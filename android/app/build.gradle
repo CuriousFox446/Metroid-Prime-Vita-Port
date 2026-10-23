@@ -1,0 +1,283 @@
+plugins {
+    id "com.android.application"
+}
+
+// The nod stub provides only the ABI, and every entry point fails, so a build
+// made with it cannot mount a disc. It exists to answer "does this compile and
+// link for Android" without a Rust cross-toolchain. Default to the real nod and
+// let a probe opt in: the cost of forgetting -PandroidNodStub=false is an APK
+// that installs, launches, and dies the moment a disc is opened.
+def useNodStub = providers.gradleProperty("androidNodStub").getOrElse("false")
+def generatedAssets = layout.buildDirectory.dir("generated/portAssets")
+def dependencyCache = providers.gradleProperty("cmakeDependencyCache")
+def configuredNdk = System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT")
+def cmakeArguments = [
+    "-DANDROID_STL=c++_static",
+    "-DMP_BUILD_TESTS=OFF",
+    "-DMP_ANDROID_NOD_STUB=${useNodStub}",
+    "-DAURORA_SDL3_PROVIDER=vendor",
+    "-DAURORA_SDL3_LINKAGE=static",
+    "-DAURORA_DAWN_PROVIDER=auto",
+    "-DAURORA_DAWN_LINKAGE=static",
+    "-DAURORA_NOD_PROVIDER=vendor",
+    "-DAURORA_NOD_LINKAGE=static",
+]
+
+if (dependencyCache.isPresent()) {
+    def cache = file(dependencyCache.get())
+    ["DAWN_PREBUILT", "SDL", "ABSEIL-CPP", "XXHASH", "FMT", "ZLIB", "PNG", "FREETYPE", "IMGUI", "SQLITE3", "ZSTD", "TRACY", "AURORA_NOD", "CORROSION", "OPENSSL"].each { name ->
+        def source = new File(cache, name.toLowerCase())
+        if (source.isDirectory()) {
+            cmakeArguments.add("-DFETCHCONTENT_SOURCE_DIR_${name}=${source}")
+        }
+    }
+}
+if (!useNodStub.toBoolean()) {
+    cmakeArguments.add("-DRust_CARGO_TARGET=aarch64-linux-android")
+}
+
+// Release signing. A release package needs an identity of its own: the debug
+// key is shared, is not private, and says nothing about who built the package.
+// The four values come from android/keystore.properties - untracked, generated
+// by tools/make_android_keystore.sh - or from the environment, so a CI secret
+// and a local file take the same path. All four are required; a partial set is
+// an error rather than a silent fall back to debug, because a half-configured
+// release that builds with the wrong key is worse than one that stops.
+def signingProperties = new Properties()
+def signingPropertiesFile = rootProject.file("keystore.properties")
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+def signingValue = { String key, String envName ->
+    def fromProperties = signingProperties.getProperty(key)
+    if (fromProperties != null && !fromProperties.trim().isEmpty()) {
+        return fromProperties.trim()
+    }
+    def fromEnvironment = System.getenv(envName)
+    return (fromEnvironment != null && !fromEnvironment.trim().isEmpty()) ? fromEnvironment.trim() : null
+}
+def configuredKeystore = signingValue("storeFile", "MP_APK_KEYSTORE")
+def configuredStorePassword = signingValue("storePassword", "MP_APK_KEYSTORE_PASSWORD")
+def configuredKeyAlias = signingValue("keyAlias", "MP_APK_KEY_ALIAS")
+def configuredKeyPassword = signingValue("keyPassword", "MP_APK_KEY_PASSWORD")
+// A relative storeFile is resolved against android/, which is where
+// make_android_keystore.sh puts it.
+if (configuredKeystore != null && !configuredKeystore.startsWith("/")) {
+    configuredKeystore = rootProject.file(configuredKeystore).absolutePath
+}
+
+def allowDebugSigning = providers.gradleProperty("mpDebugSigning").getOrElse("false").toBoolean()
+// Null means "no key of this project's own". A signingConfigs entry can only be
+// created inside the android block, so the values are carried here and the
+// config is built there; whether there is one is decided here, where the
+// failure message can be about the key rather than about Gradle.
+def signingValues = null
+if (configuredKeystore != null && configuredStorePassword != null && configuredKeyAlias != null && configuredKeyPassword != null) {
+    if (!file(configuredKeystore).exists()) {
+        throw new GradleException(
+            "keystore not found at ${configuredKeystore}\n" +
+            "  storeFile in ${signingPropertiesFile} or MP_APK_KEYSTORE points at a file that is not there.")
+    }
+    signingValues = [
+        storeFile    : configuredKeystore,
+        storePassword: configuredStorePassword,
+        keyAlias     : configuredKeyAlias,
+        keyPassword  : configuredKeyPassword,
+    ]
+} else if ([configuredKeystore, configuredStorePassword, configuredKeyAlias, configuredKeyPassword].any { it != null }) {
+    throw new GradleException(
+        "release signing is half configured; all four of storeFile, storePassword, keyAlias and " +
+        "keyPassword are needed.\n" +
+        "  found: " + [configuredKeystore != null, configuredStorePassword != null, configuredKeyAlias != null, configuredKeyPassword != null]
+            .collect { it ? "present" : "missing" }.join(", ") + "\n" +
+        "  run tools/make_android_keystore.sh to create a key and write ${signingPropertiesFile}")
+}
+
+// Signing a release with the debug key is a decision someone has to make, not a
+// default. A package signed with the shared debug key installs anywhere and
+// cannot be replaced later by a real identity, because Android treats a
+// signature change as a different app - so a debug-signed release has to be
+// uninstalled before a properly signed one will install. That is why this stops
+// instead of warning, and why the way through is one command.
+tasks.matching { it.name == "preReleaseBuild" }.configureEach { releaseBuild ->
+    if (signingValues == null && !allowDebugSigning) {
+        throw new GradleException(
+            "refusing to sign the release with the shared debug key.\n" +
+            "  create this project's own key:  tools/make_android_keystore.sh\n" +
+            "  (it writes android/keystore.properties, which is not tracked)\n" +
+            "  for a build you only intend to sideload, pass -PmpDebugSigning=true,\n" +
+            "  which is what tools/android_apk.sh does when no key is configured")
+    }
+}
+
+android {
+    namespace "org.metroidprime.port"
+    compileSdk 34
+    ndkVersion "29.0.14206865"
+    if (configuredNdk) {
+        ndkPath configuredNdk
+    }
+
+    signingConfigs {
+        if (signingValues != null) {
+            create("release") {
+                storeFile file(signingValues.storeFile)
+                storePassword signingValues.storePassword
+                keyAlias signingValues.keyAlias
+                keyPassword signingValues.keyPassword
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "org.metroidprime.port"
+        minSdk 28
+        targetSdk 34
+        versionCode 38
+        versionName "0.32.0"
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                arguments(*cmakeArguments)
+                // The rest are libadrenotools' hooks and the Vulkan shim, loaded by
+                // path for custom GPU drivers (platform/port_gpu_driver.cpp).
+                targets "metroid_prime_port", "mport_vkshim", "hook_impl", "main_hook",
+                        "file_redirect_hook", "gsl_alloc_hook"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("../../CMakeLists.txt")
+            version "3.31.5"
+        }
+    }
+
+    sourceSets.main.assets.srcDir(generatedAssets)
+    // Third-party notices, gathered from the tree and from whatever the native
+    // build fetched, so an installed app carries the terms of what it links
+    // rather than nothing. The file is listed in the app's own docs; the
+    // notices travel as an asset because assets are the only place a build
+    // reliably reaches an installed package.
+    sourceSets.main.assets.srcDir(layout.buildDirectory.dir("generatedLicenses"))
+
+    packagingOptions {
+        jniLibs.useLegacyPackaging = true
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            // The debug variant builds the native code with -O0 and is far too
+            // slow to play, so the release variant is the one worth installing.
+            // It is signed with this project's own key when one is configured,
+            // and never with the shared debug key unless that was asked for
+            // explicitly - see the signing resolution above. Setting *no*
+            // signing config is not an alternative: AGP then emits an unsigned
+            // APK, which Android will not install, so the opt-in has to name
+            // the debug key rather than merely permit it.
+            if (signingValues != null) {
+                signingConfig signingConfigs.release
+            } else if (allowDebugSigning) {
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+}
+
+tasks.register("syncPortAssets", Sync) {
+    into generatedAssets
+    from("../../textures") {
+        into "textures"
+    }
+    from("../../assets/initial_pipeline_cache.db")
+}
+
+// Gathers the licence of every third-party component the native build links:
+// the two vendored snapshots in the tree, and whatever CMake fetched. An
+// installed app then carries the terms of what it contains, which an APK
+// otherwise would not.
+tasks.register("syncLicenseNotices", Sync) {
+    def outputDir = layout.buildDirectory.dir("generatedLicenses")
+    into outputDir
+    // zstd ships both LICENSE and COPYING, and several packages appear under
+    // every build variant, so more than one source can land on a name. They
+    // are the same terms, so the first one wins rather than failing the build.
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    // The port's own grant and notice come first: an installed app that links
+    // MIT and zlib components has to carry their terms, and a grant nobody can
+    // read inside the package is not much of a grant.
+    from("../../LICENSE") { rename { "port-license.txt" } }
+    from("../../NOTICE") { rename { "port-notice.txt" } }
+    from("../../extern/aurora/LICENSE") { rename { "aurora.txt" } }
+    from("../../extern/musyx/LICENSE") { rename { "musyx.txt" } }
+    from("../../extern/astcenc/LICENSE.txt") { rename { "astcenc.txt" } }
+    from("../../extern/GamepadMotionHelpers/LICENSE") { rename { "gamepadmotionhelpers.txt" } }
+    from("../../extern/adrenotools/LICENSE") { rename { "adrenotools.txt" } }
+    from("../../extern/adrenotools/lib/linkernsbypass/LICENSE") { rename { "linkernsbypass.txt" } }
+    // The fetched packages live beside the native build output, so they are
+    // only present once a native build has run at least once. Each is named
+    // after its package: the same notice appears in several build variants, and
+    // a glob rename would not flatten those paths, leaving notices buried in
+    // assets/<variant>/<abi>/ where nothing would find them.
+    // openssl-license is a copy cmake/AndroidOpenSSL.cmake makes, because the
+    // OpenSSL source may come from the dependency cache rather than _deps.
+    // Every fetched package, not a fixed list: abseil, freetype, libpng and the
+    // rest are linked in too.
+    from(layout.projectDirectory.dir(".cxx")) {
+        include "**/_deps/*-src/LICENSE*"
+        include "**/_deps/*-src/COPYING*"
+        include "**/_deps/openssl-license/LICENSE*"
+        // A FileTree carries only files, so the copy spec never sees a
+        // directory: naming one in eachFile is what produced the empty
+        // path. The notice goes to the root of the asset dir, because the
+        // same notice appears under every build variant and nested paths
+        // would ship it several times in places nothing would look. The
+        // first licence of a package is <dep>.txt, any further one
+        // <dep>-<file>.
+        eachFile { details ->
+            def dep = details.file.parentFile.name
+            def name = details.file.name
+            details.relativePath = new RelativePath(true, ".")
+            details.path = (name ==~ /(?i)LICEN[CS]E(\.(txt|md))?/) ? "${dep}.txt" : "${dep}-${name}"
+        }
+        includeEmptyDirs = false
+    }
+    // Prebuilt packages that ship no licence of their own (Dawn, nod).
+    from("../../packaging/licenses") { include "*.txt" }
+    from(layout.projectDirectory.dir(".cxx")) {
+        include "**/_deps/freetype-src/docs/FTL.TXT"
+        eachFile { details -> details.path = "freetype-FTL.txt" }
+        includeEmptyDirs = false
+    }
+    doLast {
+        def out = outputDir.get().asFile
+        if (!out.exists() || out.listFiles()?.length == 0) {
+            logger.warn("no third-party notices found; the APK will carry none")
+        } else {
+            logger.lifecycle("collected ${out.listFiles().length} third-party notice(s) for the APK")
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("syncPortAssets")
+}
+// The notices of fetched packages exist only once the native build has fetched
+// them, so they are gathered after it and before anything reads the asset
+// directories: the asset merge, and lint, which scans them. Run earlier, a
+// clean build packages none of them.
+tasks.named("syncLicenseNotices").configure {
+    mustRunAfter(tasks.matching { it.name.startsWith("buildCMake") || it.name.startsWith("externalNativeBuild") })
+}
+tasks.matching { it.name ==~ /merge\w*Assets/ || it.name.toLowerCase().contains("lint") }.configureEach {
+    dependsOn("syncLicenseNotices")
+}

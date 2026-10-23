@@ -1,0 +1,676 @@
+# Native Metroid Prime port
+
+This branch compiles the decompiled game and Kyoto engine as native C++20.
+Aurora provides the GameCube SDK compatibility layer, SDL3, and WebGPU/Dawn;
+MusyX provides the software audio engine. It does not link DolRecomp or the
+ModernGekko runtime from the separate recompilation experiment.
+
+Other docs: `docs/SETTINGS.md` (controls and settings), `docs/MODS.md` (mods and
+texture replacements), `docs/CONSOLE.md` (debug console).
+
+## Build
+
+Requirements: CMake 3.25+, Ninja, a C++20 compiler/library, and a C compiler with
+C23 support for MusyX. Tested locally with GCC 15 and Clang 19 on x86-64 Linux;
+CI is configured for GCC 14, Clang 18, and Windows clang-cl. Windows requires LLVM and an
+MSVC developer environment/Windows SDK. Older compiler versions are unverified.
+
+Aurora and MusyX are vendored snapshots; a normal clone is sufficient. Aurora
+fetches pinned transitive dependencies on the first configure. On Linux install
+SDL build prerequisites (X11/Wayland, ALSA/PulseAudio, EGL/OpenGL, FreeType, PNG).
+On Ubuntu 24.04:
+
+```sh
+sudo apt-get install ninja-build g++-14 libasound2-dev libpulse-dev libx11-dev \
+  libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev \
+  libxtst-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev libgl-dev \
+  libfreetype-dev libpng-dev
+```
+
+See `extern/aurora/docs/building.md` for dependency-provider options.
+
+```sh
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DAURORA_ENABLE_TESTS=OFF -DMP_BUILD_TESTS=ON
+cmake --build build/native -j 4
+ctest --test-dir build/native -L port --output-on-failure
+```
+
+For Windows, run from an MSVC developer shell and add
+`-DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl` to configure.
+Plain MSVC `cl.exe` and MinGW builds are not currently validated.
+
+CI builds and tests Linux (GCC 14 and Clang 18) on each push to `port` and
+each pull request; Windows (clang-cl) and macOS (arm64, experimental) run
+weekly and can be started by hand from the Actions tab (`.github/workflows/`).
+CI configures with `-DAURORA_ENABLE_TESTS=ON`, which adds Aurora's GPU-free
+FIFO/GX tests (`gx_fifo_tests`); turn it on to run the same suite locally.
+
+Configure downloads about a dozen pinned dependencies (checked by SHA-256). On
+a machine without access to GitHub, clone them yourself and point CMake at the
+copies with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=<dir>`, the way
+`flatpak/io.github.odrannnn.metroidprimeport.yml` does.
+
+Android builds through Gradle: `tools/make_android_keystore.sh` once, then
+`tools/android_apk.sh :app:assembleRelease`; see `docs/ANDROID.md`.
+
+macOS (Apple Silicon, macOS 13+) is experimental: `.github/workflows/macos.yml`
+builds it on `macos-15` with Homebrew's `ninja` and `openssl@3` and renders
+through Metal, but nobody has played it on a real Mac yet. Configure as that
+workflow does (static SDL3/nod/OpenSSL, and
+`-DCMAKE_DISABLE_FIND_PACKAGE_{xxHash,zstd,PkgConfig}=ON` so Homebrew's copies
+are not linked). The workflow packages an ad-hoc signed
+`Metroid Prime Port.app` with the small `ffmpeg` in `Contents/MacOS`. It is
+not notarised, so on first launch macOS refuses it: right-click > Open, or
+`xattr -dr com.apple.quarantine "Metroid Prime Port.app"`.
+
+If `ccache` is installed, configure compiles through it, and on Linux `mold`
+links when it is installed. Turn them off with `-DMP_USE_CCACHE=OFF` /
+`-DMP_USE_MOLD=OFF`.
+
+On Linux, Abseil, fmt, SQLite, libpng and FreeType are built from source and
+linked statically even when the system has them (`MP_BUNDLED_DEPS`, on by
+default), so a distro update can't stop the binary starting. It then needs only
+OpenSSL 3 and the C/C++ runtime. `-DMP_BUNDLED_DEPS=OFF` uses system copies.
+
+The cache is shared between build directories in the same
+checkout, so a new `build/<name>` mostly fills from it instead of recompiling.
+One configuration takes about 0.5 GB of cache (`ccache -M` sets the limit).
+
+No disc or generated game-asset headers are needed to compile. The two embedded
+default-font resources are read from the mounted retail DOL at runtime, using
+the addresses in `decomp/config/GM8E01_00/symbols.txt`. Native builds do not depend on
+`build/GM8E01_00/include` or distribute extracted font data.
+
+### Linking and packaging
+
+`mp_game` is an OBJECT library: every source in the game manifest is deliberately
+linked once, so COFF archive extraction does not decide which game/shim-dependent
+translation units are present. Duplicate-definition errors remain enabled;
+neither whole-archive nor `/FORCE:MULTIPLE` is used. The Aurora core/GX static
+library cycle uses `LINK_GROUP:RESCAN` on supported ELF linkers; COFF resolves
+those archive dependencies normally.
+
+Desktop builds (`MP_EMBED_RESOURCES`, on by default; Android's are off) carry
+`initial_pipeline_cache.db` and the controller-glyph `textures/` inside the executable
+(generated by `tools/embed_resources.py`), so no loose copies are needed and stale
+ones beside it are ignored; with `-DMP_EMBED_RESOURCES=OFF`, keep
+`initial_pipeline_cache.db` beside the executable. Windows also needs the
+runtime DLLs copied there by CMake, including Dawn's dynamically loaded DXC
+libraries when provided. Use the CI `dist` package rather than copying just the
+EXE. The workflow runs regression tests and checks the packaged no-disc startup
+path. Preserve the accompanying dependency licenses/notices.
+
+## Run
+
+```sh
+./build/native/metroid_prime_port "/path/to/Metroid Prime (USA) (v1.00).iso"
+```
+
+Alternatively set `MP_DISC`, keep the image beside the executable (or in a
+folder beside it; for an AppImage, beside the `.AppImage` file), which starts
+the game with no prompt, or let the port ask for it. A plain `.iso`/`.gcm` there
+is only taken when its header says a supported version, so another game's image next to
+it is skipped; compressed formats are taken as found, after a matching plain
+image. Otherwise, when no disc is found it opens the platform's file dialog and
+remembers the answer as `disc_path` in the settings file. There is no prompt
+when the port has no window to show one on, or with `MP_NO_DISC_DIALOG=1`
+(for scripted runs that do have a window, as on a build runner). The disc must
+identify as **GM8E01, disc 0, revision 0, 1 or 2** (USA 1.00, 1.01 or 1.02) or **GM8P01** (PAL).
+PAL support is experimental: a PAL disc runs the same 1.00 code on its own data, at 60 Hz, with every port
+feature (Remastered import, randomizer, Archipelago, cutscene skips) and its
+languages; its saves are kept apart from USA ones. USA 1.01 runs the same
+way; its data differs from 1.00 only in a few rooms' scripts and one credits
+name. USA 1.02 runs the same way (its rooms' scripts differ more, and the
+cutscene skips and the Arboretum gate fix have 1.02 variants); Japanese, Korean and Wii discs
+are rejected. Nod/Aurora supports additional image
+containers, but the same retail content is required.
+
+`metroid_prime_port --version` prints the source revision without initializing
+graphics. The same revision appears in the launch log, the F1 menu header and F1 > Video > Frame rate.
+Include it when reporting a copied build from another machine; a `-dirty` suffix
+means the executable was built with uncommitted source changes.
+
+A copied build is self-contained: everything the port writes goes in a `user/`
+folder beside the executable (for an AppImage, loose in the folder the
+`.AppImage` file is in, with no `user/`). That is `port_settings.ini`, `mods/`,
+`savestates/`, `importers/`, `user_textures/`, the randomizer and Archipelago
+files, the controller bindings and the shader caches (`dawn_cache.db`,
+`pipeline_cache.db`), with the memory card in `user/<region>/Card A`. Files an
+older build left loose beside the executable are moved into `user/` at startup
+(renamed, never copied or deleted; the launch log lists what moved). The disc
+image is auto-detected beside the executable (or one level below, `user/`
+included), and texture replacements are loaded from `textures/` when present;
+`MP_DISC` and `MP_TEXTURES` override those two. The launch log names the folder
+(`port: user folder ...`).
+
+The per-user folder (`~/.local/share/Metroid Prime`, `%APPDATA%\Metroid Prime`)
+is used only when:
+
+- the executable's folder cannot be written to (a Flatpak, a system package), or
+- it already holds a `port_settings.ini` from an older build and the
+  `user/` folder has none. Move its contents into `user/` to make that install
+  portable.
+
+On Android the folder starts in the app's own storage, which other apps and file
+managers cannot reach. F1 > System > Data folder moves it to
+`/storage/emulated/0/MetroidPrime/` (the shared storage root): it asks for "All
+files access" (Android 11+; storage permission on 9/10), copies saves, settings,
+mods, save states, the texture pack and the copied disc there with a progress
+bar (built-in textures, the pipeline cache and the app's own Remastered import
+stay behind; docs/MODS.md), then restarts the
+game. If the shared folder already holds data, it offers to use that data or to
+copy over it. The choice is kept in `data_folder.txt` in app storage; "Move
+back to app storage" reverses it, and "Delete the old copy" frees the space the
+old folder still takes. If access is revoked later, the game starts from app
+storage and says so, with buttons to grant access again or stay there.
+
+`MP_USER_PATH` overrides the folder
+and `MP_CACHE_PATH` the caches alone (neither moves the built-in Remastered
+import, which stays in app storage); use separate directories for automated
+testing so runs do not share normal saves/settings (the memory card stays with
+the executable either way). Screenshots are written to `screenshots/` in the
+working directory.
+
+### A Wayland session hangs at startup
+
+On a GNOME Wayland session the port can pin a core at 100% and never reach its
+first frame (the log stops after the `Using surface format` line). The cause is
+outside the port: SDL3 takes its Wayland backend and never returns from
+`SDL_ShowWindow` (libdecor re-enters GTK layout from inside that call).
+
+Run with `SDL_VIDEODRIVER=x11` to use the X11 backend instead. The port does
+this for you when `SDL_VIDEODRIVER` names no driver and `DISPLAY` is set, and
+says so in the log; with no `DISPLAY` there is nothing to fall back to, so it
+prints why it is about to hang instead.
+
+### Time to first frame
+
+The port prints what startup cost, once a frame has been presented:
+
+```
+MP startup: first frame 913 ms after the main loop began, 2349 frames run
+```
+
+This is the time from entering the main loop to the first presented frame, which
+is where shader compilation, pipeline creation and the first texture uploads
+happen. It is **not** time from launching the process: the disc image is read,
+mounted and identified before the loop is entered, and a cold shader cache or a
+slow disc will dominate that part instead.
+
+Measured on the development machine (RTX 5070 Ti, warm pipeline cache, cutscenes
+skipped, `SDL_VIDEODRIVER=x11`): **913 ms, 1180 ms, 1526 ms** over three runs.
+The spread is the first-frame work varying with what the driver had cached, so
+treat it as roughly a second rather than a precise figure. F1 > Video > Frame rate still reports the steady-state render and simulation rates once
+running.
+
+### Frame pacing
+
+Measured on Linux with `MP_TRACE_TIMING=1`, sampling the frame log by arrival
+time so the wall-clock interval is what is measured rather than the frame's own
+cost (`build/frame-pace.sh`):
+
+| | presented | throughput | mean interval | p99 | jitter p99-p50 | late by >1 ms |
+|---|---|---|---|---|---|---|
+| capped (default) | 60.00 FPS | 1282.8 FPS | 16.667 ms | 16.672 ms | 5.6 us | 0 of 24 |
+| uncapped (`F10`) | 137.0 FPS | 137.0 FPS | 7.126 ms | 10.534 ms | 3277 us | 0 of 48 |
+
+Two rates are reported because they answer different questions, and the gap
+between them is the useful part:
+
+- **presented** — frames that reached the screen per second of wall time. What a
+  player perceives.
+- **throughput** — what the machine could produce, with the pacing wait excluded.
+
+At the default cap the two differ by 21x, so stutter here is never the CPU
+running out of budget. Uncapped they converge, which is the check that the two
+really are measuring different things: once nothing is waiting, they must agree.
+Simulation stays at 60 ticks/s either way, because it is fixed-step — uncapped
+presentation renders the same simulation more often rather than advancing it
+faster.
+
+Under **Xvfb with `SDL_AUDIO_DRIVER=dummy`**, so treat the throughput figure as a
+best case. The presented rate and the jitter are the parts that transfer.
+
+### Seeing the front end, and where it stops
+
+With `MP_FAST_BOOT` **off** the real front end runs and waits for input. On the
+real session, on the AMD adapter, captures (`F12` or console `shot`) showed the
+Nintendo publisher logo, the Dolby Surround Pro Logic II logo, the Metroid Prime
+title and the title with `[ PRESS START ]`. The captures are not kept in the
+repository: they are pictures of Nintendo's game.
+
+All four render correctly, so **the reported blank front end does not
+reproduce**. Note that `MP_FAST_BOOT=1` never shows any of them: it drives
+`Title -> FileSelect -> TransitionToFive()` into a new game, which is why
+captures taken with it set are pictures of the *game's* opening, not the front
+end.
+
+**Input is discarded when the window is not focused**, which is worth knowing
+before concluding that a screen is unresponsive. `CDolphinController::ReadDevices`
+(`src/Kyoto/Input/CDolphinController.cpp`) zeroes the whole pad status when
+`SDL_GetKeyboardFocus()` is null and then preserves the error code, so the
+controller still reports *present* while every button is dropped, and the front
+end receives input messages containing no buttons. A scripted press launched into
+an unfocused window on a live desktop is therefore thrown away before anything
+reads it. `MP_SMOKE_SCRIPT` and `MP_SMOKE_FRONTEND` now claim focus the way
+`MP_SMOKE_MOUSE` already did; with that fixed the front end reaches the title and
+its `[ PRESS START ]` prompt.
+
+The front end then loops between the title and the attract movie. The main menu,
+and the Continue option on it, has not been reached: at the few frames per second
+this path presents, a single scripted press is a lottery — one during a fade-in
+is ignored — and the loop's phase drifts with machine speed, so a press timed
+from a fixed frame number does not land. Not a suspected defect, just not done.
+
+Two things to know when reproducing this:
+
+- **The card follows the executable, not `MP_USER_PATH`.** `CARDSetBasePath` is
+  given `SDL_GetBasePath()`, so each build directory has its own card. A save
+  written by one build is invisible to another. Inside a macOS app bundle it is
+  kept in the user folder instead.
+- **A single press at a guessed frame is not enough.** The title takes ~2000
+  frames to fade in on this path, and a press during the fade is silently
+  ignored, which is indistinguishable from "the button does not work". Use
+  `MP_SMOKE_FRONTEND=<frame>`, which taps repeatedly.
+
+### Audio
+
+A run reports which backend it got, and with what:
+
+```
+MP audio: driver pulseaudio
+```
+
+or `MP audio: no driver; SDL opened no audio device`. SDL3 picks the first
+available backend, so on Linux this is normally `pipewire` or `pulseaudio` — SDL
+loads both at runtime, which is why neither appears in `ldd` — and it is the only
+place a missing `libpulse` becomes visible at all. Force one with
+`SDL_AUDIO_DRIVER`; `SDL_AUDIO_DRIVER=dummy` is what the automated runs use so
+they do not fight over a real device.
+
+There is deliberately **no** mixer level or queue-depth report. The mix happens in
+vendored MusyX, not in the port, so measuring it there means instrumenting a
+vendored snapshot, and a report taken from the port's AI DMA path would describe a
+path that is idle in a normal run.
+
+### Choosing a GPU
+
+The loader picks a GPU on its own, which is fine on a desktop and a problem on a
+machine with more than one. To pin it, restrict the ICD — no code change is
+involved:
+
+```sh
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json   # AMD (RADV)
+```
+
+Worth knowing on a multi-GPU machine: pinning a vendor is not the same as pinning
+a device. `MESA_VK_DEVICE_SELECT` did not move the choice off the Radeon RX 7900
+XTX onto the adjacent Raphael iGPU, so the selector matched a name the loader was
+not using. To run on the integrated GPU, set `MP_GPU_POWER=low`: the game then
+asks WebGPU for its low-power adapter instead of the high-performance one (the
+log's adapter line says `IntegratedGPU`).
+
+**Headless runs on Xvfb need Mesa's software WSI.** Xvfb exposes no DRI3
+extension, and Mesa's Vulkan WSI requires it:
+
+```
+MESA: info: vulkan: No DRI3 support detected - required for presentation
+```
+
+Without it the run creates the device and then dies at surface creation with
+**0 frames**. Set `MESA_VK_WSI_DEBUG=sw SDL_VIDEODRIVER=x11` (`tools/mprig.py`
+does). Software Vulkan (lavapipe) fails differently, segfaulting inside Dawn's
+surface setup rather than logging.
+
+### Custom Vulkan drivers (Android, Turnip)
+
+On Adreno phones the game can run on Mesa's Turnip (or another custom Vulkan
+driver) instead of the phone's own. It loads the driver through
+[libadrenotools](https://github.com/bylaws/libadrenotools) (`extern/adrenotools`,
+`platform/port_gpu_driver.cpp`), the same way Android GameCube/Switch emulators do,
+and takes the same driver zips (a `meta.json` naming the library, plus that
+library; e.g. the AdrenoToolsDrivers releases). None is bundled.
+
+F1 > Video > Compatibility > "Install driver (.zip)..." unpacks a zip into the app's
+internal storage (`gpu_drivers/<id>/`; dlopen refuses shared storage) and selects
+it. The "Vulkan driver" combo switches between installed drivers and System, and
+the setting `gpu_driver=<id>` (empty = System) takes effect at the next start.
+`MP_GPU_DRIVER=<id>` overrides it for one run. "Running:" under the combo shows
+the driver the GPU reports, e.g. `Mesa Turnip ...`, since adrenotools quietly falls
+back to the system driver when its hooks fail. The OpenGL ES backend always uses
+the system driver.
+
+While the GPU starts, `gpu_driver_starting` stays in the user folder, so a crash
+there reverts to System at the next start, like the OpenGL ES toggle does. A driver
+that starts but draws garbage (Turnip builds for another GPU did) has to be switched
+back by hand.
+
+If Vulkan doesn't start at all with the chosen driver (Qualcomm's own driver
+packs for the Adreno 840 failed this way), the game retries Vulkan with the
+system driver in the same run instead of falling back to OpenGL ES, switches the
+setting back to System and shows the error under the combo.
+
+A library named `vulkan.*` is installed as `mportv.*`, and a `vulkan.*` SONAME is
+patched to match: Android's linker would otherwise hand back the system
+`vulkan.adreno.so` that HWUI already loaded under the same SONAME.
+
+How it reaches Dawn: Dawn only opens `libvulkan.so` by name from its search paths.
+The port copies `libmport_vkshim.so` (which exports only `vkGetInstanceProcAddr`,
+forwarding to the custom driver's) to `<internal>/vkshim/libvulkan.so`, loads it,
+points it at the driver adrenotools opened, and puts that folder first in
+`DawnInstanceDescriptor::additionalRuntimeSearchPaths` (`AuroraConfig::vulkanLibraryDir`).
+The log says `GPU driver <id> ... loaded through adrenotools`, or why it was not.
+
+### Running out of device memory
+
+A Vulkan allocation that does not fit is fatal:
+
+```
+[fatal] [aurora::gpu] WebGPU error 3: vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
+ - While calling [Device].CreateTexture([TextureDescriptor ""GX Static Texture""]).
+```
+
+and the process stops. The message names an allocation and nothing else, so the
+first reading is that the port is holding too much. **It usually is not:**
+check what else is on the GPU first.
+
+Not fixed: the port aborts on a fatal allocation with a message that does not say
+what was short, which a player on a busy GPU would see as an unexplained crash.
+The honest fix and the smaller-attachment fallback both belong in vendored Aurora,
+so they are better decided there than worked around from the port.
+
+### HD texture replacements
+
+Moved to `docs/MODS.md`.
+
+### Mods folder
+
+Moved to `docs/MODS.md`.
+### Platforms
+
+The port is built and tested on Linux and Windows (macOS builds and passes
+its tests in CI, see Build). Its own platform code is
+portable - SDL3 and `std::filesystem` throughout - and the CMake keeps the MSVC
+linker paths from the template. The Windows build is exercised by
+`.github/workflows/windows.yml` on `windows-latest`, which only runs when
+started by hand for now (`gh workflow run windows.yml --ref port`): it configures with
+clang-cl, builds, runs `ctest -L port`, runs the FIFO regressions, packages a
+`dist/` directory with licences, checks that the packaged executable reaches
+main and reports the missing disc image, and uploads the result as an artifact.
+All of that is green.
+
+Only the things that need a GPU, a window or a real controller are verified on
+one platform alone. `wss://` is verified on both: each CI job runs
+`port_ws_tests` directly as well as through ctest, so the log shows a completed
+TLS handshake against a throwaway CA plus the four rejections (wrong CA,
+certificate for another address, system trust store, missing CA file) rather
+than only a configure line saying OpenSSL was found.
+
+`platform/glibc_compat.c`, which lowers the glibc the Linux build needs, is
+guarded to Linux and takes no part elsewhere. The AppImage and Flatpak packaging
+are Linux-only.
+
+### Distribution
+
+`tools/make_appimage.sh [build-dir] [output-dir]` packages the executable and
+its texture replacements as an AppImage, and `tools/make_flatpak.sh` builds a
+Flatpak instead. The disc image is deliberately not included, so the port asks
+for it with the platform's file dialog on first launch and remembers the
+answer as `disc_path` in the settings file. A path given as an argument or in
+`MP_DISC` still wins, then the saved path, then a copy beside the executable.
+See `docs/RELEASING.md` for what a release carries, the bundled libraries, the
+glibc floor and the licensing position.
+
+Where FUSE itself is unavailable, such as in a container, run the AppImage
+with `APPIMAGE_EXTRACT_AND_RUN=1` (or `--appimage-extract-and-run`), which
+unpacks to a temporary directory instead of mounting.
+
+### 1.00 sequence-break compatibility
+
+F1 > Game > Cutscenes > "1.00 sequence-break compatibility" (INI key
+`revision_100_compatibility`, default false; forced on in randomizer and
+Archipelago games, reload needed) puts back what 1.00 sequence breaks rely on.
+`platform/port_revision_scripts.cpp` adds room-script ops (applied through
+`PortSkipCutscenes::PatchArea`, whose op stream it shares) for the rev2 locks, the 1.02 Hive Totem
+trigger and lock, and the PAL Ore Processing, Main Quarry and Central Dynamo
+locks (randomprime's values, not byte-exact 1.00). Every op target is checked first (layer, object
+type, property size, lock model, active byte), and a mismatch leaves the room
+untouched (logged, all or nothing); deactivations are EDITs of the active byte,
+removals are DELETEs of the verified full ids.
+It reads the setting at use through
+`PortDebug::Revision100Compatibility() || PortSkipCutscenes::Forced()`. Only the
+named script locks are fixed; missing 1.00 geometry (e.g. the Ruined Shrine
+root) is not restored. Unit test: `port_revision_scripts_tests`. Ordinary
+cutscene skipping is independent.
+
+### Controls and settings
+
+Moved to `docs/SETTINGS.md`; the debug console now lives in `docs/CONSOLE.md`.
+## Where port code goes
+
+The game code under `src/` and `include/` is the decompilation and stays
+recognisably so: it is what upstream PrimeDecomp fixes are merged into (see
+`tools/upstream_screen.py`), and what reviewers compare against the original.
+Port behaviour therefore lives in `platform/`, and a decomp file gets only a
+short `#ifdef TARGET_PC` hook that calls into it, as in `CPlayer.cpp`:
+
+```cpp
+#ifdef TARGET_PC
+  if (const float hurt = PortConsoleTakePendingHurt(); hurt > 0.f) {
+    TakeDamage(true, GetTranslation(), hurt, kWT_AI, mgr);
+  }
+#endif
+```
+
+The `Port*` function or namespace (declared in `platform/include/port_*.h`,
+defined in `platform/port_*.cpp`) holds the logic, its state and its settings,
+and can be unit tested in `tests/` against that header, without the game.
+A hook passes in the game objects it needs and acts on what comes back; it
+does not grow into tens or hundreds of inline lines in the decomp file. Keep
+retail behaviour the default path, so the hook reads as an exception to the
+original code, not a rewrite of it.
+
+Port code that was moved out of a decomp file but still defines members of
+decomp classes or depends on decomp headers the way game code does (for
+example `platform/port_remastered_movers.cpp`, which holds the Remastered
+player movers called from `CGameCollision::MovePlayer`) is appended to
+`MP_GAME_SOURCES` in `CMakeLists.txt` rather than `MP_PORT_SOURCES`. It is then
+compiled exactly as the file it came from (same flags, definitions and forced
+`platform/compat.h`), so moving it does not change the generated code.
+
+## Ownership and threading rules
+
+- Use `rstl::auto_ptr<T[]>` / `single_ptr<T[]>` for host arrays and scalar owners
+  for host objects. `rstl::game_memory<T>` selects `CMemory::Free` for game-heap
+  buffers. `rs_new` is ordinary host `new` in the native build.
+- `rstl::auto_ptr` still transfers ownership on copy and `release()` retains a
+  non-owning view; do not treat it like `std::unique_ptr`.
+- Reference-counted and resource owners capture a deleter where the type is
+  complete; their release sites can safely live in forward-declaration-only
+  translation units. This avoids inconsistent template destructor definitions.
+- MusyX pins resources for its bounded pushed-group stack. Group pop holds the
+  IRQ mutex while detaching software voices and unregistering data, so samples
+  can be freed afterwards. Audio output is joined before DSP state is destroyed.
+- DVD callbacks can run on the DVD worker. ARAM file queue/state/lifetime changes
+  share one recursive mutex. ARQ completions are pumped on the main thread.
+- FIFO draw-sync tokens protect CPU-side consumption of referenced arrays.
+  Synthetic VI retraces are bookkeeping callbacks, not WebGPU completion fences.
+- If `BeginScene()` returns false, do not draw or call `EndScene()`. Delayed
+  render-resource retirement advances only after a successful frame.
+
+Saves write the retail big-endian CRC word. Reading also accepts the early
+native port's little-endian CRC representation for compatibility. Bit fields
+are serialized MSB-first on both host byte orders.
+
+## Validation
+
+CTest's `port` label covers array/game-heap ownership, golden save bit fields,
+truncated-stream errors, pathfinder bitset bounds, AI enable/callback teardown,
+the MusyX pointer-sized DMA API, and DOL section mapping/bounds. It does not
+require a disc or GPU.
+`port_mouse_tests` checks direction/inversion, pitch limits, yaw normalization,
+lock and non-first-person handoffs, movement bounds and held-button/capture edge
+behavior. `port_timing_tests` covers fractional-time carry and capped jitter;
+`port_audio_math_tests` covers ADPCM partial loops, PCM8 and wide Q15 mixing.
+The CARD regression creates its own `card-test-data` directory under the build
+tree, tests null callbacks and file operations, and closes/reopens the backing
+store before comparing the saved bytes. It never uses the normal game profile.
+Real-disc smoke runs also created a native `MetroidPrime A.gci` in an isolated
+profile and reopened that profile in a subsequent process.
+
+For a real-disc lifecycle run, configure with `-DMP_ENABLE_SMOKE_DRIVER=ON`:
+
+```sh
+MP_FAST_BOOT=1 MP_SKIP_CUTSCENES=1 MP_DISABLE_AI_AUDIO=1 \
+MP_SMOKE_FRAMES=2400 MP_SMOKE_LIFECYCLE=1 SDL_AUDIO_DRIVER=dummy \
+./build/native/metroid_prime_port "/path/to/Metroid Prime (USA) (v1.00).iso"
+```
+
+This opt-in driver hides/restores the window, mutes/unmutes both audio paths,
+toggles presentation pacing, restarts to the menu, and exits normally. Omit
+`MP_SMOKE_LIFECYCLE` for a bounded ordinary run. Production builds omit the
+driver unless enabled at configure time.
+
+`MP_SMOKE_MOUSE=1` enables an additional deterministic real-disc scenario in that
+build. Run it with `MP_FAST_BOOT=1 MP_SKIP_CUTSCENES=1 MP_SMOKE_FRAMES=1800` and an
+isolated `MP_USER_PATH`/`MP_CACHE_PATH`. It injects mouse input without grabbing
+the real pointer, verifies immediate camera aim, live power/missile projectiles,
+charged release, lock/release, jump and morph-ball handoffs, a left-click bomb in
+morph ball, UI charge cancellation,
+crosshair state, and cannon/view orientation while uncapped. Scripted cinematics
+pause the test sequence; the frame limit is a minimum until the scenario finishes.
+Success is reported as `[mouse-smoke] passed` followed by a clean exit.
+The sequence also verifies free strafing on both sides of opening/closing F1.
+
+`MP_SMOKE_AREA_RELOAD=1` exercises three real geometry eviction/ARAM restoration
+cycles and reports `[area-smoke] passed` (regression test for the material-flags
+crash on door open). It can be combined with the
+mouse scenario.
+
+`MP_SMOKE_WORLD=<hex MLVL id>`, or `MP_SMOKE_WORLD=auto` to pick the first world
+other than the current one, jumps to another world through the same restart path
+the in-game world teleporters use. It waits for gameplay, requests the jump, and
+reports `[world-smoke] passed: world <id> area <n>` once a freshly constructed
+world is running. The F1 overlay's Debug > Cheats page (with Show cheats ticked)
+lists every world by its front-end name and jumps to it on click.
+
+`MP_SMOKE_ELEVATOR=<ticks>` rides the elevator most recently loaded in the current world
+once gameplay has run for `<ticks>` ticks. It sends the elevator's `Play` and
+`SetToZero` messages, like the ride trigger does, and reports
+`[elevator-smoke] passed: world <id> area <n>` once the destination world is
+playable. Combine it with `MP_SMOKE_WORLD=83F6FF6F` (Chozo Ruins, whose spawn
+area loads the Tallon elevator). Regression test for the elevator crash (the
+model pass that bounced buffers through ARAM is now skipped).
+
+`MP_SMOKE_VISOR=1` grants and switches to the thermal visor (`MP_SMOKE_VISOR=xray`:
+the X-ray visor) after gameplay starts and reports `[visor-smoke] passed` once it has stayed up (regression test for the FIFO-worker crash on an
+unmapped texture pointer). The port now fills a real scratch noise buffer, and
+Aurora skips any texture whose source page is not mapped instead of hashing
+it; set `MP_LOG_TEX_INVALID=1` to log each rejected texture's pointer, format,
+size and object id.
+
+`MP_SMOKE_WALK=<ticks>` holds the stick fully forward after gameplay starts and
+reports `[walk-smoke] passed: ticks=... dist=... maxFlatSpeed=... speed=.../s`.
+Run it with the same real duration at two simulation rates (for example 60 ticks
+at 60 Hz and 120 ticks at 120 Hz) to confirm ground movement stays real-time.
+With `MP_SMOKE_WORLD` set, the walk waits until the world jump has finished, so
+it starts in the destination room. For example, this reaches the Parasite Queen
+fight (Frigate Orpheon, Reactor Core) in about 15 s:
+`MP_TURBO=8 MP_SMOKE_WORLD=158EFE17 MP_SMOKE_WORLD_AREA=87452DC1 MP_SMOKE_WALK=3000 MP_SMOKE_FRAMES=1500`
+together with `MP_FAST_BOOT=1 MP_SKIP_CUTSCENES=1`.
+
+`MP_SMOKE_STICK=1` holds the right stick and reports the aim yaw change, to
+verify twin-stick aiming (run with `MP_TWIN_STICK=1`).
+
+`MP_SMOKE_DASH=1` turns the player until an orbit target is offered, locks on with
+L, holds the stick right and presses B, then reports
+`[dash-smoke] passed/failed: lockedTicks=... dashTicks=...`. `MP_SMOKE_DASH=scan`
+switches to the scan visor first and locks onto scan points, for rooms with no
+targetable enemies; Reactor Core (the walk example above) passes that way. Run it
+plain, with `MP_MOUSE_AIM=1` and with `MP_TWIN_STICK=1`: all three should dash.
+
+`MP_SMOKE_PAUSE=<ticks>` enters the pause screen after gameplay starts;
+`MP_SMOKE_MAP=<ticks>` presses Z that many ticks into gameplay to open the map
+screen (Z opens the map from gameplay; in the pause screen it does nothing).
+Combine with `MP_SMOKE_SHOT` to capture them.
+`MP_SMOKE_FRONTEND=<frame>` taps Start every 300 frames from that frame, so the
+front-end screens (title, save dialogs, main menu) are reached without a player;
+Start alone leaves dialogs on screen rather than dismissing them.
+`MP_SMOKE_CONTINUE=1` walks the title and file select to Continue on slot 1. It
+does not combine with `MP_FAST_BOOT`: the walker only acts at file select, and
+fast boot is what leaves file select, so with both set the run quietly becomes a
+new game instead. This has always been so; set only `MP_SMOKE_CONTINUE` to test
+the Continue path.
+
+For audio reports, `MP_AUDIO_STATS=1` logs MusyX's generated samples/second, queued
+audio, peak output and clipping. Nominal output is 32,000 stereo frames/second;
+short windows vary with the device's buffering. Static ADPCM loops must wrap at
+`loop + loopLength` and restart from the exact loop nibble/history. Streaming
+ADPCM retains its predictor history across ring-buffer wraps. These rules are
+now distinct; neither is tied to the renderer's frame count.
+
+For stuck or unexpected sounds, `MP_LOG_VOICES=1` logs the active MusyX voices
+(sample id, source pointer, length/loop, compression, pitch, volumes and the
+listener heading) about three times a second, and `MP_MUTE_SMP=65535,93` silences
+voices by sample id so a persistent one can be identified by ear. Streamed
+voices report sample id 65535. `MP_LOG_3D=1` logs any 3D emitter whose Doppler
+factor is not 1. The overlay's Debug > Audio > **Sounds playing** list shows the live voices (loudest
+first) with a per-sample mute checkbox and an "Unmute all" button, which also
+turns both audio paths back on. Mutes are not saved: a relaunch has full sound.
+
+A main-loop iteration that takes longer than 250 ms logs `MP stall: frame N took
+… ms (events, input, tick, draw)`, at most one line every two seconds, and a run
+of frames that were not presented logs `MP stall: N frames not presented over …
+ms` when presenting resumes. On Android they go to logcat under the tag
+`metroidprime` (`adb logcat -s metroidprime`). `MP_NO_STALL_LOG=1` turns them off.
+
+For doors that stay shut, `MP_LOG_DOORS=1` prints `MP door <id> opened after N
+ms` with the ticks spent on each condition that held it (`anim`, `thisArea`,
+`sky`, `areaLoad`, `actors`, `otherDoor`, `occluding`, `aram`, `map`), `still
+waiting` every 3 s while a wait lasts (followed by `now on otherDoor <id>` or
+`now on occluding <area>` when the condition names an object, or `sky: …` with
+the skybox state, the sky model's lock/build/queue state and the loader list size
+while the world sky is pending, and, per unloaded sky texture, whether it is
+locked, loading and in the loader's queue: 0 absent, 1 read pending, 2 read
+done), `MP sky <id> requested` / `model built after N ms` / `textures loaded
+after N ms` whenever the world sky has to be (re)loaded (the port keeps it
+resident, so after world load this should not appear), and
+`opened at once`, `ignored Open
+(inactive)`, `refused Open (area missing)` or `wait cancelled by Close` for the
+other outcomes (a trigger's Open usually ends a wait, since newer objects think
+first). Console `obj u<n>` shows an actor's touch bounds. `MP area`
+lines for each area's stream start, dependencies ready, load time and
+cancellation, and `streaming held N ticks` when the world held streaming back.
+
+For AddressSanitizer, use a separate Clang build with
+`-DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer"` and the same
+`CMAKE_CXX_FLAGS`. Keep allocation/deallocation mismatch checks enabled.
+`ASAN_OPTIONS=detect_leaks=0` can isolate memory-safety/lifetime checks from
+process-global caches; such a run does not establish leak freedom.
+
+With `-DAURORA_ENABLE_TESTS=ON`, build and run `gx_fifo_tests` under
+`build/native/extern/aurora/tests/`. This GPU-free suite includes concurrent
+producer/worker append, buffer growth, and draw-sync ordering. All 205 FIFO/GX
+tests passed in the local ThreadSanitizer build. Full-application TSan validation
+is currently blocked by reports in uninstrumented system GLib/libdbus and the
+prebuilt Rust nod preloader before game execution; no whole-game TSan-clean
+claim is made. The standalone FIFO suite avoids those dependencies.
+
+Manual validation still matters: door/room traversal, map/pause transitions,
+retail/Dolphin save import/export, interrupted saves, controller hot-plugging,
+audio pitch/tempo by ear, and Windows packaged gameplay on a clean machine.
+The automated lifecycle driver does not claim full-game coverage.
+
+## Save import and conversion
+
+The memory-card import (debug UI → Memory card → Import, `PortGci::ImportBytes`) accepts
+Metroid Prime saves from any source and converts them to the mounted disc's format
+(`platform/port_save_convert.*`): USA GCI, real PAL GCI (3 blocks), the port's earlier
+1-block PAL saves, raw cards (`GM8E`/`GM8P`), and Wii Trilogy `save.bin`/`data.bin`.
+Same-format imports are copied unchanged; if a native-format candidate exists it wins over
+conversions. Ids with no counterpart in the target release are dropped and counted in the
+import summary. On a PAL disc, startup moves legacy "MetroidPrime A"/"B" files into
+`_replaced` and writes the newest as a real PAL file. Tests: `ctest -R port_save_convert`
+(the fixture part needs `PORT_SAVE_FIXTURES`, default `../wii-save`, and skips otherwise).
+Layout tables are generated by `tools/gen_save_layouts.py` into `platform/save_layouts/`.

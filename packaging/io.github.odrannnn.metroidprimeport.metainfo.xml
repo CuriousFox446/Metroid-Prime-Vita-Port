@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.odrannnn.metroidprimeport</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>LicenseRef-mixed</project_license>
+
+  <name>Metroid Prime Port</name>
+    <!-- The icon the desktop entry names, installed by the project's own rules to
+       share/icons/hicolor/scalable/apps. Without this declaration appstreamcli
+       compose finds the file by convention and then cannot resolve it, which is
+       reported as file-read-error. -->
+  <icon type="stock">io.github.odrannnn.metroidprimeport</icon>
+  <!-- AppStream categories, which are a different list from the desktop
+       entry's XDG ones. Without this the desktop file's Categories=Game has
+       nothing to map onto and compose reports both app-categories-missing
+       and filters-but-no-output. -->
+  <categories>
+    <category>Game</category>
+  </categories>
+<summary>Metroid Prime running natively, with randomizer and Archipelago support</summary>
+
+  <description>
+    <p>
+      A native recompilation of Metroid Prime. The game is played as it was
+      released, on the host's own Vulkan driver, with no emulator in the loop and
+      no disc image bundled: the port asks for your own copy of the disc on first
+      launch.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Randomizer, with a full world and layer sweep covering every area</li>
+      <li>Archipelago multiworld, over ws:// and wss://</li>
+      <li>DeathLink, opt-in</li>
+      <li>Controller button prompts rebuilt for the device in use</li>
+      <li>Memory card saves in the GCI format the series used</li>
+    </ul>
+    <p>
+      This package contains no game assets. It will not play without a disc image
+      you supply, and none is distributed with it.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.odrannnn.metroidprimeport.desktop</launchable>
+
+  <url type="homepage">https://github.com/Odrannnn/MetroidPrimePort</url>
+  <url type="bugtracker">https://github.com/Odrannnn/MetroidPrimePort/issues</url>
+
+  <developer id="org.metroidprime">
+    <name>The Metroid Prime Port contributors</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <!-- Newest first. A release adds its entry here when it bumps versionName in
+       android/app/build.gradle; tools/make_flatpak.sh refuses to build when the
+       two differ, since Flatpak reports the newest entry as the app's version. -->
+  <releases>
+    <release version="0.32.0" date="2026-10-22">
+      <description>
+        <p>Suit colour customisation with a random colours button, the Fusion Suit from the F1 menu, a touch layout editor that adds your own buttons, deletes stock ones and sets per-control opacity, fixes for the crash in the Meta Ridley fight and in the credits on discs without the Japanese font, no more white square in the corner in morph ball, Aurora graphics fixes (missing vertex colours read as opaque white, EFB alpha, partial copy clears, texture coordinate generation and minification), Ridley, Thardus, Flaahgra and Metroid Prime restored mid-fight by savestates, a check of the whole disc image against its Redump release, safer save, movie and disc reads, and Linux aarch64 builds.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.32.0</url>
+    </release>
+    <release version="0.31.1" date="2026-10-21">
+      <description>
+        <p>Fewer missing or wrongly sized Remastered effects (sprites without a size, shutdown behaviour of trails and child particles, particle depth bias and motion spread), water fogs that follow the Gravity Suit in Tallon Overworld and Phendrana, progressive beam upgrades for Archipelago, a likely fix for a crash after the Frigate escape on Android, and Windows builds from a plain Visual Studio setup.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.31.1</url>
+    </release>
+    <release version="0.31.0" date="2026-10-21">
+      <description>
+        <p>Remastered clustered lighting for lit effects (the Ice Beam's charge collision first), every Remastered point-light effect lit, more effect elements converted so the last effects that failed whole now load, the original ELC2 lightning look, separate vertical sensitivity for mouse, touch and gyro aim, empty lock-on holding the camera pitch under direct aim, Archipelago and offline randomizer pickup jingles for the placed item and scanned artifact hints, savestate fixes for Omega Pirate, moving platforms and spider tracks, and Fungal Hall Access's beam doors unlocking.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.31.0</url>
+    </release>
+    <release version="0.30.1" date="2026-10-20">
+      <description>
+        <p>More Remastered effects drawn with their own shaders (Ice Beam charge and impact shards, missile and fire sprites, disintegration, visor goo splats that now actually draw, visor rain runoff, refraction warps), soft particles, the Plasma Beam's swooshes, resuming boss fights from savestates, charged and combo shots ricocheting off reflective enemies as in the original, real manual gyro calibration, unlocked beam doors kept after copying user data into a new release folder, lower storage use on Android, and a fix for mouse clicks wrongly accepting the resume prompt.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.30.1</url>
+    </release>
+    <release version="0.30.0" date="2026-10-19">
+      <description>
+        <p>Remastered effects now run their particle maths as Metroid Prime Remastered does, generated Gravity, Phazon and Power spider ball looks, the full Flaahgra theme imported from a PAL, JP or Trilogy disc, a stack_beams setting, a first-person FOV limit of 120, gyro aiming improvements, lower memory use on Android, and fixes for savestates, PAL menus and doors saved open.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.30.0</url>
+    </release>
+    <release version="0.29.0" date="2026-10-18">
+      <description>
+        <p>Per-visor HUD opacity, a Remastered-style crosshair, an option to keep beam doors unlocked once opened, a Rumble toggle, an Android setting to turn the on-screen controls off, Remastered movement on moving and rotating platforms, and fixes for rapid charge locking the weapons, bombs after a savestate load in morph ball, twin-stick aim speed, credits layout on wide screens, Archipelago item ids and the Remastered Power charge effect.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.29.0</url>
+    </release>
+    <release version="0.28.1" date="2026-10-17">
+      <description>
+        <p>Smooth right-stick turning at high frame rates, map rotation with one finger on touch (with an option to swap one- and two-finger gestures), lock-on no longer keeping Remastered movement going, and Driver workarounds settings with a more detailed GPU self-test.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.28.1</url>
+    </release>
+    <release version="0.28.0" date="2026-10-17">
+      <description>
+        <p>Gyro aim, mouse sensitivity on the Quake/Source scale, Remastered actor shadows and a world-wide baked-lighting volume, Wave Beam trails and electric arcs, Remastered movement, map pickup kinds and room marks, new randomizer options, smoother dynamic resolution, a faster Remastered import, adjustable touch control opacity on Android, a graphics backend choice on Windows, and screenshots that are no longer blank.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.28.0</url>
+    </release>
+    <release version="0.27.0" date="2026-10-14">
+      <description>
+        <p>Mouse and touch in the menus and map, optional Trilogy-style pointer aim, Remastered room animations, waterfalls and shader fixes, movement that matches retail at any tick rate, and a shared memory card with Dolphin.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.27.0</url>
+    </release>
+    <release version="0.26.0" date="2026-10-13">
+      <description>
+        <p>Remastered impact effects for the Power Beam, Plasma Beam and missiles, Android touch buttons that name what they do in morph ball and menus, and a fix for visor static that could get the game killed for low memory.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.26.0</url>
+    </release>
+    <release version="0.25.0" date="2026-10-13">
+      <description>
+        <p>Steadier X-ray and thermal reticles while walking, a scan lock that no longer drops when a scan finishes, and better crash logging on Android.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.25.0</url>
+    </release>
+    <release version="0.24.0" date="2026-10-13">
+      <description>
+        <p>A searchable settings window, a separate vertical stick aim speed, mouse fixes in morph ball, smoother scan icons and visor reticles at high frame rates, animated visor static, and a fix for the thermal visor running out of memory.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.24.0</url>
+    </release>
+    <release version="0.23.0" date="2026-10-12">
+      <description>
+        <p>Save import and conversion between Wii Trilogy, USA, PAL and Dolphin saves, the real PAL save format, USA 1.01 and 1.02 discs supported, a 1.00 compatibility option, prompts that follow rebinds, and Remastered sun cascades.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.23.0</url>
+    </release>
+    <release version="0.22.0" date="2026-10-11">
+      <description>
+        <p>Smoother high-FPS presentation, rebindable menu buttons, aim and scan-speed options, and Remastered prop lighting fixes.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.22.0</url>
+    </release>
+    <release version="0.21.0" date="2026-10-10">
+      <description>
+        <p>Improves controller remapping and projected-blend lighting in Remastered imports.</p>
+      </description>
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.21.0</url>
+    </release>
+    <release version="0.20.0" date="2026-10-10">
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.20.0</url>
+    </release>
+    <release version="0.19.0" date="2026-10-09">
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.19.0</url>
+    </release>
+    <release version="0.18.0" date="2026-10-07">
+      <url type="details">https://github.com/Odrannnn/MetroidPrimePort/releases/tag/v0.18.0</url>
+    </release>
+    <release version="0.1.0" date="2026-09-26">
+      <description>
+        <p>First packaged release.</p>
+      </description>
+    </release>
+  </releases>
+
+  <requires>
+    <display_length compare="ge">640</display_length>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>gamepad</control>
+  </recommends>
+
+  <!--
+    Deliberately absent: screenshots and a project URL. Screenshots would show
+    Nintendo's game, which this package may not redistribute, and there is no
+    public project page to point at. Both are Flathub requirements, so this
+    component is not publishable as-is - see docs/RELEASING.md.
+  -->
+</component>

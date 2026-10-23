@@ -1,0 +1,70 @@
+# IDE folders
+.idea/
+.vs/
+.vscode/
+
+# Caches
+__pycache__
+.mypy_cache
+.cache/
+
+# Original files
+decomp/orig/*/*
+!decomp/orig/*/.gitkeep
+
+# Build files
+build/
+.ninja_*
+build.ninja
+
+# decompctx output
+ctx.*
+*.ctx
+
+# Generated configs
+objdiff.json
+compile_commands.json
+report*.json
+
+# Miscellaneous
+/*.txt
+!/CMakeLists.txt
+*.exe
+*.dol
+
+# Game data: disc images and dumps are the user's own and must never be committed.
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.gcz
+*.wbfs
+*.wia
+*.nsp
+*.xci
+*.nca
+prod.keys
+title.keys
+
+# Packaging output from the CI steps when run locally
+/dist/
+/ffmpeg-min/
+/build-mac/
+/build-win/
+
+# Port runtime output
+screenshots/
+
+# Claude Code personal settings (per-machine allow/deny rules)
+.claude/settings.local.json
+
+# Release signing identity: a private key and the properties that name it.
+android/keystore.properties
+android/*.jks
+android/*.keystore
+
+# Local agent notes: they hold machine paths and private details.
+/AGENTS.md
+/CLAUDE.md
+/STATUS.md
+/STATUS-archive.md
