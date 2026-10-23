@@ -76,6 +76,26 @@ function(_aurora_dawn_fix_android_link_interface)
   endif ()
 endfunction()
 
+# PS Vita: no WebGPU driver exists, so the renderer runs against a null
+# implementation of the WebGPU C API (headless: everything is accepted, nothing
+# is drawn). See platforms/vita/webgpu_null/null_webgpu.hpp.
+if (VITA)
+  if (NOT TARGET webgpu_null)
+    set(_null_dir "${CMAKE_CURRENT_LIST_DIR}/../platforms/vita/webgpu_null")
+    add_library(webgpu_null STATIC "${_null_dir}/null_webgpu.cpp" "${_null_dir}/null_webgpu_stubs.cpp")
+    target_include_directories(webgpu_null PUBLIC "${_null_dir}/include")
+    target_compile_definitions(webgpu_null PUBLIC AURORA_NULL_GPU)
+    add_library(dawn::webgpu_dawn ALIAS webgpu_null)
+    add_library(dawn::dawncpp_headers ALIAS webgpu_null)
+  endif ()
+  foreach (_backend D3D12 D3D11 VULKAN METAL DESKTOP_GL OPENGLES)
+    set(DAWN_ENABLE_${_backend} OFF CACHE INTERNAL "")
+  endforeach ()
+  set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
+  set(AURORA_DAWN_IS_SHARED FALSE)
+  return()
+endif ()
+
 aurora_get_target_arch(_dawn_target_arch)
 string(TOLOWER "${CMAKE_SYSTEM_NAME}" _dawn_system)
 string(TOLOWER "${_dawn_target_arch}" _dawn_arch)

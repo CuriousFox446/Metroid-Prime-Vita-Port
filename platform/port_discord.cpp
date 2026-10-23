@@ -15,7 +15,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif !defined(__ANDROID__)
+#elif !defined(__ANDROID__) && !defined(__vita__)
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
@@ -37,11 +37,11 @@ const auto kRetryDelay = std::chrono::seconds(5);
 const auto kMinSendInterval = std::chrono::seconds(4);
 const auto kHandshakeTimeout = std::chrono::seconds(5);
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__vita__)
 
 struct Pipe {
   bool Open(std::string& error) {
-    error = "not available on Android";
+    error = "not available on this platform";
     return false;
   }
   bool Write(const std::string&) { return false; }
@@ -394,7 +394,7 @@ Runtime& GetRuntime() {
 } // namespace
 
 bool Supported() {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__vita__)
   return false;
 #else
   return true;

@@ -42,10 +42,16 @@ else ()
     set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
   endif()
   set(ABSL_PROPAGATE_CXX_STD ON)
+  set(_absl_patch)
+  if (VITA)
+    set(_absl_patch PATCH_COMMAND ${CMAKE_COMMAND} -DABSL_SOURCE_DIR=<SOURCE_DIR>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/patches/apply-abseil-vita.cmake")
+  endif ()
   FetchContent_Declare(abseil-cpp
     URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
     URL_HASH SHA256=f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    ${_absl_patch}
     EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(abseil-cpp)
@@ -205,6 +211,10 @@ if (AURORA_ENABLE_GX)
   endif ()
 
   aurora_find_system_package_global(Freetype QUIET)
+  if (VITA AND TARGET Freetype::Freetype)
+    # VitaSDK's static FreeType is built with bzip2 support, which FindFreetype omits.
+    set_property(TARGET Freetype::Freetype APPEND PROPERTY INTERFACE_LINK_LIBRARIES bz2)
+  endif ()
   if (NOT TARGET Freetype::Freetype AND NOT AURORA_BUNDLED_DEPS)
     find_package(PkgConfig)
     if (PkgConfig_FOUND AND NOT CMAKE_CROSSCOMPILING)
@@ -254,6 +264,10 @@ if (AURORA_ENABLE_GX)
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
     target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_TEST_ENGINE)
+    if (VITA)
+      # ImGui's default "open in shell" forks and execs, which the Vita cannot.
+      target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+    endif ()
 
     add_library(imgui_backends STATIC
       ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
@@ -309,6 +323,14 @@ if (AURORA_ENABLE_GX)
 
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+    if (VITA)
+      # newlib on the Vita: no mmap, no <sys/ioctl.h> (the unix VFS includes it but
+      # only uses it on Linux), no shared-memory WAL. fchown and readlink, which
+      # sqlite always references, are stubbed in the port (platform/vita).
+      target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL SQLITE_MAX_MMAP_SIZE=0
+        SQLITE_OMIT_LOAD_EXTENSION HAVE_USLEEP=1)
+      target_include_directories(sqlite3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/sqlite_shim")
+    endif ()
   endif ()
 
   if (AURORA_CACHE_USE_ZSTD)
@@ -365,8 +387,25 @@ if (AURORA_ENABLE_GX)
   endif ()
 endif ()
 
-if (NOT TARGET Tracy::TracyClient)
+if (NOT TARGET Tracy::TracyClient AND NOT VITA)
   aurora_find_package_global(Tracy CONFIG)
+endif ()
+if (NOT TARGET Tracy::TracyClient AND VITA)
+  # Tracy's client has no Vita port, and with TRACY_ENABLE off its macros expand to
+  # nothing: only the headers are needed (SOURCE_SUBDIR names no CMake project).
+  message(STATUS "aurora: Fetching Tracy headers")
+  FetchContent_Declare(
+          tracy
+          URL https://github.com/wolfpld/tracy/archive/refs/tags/v0.14.1.zip
+          URL_HASH SHA256=908f3a2917fa86a247abfcf85dcf04bad1db6986a4d40f94b70512f3e9e98d5b
+          DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+          SOURCE_SUBDIR headers-only
+          EXCLUDE_FROM_ALL
+  )
+  FetchContent_MakeAvailable(tracy)
+  add_library(TracyClient INTERFACE)
+  target_include_directories(TracyClient INTERFACE "${tracy_SOURCE_DIR}/public")
+  add_library(Tracy::TracyClient ALIAS TracyClient)
 endif ()
 if (NOT TARGET Tracy::TracyClient)
   message(STATUS "aurora: Fetching Tracy")

@@ -27,6 +27,10 @@
 #include <dbghelp.h>
 
 #include <string>
+#elif defined(__vita__)
+// No signal reaches a Vita process when it faults: the kernel stops it and writes
+// a core dump (ux0:data/*.psp2dmp), so only the exception report is ours.
+#include <cxxabi.h>
 #else
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -326,6 +330,11 @@ void OnInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned
   ReportHere("invalid parameter passed to a C runtime function");
   std::abort(); // what the default handler does, in effect
 }
+#elif defined(__vita__)
+void Emit(Line& line) {
+  line.text[line.used++] = '\n';
+  PortLogFile::WriteRaw(line.text, line.used);
+}
 #else
 // The handlers that were there before, which the signal goes on to: the default
 // one (a core dump), or on Android the one that writes the tombstone.
@@ -483,6 +492,8 @@ void Install() {
   SetUnhandledExceptionFilter(OnException);
   std::signal(SIGABRT, OnAbort);
   _set_invalid_parameter_handler(OnInvalidParameter);
+#elif defined(__vita__)
+  // Nothing to install (see the includes).
 #else
   // The main thread's stack overflowing leaves no stack for the handler.
   static char alternate[64 * 1024];
@@ -512,7 +523,7 @@ void Install() {
 }
 
 bool RequestStack(long threadId) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__vita__)
   (void)threadId;
   return false;
 #else

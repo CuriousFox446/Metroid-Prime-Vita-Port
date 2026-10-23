@@ -10,6 +10,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
+# PS Vita (VitaSDK toolchain): a headless build. Aurora's renderer runs against a
+# null WebGPU and the disc is read by a plain GCM reader (extern/aurora/platforms/
+# vita), so the game and the GX translation can be timed on the device before a
+# real graphics backend exists. Packaged as a VPK at the end of this file.
+if(VITA)
+    # A Vita executable is position-dependent; vita-elf-create relocates it.
+    set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+    set(MP_BUILD_TESTS OFF CACHE BOOL "Build native-port regression tests" FORCE)
+    set(MP_EMBED_RESOURCES OFF CACHE BOOL "Embed resources" FORCE)
+    # VitaSDK's GNU ld supports a rescanned group, which Aurora's core/gx cycle needs;
+    # CMake only knows that for its Linux platform.
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+endif()
+
 # Build speed, used only when the tools are installed. ccache makes recompiling
 # unchanged sources nearly free (stashing or setting edits aside rewrites mtimes)
 # and lets a fresh build directory fill from the cache: base_dir rewrites paths
@@ -614,6 +629,22 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.odrannnn.metroidpr
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
               ${CMAKE_CURRENT_SOURCE_DIR}/NOTICE
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/metroid-prime-port)
+
+if(VITA)
+    # Heap and stack sizes, clocks, and where the disc and saves live (ux0:data).
+    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp)
+    target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
+    include("${VITASDK}/share/vita.cmake" REQUIRED)
+    set(MP_VITA_TITLEID "MPPT00001" CACHE STRING "Vita title ID (4 letters, 5 digits)")
+    vita_create_self(eboot.bin metroid_prime_port UNSAFE)
+    # ATTRIBUTE2=12: the extended memory budget. The executable's static data (the
+    # emulated main memory among it) and the heap do not fit the default one.
+    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
+    vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
+        VERSION "00.32"
+        NAME "Metroid Prime Port (headless)"
+        FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png)
+endif()
 
 # Source-derived Remastered box/triangle contact geometry (0xc0a180) and its
 # adapter. Linked into the game by the Remastered mover; the tests use it

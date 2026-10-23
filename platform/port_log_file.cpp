@@ -39,7 +39,7 @@
 
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_system.h>
-#elif !defined(_WIN32)
+#elif !defined(_WIN32) && !defined(__vita__)
 #include <csignal>
 #include <poll.h>
 #include <pwd.h>
@@ -51,9 +51,9 @@ namespace PortLogFile {
 namespace {
 bool sActive = false;
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__vita__)
 // What the file copy takes out of the log (port_log_redact.h). Android's paths
-// name the package, not the person, so it has none.
+// name the package, not the person, so it has none; nor do the Vita's.
 PortLogRedact::Rules MakeRules() {
   PortLogRedact::Rules rules;
 #if defined(_WIN32)
@@ -131,7 +131,7 @@ void WriteAll(int fd, const char* data, ssize_t size) {
 }
 #endif
 
-#if !defined(_WIN32) && !defined(__ANDROID__)
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(__vita__)
 // Writes to the terminal, dropping what it will not take. The terminal copy is
 // opened non-blocking (or is a socket, sent to with MSG_DONTWAIT), so a terminal
 // that stops reading - Ctrl+S, a pager left waiting - loses its copy of the
@@ -514,7 +514,13 @@ void WriteRaw(const char* data, size_t size) {
     return;
   }
 #endif
+#if defined(__vita__)
+  // stderr is a reopened stream (Start), not necessarily descriptor 2.
+  std::fwrite(data, 1, size, stderr);
+  std::fflush(stderr);
+#else
   WriteAll(STDERR_FILENO, data, static_cast< ssize_t >(size));
+#endif
 }
 #endif
 
@@ -642,6 +648,18 @@ bool Start() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::thread(CopyStdio, fds[0]).detach();
+  }
+#elif defined(__vita__)
+  // No processes, pipes or dup2: stdout and stderr are reopened onto the file
+  // itself, both appending, line by line, so a crash leaves the last lines in it.
+  if (std::freopen(path.c_str(), "w", stderr) == nullptr) {
+    return false;
+  }
+  std::setvbuf(stderr, nullptr, _IOLBF, 0);
+  std::fprintf(stderr, "metroid_prime_port log, started %s\n", started);
+  std::fflush(stderr);
+  if (std::freopen(path.c_str(), "a", stdout) != nullptr) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
   }
 #else
   const int out = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);

@@ -69,9 +69,12 @@ if (AURORA_ENABLE_GX)
             lib/webgpu/gpu_cache.cpp
             lib/webgpu/gpu_prof.cpp
             lib/dawn/BackendBinding.cpp
-            lib/dawn/TracyPlatform.cpp
     )
-    if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    # Dawn's platform hooks for Tracy; the null WebGPU (Vita) has no Dawn platform.
+    if (NOT VITA)
+        target_sources(aurora_core PRIVATE lib/dawn/TracyPlatform.cpp)
+    endif ()
+    if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU" AND NOT VITA)
         set_source_files_properties(lib/dawn/TracyPlatform.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
     endif ()
     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)
