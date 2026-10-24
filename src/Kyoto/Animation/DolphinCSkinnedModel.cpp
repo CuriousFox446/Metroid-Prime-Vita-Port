@@ -272,7 +272,7 @@ void CSkinnedModel::Draw(const float* positions, const float* normals,
 void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
                               const rstl::optional_object< CVertexMorphEffect >& morphEffect,
                               const float* averagedNormals, float* workVerts) {
-  PORT_ZONE("CSkinnedModel::Calculate (CPU skinning)");
+  PORT_ZONE_TIMED("CSkinnedModel::Calculate (CPU skinning)");
   size_t alignedNormSize = 0;
   size_t alignedVertSize = 0;
   size_t totalSize = 0;

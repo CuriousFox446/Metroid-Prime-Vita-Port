@@ -57,6 +57,11 @@ void ReleaseArea(const void* areaKey) {
   sKept.erase(found);
 }
 
+// Models and areas share the table: their keys (a CModel, an area's instance vector) differ.
+void KeepModel(const void* modelKey, const CCubeModel& model) { KeepAreaModel(modelKey, model); }
+
+void ReleaseModel(const void* modelKey) { ReleaseArea(modelKey); }
+
 void ReleaseAll() {
   for (const auto& [areaKey, kept] : sKept) {
     for (const void* data : kept) {

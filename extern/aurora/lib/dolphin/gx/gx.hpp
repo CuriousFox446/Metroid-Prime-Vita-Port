@@ -7,6 +7,11 @@ static aurora::Module Log("aurora::gx");
 
 using aurora::gx::g_gxState;
 
+namespace aurora::gx::source {
+// For aurora_take_gx_source_counts (GXDispList.cpp): an immediate primitive sent now.
+void count_begin(u16 vertices) noexcept;
+} // namespace aurora::gx::source
+
 static inline aurora::Vec4<float> from_gx_color(GXColor color) {
   return {
       static_cast<float>(color.r) / 255.f,

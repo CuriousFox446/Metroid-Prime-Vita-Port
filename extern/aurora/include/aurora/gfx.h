@@ -103,6 +103,22 @@ typedef struct {
   uint32_t rebuilds;       // converted again: the vertex format changed since
 } AuroraResidentDlStats;
 void aurora_take_resident_dl_stats(AuroraResidentDlStats* out);
+
+// What the game sent through GX, by a source the game names (game thread only): immediate
+// primitives (GXBegin) and display list calls, sent as they are or resident. Source 0 is
+// whatever is sent with no source set.
+#define AURORA_GX_SOURCES 32
+typedef struct {
+  uint32_t begins;        // GXBegin calls
+  uint32_t beginVertices; // their vertices
+  uint32_t lists;         // GXCallDisplayList calls sent through the FIFO
+  uint32_t listKiB;       // ...and their size, KiB
+  uint32_t residentLists; // calls of retained display lists (drawn from their GPU copy)
+} AuroraGxSourceCounts;
+// Returns the source it replaces.
+uint32_t aurora_gx_set_source(uint32_t source);
+// Copies the counts since the last call and resets them.
+void aurora_take_gx_source_counts(AuroraGxSourceCounts out[AURORA_GX_SOURCES]);
 // Whether the device samples BC and ASTC 4x4 compressed textures (false until it exists).
 void aurora_get_texture_support(bool* bc, bool* astc);
 // A GX texture object's (GXTexObj*) base level decoded to RGBA8 into `out` (cap bytes); false for

@@ -91,6 +91,14 @@ Aurora turns each display list into triangle lists once. The profiler is off by
 default again (`MP_PROFILE=1` turns it on); the `[split]` line ends with the resident
 geometry in use, which stays at 0 if the display lists could not be made resident.
 
+On hardware every retained world display list was drawn resident (about 1,000-1,700
+calls a frame in the hangar, no fallbacks, no conversions redone), and the intro's
+heaviest draw phase fell from about 95 to 70 ms; but the hangar stayed near 7.5 FPS, so
+most of the GX work is not world geometry. Now every loaded model (`CModel`: actors, the
+gun, characters) keeps its display lists resident too, and the `[gxsrc]` lines count
+what each stage of the frame sends through GX (immediate primitives, display lists sent
+or resident), with a `[heap]` line, since each retained list is also copied on the CPU.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because

@@ -16,6 +16,10 @@
 #include <Kyoto/Graphics/CGraphics.hpp>
 #include <Kyoto/IObjectStore.hpp>
 #include <Kyoto/TToken.hpp>
+
+#ifdef TARGET_PC
+#include "port_retail_resident.h"
+#endif
 static bool sIsTextureTimeoutEnabled = true;
 uint CModel::sTotalMemory = 0;
 CModel* CModel::sThisFrameList = nullptr;
@@ -113,6 +117,10 @@ CModel::CModel(const rstl::auto_ptr< uchar[] >& data, int length, IObjectStore& 
                         (visorFlags ? 1 : 0) | (nbtNormals ? CCubeModel::kNbtNormals : 0) |
                             (nbtNormals && nbtNormals5 ? CCubeModel::kNbtNormals5 : 0), true, -1, positionsSize, normalsSize, colorsSize,
                         floatUvsSize, shortUvsSize);
+#ifdef TARGET_PC
+  // Port: its display lists and arrays kept on the GPU (port_retail_resident.h).
+  PortRetailResident::KeepModel(this, *x28_modelInstance);
+#endif
   sThisFrameList = this;
   if (x34_next != nullptr) {
     x34_next->x30_prev = this;
@@ -123,6 +131,9 @@ CModel::CModel(const rstl::auto_ptr< uchar[] >& data, int length, IObjectStore& 
 }
 
 CModel::~CModel() {
+#ifdef TARGET_PC
+  PortRetailResident::ReleaseModel(this);
+#endif
   RemoveFromList();
   RemoveFromTotal(x4_dataLen);
   const int frame = CGraphics::GetFrameCounter();
@@ -351,6 +362,10 @@ inline void RemapPointer(T*& pointer, uintptr_t offset) {
 } // namespace
 
 void CModel::RemapData(uchar* data) {
+#ifdef TARGET_PC
+  // Port: what was kept is keyed by the old addresses (kept again below).
+  PortRetailResident::ReleaseModel(this);
+#endif
   uintptr_t offset =
       reinterpret_cast< uintptr_t >(data) - reinterpret_cast< uintptr_t >(x0_data.release());
   x0_data = data;
@@ -382,6 +397,9 @@ void CModel::RemapData(uchar* data) {
       normals, colors, uvs, packedUvs, bounds, flags, texturesLoaded, index,
       instance.GetVertexSize(), instance.GetNormalSize(), instance.GetColorSize(),
       instance.GetTCSize(), instance.GetPackedTCSize());
+#ifdef TARGET_PC
+  PortRetailResident::KeepModel(this, *x28_modelInstance);
+#endif
   MoveToThisFrameList();
 }
 

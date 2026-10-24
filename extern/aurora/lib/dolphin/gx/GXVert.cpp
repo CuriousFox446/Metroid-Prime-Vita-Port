@@ -36,6 +36,9 @@ extern "C" {
 
 void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   pre_begin();
+  if (!aurora::gx::fifo::in_display_list()) {
+    aurora::gx::source::count_begin(nVerts);
+  }
 
   const u8 drawCmd = static_cast<u8>(vtxFmt) | static_cast<u8>(primitive);
   sBeginAuto = nVerts == GX_AUTO;

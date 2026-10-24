@@ -566,7 +566,7 @@ void CAnimData::PrimitiveSetToTokenVector(const rstl::set< CPrimitive >& primSet
 }
 
 void CAnimData::BuildPose() {
-  PORT_ZONE("CAnimData::BuildPose");
+  PORT_ZONE_TIMED("CAnimData::BuildPose");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;
@@ -583,7 +583,7 @@ void CAnimData::BuildPose() {
 }
 
 void CAnimData::PreRender() {
-  PORT_ZONE("CAnimData::PreRender");
+  PORT_ZONE_TIMED("CAnimData::PreRender");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;

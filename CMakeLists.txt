@@ -646,7 +646,8 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
 
 if(VITA)
     # Heap and stack sizes, clocks, and where the disc and saves live (ux0:data).
-    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp platform/vita/vita_printf.cpp)
+    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp platform/vita/vita_printf.cpp
+        platform/vita/vita_gx_sources.cpp)
     # newlib's printf here lacks C99 length modifiers (%zu); every caller goes through
     # platform/vita/vita_printf.cpp, which rewrites them.
     target_link_options(metroid_prime_port PRIVATE
