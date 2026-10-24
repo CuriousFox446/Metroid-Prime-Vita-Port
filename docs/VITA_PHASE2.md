@@ -305,3 +305,16 @@ So, second try:
   a call copies it and reads only the positions, from the array as it is now. The faces keep the
   shading of the pose the template was made in.
 - The zones inside a call are gone again, but for working out a material and a skinned call.
+
+Its run (53a2e2c, the opening, no errors): the seconds with 1,500 calls a frame at 13.5 FPS
+(11.5 before the cache, 10.2 with it), the game thread's wait for the FIFO thread down from 24 to
+13 ms a frame, `draw_resident` from 63 to 46 ms a frame. Every skinned call drew from its
+template (a dozen a frame, 5 ms in all where they took 22). But materials are still worked out for
+about 44% of the calls in those seconds (about 750 a frame, 10 µs each): the hash takes in all
+eight texture slots and texgens, and the game leaves slots no stage reads loaded with whatever it
+bound last, so the same material hashes differently from draw to draw.
+
+Also seen: the upside-down Samus in front of the camera is `CCubeRenderer::CacheReflection`'s
+pass, which draws the player from a reflection camera (its up is -Z) into a 256x256 corner of the
+EFB and copies it to a texture for the helmet and ball reflections. The Vita path ignores the
+viewport, the copy and its clear, so the pass lands on the screen. Left for milestone 5.
