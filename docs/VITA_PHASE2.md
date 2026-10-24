@@ -323,3 +323,11 @@ So the material hash now takes in only what the stages name: the texture slots a
 generators they read, and of the vertex descriptor only those generators' source attributes
 (the rest of it differs from model to model and the material does not read it). The cache grew
 to 1,024 entries.
+
+Its run (a2814e5, 16 minutes, no errors): materials worked out in the heavy seconds fell from
+about 750 to 590 a frame, `draw_resident` from 46 to 42 ms, the game thread's wait from 13 to 10
+ms; 13.3 FPS there, the game thread's own tick higher this run. But the cache was full (1,024)
+in every window: Aurora's texture bind generation, in the hash, moves at every EFB copy
+(`GXCopyTex` calls `invalidate_bindings`), several a frame, and each move left every cached
+material unreachable. A static texture is named in the hash by its identity already, so the
+generation now goes into it only when a slot the stages read holds an EFB copy's destination.

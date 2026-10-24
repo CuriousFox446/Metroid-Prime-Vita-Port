@@ -954,8 +954,8 @@ u32 sWindow = 0;
 Material* sLastMaterial = nullptr;
 u64 sLastGeneration = 0;
 
-// A hash of the GX state a Material reads: the TEV stages, Aurora's texture bind generation,
-// blending, depth, culling, the colour mask and the alpha compare, and of what the stages name, the
+// A hash of the GX state a Material reads: the TEV stages, blending, depth, culling, the colour
+// mask and the alpha compare, and of what the stages name, the
 // texture coordinate generators, the vertex descriptor's entries for their sources, and the loaded
 // textures with their palettes. The game leaves slots and generators no stage reads holding
 // whatever it set last, so they are left out, as are the matrices and the colour constants (read
@@ -968,8 +968,7 @@ u64 material_hash(u64 generation) noexcept {
       static_cast<u32>(s.blendFacDst),  static_cast<u32>(s.blendOp), static_cast<u32>(s.depthFunc),
       s.depthCompare,  s.depthUpdate,   s.colorUpdate,  s.alphaUpdate, static_cast<u32>(s.cullMode),
       static_cast<u32>(alpha.comp0),    alpha.ref0,     static_cast<u32>(alpha.op),
-      static_cast<u32>(alpha.comp1),    alpha.ref1,     static_cast<u32>(generation),
-      static_cast<u32>(generation >> 32),
+      static_cast<u32>(alpha.comp1),    alpha.ref1,
   };
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
@@ -1022,6 +1021,15 @@ u64 material_hash(u64 generation) noexcept {
     textures[i][11] = tlut != nullptr ? tlut->tlutDataVersion : 0;
   }
   h = XXH3_64bits_withSeed(textures, sizeof(textures), h);
+  // Aurora's bind generation moves at every EFB copy (several a frame), and a static texture is
+  // already named by its identity above; only a slot holding a copy's destination resolves to
+  // something new when it moves.
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    if ((usedMaps & (1u << i)) != 0 && s.copyTextures.contains(s.loadedTextures[i].data)) {
+      h = XXH3_64bits_withSeed(&generation, sizeof(generation), h);
+      break;
+    }
+  }
   return h;
 }
 
