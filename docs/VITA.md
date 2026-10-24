@@ -143,6 +143,13 @@ frame. The next `begin_frame` waits for that command only, so the wait left show
 change, a GPU synchronize) waits for it first too. RmlUi frames still end the old way.
 `platforms/vita/tests/fifo_frame_end_test.cpp` runs the FIFO side on the host.
 
+On hardware (4.7 minutes, no errors, no crash) the hangar's heavy seconds went from 9.6 to
+14.7 FPS throughput and 8.0 to 11.9 presented; end-scene fell from about 34 ms to 0.2 and
+begin-wait stayed under 1 ms, so the game thread no longer waits for the FIFO thread at all.
+It is now the game thread's own work that sets the frame: input about 3 ms, the ticks about
+37 ms (3 to 4 a frame at about 12 ms each, the simulation at about 35 of 60 ticks a second)
+and the draw about 31 ms, against the FIFO thread's roughly 65 ms alongside.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
