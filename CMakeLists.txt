@@ -332,6 +332,7 @@ set(MP_PORT_SOURCES
     platform/port_room_env_tiles.cpp
     platform/port_room_geo.cpp
     platform/port_room_geo_file.cpp
+    platform/port_retail_resident.cpp
     platform/port_room_liquid.cpp
     platform/port_room_effects.cpp
     platform/port_room_effects_file.cpp

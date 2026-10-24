@@ -1299,11 +1299,13 @@ int CMain::RsMain(int argc, const char* const* argv) {
             const uint64_t workerNow = aurora_render_worker_busy_ns();
             const double wallNs = static_cast< double >(workEndNs - sSpanStartNs);
             PortLog::Write("[split] ms/frame: input %.1f, tick %.1f (%.1f ticks), begin-wait %.1f, draw %.1f, "
-                           "loader %.1f, end-scene %.1f, other %.1f | render worker busy %.0f%% (%.1f ms/frame)\n",
+                           "loader %.1f, end-scene %.1f, other %.1f | render worker busy %.0f%% (%.1f ms/frame)"
+                           " | resident geometry %.1f MiB\n",
                            perFrame(sIn), perFrame(sTick), sTicks / frames, perFrame(sWait), perFrame(sDraw),
                            perFrame(sIdle), perFrame(sEnd), perFrame(sRest),
                            100.0 * static_cast< double >(workerNow - sWorkerStartNs) / wallNs,
-                           perFrame(workerNow - sWorkerStartNs));
+                           perFrame(workerNow - sWorkerStartNs),
+                           static_cast< double >(aurora_get_resident_geometry_used()) / (1024.0 * 1024.0));
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });
             sSpanStartNs = workEndNs;

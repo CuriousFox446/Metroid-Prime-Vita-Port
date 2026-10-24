@@ -37,6 +37,7 @@
 #include "port_pal_languages.h"
 #include "port_flaahgra_music.h"
 #include "port_room_geo.h"
+#include "port_retail_resident.h"
 #include "port_importers.h"
 #include "port_remastered_import.h"
 #include "port_storage_report.h"
@@ -855,6 +856,14 @@ int main(int argc, char** argv) {
         residentMiB = static_cast<uint32_t>(
             envMiB >= 0 ? std::clamp(static_cast<unsigned long>(envMiB), 16UL, 2048UL) : kResidentMiB);
     }
+    // MP_RETAIL_RESIDENT=1: the retail world geometry kept on the GPU too
+    // (port_retail_resident.h), in the room geometry's region when there is one.
+    const bool retailResident = port::EnvFlag("MP_RETAIL_RESIDENT", false);
+    if (retailResident && residentMiB == 0) {
+        const int envMiB = port::EnvInt("MP_RETAIL_RESIDENT_MB", -1);
+        residentMiB = static_cast<uint32_t>(
+            envMiB >= 0 ? std::clamp(static_cast<unsigned long>(envMiB), 16UL, 2048UL) : 48UL);
+    }
     uint32_t frameBufferScale = !roomGeometry ? 1 : resident ? kResidentFrameBuffers : kRoomGeoFrameBuffers;
     const int envFrameBuffers = port::EnvInt("MP_FRAME_BUFFERS", -1);
     if (envFrameBuffers >= 0) {
@@ -1155,6 +1164,13 @@ int main(int argc, char** argv) {
         const uint32_t got = aurora_get_resident_geometry_mib();
         PortRoomGeo::SetResident(got != 0);
         PortLog::Write("port: room geometry kept on the GPU in %u MiB\n", got);
+    }
+    if (retailResident) {
+        const uint32_t got = aurora_get_resident_geometry_mib();
+        PortRetailResident::SetEnabled(got != 0);
+        PortLog::Write(got != 0 ? "port: retail world geometry kept on the GPU in %u MiB\n"
+                                : "port: retail world geometry not kept on the GPU (no resident room: %u MiB)\n",
+                       got);
     }
     // Apply the persisted render scale. Vsync is applied on the first drawn
     // frame (once the swapchain surface exists) so it uses real capabilities.

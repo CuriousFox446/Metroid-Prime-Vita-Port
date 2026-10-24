@@ -1,5 +1,6 @@
 #include "MetaRender/CCubeRenderer.hpp"
 #include "port_profile.h"
+#include "port_retail_resident.h"
 #include "Kyoto/Basics/CBasics.hpp"
 
 #include "Collision/CollisionUtil.hpp"
@@ -507,6 +508,9 @@ void CCubeRenderer::LoadThermoPalette() {
 
 CCubeRenderer::~CCubeRenderer() {
   sRenderer = nullptr;
+#ifdef TARGET_PC
+  PortRetailResident::ReleaseAll();
+#endif
   Buckets::Shutdown();
   CSkinnedModel::RemoveDummySkinnedModelRef();
   if (!x314_phazonSuitMask.null()) {
@@ -533,6 +537,10 @@ void CCubeRenderer::AddStaticGeometry(const rstl::vector< CMetroidModelInstance 
             it->GetColorPointer(), it->GetTCPointer(), it->GetPackedTCPointer(),
             it->GetBoundingBox(), it->GetFlags(), false, i, it->GetVertexSize(), it->GetNormalSize(),
             it->GetColorSize(), it->GetTCSize(), it->GetPackedTCSize()));
+#ifdef TARGET_PC
+        // Port: keep the area's display lists and arrays on the GPU (port_retail_resident.h).
+        PortRetailResident::KeepAreaModel(geometry, *models->back());
+#endif
       }
     }
     x1c_areaListItems.push_back(CAreaListItem(geometry, octTree, textures, models, areaIdx));
@@ -553,6 +561,9 @@ CCubeRenderer::FindStaticGeometry(const rstl::vector< CMetroidModelInstance >* g
 void CCubeRenderer::RemoveStaticGeometry(const rstl::vector< CMetroidModelInstance >* geometry) {
   AUTO(search, FindStaticGeometry(geometry));
   if (search != x1c_areaListItems.end()) {
+#ifdef TARGET_PC
+    PortRetailResident::ReleaseArea(geometry);
+#endif
     x1c_areaListItems.erase(search);
   }
 }

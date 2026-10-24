@@ -127,8 +127,11 @@ __attribute__((constructor(101))) void vitaSetup() {
     // second, and boot straight into a new game, since the menus cannot be seen.
     setenv("MP_TRACE_TIMING", "1", 0);
     setenv("MP_FAST_BOOT", "1", 0);
-    // And which parts of a frame are slow: the zone profiler's [zones] lines.
-    setenv("MP_PROFILE", "1", 0);
+    // The retail world geometry's display lists made into GPU-side triangle lists once,
+    // instead of re-read primitive by primitive every frame (port_retail_resident.h).
+    setenv("MP_RETAIL_RESIDENT", "1", 0);
+    // The zone profiler ([zones] lines) stays off: its clock reads slow per-draw code
+    // several fold. A build that wants it sets MP_PROFILE=1 here.
     // Nothing can show or answer a box here: no disc dialog or message boxes, and
     // Aurora keeps running on its Null backend instead of exiting (which a missing
     // GPU means on a desktop, and is the point of this build).

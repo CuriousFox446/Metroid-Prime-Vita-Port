@@ -84,6 +84,13 @@ it only for room-geometry mods, never the retail models. A game tick costs about
 fold (hangar about 4 FPS profiled against about 20 without): trust counts and
 ranking, not milliseconds.
 
+So the Vita build now keeps the retail world geometry resident (`MP_RETAIL_RESIDENT`,
+`platform/port_retail_resident.cpp`): each area's model arrays and surface display
+lists are retained when the area's geometry is added and released when it goes, so
+Aurora turns each display list into triangle lists once. The profiler is off by
+default again (`MP_PROFILE=1` turns it on); the `[split]` line ends with the resident
+geometry in use, which stays at 0 if the display lists could not be made resident.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
