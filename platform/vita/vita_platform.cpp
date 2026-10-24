@@ -58,20 +58,31 @@ bool hasDiscExtension(const char* name) {
   return endsWith(".iso") || endsWith(".gcm");
 }
 
-// The first .iso/.gcm in the data folder, when MP_DISC does not name one.
+// The first .iso/.gcm in the data folder, when MP_DISC does not name one. Says what
+// the folder holds when there is none, since nothing else on the Vita will.
 std::string findDisc() {
-  const SceUID dir = sceIoDopen(kDataDir);
+  const std::string folder(kDataDir, std::strlen(kDataDir) - 1); // sceIoDopen without the slash
+  const SceUID dir = sceIoDopen(folder.c_str());
   if (dir < 0) {
+    std::fprintf(stderr, "vita: cannot list %s (error 0x%08x)\n", folder.c_str(), static_cast<unsigned>(dir));
     return {};
   }
   std::string found;
+  int entries = 0;
   SceIoDirent entry{};
-  while (found.empty() && sceIoDread(dir, &entry) > 0) {
-    if (SCE_S_ISREG(entry.d_stat.st_mode) && hasDiscExtension(entry.d_name)) {
+  while (sceIoDread(dir, &entry) > 0) {
+    ++entries;
+    const bool isDir = SCE_S_ISDIR(entry.d_stat.st_mode);
+    const bool disc = !isDir && hasDiscExtension(entry.d_name);
+    std::fprintf(stderr, "vita:   %s%s  %lld bytes  mode 0x%x%s\n", entry.d_name, isDir ? "/" : "",
+                 static_cast<long long>(entry.d_stat.st_size), static_cast<unsigned>(entry.d_stat.st_mode),
+                 disc && found.empty() ? "  <- disc" : "");
+    if (disc && found.empty()) {
       found = std::string(kDataDir) + entry.d_name;
     }
   }
   sceIoDclose(dir);
+  std::fprintf(stderr, "vita: %d entries in %s\n", entries, folder.c_str());
   return found;
 }
 
@@ -106,6 +117,7 @@ __attribute__((constructor(101))) void vitaSetup() {
     if (disc == nullptr || disc[0] == '\0') {
       const std::string found = findDisc();
       if (!found.empty()) {
+        std::fprintf(stderr, "vita: disc %s\n", found.c_str());
         setenv("MP_DISC", found.c_str(), 1);
       } else {
         std::fprintf(stderr, "vita: no .iso or .gcm in %s\n", kDataDir);
