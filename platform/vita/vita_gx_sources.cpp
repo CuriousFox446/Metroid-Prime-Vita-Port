@@ -59,6 +59,7 @@ const char* OpName(uint32_t op) {
   case 0x6D: return "PBR_MODEL_MOD";
   case 0x70: return "ACTOR_SHADOW";
   case 0x71: return "VFX_CAPTURE";
+  case 0x72: return "FRAME_END";
   default:
     return op >= 0x10 && op <= 0x1F ? "ARRAYBASE" : nullptr;
   }

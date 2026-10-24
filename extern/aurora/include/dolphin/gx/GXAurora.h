@@ -345,6 +345,9 @@ extern "C" {
 // Port extension: Remastered's opaque scene copy for the VFX draws (aurora::gfx::vfx::capture_scene),
 // made where the FIFO thread reaches it. No payload.
 #define GX_AURORA_PORT_VFX_CAPTURE_SCENE 0x0071
+// Internal: work queued for the FIFO thread (fifo::queue_frame_end). Payload: u64 pointer to a
+// heap std::function<void()>, which the processor runs and deletes.
+#define GX_AURORA_PORT_FIFO_TASK 0x0072
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
 

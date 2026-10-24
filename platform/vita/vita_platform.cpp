@@ -144,6 +144,10 @@ __attribute__((constructor(101))) void vitaSetup() {
     // The PC port's own lighting (sun shadows, volumetric fog, bloom, reflection probes;
     // projected actor shadows are off in options.cpp) is FIFO work the Vita has no room
     // for, and the retail game never had it.
+    // The FIFO thread finishes each frame while the game ticks the next, instead of the game
+    // waiting for it at the frame's end (Aurora's AURORA_DEFERRED_FRAME_END): the tick no
+    // longer adds to the FIFO thread's time. The wait that is left shows as begin-wait.
+    setenv("AURORA_DEFERRED_FRAME_END", "1", 0);
     setenv("MP_SHADOWS", "0", 0);
     setenv("MP_VOLFOG", "0", 0);
     setenv("MP_BLOOM", "0", 0);

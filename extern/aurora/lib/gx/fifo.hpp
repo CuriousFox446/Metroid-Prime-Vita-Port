@@ -3,6 +3,7 @@
 #include "../internal.hpp"
 
 #include <cstring>
+#include <functional>
 
 namespace aurora::gx::fifo {
 
@@ -112,6 +113,16 @@ void drain();
 // For aurora_take_drain_sites: the game's call site behind the drains a wrapper (GXDrawDone)
 // makes until it is set back to null.
 void set_drain_origin(const void* origin) noexcept;
+
+// The deferred frame end (AURORA_DEFERRED_FRAME_END): instead of draining at the end of a
+// frame, the producer queues `task` behind the frame's commands and goes on (the game's next
+// tick runs while the FIFO thread finishes the frame). The FIFO thread clears its draw cache and
+// runs the task. Ends the frame for the producer, as end_frame does. Thread processing only.
+void queue_frame_end(std::function<void()> task);
+// Waits until a queued frame end has run, then drops the processed commands from the buffer.
+// Anything that needs the frame ended calls it first: the next begin_frame, a GPU synchronize,
+// a resize. A no-op with none queued, or off the thread that queued it (the FIFO thread itself).
+void finish_frame_end() noexcept;
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

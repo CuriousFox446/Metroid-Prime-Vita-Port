@@ -18,6 +18,7 @@
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "texture_replacement.hpp"
+#include "../gx/fifo.hpp"
 #include "../gx/gx.hpp"
 #ifdef AURORA_ENABLE_RMLUI
 #include "../rmlui/pipeline.hpp"
@@ -62,7 +63,9 @@ std::array<std::atomic<uint64_t>, 4> g_stagingGrowthWant{};
 constexpr uint32_t StorageGrowthCapScale = 6;
 std::array<wgpu::Buffer, StagingBufferCount> g_stagingBuffers;
 std::array<std::atomic<BufferMapState>, StagingBufferCount> g_mappingStates;
-uint32_t g_frameIndex = UINT32_MAX;
+// Advanced by end_frame, which the FIFO thread runs under a deferred frame end while the game
+// reads current_frame().
+std::atomic<uint32_t> g_frameIndex = UINT32_MAX;
 
 std::array<FramePacket, FrameSlotCount> g_framePackets;
 uint64_t g_nextFrameId = 1;
@@ -869,7 +872,7 @@ void grow_frame_buffer(StagingKind kind, uint64_t need, const wgpu::CommandEncod
     wgpu::Buffer& current = g_resources.*shared.member;
     encoder.CopyBufferToBuffer(current, 0, buffer, 0, base + device);
     Log.info("frame {} device buffer grown from {} to {} KiB during frame {} (needed {} KiB)", shared.name,
-             device >> 10, grown >> 10, g_frameIndex, need >> 10);
+             device >> 10, grown >> 10, g_frameIndex.load(), need >> 10);
     current = std::move(buffer);
     device = grown;
     if (kind == StagingKind::Uniform) {
@@ -1046,9 +1049,17 @@ void after_submit() noexcept {
   bloom::after_submit();
 }
 
-void gpu_synchronize() { render_worker::synchronize(); }
+// Both wait for a deferred frame end first: what follows (a resize, a quality change, a cache
+// flush) assumes the frame is over and queued.
+void gpu_synchronize() {
+  gx::fifo::finish_frame_end();
+  render_worker::synchronize();
+}
 
-void synchronize() { render_worker::synchronize(); }
+void synchronize() {
+  gx::fifo::finish_frame_end();
+  render_worker::synchronize();
+}
 
 void after_present() noexcept {
   const auto now = PresentClock::now();

@@ -352,6 +352,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
 void shutdown() noexcept {
 #ifdef AURORA_ENABLE_GX
+  gx::fifo::finish_frame_end();
   gx::fifo::shutdown();
   gfx::render_worker::synchronize();
 #ifdef AURORA_ENABLE_RMLUI
@@ -415,6 +416,10 @@ void release_lost_surface() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  // A deferred end of the last frame must have run before anything here touches the surface,
+  // the recorder or the frame slots.
+  phase::set(phase::Main, "begin_frame (waiting for the FIFO thread to end the last frame)");
+  gx::fifo::finish_frame_end();
   {
     if (!service_surface("begin_frame")) {
       return false;
@@ -449,28 +454,30 @@ bool begin_frame() noexcept {
   return true;
 }
 
-void end_frame() noexcept {
-  ZoneScoped;
-  // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
-  struct ResizeFrameTimer {
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-    bool timed = webgpu::g_resizeFramesToTime > 0;
-    ~ResizeFrameTimer() {
-      if (timed) {
-        const int index = 3 - webgpu::g_resizeFramesToTime--;
-        const double ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        Log.info("EFB resize: frame {} after it took {:.1f} ms to record, submit and present", index, ms);
-      }
-    }
-  } resizeFrameTimer;
 #ifdef AURORA_ENABLE_GX
-  phase::set(phase::Main, "end_frame (recording and queueing the frame)");
-  gx::fifo::drain();
-  gx::fifo::end_frame();
+// AURORA_DEFERRED_FRAME_END=1: end_frame queues the frame's end on the FIFO thread instead of
+// draining it, so the game's next tick runs while the FIFO thread finishes this frame, and the
+// next begin_frame waits for it (fifo::queue_frame_end). For a game thread that waits on a
+// FIFO thread slower than its own work (the PS Vita). Not with RmlUi, whose frame is recorded
+// from the game thread.
+static bool deferred_frame_end() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("AURORA_DEFERRED_FRAME_END");
+    return value != nullptr && value[0] == '1' && gx::fifo::processing_mode() == gx::fifo::ProcessingMode::Thread;
+  }();
+#if AURORA_ENABLE_RMLUI
+  if (rmlui::is_initialized()) {
+    return false;
+  }
+#endif
+  return enabled;
+}
+
+// The rest of end_frame once the FIFO has processed the frame: on the game thread after a drain,
+// or on the FIFO thread under a deferred frame end.
+static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
   gx::texture::end_frame();
   gfx::finish();
-  auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
@@ -656,7 +663,36 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
   });
+}
+#endif
 
+void end_frame() noexcept {
+  ZoneScoped;
+  // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
+  struct ResizeFrameTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    bool timed = webgpu::g_resizeFramesToTime > 0;
+    ~ResizeFrameTimer() {
+      if (timed) {
+        const int index = 3 - webgpu::g_resizeFramesToTime--;
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        Log.info("EFB resize: frame {} after it took {:.1f} ms to record, submit and present", index, ms);
+      }
+    }
+  } resizeFrameTimer;
+#ifdef AURORA_ENABLE_GX
+  phase::set(phase::Main, "end_frame (recording and queueing the frame)");
+  // ImGui belongs to the game thread: its frame is frozen here either way.
+  auto imguiDrawData = imgui::freeze();
+  if (deferred_frame_end()) {
+    gx::fifo::queue_frame_end(
+        [imguiDrawData = std::move(imguiDrawData)]() mutable { submit_frame(std::move(imguiDrawData)); });
+    return;
+  }
+  gx::fifo::drain();
+  gx::fifo::end_frame();
+  submit_frame(std::move(imguiDrawData));
 #endif
 }
 } // namespace

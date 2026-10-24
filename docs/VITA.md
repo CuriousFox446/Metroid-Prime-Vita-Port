@@ -131,6 +131,18 @@ recorder that the FIFO thread owns, so it is now a FIFO command
 (`GX_AURORA_PORT_VFX_CAPTURE_SCENE`) made where the FIFO thread reaches it, and the
 game no longer waits there. The VFX draws that read the copy still drain first.
 
+On hardware that wait was gone, but throughput stayed at 9.6 FPS: the time moved to
+`end_frame`'s drain (about 35 ms). A frame was the game's ticks (about 38 ms, with the FIFO
+thread idle), then its draw (about 30 ms, the FIFO thread working alongside), then the wait
+for the FIFO thread's remaining work. So the Vita build now ends frames deferred
+(`AURORA_DEFERRED_FRAME_END=1`): `end_frame` freezes ImGui and queues the rest of the frame
+end (Aurora's texture sweep, `gfx::finish`, handing the frame to the render worker) as a
+FIFO command, then returns, and the game's next tick runs while the FIFO thread finishes the
+frame. The next `begin_frame` waits for that command only, so the wait left shows as the
+`[split]` line's begin-wait. Anything that changes the EFB or swapchain (a resize, a quality
+change, a GPU synchronize) waits for it first too. RmlUi frames still end the old way.
+`platforms/vita/tests/fifo_frame_end_test.cpp` runs the FIFO side on the host.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because

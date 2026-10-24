@@ -4,6 +4,8 @@
 #include "command_processor.hpp"
 
 #include <aurora/gfx.h>
+#include <dolphin/gx/GXAurora.h>
+#include <dolphin/gx/GXCommandList.h>
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
 
 #include <tracy/Tracy.hpp>
 
@@ -40,6 +43,11 @@ std::mutex sBufferMutex;
 std::atomic<uint32_t> sWorkerWake{0};
 thread::Thread sWorkerThread;
 std::atomic<DrawDoneCallback> sDrawDoneCallback{nullptr};
+
+// queue_frame_end: the stream position just past the queued frame end (0 when none), and the
+// thread that queued it, the only one finish_frame_end waits on.
+uint64_t sPendingFrameEnd = 0;
+std::thread::id sFrameEndProducer;
 
 // aurora_take_drain_sites: the drains the producer waited in since the last take.
 std::array<AuroraDrainSite, AURORA_DRAIN_SITES> sDrainSites{};
@@ -173,6 +181,45 @@ void end_frame() noexcept {
 }
 
 bool frame_active() noexcept { return sFrameActive; }
+
+void queue_frame_end(std::function<void()> task) {
+  AURORA_ASSERT(kProcessingMode == ProcessingMode::Thread && !detail::sInDisplayList && sFrameActive,
+                "fifo::queue_frame_end: needs an active frame on the FIFO thread");
+  finish_frame_end(); // one in flight at a time
+  auto* queued = new std::function<void()>([task = std::move(task)] {
+    clear_draw_cache(); // command_processor, as end_frame does once drained
+    task();
+  });
+  write_u8(GX_AURORA);
+  write_u16(GX_AURORA_PORT_FIFO_TASK);
+  write_u64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(queued)));
+  publish();
+  sFrameActive = false;
+  sPendingFrameEnd = sStreamBase + detail::sBufferSize;
+  sFrameEndProducer = std::this_thread::get_id();
+}
+
+void finish_frame_end() noexcept {
+  if (sPendingFrameEnd == 0 || std::this_thread::get_id() != sFrameEndProducer) {
+    return;
+  }
+  ZoneScoped;
+  uint64_t processed = sProcessed.load(std::memory_order_acquire);
+  while (processed < sPendingFrameEnd) {
+    sProcessed.wait(processed, std::memory_order_acquire);
+    processed = sProcessed.load(std::memory_order_acquire);
+  }
+  sPendingFrameEnd = 0;
+  // Nothing past the frame end was published (the frame is over), so the processor is idle:
+  // drop what it processed, keeping what the producer wrote since (drain does this otherwise).
+  std::lock_guard lock{sBufferMutex};
+  const auto done = static_cast<uint32_t>(processed - sStreamBase);
+  if (done != 0) {
+    std::memmove(detail::sBufferData, detail::sBufferData + done, detail::sBufferSize - done);
+    detail::sBufferSize -= done;
+    sStreamBase = processed;
+  }
+}
 
 void write_data_grow(const void* data, uint32_t length) {
   const uint64_t needed64 = static_cast<uint64_t>(detail::sBufferSize) + length;

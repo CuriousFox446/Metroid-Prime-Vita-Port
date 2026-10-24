@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <span>
 #include <memory>
 #include <vector>
@@ -1442,6 +1443,10 @@ void handle_aurora(ByteReader& reader) noexcept {
         Log.warn("GX_AURORA_PORT_SCENE_HDR: switch to {} refused", value);
       }
     }
+  } else if (subCmd == GX_AURORA_PORT_FIFO_TASK) {
+    std::unique_ptr<std::function<void()>> task{
+        reinterpret_cast<std::function<void()>*>(static_cast<uintptr_t>(reader.read<u64>()))};
+    (*task)();
   } else if (subCmd == GX_AURORA_PORT_VFX_CAPTURE_SCENE) {
     gfx::vfx::capture_scene_now();
   } else if (subCmd == GX_AURORA_PORT_COPY_SCENE) {
