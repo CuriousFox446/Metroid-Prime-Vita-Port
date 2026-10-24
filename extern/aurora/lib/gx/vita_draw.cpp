@@ -10,6 +10,7 @@
 #include <dolphin/gx/GXCommandList.h>
 
 #include <tracy/Tracy.hpp>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
@@ -156,6 +157,9 @@ struct Stats {
   u32 lateCopies = 0;
   // Second units added on top (GL_ADD) rather than modulated.
   u32 additiveUnits = 0;
+  // Draws whose material (current_material) was in the cache, and those that worked it out.
+  u32 materialHits = 0;
+  u32 materialMisses = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -835,7 +839,7 @@ vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
 // them. texAttrs gets the attributes their coordinates come from. Returns how many units there
 // are, or -1 when a texture has no Vita copy (an EFB copy, a dynamic texture): drawn without it,
 // a full-screen pass over a copy of the screen would cover the screen in its vertex colour.
-int resolve_units(vita_gl::TexUnit units[kTexUnits], TexAttrs& texAttrs) noexcept {
+int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexUnits], TexAttrs& texAttrs) noexcept {
   UnitChoice choices[kTexUnits];
   const int chosen = choose_units(choices);
   texAttrs = kNoTexAttrs;
@@ -861,12 +865,11 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], TexAttrs& texAttrs) noexcep
       }
       vita_gl::TexUnit& unit = units[unitCount];
       unit.texture = bind.ref->vitaTexture;
-      tex_matrix(*choices[i].tcg, unit.matrix);
       unit.sampler = sampler_for(bind.texObj);
       // The first unit takes the vertex colour, so it always modulates; a later one adds when its
       // stage does.
       unit.envMode = unitCount > 0 && choices[i].additive ? kGlAdd : kGlModulate;
-      sStats.additiveUnits += unit.envMode == kGlAdd ? 1 : 0;
+      tcgs[unitCount] = choices[i].tcg;
       texAttrs[unitCount] = static_cast<u8>(GX_VA_TEX0 + (choices[i].tcg->src - GX_TG_TEX0));
       ++unitCount;
     }
@@ -874,8 +877,128 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], TexAttrs& texAttrs) noexcep
   return unitCount;
 }
 
-// Records a draw of `mesh` with GX's current matrices and state, and the units resolve_units made.
-void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, vita_gl::TexUnit units[kTexUnits], int unitCount) noexcept {
+// What the GX state decides for a draw apart from its matrices: its texture units (textures,
+// samplers, combine), the attributes their coordinates come from, and the fixed-function state
+// with TEV's constant alpha folded in. Working it out is most of a call's cost, and the game draws
+// run after run of calls under one material, so it is kept, by a hash of the state it reads.
+struct Material {
+  u64 hash = 0;
+  bool valid = false;
+  u32 window = 0;     // the stats window it was last used in (log_stats frees the idle ones)
+  int unitCount = 0;  // -1: a texture without a Vita copy (resolve_units)
+  bool rejected = false; // its alpha test fails everywhere
+  u8 alphaKind = 0;   // 1: a worked-out constant, 2: read from a texture
+  TexAttrs texAttrs = kNoTexAttrs;
+  vita_gl::TexUnit units[kTexUnits];
+  const TcgConfig* tcgs[kTexUnits] = {};
+  vita_gl::RenderState state;
+};
+constexpr size_t kMaterials = 256;
+std::array<Material, kMaterials> sMaterials;
+u32 sWindow = 0;
+
+// A hash of the GX state a Material reads: the TEV stages, texture coordinate generation, the
+// vertex descriptor (which texture coordinates the list has), the loaded textures and their
+// palettes, Aurora's texture bind generation, blending, depth, culling and the colour mask, the
+// alpha compare, and the constants TEV's alpha may read (konst and register colours, the alpha
+// channels' configuration and material colours, the swap tables). Not the matrices: those are
+// read for every draw.
+u64 material_hash() noexcept {
+  ZoneScopedN("vita: material hash");
+  const GXState& s = g_gxState;
+  const u64 generation = texture::current_bind_generation();
+  const AlphaCompare& alpha = s.alphaCompare;
+  const u32 fixed[] = {
+      s.numTevStages,  static_cast<u32>(s.blendMode),   static_cast<u32>(s.blendFacSrc),
+      static_cast<u32>(s.blendFacDst),  static_cast<u32>(s.blendOp), static_cast<u32>(s.depthFunc),
+      s.depthCompare,  s.depthUpdate,   s.colorUpdate,  s.alphaUpdate, static_cast<u32>(s.cullMode),
+      static_cast<u32>(alpha.comp0),    alpha.ref0,     static_cast<u32>(alpha.op),
+      static_cast<u32>(alpha.comp1),    alpha.ref1,     static_cast<u32>(generation),
+      static_cast<u32>(generation >> 32),
+  };
+  u64 h = XXH3_64bits(fixed, sizeof(fixed));
+  const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
+  h = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), h);
+  h = XXH3_64bits_withSeed(s.tcgs.data(), sizeof(s.tcgs), h);
+  h = XXH3_64bits_withSeed(s.vtxDesc.data(), sizeof(s.vtxDesc), h);
+  // A texture by what identifies its contents and sampling, and a palette texture's palette.
+  u32 textures[MaxTextures][12];
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    const GXTexObj_& obj = s.loadedTextures[i];
+    const u32 format = obj.format();
+    const bool palette = format == GX_TF_C4 || format == GX_TF_C8 || format == GX_TF_C14X2;
+    const GXTlutObj_* tlut =
+        palette && static_cast<size_t>(obj.tlut) < s.loadedTluts.size() ? &s.loadedTluts[obj.tlut] : nullptr;
+    textures[i][0] = static_cast<u32>(reinterpret_cast<uintptr_t>(obj.data));
+    textures[i][1] = obj.texObjId;
+    textures[i][2] = obj.texDataVersion;
+    textures[i][3] = obj.mode0;
+    textures[i][4] = obj.mode1;
+    textures[i][5] = obj.image0;
+    textures[i][6] = obj.mWidth;
+    textures[i][7] = obj.mHeight;
+    textures[i][8] = obj.mFormat;
+    textures[i][9] = obj.flags;
+    textures[i][10] = tlut != nullptr ? tlut->tlutObjId : 0;
+    textures[i][11] = tlut != nullptr ? tlut->tlutDataVersion : 0;
+  }
+  h = XXH3_64bits_withSeed(textures, sizeof(textures), h);
+  h = XXH3_64bits_withSeed(s.kcolors.data(), sizeof(s.kcolors), h);
+  h = XXH3_64bits_withSeed(s.colorRegs.data(), sizeof(s.colorRegs), h);
+  h = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), h);
+  const float alphaMaterials[2] = {s.colorChannelState[GX_ALPHA0].matColor[3],
+                                   s.colorChannelState[GX_ALPHA1].matColor[3]};
+  h = XXH3_64bits_withSeed(alphaMaterials, sizeof(alphaMaterials), h);
+  h = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), h);
+  return h;
+}
+
+// The Material for the current GX state, worked out when the cache does not hold it.
+const Material& current_material() noexcept {
+  const u64 hash = material_hash();
+  Material& material = sMaterials[hash % kMaterials];
+  material.window = sWindow;
+  if (material.valid && material.hash == hash) {
+    ++sStats.materialHits;
+    return material;
+  }
+  ZoneScopedN("vita: work out a material");
+  ++sStats.materialMisses;
+  material = {};
+  material.hash = hash;
+  material.valid = true;
+  material.window = sWindow;
+  material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs);
+  if (material.unitCount < 0) {
+    return material;
+  }
+  material.state = render_state();
+  const TevAlpha alpha = tev_alpha();
+  if (alpha.known) {
+    material.alphaKind = 1;
+    material.rejected = !fold_constant_alpha(alpha.value, material.state);
+  } else if (alpha.texture) {
+    material.alphaKind = 2;
+  }
+  vita_gl::RenderState& state = material.state;
+  if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
+    state.blend = false;
+  }
+  return material;
+}
+
+// Records a draw of `mesh` with GX's current matrices and the material's units and state.
+void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
+  ZoneScopedN("vita: record a draw");
+  if (material.alphaKind == 1) {
+    ++sStats.alphaConstant;
+  } else if (material.alphaKind == 2) {
+    ++sStats.alphaTexture;
+  }
+  if (material.rejected) {
+    ++sStats.alphaRejected;
+    return; // its alpha test fails everywhere: nothing to draw
+  }
   vita_gl::Draw draw{.mesh = std::move(mesh)};
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
@@ -887,42 +1010,30 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, vita_gl::TexUnit units[kTe
     draw.projection[8 + c] = 2.f * proj.m2[c] + proj.m3[c];
     draw.projection[12 + c] = proj.m3[c];
   }
-  for (int unit = 0; unit < unitCount; ++unit) {
-    draw.units[unit] = std::move(units[unit]);
+  for (int unit = 0; unit < material.unitCount; ++unit) {
+    draw.units[unit] = material.units[unit];
+    // Texture matrices animate (scrolling, pulsing): read for every draw.
+    tex_matrix(*material.tcgs[unit], draw.units[unit].matrix);
+    sStats.additiveUnits += draw.units[unit].envMode == kGlAdd ? 1 : 0;
   }
-  draw.state = render_state();
-  const TevAlpha alpha = tev_alpha();
-  if (alpha.known) {
-    ++sStats.alphaConstant;
-    if (!fold_constant_alpha(alpha.value, draw.state)) {
-      ++sStats.alphaRejected;
-      return; // its alpha test fails everywhere: nothing to draw
-    }
-  } else if (alpha.texture) {
-    ++sStats.alphaTexture;
-  }
-  if (draw.state.blend && draw.state.blendEquation == kGlFuncAdd && draw.state.blendSrc == kGlOne &&
-      draw.state.blendDst == kGlZero) {
-    draw.state.blend = false;
-  }
+  draw.state = material.state;
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
-  ++sStats.drawsByUnits[unitCount];
+  ++sStats.drawsByUnits[material.unitCount];
 }
 } // namespace
 
 bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
   ZoneScoped;
   ++sStats.calls;
-  vita_gl::TexUnit units[kTexUnits];
-  TexAttrs texAttrs;
-  const int unitCount = resolve_units(units, texAttrs);
-  if (unitCount < 0) {
+  const Material& material = current_material();
+  if (material.unitCount < 0) {
     return false;
   }
+  const TexAttrs& texAttrs = material.texAttrs;
   // Positions made at run time (CPU skinning) change under the same list, so such a call is
   // decoded each time, into a mesh for this frame alone. The retail models' own arrays are
   // retained (port_retail_resident), whatever their byte order; a workspace the game rewrites
@@ -937,14 +1048,17 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       return false;
     }
     ++sStats.perCall;
-    record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
+    record_draw(vita_gl::make_mesh(std::move(triangles)), material);
     return true;
   }
-  const Cached& cached = lookup(key, entry, size, texAttrs);
+  const Cached& cached = [&]() -> const Cached& {
+    ZoneScopedN("vita: list lookup");
+    return lookup(key, entry, size, texAttrs);
+  }();
   if (!cached.mesh) {
     return false;
   }
-  record_draw(cached.mesh, units, unitCount);
+  record_draw(cached.mesh, material);
   return true;
 }
 
@@ -954,12 +1068,11 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     ++sStats.immediateLines;
     return false;
   }
-  vita_gl::TexUnit units[kTexUnits];
-  TexAttrs texAttrs;
-  const int unitCount = resolve_units(units, texAttrs);
-  if (unitCount < 0) {
+  const Material& material = current_material();
+  if (material.unitCount < 0) {
     return false;
   }
+  const TexAttrs& texAttrs = material.texAttrs;
   std::vector<vita_gl::Vertex> prims;
   const u8* vtx = vertices.data();
   sLastFail = Fail::None;
@@ -974,18 +1087,17 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
+  record_draw(vita_gl::make_mesh(std::move(triangles)), material);
   return true;
 }
 
 bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept {
   ZoneScoped;
-  vita_gl::TexUnit units[kTexUnits];
-  TexAttrs texAttrs;
-  const int unitCount = resolve_units(units, texAttrs);
-  if (unitCount < 0) {
+  const Material& material = current_material();
+  if (material.unitCount < 0) {
     return false;
   }
+  const TexAttrs& texAttrs = material.texAttrs;
   std::vector<vita_gl::Vertex> prims;
   const u8* vtx = vertices.data();
   sLastFail = Fail::None;
@@ -1011,7 +1123,7 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
+  record_draw(vita_gl::make_mesh(std::move(triangles)), material);
   return true;
 }
 
@@ -1019,6 +1131,17 @@ void release(const void* key) noexcept { sCache.erase(key); }
 
 void log_stats() noexcept {
   const Stats& s = sStats;
+  // Materials no draw used this window go, with the textures they hold.
+  u32 materials = 0;
+  for (Material& material : sMaterials) {
+    if (material.valid && material.window != sWindow) {
+      material = {};
+    }
+    materials += material.valid ? 1 : 0;
+  }
+  ++sWindow;
+  Log.info("materials: {} draws found theirs cached, {} worked one out; {} cached", s.materialHits,
+           s.materialMisses, materials);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);

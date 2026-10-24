@@ -277,6 +277,19 @@ void draw_world(const std::vector<Draw>& draws) {
     env = GL_MODULATE;
   }
   float matrix[16];
+  // vitaGL's matrix calls are not free: the projection and the texture matrices change seldom
+  // between draws (the modelview nearly always), so they are loaded only when they differ.
+  GLenum matrixMode = 0;
+  const auto set_matrix_mode = [&matrixMode](GLenum mode) {
+    if (mode != matrixMode) {
+      glMatrixMode(mode);
+      matrixMode = mode;
+    }
+  };
+  float lastProjection[16];
+  bool haveProjection = false;
+  float lastTexMatrix[kTexUnits][8];
+  bool haveTexMatrix[kTexUnits] = {};
   for (const Draw& draw : draws) {
     const GLsizei count = draw.mesh->bind();
     glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
@@ -306,14 +319,22 @@ void draw_world(const std::vector<Draw>& draws) {
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, texUnit.envMode);
         unitEnv[unit] = texUnit.envMode;
       }
-      glMatrixMode(GL_TEXTURE);
-      to_column_major(texUnit.matrix, 2, matrix);
-      glLoadMatrixf(matrix);
+      if (!haveTexMatrix[unit] || std::memcmp(lastTexMatrix[unit], texUnit.matrix, sizeof(texUnit.matrix)) != 0) {
+        set_matrix_mode(GL_TEXTURE);
+        to_column_major(texUnit.matrix, 2, matrix);
+        glLoadMatrixf(matrix);
+        std::memcpy(lastTexMatrix[unit], texUnit.matrix, sizeof(texUnit.matrix));
+        haveTexMatrix[unit] = true;
+      }
     }
-    glMatrixMode(GL_PROJECTION);
-    to_column_major(draw.projection, 4, matrix);
-    glLoadMatrixf(matrix);
-    glMatrixMode(GL_MODELVIEW);
+    if (!haveProjection || std::memcmp(lastProjection, draw.projection, sizeof(draw.projection)) != 0) {
+      set_matrix_mode(GL_PROJECTION);
+      to_column_major(draw.projection, 4, matrix);
+      glLoadMatrixf(matrix);
+      std::memcpy(lastProjection, draw.projection, sizeof(draw.projection));
+      haveProjection = true;
+    }
+    set_matrix_mode(GL_MODELVIEW);
     to_column_major(draw.modelView, 3, matrix);
     glLoadMatrixf(matrix);
     apply_state(draw.state, current, false);

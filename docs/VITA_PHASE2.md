@@ -271,3 +271,17 @@ The cost shows: the seconds with 1,500 or more list calls a frame (here the cuts
 frame in `draw_resident` (about 26 µs a call, a skinned call's decode about 1 ms of it) and the
 render worker 26 ms. What a call does each time it is drawn (resolving its textures, choosing
 units, working out TEV's alpha and state, building the draw) is the next thing to make cheaper.
+
+**Materials cached (built, not yet run on the Vita).** What the GX state decides for a draw apart
+from its matrices (its texture units with their textures, samplers and combine, the attributes
+their coordinates come from, the fixed-function state with TEV's constant alpha folded in) is now
+a `Material`, kept in a 256-entry cache by an XXH3 hash of the state it reads: the TEV stages,
+texture coordinate generation, the vertex descriptor, the loaded textures and their palettes by
+what identifies them, Aurora's texture bind generation, blending, depth, culling, the colour mask,
+the alpha compare, and the constants TEV's alpha may read. The game draws run after run of
+calls under one material, so most calls hash about a kilobyte of state and find theirs; a draw
+still reads its position, projection and texture matrices (texture matrices animate). A material
+no draw used for a stats window (300 frames) is dropped with the textures it holds. On the
+render worker, the projection and texture matrices are loaded only when they differ from the
+last draw's. The log adds the cache's hits and misses, and zones for the hash, the working out,
+the list lookup and the recording.
