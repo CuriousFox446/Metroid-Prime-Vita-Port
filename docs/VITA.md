@@ -63,7 +63,16 @@ expensive zones for the same second, in ms and calls per frame, longest first, a
 the busiest zones on other threads. Zones are the game's draw stages (`PORT_ZONE` in
 the world draw, renderer, CPU skinning, particles, HUD, gun) and Aurora's own Tracy
 zones, which `extern/aurora/platforms/vita/profile` receives in place of Tracy.
-Times are inclusive: a zone includes the zones it calls.
+Times are inclusive: a zone includes the zones it calls. `[zones] other` lines are
+the other threads' busiest zones, the GX FIFO thread's among them (`process`,
+`draw_prim`, `push_gx_draw`...). Past its first 64 calls a second, a zone is timed on
+one call in 16 and weighted, since the Vita's clock is a kernel call: per-draw zones
+timed on every call slowed the hangar from about 20 to 3 FPS.
+
+First profiled run: the main thread's long draw phase is almost all `drain`, waiting
+for the GX FIFO thread, whose `process` (mostly `draw_prim`, Aurora's GX-to-WebGPU
+translation per draw) took about 200-300 ms a frame at the heaviest points. The
+game's own draw code was about 20 ms, CPU skinning 1-2 ms.
 
 ## On hardware so far
 

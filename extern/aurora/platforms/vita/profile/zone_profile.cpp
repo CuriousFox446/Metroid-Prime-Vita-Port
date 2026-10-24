@@ -95,6 +95,7 @@ void Report(uint32_t frames, void (*write)(const char* line)) {
     const uint32_t mainCalls = site->mainCalls.exchange(0, std::memory_order_relaxed);
     const uint64_t otherNs = site->otherNs.exchange(0, std::memory_order_relaxed);
     const uint32_t otherCalls = site->otherCalls.exchange(0, std::memory_order_relaxed);
+    site->sequence.store(0, std::memory_order_relaxed);
     if (mainCalls != 0) {
       main.push_back({site->name, mainNs, mainCalls});
     }
@@ -113,18 +114,12 @@ void Report(uint32_t frames, void (*write)(const char* line)) {
                   static_cast<double>(main[i].ns) / 1e6 * perFrame, main[i].calls * perFrame, main[i].name);
     write(line);
   }
-  size_t used = static_cast<size_t>(std::snprintf(line, sizeof(line), "[zones] other threads, ms/frame:"));
-  for (size_t i = 0; i < other.size() && i < 5 && used < sizeof(line); ++i) {
-    used += static_cast<size_t>(std::snprintf(line + used, sizeof(line) - used, " %s %.2f", other[i].name,
-                                              static_cast<double>(other[i].ns) / 1e6 * perFrame));
+  constexpr size_t kOtherRows = 12;
+  for (size_t i = 0; i < other.size() && i < kOtherRows; ++i) {
+    std::snprintf(line, sizeof(line), "[zones] other %6.2f ms %7.1f calls  %s\n",
+                  static_cast<double>(other[i].ns) / 1e6 * perFrame, other[i].calls * perFrame, other[i].name);
+    write(line);
   }
-  if (used < sizeof(line) - 1) {
-    line[used++] = '\n';
-    line[used] = '\0';
-  } else {
-    line[sizeof(line) - 2] = '\n';
-  }
-  write(line);
 }
 
 } // namespace vita_profile

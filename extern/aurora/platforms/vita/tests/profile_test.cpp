@@ -39,9 +39,10 @@ static void Outer() {
   Inner();
 }
 
+// The main thread's line for a zone (not the "[zones] other" lines).
 static const std::string* Find(const char* name) {
   for (const auto& line : g_lines) {
-    if (line.find(std::string("  ") + name + "\n") != std::string::npos) {
+    if (line.rfind("[zones] other", 0) != 0 && line.find(std::string("  ") + name + "\n") != std::string::npos) {
       return &line;
     }
   }
@@ -81,12 +82,33 @@ int main() {
     CHECK(outer < inner); // sorted by time, longest first
   }
   CHECK(Find("worker zone") == nullptr); // not the main thread's
-  CHECK(!g_lines.empty() && g_lines.back().find("worker zone") != std::string::npos);
+  CHECK(!g_lines.empty() && g_lines.back().rfind("[zones] other", 0) == 0 &&
+        g_lines.back().find("worker zone") != std::string::npos);
 
   // Counts reset after a report.
   g_lines.clear();
   vita_profile::Report(1, [](const char* line) { g_lines.emplace_back(line); });
   CHECK(Find("outer") == nullptr);
+
+  // A hot zone: past the exact calls it is sampled, but the calls are exact and the
+  // weighted time estimates the real one (1000 x 50 us = 50 ms).
+  g_lines.clear();
+  for (int i = 0; i < 1000; ++i) {
+    VITA_ZONE("hot");
+    const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(50);
+    while (std::chrono::steady_clock::now() < end) {
+    }
+  }
+  vita_profile::Report(1, [](const char* line) { g_lines.emplace_back(line); });
+  const std::string* hot = Find("hot");
+  CHECK(hot != nullptr);
+  if (hot != nullptr) {
+    std::fputs(hot->c_str(), stdout);
+    double hotMs = 0, hotCalls = 0;
+    std::sscanf(hot->c_str(), "[zones] %lf ms %lf calls", &hotMs, &hotCalls);
+    CHECK(hotCalls == 1000.0);
+    CHECK(hotMs > 45.0 && hotMs < 60.0);
+  }
 
   std::printf(g_failures == 0 ? "profile_test: all passed\n" : "profile_test: %d failed\n", g_failures);
   return g_failures == 0 ? 0 : 1;

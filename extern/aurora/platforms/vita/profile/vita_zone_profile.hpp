@@ -7,13 +7,18 @@
 // ZoneScopedN) come here through the tracy/Tracy.hpp shim beside this file; the game
 // marks its stages with PORT_ZONE (platform/include/port_profile.h).
 //
-// Times are inclusive (a zone counts the zones inside it), and each zone costs two
-// clock reads, so many tiny zones inflate what they measure a little.
+// Times are inclusive (a zone counts the zones inside it). Reading the Vita's clock is a
+// kernel call, which per-draw zones (thousands a frame) made dominate what they measured;
+// so each site times its first kExactCalls calls in a report window, then one call in
+// kSampleEvery, weighted by kSampleEvery. Calls are always counted exactly.
 
 #include <atomic>
 #include <cstdint>
 
 namespace vita_profile {
+
+constexpr uint32_t kExactCalls = 64;
+constexpr uint32_t kSampleEvery = 16;
 
 struct Site {
   const char* name;
@@ -21,6 +26,7 @@ struct Site {
   std::atomic<uint64_t> otherNs{0};
   std::atomic<uint32_t> mainCalls{0};
   std::atomic<uint32_t> otherCalls{0};
+  std::atomic<uint32_t> sequence{0}; // calls this report window, for sampling
   std::atomic<bool> linked{false};
   Site* next = nullptr;
 
@@ -35,8 +41,8 @@ void Link(Site& site) noexcept;
 // The thread whose time Report lists; the first caller of Report otherwise.
 void SetMainThread() noexcept;
 // Writes the main thread's top zones since the last call, as milliseconds and calls
-// per frame over `frames` frames, through `write` (one call per line), and the busiest
-// zones on other threads in one more line. Resets the counts.
+// per frame over `frames` frames, through `write` (one call per line), then the busiest
+// zones on other threads ("[zones] other"). Resets the counts.
 void Report(uint32_t frames, void (*write)(const char* line));
 
 class Zone {
@@ -46,14 +52,18 @@ public:
       if (!site.linked.load(std::memory_order_acquire)) {
         Link(site);
       }
-      m_start = NowNs();
+      const uint32_t n = site.sequence.fetch_add(1, std::memory_order_relaxed);
+      m_weight = n < kExactCalls ? 1 : (n % kSampleEvery == 0 ? kSampleEvery : 0);
+      if (m_weight != 0) {
+        m_start = NowNs();
+      }
     }
   }
   ~Zone() {
     if (m_site == nullptr) {
       return;
     }
-    const uint64_t elapsed = NowNs() - m_start;
+    const uint64_t elapsed = m_weight != 0 ? (NowNs() - m_start) * m_weight : 0;
     if (IsMainThread()) {
       m_site->mainNs.fetch_add(elapsed, std::memory_order_relaxed);
       m_site->mainCalls.fetch_add(1, std::memory_order_relaxed);
@@ -68,6 +78,7 @@ public:
 private:
   Site* m_site;
   uint64_t m_start = 0;
+  uint32_t m_weight = 0;
 };
 
 } // namespace vita_profile

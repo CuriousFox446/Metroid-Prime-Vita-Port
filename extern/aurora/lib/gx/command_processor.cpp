@@ -456,6 +456,7 @@ static bool drop_overflowed_draw(gfx::Range range, const char* buffer) noexcept 
 
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) noexcept {
+  ZoneScoped;
   auto& state = g_gxState;
   auto& cache = sDrawCache;
   if (drop_overflowed_draw(vertRange, "vertex") || drop_overflowed_draw(idxRange, "index")) {
