@@ -138,6 +138,16 @@ __attribute__((constructor(101))) void vitaSetup() {
     // that needs more spills into extra buffers. The [heap] line says what a frame used.
     setenv("AURORA_STAGING_START_KIB", "1024", 0);
     setenv("AURORA_STAGING_START_MASK", "13", 0);
+    // The uniforms took at most 3.7 MiB a frame in the hangar, of 8 MiB a buffer: 4 MiB
+    // saves 20 MiB over the five (and the device copy), and a bigger frame spills.
+    setenv("AURORA_STAGING_START_UNIFORM_KIB", "4096", 0);
+    // The PC port's own lighting (sun shadows, volumetric fog, bloom, reflection probes;
+    // projected actor shadows are off in options.cpp) is FIFO work the Vita has no room
+    // for, and the retail game never had it.
+    setenv("MP_SHADOWS", "0", 0);
+    setenv("MP_VOLFOG", "0", 0);
+    setenv("MP_BLOOM", "0", 0);
+    setenv("MP_PBR_PROBE", "0", 0);
     // The zone profiler ([zones] lines): with the geometry resident its per-primitive
     // zones hardly run, so its clock reads no longer dominate; on for the per-draw
     // breakdown, at some cost to the [timing] numbers.

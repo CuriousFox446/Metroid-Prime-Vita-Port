@@ -38,6 +38,7 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   pre_begin();
   if (!aurora::gx::fifo::in_display_list()) {
     aurora::gx::source::count_begin(nVerts);
+    aurora::gx::draw_tag::flush();
   }
 
   const u8 drawCmd = static_cast<u8>(vtxFmt) | static_cast<u8>(primitive);

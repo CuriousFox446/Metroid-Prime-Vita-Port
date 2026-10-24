@@ -606,6 +606,12 @@ void initialize() {
       if (mask & 4u) g_bufferSizes.index = std::min(g_bufferSizes.maxIndex, size);
       if (mask & 8u) g_bufferSizes.storage = std::min(g_bufferSizes.maxStorage, size);
     }
+    // AURORA_STAGING_START_UNIFORM_KIB=<n> sets the uniform staging alone, for a platform short of
+    // memory (the Vita's frames use under 4 MiB of it); a frame that needs more spills.
+    if (const char* kib = std::getenv("AURORA_STAGING_START_UNIFORM_KIB")) {
+      const uint64_t size = std::max<uint64_t>(256, (std::strtoull(kib, nullptr, 10) << 10) & ~uint64_t(255));
+      g_bufferSizes.uniform = std::min(g_bufferSizes.maxUniform, size);
+    }
     // The growable cap is relative to the staging size, so it keeps its meaning; but a cap the
     // staging storage already has is no cap.
     if (g_bufferSizes.storageCap != 0 && g_bufferSizes.storageCap <= g_bufferSizes.storage) {

@@ -12,6 +12,12 @@ namespace aurora::gx::source {
 void count_begin(u16 vertices) noexcept;
 } // namespace aurora::gx::source
 
+namespace aurora::gx::draw_tag {
+// Sends the tag GXSetDrawTag last set, if it changed since it was sent (GXExtra.cpp). Called
+// before each draw goes into the FIFO: GXBegin and GXCallDisplayList.
+void flush() noexcept;
+} // namespace aurora::gx::draw_tag
+
 static inline aurora::Vec4<float> from_gx_color(GXColor color) {
   return {
       static_cast<float>(color.r) / 255.f,

@@ -109,6 +109,9 @@ bool in_display_list();
 
 // Ensure all buffered commands have been processed.
 void drain();
+// For aurora_take_drain_sites: the game's call site behind the drains a wrapper (GXDrawDone)
+// makes until it is set back to null.
+void set_drain_origin(const void* origin) noexcept;
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

@@ -3,8 +3,12 @@
 #include "../thread.hpp"
 #include "command_processor.hpp"
 
+#include <aurora/gfx.h>
+
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -36,6 +40,25 @@ std::mutex sBufferMutex;
 std::atomic<uint32_t> sWorkerWake{0};
 thread::Thread sWorkerThread;
 std::atomic<DrawDoneCallback> sDrawDoneCallback{nullptr};
+
+// aurora_take_drain_sites: the drains the producer waited in since the last take.
+std::array<AuroraDrainSite, AURORA_DRAIN_SITES> sDrainSites{};
+uint32_t sDrainSiteCount = 0;
+const void* sDrainOrigin = nullptr;
+
+void note_drain(const void* caller, uint64_t waitNs) noexcept {
+  for (uint32_t i = 0; i < sDrainSiteCount; ++i) {
+    auto& site = sDrainSites[i];
+    if (site.caller == caller && site.origin == sDrainOrigin) {
+      ++site.calls;
+      site.waitNs += waitNs;
+      return;
+    }
+  }
+  if (sDrainSiteCount < sDrainSites.size()) {
+    sDrainSites[sDrainSiteCount++] = {.caller = caller, .origin = sDrainOrigin, .calls = 1, .waitNs = waitNs};
+  }
+}
 
 void dispatch_draw_done() noexcept {
   if (const auto callback = sDrawDoneCallback.load(std::memory_order_acquire); callback != nullptr) {
@@ -236,12 +259,16 @@ uint32_t end_display_list() {
 
 bool in_display_list() { return detail::sInDisplayList; }
 
+void set_drain_origin(const void* origin) noexcept { sDrainOrigin = origin; }
+
 void drain() {
   if (detail::sBufferSize == 0) {
     return;
   }
 
   ZoneScoped;
+  const void* caller = __builtin_return_address(0);
+  const auto waitStart = std::chrono::steady_clock::now();
   const uint64_t target = sStreamBase + detail::sBufferSize;
 
   switch (kProcessingMode) {
@@ -271,6 +298,9 @@ void drain() {
     detail::sBufferSize = 0;
   }
   sPendingDraws = 0;
+  note_drain(caller, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::steady_clock::now() - waitStart)
+                                                .count()));
 }
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
@@ -287,3 +317,13 @@ void clear_buffer() {
 }
 
 } // namespace aurora::gx::fifo
+
+uint32_t aurora_take_drain_sites(AuroraDrainSite out[AURORA_DRAIN_SITES]) {
+  using namespace aurora::gx::fifo;
+  const uint32_t count = sDrainSiteCount;
+  std::copy_n(sDrainSites.begin(), count, out);
+  sDrainSiteCount = 0;
+  return count;
+}
+
+const void* aurora_drain_anchor(void) { return reinterpret_cast<const void*>(&aurora_take_drain_sites); }

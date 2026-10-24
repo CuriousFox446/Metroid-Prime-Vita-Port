@@ -90,6 +90,7 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
     __GXSendFlushPrim();
   }
+  aurora::gx::draw_tag::flush();
 
   if (!sRetained.empty() && !aurora::gx::fifo::in_display_list()) {
     const auto found = sRetained.find(data);

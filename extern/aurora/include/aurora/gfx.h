@@ -119,6 +119,23 @@ typedef struct {
 uint32_t aurora_gx_set_source(uint32_t source);
 // Copies the counts since the last call and resets them.
 void aurora_take_gx_source_counts(AuroraGxSourceCounts out[AURORA_GX_SOURCES]);
+// Extension commands (GX_AURORA) the FIFO processor has handled since it started, by opcode;
+// opcodes from AURORA_GX_OPCODES - 1 up share the last slot. Any thread.
+#define AURORA_GX_OPCODES 128
+void aurora_read_aurora_op_counts(uint32_t out[AURORA_GX_OPCODES]);
+// fifo::drain calls the game waited in, by call site. caller is the return address in the
+// function that called drain; origin, for GXDrawDone, AuroraGXSync and GXSetDrawSync, the one
+// in their caller (else null). Offsets from aurora_drain_anchor() locate both in the binary.
+#define AURORA_DRAIN_SITES 16
+typedef struct {
+  const void* caller;
+  const void* origin;
+  uint32_t calls;
+  uint64_t waitNs;
+} AuroraDrainSite;
+// Copies the sites since the last call, returns how many, and resets them. Game thread.
+uint32_t aurora_take_drain_sites(AuroraDrainSite out[AURORA_DRAIN_SITES]);
+const void* aurora_drain_anchor(void);
 // Whether the device samples BC and ASTC 4x4 compressed textures (false until it exists).
 void aurora_get_texture_support(bool* bc, bool* astc);
 // A GX texture object's (GXTexObj*) base level decoded to RGBA8 into `out` (cap bytes); false for

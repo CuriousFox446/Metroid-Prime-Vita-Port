@@ -904,9 +904,16 @@ static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   draw_prim(prim, fmt, reader.read<u16>(), reader);
 }
 
+// aurora_take_aurora_op_counts: extension commands processed, by opcode (GX2 and higher in the
+// last slot). Only the FIFO thread writes them; the reader takes the difference between reads.
+static std::array<std::atomic<u32>, AURORA_GX_OPCODES> sAuroraOpCounts{};
+
 void handle_aurora(ByteReader& reader) noexcept {
-  ZoneScoped;
   const u16 subCmd = reader.read<u16>();
+  {
+    auto& ops = sAuroraOpCounts[std::min<u32>(subCmd, AURORA_GX_OPCODES - 1)];
+    ops.store(ops.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  }
 
   if (subCmd == GX_AURORA_LOAD_VIEWPORT_RENDER) {
     const f32 left = reader.read<f32>();
@@ -1712,4 +1719,10 @@ void aurora_take_resident_dl_stats(AuroraResidentDlStats* out) {
       .failRoom = take(s.failRoom),
       .rebuilds = take(s.rebuilds),
   };
+}
+
+void aurora_read_aurora_op_counts(uint32_t out[AURORA_GX_OPCODES]) {
+  for (uint32_t i = 0; i < AURORA_GX_OPCODES; ++i) {
+    out[i] = aurora::gx::fifo::sAuroraOpCounts[i].load(std::memory_order_relaxed);
+  }
 }

@@ -12,6 +12,7 @@
 #include "../../webgpu/gpu.hpp"
 #include "../../webgpu/gpu_prof.hpp"
 
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstring>
@@ -452,11 +453,38 @@ void GXPortSetDepthPrepass(u8 pass) {
   GX_WRITE_U8(pass);
 }
 
-void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+// The draw tag only names draws in Aurora's warnings, so it is sent with the next draw
+// (flush_draw_tag) and only when it changed: the game tags every surface and clears the tag
+// after it, two commands a surface otherwise.
+static std::array<u32, 3> sWantedDrawTag{0, UINT32_MAX, 0};
+static std::array<u32, 3> sSentDrawTag{0, UINT32_MAX, 0};
+
+static void write_draw_tag(const std::array<u32, 3>& tag) {
   GX_WRITE_AURORA(GX_AURORA_SET_DRAW_TAG);
-  GX_WRITE_U32(asset);
-  GX_WRITE_U32(model);
-  GX_WRITE_U32(material);
+  GX_WRITE_U32(tag[0]);
+  GX_WRITE_U32(tag[1]);
+  GX_WRITE_U32(tag[2]);
+}
+
+void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+  if (aurora::gx::fifo::in_display_list()) {
+    // Into the list as it is: the list's draws carry it wherever it is called.
+    write_draw_tag({asset, model, material});
+    return;
+  }
+  sWantedDrawTag = {asset, model, material};
+}
+
+extern "C++" {
+namespace aurora::gx::draw_tag {
+void flush() noexcept {
+  if (sWantedDrawTag == sSentDrawTag || fifo::in_display_list()) {
+    return;
+  }
+  sSentDrawTag = sWantedDrawTag;
+  write_draw_tag(sSentDrawTag);
+}
+} // namespace aurora::gx::draw_tag
 }
 
 void GXPortSetDrawSerial(u32 serial) {

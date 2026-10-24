@@ -99,6 +99,27 @@ gun, characters) keeps its display lists resident too, and the `[gxsrc]` lines c
 what each stage of the frame sends through GX (immediate primitives, display lists sent
 or resident), with a `[heap]` line, since each retained list is also copied on the CPU.
 
+With every model resident the hangar ran at about 10 FPS, and the profile put the limit
+on the FIFO thread: about 82 ms of work a frame, of which `push_gx_draw` (about 2,050
+draws at roughly 24 µs, half of it bind groups and uniforms) is most and the ~13,000
+other extension commands about 15 ms. The game thread spends about 50 ms of its draw
+phase in two `drain` waits for it. So the Vita build now:
+
+- sends the draw tag (which only names draws in Aurora's warnings) with the next draw
+  and only when it changed, instead of twice a surface;
+- turns off the PC port's own lighting, which is FIFO work the retail game never had:
+  sun shadows (`MP_SHADOWS=0`), volumetric fog (`MP_VOLFOG=0`), bloom (`MP_BLOOM=0`),
+  reflection probes (`MP_PBR_PROBE=0`) and projected actor shadows
+  (`MP_PROJECTED_SHADOWS=1` gives the last back to the setting);
+- starts the uniform staging at 4 MiB (`AURORA_STAGING_START_UNIFORM_KIB`; a frame used
+  at most 3.7 MiB), 20 MiB less over the five buffers.
+
+Two more lines say what is left. `[ops]` counts the extension commands the FIFO thread
+handled per frame, most first. `[drain]` lines list where the game waited for the FIFO
+thread, per frame, by call site; `tools/vita_drain_sites.sh <log>` names the sites from
+the same build's ELF (`build/vita/metroid_prime_port`). Removing the waits alone cannot
+beat the FIFO thread's own time per frame, which is the ceiling until it does less.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
