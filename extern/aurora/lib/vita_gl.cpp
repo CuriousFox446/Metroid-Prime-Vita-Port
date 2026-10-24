@@ -35,12 +35,16 @@ bool initialize() noexcept {
   std::error_code ec;
   std::filesystem::create_directories(cachePath, ec);
   vglSetShaderCachePath(cachePath.c_str());
-  if (!vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE)) {
-    Log.error("vitaGL could not start; the overlay goes through SDL's renderer");
-    return false;
-  }
+  // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
+  // and it started at the display's own size instead, false when it started as asked. Either way
+  // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
+  const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
   g_active = true;
-  Log.info("vitaGL started at {}x{}", kWidth, kHeight);
+  if (clamped) {
+    Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
+  } else {
+    Log.info("vitaGL started at {}x{}", kWidth, kHeight);
+  }
   return true;
 }
 

@@ -13,7 +13,8 @@
 
 namespace aurora::vita_gl {
 #ifdef AURORA_VITA_GL
-// Starts vitaGL at the Vita's 960x544. False if it could not (then SDL's renderer is used).
+// Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
+// too, must never be created.
 bool initialize() noexcept;
 bool active() noexcept;
 // ImGui's renderer backend (game thread, after ImGui's context exists).

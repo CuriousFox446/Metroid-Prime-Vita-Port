@@ -69,3 +69,10 @@ OpenGL 2 backend (its `GL/gl.h` is vitaGL's, `platforms/vita/vitagl_shim`) and s
 font atlas is built on the game thread and uploaded on the render worker. ImGui images
 (`aurora_imgui_add_texture`) are made there too. The game's GX draws still go to the null
 WebGPU, so the screen shows only the blue and the overlay.
+
+First run on the Vita: a crash at startup. `vglInitExtended` had started GXM (its garbage
+collector and splash screen threads were running) but returned false, which the code took
+for a failure: it created SDL's renderer, whose own GXM init failed ("already initialized")
+and crashed in its cleanup. This vitaGL's init returns true only when the requested size was
+beyond the display's and it clamped it; false is the normal case. The return is now only
+logged, and SDL's renderer is never created once vitaGL has run.
