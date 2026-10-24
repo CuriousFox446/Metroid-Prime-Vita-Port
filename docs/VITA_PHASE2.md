@@ -340,3 +340,44 @@ is 40 ms a frame there (63 before the material work), the game thread's wait for
 10 ms (24), 13.8 FPS. The frame is now the game thread's own: about 31 ms of tick and 30 of
 draw. The FIFO thread's remaining cost per call (about 19 µs with the material reused: the list
 lookup, recording the draw) is the next of its costs, but no longer what sets the frame rate.
+
+**Milestone 4, generated programs (built, not yet run on the Vita).** First, why milestone 2's
+Cg program crashed in `glLinkProgram`: vitaGL takes `GL_VERTEX_SHADER` and `GL_FRAGMENT_SHADER`
+source for GLSL, and by default (`VGL_MODE_POSTPONED`) only translates and compiles it at the
+link; `glCompileShader` said yes to a source it had not compiled, the translation of Cg as GLSL
+failed at the link, and the link then read the invalid GXM program (the dump's return address is
+just after `sceGxmProgramGetParameterCount` on the vertex shader's program). Cg source takes
+`GL_CG_VERTEX_SHADER_EXT` and `GL_CG_FRAGMENT_SHADER_EXT`, and then compiles at
+`glCompileShader`, with a status that holds. `glLinkProgram` also looks up every
+`glBindAttribLocation` name in the compiled program and uses the result unchecked, so a name the
+compiler dropped would crash it too: the generated programs bind no names, and ask for the
+locations after the link (`glGetAttribLocation` and `glGetUniformLocation` check theirs). vitaGL's
+uniform locations are its records' addresses negated: anything but -1 is one.
+
+`gx/vita_tev.cpp` generates a Cg vertex and fragment program from the TEV state when a material
+is worked out:
+- the stages' colour and alpha combiners as GX evaluates them: d +/- lerp(a, b, c) with bias,
+  scale and clamp (to [0, 1], or GX's 11-bit range unclamped), and the compare modes (R8, GR16,
+  BGR24, RGB8/A8, greater and equal); a, b and c clamped to [0, 1] as GX's 8-bit inputs are;
+- every input: the four registers (PREV first), konst colours and their component selections,
+  texture and raster colours through the swap tables, one and a half;
+- up to four textures and four coordinate generators (2x4, or 3x4 sampled projectively), each
+  with its matrix for GX's (s, t, 1, 1) input;
+- the raster colour from the channel setup: the vertex or register material colour, and for a
+  lit channel the ambient colour plus the face's shading (there are no normals in the meshes
+  yet, so no real lights);
+- the alpha compare with both comparisons and the operator, as a `discard`.
+A program is cached by a hash of the state it is made from, then by its source. Each draw carries
+the konst colours, registers, channel colours and alpha references (13 vec4s), its coordinate
+matrices and the program's textures; the fixed-function draw's units and state stay beside them.
+
+On the render worker, a program compiles at its first draw, one a frame at most (vitaGL's shader
+cache keeps them on the memory card for the next run); until it is ready, or if it fails, the draw
+goes the fixed-function way, and the first three failures log their source. Indirect textures,
+coordinates made from positions or normals (reflections), more than four textures or coordinate
+sets, and fog leave a material fixed-function. `MP_VITA_TEV=0` turns the programs off.
+
+The meshes now carry four coordinate sets, the vertex colour as GX has it and the shading apart
+(56 bytes a vertex, 32 before). The log adds the draws recorded with a program and the programs
+generated (the materials line), and the draws drawn with theirs, waiting, and compiled, failed
+and the time spent compiling (the presents line).

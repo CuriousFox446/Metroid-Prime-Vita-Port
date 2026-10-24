@@ -67,7 +67,7 @@ target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
 
 if (VITA)
     # The Vita's draws through vitaGL (lib/gx/vita_draw.hpp, docs/VITA_PHASE2.md).
-    target_sources(aurora_gx PRIVATE lib/gx/vita_draw.cpp)
+    target_sources(aurora_gx PRIVATE lib/gx/vita_draw.cpp lib/gx/vita_tev.cpp)
 endif ()
 
 if (AURORA_ENABLE_RMLUI)

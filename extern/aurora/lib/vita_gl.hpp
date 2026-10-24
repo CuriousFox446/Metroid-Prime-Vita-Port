@@ -10,23 +10,31 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <imgui.h>
 
 namespace aurora::vita_gl {
-// The texture units a draw can use: vitaGL's fixed-function pipeline has two texture coordinate
-// sets, each with its own texture matrix.
+// The texture units a fixed-function draw can use: vitaGL's fixed-function pipeline has two
+// texture coordinate sets, each with its own texture matrix.
 constexpr int kTexUnits = 2;
+// The texture coordinate sets a mesh carries, and the textures a generated program samples.
+constexpr int kTexCoords = 4;
+constexpr int kSamplers = 4;
 
-// A vertex of the Vita path's meshes: position, a texture coordinate set per unit, and a colour
-// with the face's shading in it.
+// A vertex of the Vita path's meshes: position, its texture coordinate sets, the colour the
+// fixed-function draw uses (the face's shading in it), the vertex colour as GX has it (white
+// without one) and the face's shading on its own (for a generated program's raster colour).
 struct Vertex {
   float pos[3];
-  float uv[kTexUnits][2];
+  float uv[kTexCoords][2];
   uint8_t color[4];
+  uint8_t raw[4];
+  uint8_t shade;
+  uint8_t pad[3];
 };
-static_assert(sizeof(Vertex) == 32);
+static_assert(sizeof(Vertex) == 56);
 
 // Triangles decoded once from a GX display list (gx/vita_draw.cpp). Uploaded to the GPU on the
 // render worker at its first draw; freed there once no frame draws it.
@@ -59,6 +67,7 @@ struct TexUnit {
   float matrix[8];
   Sampler sampler;
   uint16_t envMode = 0x2100; // GL_MODULATE
+  uint8_t coord = 0;         // the mesh's texture coordinate set
 };
 
 // A draw's fixed-function state, as GL enums (gx/vita_draw.cpp maps GX's to these): blending,
@@ -79,14 +88,39 @@ struct RenderState {
   bool operator==(const RenderState&) const = default;
 };
 
+// A Cg program generated from a GX material's TEV configuration (gx/vita_tev.cpp). Compiled on
+// the render worker at its first draw, a few a frame, with vitaGL's Cg compiler; until it is
+// ready, or if it fails, its draws use the fixed-function path.
+class Program;
+std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource) noexcept;
+
+// The constants a generated program reads, as vec4s: the konst colours (4), the TEV registers
+// (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
+// the alpha compare's references (x, y).
+constexpr int kProgramConstants = 13;
+
+// A draw's generated program and what it reads besides the matrices: its textures (sampler slot
+// order), the texture coordinates' matrices (3 rows of 4 each, for GX's (s, t, 1, 1) input), the
+// constants, and the fixed-function state it draws with (the program does the alpha test).
+struct ProgramInputs {
+  std::shared_ptr<Program> program;
+  std::shared_ptr<Texture> textures[kSamplers];
+  Sampler samplers[kSamplers];
+  float texMatrices[kTexCoords][12];
+  float constants[kProgramConstants][4];
+  RenderState state;
+};
+
 // One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
-// GL's depth range), its texture units and its state.
+// GL's depth range); its fixed-function texture units and state; and its generated program, when
+// it has one (drawn with it once the program is ready).
 struct Draw {
   std::shared_ptr<Mesh> mesh;
   float modelView[12];
   float projection[16];
   TexUnit units[kTexUnits];
   RenderState state;
+  ProgramInputs program;
 };
 
 #ifdef AURORA_VITA_GL

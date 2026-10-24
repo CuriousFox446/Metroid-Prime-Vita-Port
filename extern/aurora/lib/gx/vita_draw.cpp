@@ -6,6 +6,7 @@
 #include "gx.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
+#include "vita_tev.hpp"
 
 #include <dolphin/gx/GXCommandList.h>
 
@@ -23,12 +24,14 @@
 namespace aurora::gx::vita {
 namespace {
 constexpr Module Log{"aurora::gx::vita"};
+using vita_gl::kSamplers;
+using vita_gl::kTexCoords;
 using vita_gl::kTexUnits;
 
-// The vertex attribute each texture unit's coordinates come from (GX_VA_TEX0..7), or none.
+// The vertex attribute each of a mesh's texture coordinate sets comes from (GX_VA_TEX0..7), or none.
 constexpr u8 kNoTexAttr = 0xFF;
-using TexAttrs = std::array<u8, kTexUnits>;
-constexpr TexAttrs kNoTexAttrs{kNoTexAttr, kNoTexAttr};
+using TexAttrs = std::array<u8, kTexCoords>;
+constexpr TexAttrs kNoTexAttrs{kNoTexAttr, kNoTexAttr, kNoTexAttr, kNoTexAttr};
 
 // GL's enums for the samplers and state (vitaGL.h is not included here).
 constexpr u16 kGlNearest = 0x2600;
@@ -65,10 +68,10 @@ struct DecodeState {
   u8 fmtMask = 0;
   std::array<VtxFmt, MaxVtxFmt> vtxFmts{}; // only those in fmtMask are compared
   TexAttrs texAttrs = kNoTexAttrs;
-  std::array<AttrArray, 2 + kTexUnits> arrays{}; // as array_attrs lists them
+  std::array<AttrArray, 2 + kTexCoords> arrays{}; // as array_attrs lists them
 
-  std::array<u8, 2 + kTexUnits> array_attrs() const noexcept {
-    return {GX_VA_POS, GX_VA_CLR0, texAttrs[0], texAttrs[1]};
+  std::array<u8, 2 + kTexCoords> array_attrs() const noexcept {
+    return {GX_VA_POS, GX_VA_CLR0, texAttrs[0], texAttrs[1], texAttrs[2], texAttrs[3]};
   }
 
   void capture_arrays() noexcept {
@@ -177,6 +180,8 @@ struct Stats {
   // Skinned list calls drawn from their template, and templates made.
   u32 skinnedFromTemplate = 0;
   u32 skinnedTemplates = 0;
+  // Draws recorded with a generated program (vita_tev.hpp).
+  u32 withProgram = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -261,6 +266,7 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, 
   out = {};
   out.color[0] = out.color[1] = out.color[2] = grey;
   out.color[3] = 255;
+  out.raw[0] = out.raw[1] = out.raw[2] = out.raw[3] = 255;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
     const GXAttrType type = g_gxState.vtxDesc[i];
@@ -272,7 +278,8 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, 
       sLastFail = Fail::MatrixIndex;
       return false;
     }
-    const bool wanted = attr == GX_VA_POS || attr == GX_VA_CLR0 || i == texAttrs[0] || i == texAttrs[1];
+    const bool wanted = attr == GX_VA_POS || attr == GX_VA_CLR0 ||
+                        std::find(texAttrs.begin(), texAttrs.end(), static_cast<u8>(i)) != texAttrs.end();
     const u32 elemSize = attr >= GX_VA_PNMTXIDX && attr <= GX_VA_TEX7MTXIDX
                              ? 1
                              : u32(comp_type_size(attr, attrFmt.type)) * comp_cnt_count(attr, attrFmt.cnt);
@@ -319,15 +326,16 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, 
       }
     } else if (attr == GX_VA_CLR0) {
       read_color(data, attrFmt.type, out.color);
+      std::memcpy(out.raw, out.color, sizeof(out.raw));
     } else {
       float st[2] = {};
       for (u32 c = 0; c < cnt && c < 2; ++c) {
         st[c] = read_component(data + c * step, attrFmt.type, attrFmt.frac, le);
       }
-      for (int unit = 0; unit < kTexUnits; ++unit) {
-        if (texAttrs[unit] == i) {
-          out.uv[unit][0] = st[0];
-          out.uv[unit][1] = st[1];
+      for (int set = 0; set < kTexCoords; ++set) {
+        if (texAttrs[set] == i) {
+          out.uv[set][0] = st[0];
+          out.uv[set][1] = st[1];
         }
       }
     }
@@ -349,11 +357,15 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
     const float facing = (0.65f * std::fabs(n[2]) + 0.35f * std::fabs(n[0])) / len;
     shade = textured ? 0.6f + 0.4f * facing : 0.3f + 0.7f * facing;
   }
+  // The generated programs take the shading on its own, as the light a lit channel adds to its
+  // ambient colour (vita_tev.cpp), from the same face normal without the textured damping.
+  const float light = len > 1e-8f ? 0.3f + 0.7f * (0.65f * std::fabs(n[2]) + 0.35f * std::fabs(n[0])) / len : 1.f;
   for (const vita_gl::Vertex* src : {&a, &b, &c}) {
     vita_gl::Vertex vertex = *src;
     for (int i = 0; i < 3; ++i) {
       vertex.color[i] = static_cast<u8>(std::min(255.f, vertex.color[i] * shade));
     }
+    vertex.shade = static_cast<u8>(std::min(255.f, light * 255.f));
     out.push_back(vertex);
   }
 }
@@ -533,6 +545,7 @@ struct UnitChoice {
   GXTexMapID map;
   const TcgConfig* tcg;
   bool additive;
+  GXTexCoordID coord;
 };
 
 bool adds_texture(const TevStage& stage) noexcept {
@@ -565,7 +578,7 @@ int choose_units(UnitChoice out[kTexUnits]) noexcept {
         tcg.src > GX_TG_TEX7 || g_gxState.vtxDesc[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)] == GX_NONE) {
       continue;
     }
-    out[count++] = {stage.texMapId, &tcg, adds_texture(stage)};
+    out[count++] = {stage.texMapId, &tcg, adds_texture(stage), stage.texCoordId};
   }
   return count;
 }
@@ -892,16 +905,31 @@ vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
 // them. texAttrs gets the attributes their coordinates come from. Returns how many units there
 // are, or -1 when a texture has no Vita copy (an EFB copy, a dynamic texture): drawn without it,
 // a full-screen pass over a copy of the screen would cover the screen in its vertex colour.
-int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexUnits], TexAttrs& texAttrs) noexcept {
+// With a program layout (vita_tev.hpp), the mesh's coordinate sets are the layout's and the units
+// take theirs from it; without, each unit has its own set, in unit order. The layout's textures are
+// resolved with the units', for the program.
+int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexUnits], TexAttrs& texAttrs,
+                  const TevLayout& layout) noexcept {
   UnitChoice choices[kTexUnits];
   const int chosen = choose_units(choices);
   texAttrs = kNoTexAttrs;
+  if (layout.supported) {
+    for (int c = 0; c < layout.coordCount; ++c) {
+      const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
+      texAttrs[c] = static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0));
+    }
+  }
   int unitCount = 0;
-  if (chosen != 0) {
+  if (chosen != 0 || (layout.supported && layout.samplerCount != 0)) {
     static ShaderInfo sSampled;
     sSampled.sampledTextures.reset();
     for (int i = 0; i < chosen; ++i) {
       sSampled.sampledTextures.set(choices[i].map);
+    }
+    if (layout.supported) {
+      for (int m = 0; m < layout.samplerCount; ++m) {
+        sSampled.sampledTextures.set(layout.maps[m]);
+      }
     }
     {
       const gfx::VitaCopyScope copies;
@@ -923,7 +951,16 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
       // stage does.
       unit.envMode = unitCount > 0 && choices[i].additive ? kGlAdd : kGlModulate;
       tcgs[unitCount] = choices[i].tcg;
-      texAttrs[unitCount] = static_cast<u8>(GX_VA_TEX0 + (choices[i].tcg->src - GX_TG_TEX0));
+      int coord = unitCount;
+      if (layout.supported) {
+        // The layout holds every coordinate generator a stage samples with, the units' among them.
+        coord = static_cast<int>(std::find(layout.coords.begin(), layout.coords.begin() + layout.coordCount,
+                                           choices[i].coord) -
+                                 layout.coords.begin());
+      } else {
+        texAttrs[coord] = static_cast<u8>(GX_VA_TEX0 + (choices[i].tcg->src - GX_TG_TEX0));
+      }
+      unit.coord = static_cast<u8>(coord);
       ++unitCount;
     }
   }
@@ -945,6 +982,14 @@ struct Material {
   vita_gl::TexUnit units[kTexUnits];
   const TcgConfig* tcgs[kTexUnits] = {};
   vita_gl::RenderState state; // before TEV's constant alpha is folded in (record_draw)
+  // Its generated program (vita_tev.hpp; null: fixed-function only), with the textures it samples,
+  // its coordinate generators (the mesh's sets in order) and its state (the program alpha-tests).
+  std::shared_ptr<vita_gl::Program> program;
+  std::shared_ptr<vita_gl::Texture> programTextures[kSamplers];
+  vita_gl::Sampler programSamplers[kSamplers] = {};
+  int coordCount = 0;
+  const TcgConfig* coordTcgs[kTexCoords] = {};
+  vita_gl::RenderState programState;
 };
 // Direct-mapped: a heavy frame of the opening works out several hundred materials.
 constexpr size_t kMaterials = 1024;
@@ -973,6 +1018,11 @@ u64 material_hash(u64 generation) noexcept {
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   h = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), h);
+  // What a generated program reads besides the stages: the swap tables, the channels' setup and
+  // whether indirect stages are on.
+  h = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), h);
+  h = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), h);
+  h = XXH3_64bits_withSeed(&s.numIndStages, sizeof(s.numIndStages), h);
   u32 usedMaps = 0;
   u32 usedCoords = 0;
   for (u32 i = 0; i < stages; ++i) {
@@ -1059,7 +1109,8 @@ const Material& current_material() noexcept {
   material.hash = hash;
   material.valid = true;
   material.window = sWindow;
-  material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs);
+  const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
+  material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs, layout);
   if (material.unitCount < 0) {
     return material;
   }
@@ -1069,6 +1120,39 @@ const Material& current_material() noexcept {
   material.alphaMatters = compare.comp0 != GX_ALWAYS || compare.comp1 != GX_ALWAYS ||
                           (material.state.blend && (readsAlpha(material.state.blendSrc) ||
                                                     readsAlpha(material.state.blendDst)));
+  if (layout.supported) {
+    // Every texture the stages sample needs its Vita copy (resolve_units resolved them all).
+    bool copies = true;
+    for (int m = 0; m < layout.samplerCount; ++m) {
+      const gfx::TextureBind& bind = g_gxState.textures[layout.maps[m]];
+      if (bind.ref && !bind.ref->vitaTexture) {
+        add_missing_copy(*bind.ref, g_gxState.loadedTextures[layout.maps[m]]);
+      }
+      if (!bind.ref || !bind.ref->vitaTexture) {
+        copies = false;
+        break;
+      }
+      material.programTextures[m] = bind.ref->vitaTexture;
+      material.programSamplers[m] = sampler_for(bind.texObj);
+    }
+    if (copies) {
+      material.program = tev_program(layout);
+      material.coordCount = layout.coordCount;
+      for (int c = 0; c < layout.coordCount; ++c) {
+        material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
+      }
+      material.programState = material.state;
+      material.programState.alphaFunc = kGlAlways;
+      vita_gl::RenderState& state = material.programState;
+      if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
+        state.blend = false;
+      }
+    } else {
+      for (auto& texture : material.programTextures) {
+        texture.reset();
+      }
+    }
+  }
   return material;
 }
 
@@ -1109,6 +1193,20 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     sStats.additiveUnits += draw.units[unit].envMode == kGlAdd ? 1 : 0;
   }
   draw.state = state;
+  if (material.program) {
+    vita_gl::ProgramInputs& inputs = draw.program;
+    inputs.program = material.program;
+    for (int m = 0; m < kSamplers; ++m) {
+      inputs.textures[m] = material.programTextures[m];
+      inputs.samplers[m] = material.programSamplers[m];
+    }
+    for (int c = 0; c < material.coordCount; ++c) {
+      tev_texgen_rows(*material.coordTcgs[c], inputs.texMatrices[c]);
+    }
+    tev_constants(inputs.constants);
+    inputs.state = material.programState;
+    ++sStats.withProgram;
+  }
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
@@ -1300,9 +1398,10 @@ void log_stats() noexcept {
   ++sWindow;
   sLastMaterial = nullptr;
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out; {} cached; "
-           "skinned calls: {} from their template, {} decoded whole, {} templates made",
+           "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
+           "program ({} generated)",
            s.materialReused, s.materialHits, s.materialMisses, materials, s.skinnedFromTemplate, s.perCall,
-           s.skinnedTemplates);
+           s.skinnedTemplates, s.withProgram, tev_program_count());
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);

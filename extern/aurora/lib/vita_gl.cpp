@@ -10,6 +10,7 @@
 #include <fmt/format.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -169,6 +170,150 @@ std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelForm
   return std::make_shared<Texture>(width, height, format, std::move(level0));
 }
 
+namespace {
+// For the log: generated programs compiled, failed, and the time spent compiling (render worker).
+struct ProgramStats {
+  uint32_t compiled = 0;
+  uint32_t failed = 0;
+  double compileMs = 0.0;
+  uint32_t failuresLogged = 0;
+};
+ProgramStats g_programStats;
+
+// vitaGL's uniform locations are its uniform records' addresses negated, so any value but -1
+// (not found) is one; attribute locations are plain indices.
+constexpr GLint kNoUniform = -1;
+
+// The vertex attributes a generated program may declare (gx/vita_tev.cpp), by name.
+enum ProgramAttr { kAttrPos, kAttrRaw, kAttrShade, kAttrUv0, kAttrCount = kAttrUv0 + kTexCoords };
+constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aUv0", "aUv1", "aUv2", "aUv3"};
+
+// Compiles Cg source. The GL_CG_* types matter: vitaGL takes GL_VERTEX_SHADER and
+// GL_FRAGMENT_SHADER source for GLSL, translates it at glLinkProgram (VGL_MODE_POSTPONED), and a
+// Cg source that fails there leaves an invalid GXM program that glLinkProgram reads (the crash of
+// milestone 2's first program). With the Cg types the compile happens here, and its status holds.
+GLuint compile_cg(GLenum type, const std::string& source, std::string& error) {
+  const GLuint shader = glCreateShader(type);
+  const char* text = source.c_str();
+  const auto length = static_cast<GLint>(source.size());
+  glShaderSource(shader, 1, &text, &length);
+  glCompileShader(shader);
+  GLint ok = GL_FALSE;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+  if (ok != GL_TRUE) {
+    char log[1024] = {};
+    glGetShaderInfoLog(shader, sizeof(log) - 1, nullptr, log);
+    error = log;
+    glDeleteShader(shader);
+    return 0;
+  }
+  return shader;
+}
+} // namespace
+
+class Program {
+public:
+  Program(std::string vertexSource, std::string fragmentSource) noexcept
+  : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)) {}
+  ~Program() {
+    if (m_id != 0) {
+      const GLuint id = m_id;
+      gfx::render_worker::enqueue_work([id] { glDeleteProgram(id); });
+    }
+  }
+
+  // Render worker: true once linked. A program not tried yet is compiled while `budget` (the
+  // frame's compiles left) allows.
+  bool ready(int& budget) noexcept {
+    if (m_state == State::Pending && budget > 0) {
+      --budget;
+      build();
+    }
+    return m_state == State::Ready;
+  }
+
+  GLuint id() const noexcept { return m_id; }
+  GLint attr(int index) const noexcept { return m_attrs[index]; }
+  GLint mv = -1;
+  GLint proj = -1;
+  GLint texMtx = -1;
+  GLint constants = -1;
+  GLint samplers[kSamplers] = {-1, -1, -1, -1};
+
+private:
+  enum class State : uint8_t { Pending, Ready, Failed };
+
+  void build() noexcept {
+    const auto start = std::chrono::steady_clock::now();
+    std::string error;
+    const GLuint vs = compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
+    const GLuint fs = vs != 0 ? compile_cg(GL_CG_FRAGMENT_SHADER_EXT, m_fragmentSource, error) : 0;
+    if (vs != 0 && fs != 0) {
+      // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
+      // and passes the result on unchecked, so a name the compiler dropped would crash it. The
+      // locations are asked for after the link instead.
+      const GLuint program = glCreateProgram();
+      glAttachShader(program, vs);
+      glAttachShader(program, fs);
+      glLinkProgram(program);
+      GLint ok = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (ok == GL_TRUE) {
+        m_id = program;
+      } else {
+        error = "the link failed";
+        glDeleteProgram(program);
+      }
+    }
+    if (vs != 0) {
+      glDeleteShader(vs);
+    }
+    if (fs != 0) {
+      glDeleteShader(fs);
+    }
+    g_programStats.compileMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (m_id == 0) {
+      m_state = State::Failed;
+      ++g_programStats.failed;
+      if (g_programStats.failuresLogged++ < 3) {
+        Log.error("a generated program did not build: {}\n-- vertex --\n{}\n-- fragment --\n{}", error,
+                  m_vertexSource, m_fragmentSource);
+      }
+    } else {
+      for (int i = 0; i < kAttrCount; ++i) {
+        m_attrs[i] = glGetAttribLocation(m_id, kAttrNames[i]);
+      }
+      mv = glGetUniformLocation(m_id, "uMv");
+      proj = glGetUniformLocation(m_id, "uProj");
+      texMtx = glGetUniformLocation(m_id, "uTexMtx");
+      constants = glGetUniformLocation(m_id, "uConst");
+      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3"};
+      glUseProgram(m_id);
+      for (int i = 0; i < kSamplers; ++i) {
+        samplers[i] = glGetUniformLocation(m_id, kSamplerNames[i]);
+        if (samplers[i] != kNoUniform) {
+          glUniform1i(samplers[i], i);
+        }
+      }
+      m_state = State::Ready;
+      ++g_programStats.compiled;
+    }
+    std::string().swap(m_vertexSource);
+    std::string().swap(m_fragmentSource);
+  }
+
+  std::string m_vertexSource;
+  std::string m_fragmentSource;
+  GLuint m_id = 0;
+  GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1};
+  State m_state = State::Pending;
+};
+
+std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource) noexcept {
+  return std::make_shared<Program>(std::move(vertexSource), std::move(fragmentSource));
+}
+
 void record(Draw draw) noexcept { g_recording.push_back(std::move(draw)); }
 
 void end_frame_draws() noexcept {
@@ -202,6 +347,9 @@ struct PresentStats {
   uint32_t presents = 0;
   uint32_t framesWithDraws = 0;
   uint64_t draws = 0;
+  // Draws with their generated program, and draws whose program was not ready (fixed-function).
+  uint64_t programDraws = 0;
+  uint64_t programPending = 0;
 };
 PresentStats g_presentStats;
 
@@ -251,6 +399,83 @@ void apply_state(const RenderState& state, RenderState& current, bool force) {
   current = state;
 }
 
+// Generated programs compiled a frame at most: vitaGL's Cg compiler takes from a few to a hundred
+// milliseconds a program (its shader cache keeps them for the next run).
+constexpr int kCompilesPerFrame = 1;
+
+// A draw with its generated program (render worker). Leaving the fixed-function path turns its
+// arrays off; a program switch turns on the generic arrays the new one reads.
+void draw_with_program(const Draw& draw, const Program& program, GLuint& usedProgram, uint32_t& attribsOn,
+                       RenderState& current) {
+  if (usedProgram != program.id()) {
+    if (usedProgram == 0) {
+      glDisableClientState(GL_VERTEX_ARRAY);
+      glDisableClientState(GL_COLOR_ARRAY);
+      for (int unit = 0; unit < kTexUnits; ++unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+      }
+    }
+    glUseProgram(program.id());
+    usedProgram = program.id();
+    uint32_t wanted = 0;
+    for (int i = 0; i < kAttrCount; ++i) {
+      if (program.attr(i) >= 0) {
+        wanted |= 1u << program.attr(i);
+      }
+    }
+    for (int i = 0; i < 32; ++i) {
+      const uint32_t bit = 1u << i;
+      if ((attribsOn & bit) != 0 && (wanted & bit) == 0) {
+        glDisableVertexAttribArray(i);
+      } else if ((attribsOn & bit) == 0 && (wanted & bit) != 0) {
+        glEnableVertexAttribArray(i);
+      }
+    }
+    attribsOn = wanted;
+  }
+  const GLsizei count = draw.mesh->bind();
+  const auto pointer = [](size_t offset) { return reinterpret_cast<const void*>(offset); };
+  if (program.attr(kAttrPos) >= 0) {
+    glVertexAttribPointer(program.attr(kAttrPos), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
+  }
+  if (program.attr(kAttrRaw) >= 0) {
+    glVertexAttribPointer(program.attr(kAttrRaw), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex),
+                          pointer(offsetof(Vertex, raw)));
+  }
+  if (program.attr(kAttrShade) >= 0) {
+    glVertexAttribPointer(program.attr(kAttrShade), 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex),
+                          pointer(offsetof(Vertex, shade)));
+  }
+  for (int coord = 0; coord < kTexCoords; ++coord) {
+    if (program.attr(kAttrUv0 + coord) >= 0) {
+      glVertexAttribPointer(program.attr(kAttrUv0 + coord), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                            pointer(offsetof(Vertex, uv) + coord * sizeof(float[2])));
+    }
+  }
+  const ProgramInputs& inputs = draw.program;
+  if (program.mv != kNoUniform) {
+    glUniform4fv(program.mv, 3, draw.modelView);
+  }
+  if (program.proj != kNoUniform) {
+    glUniform4fv(program.proj, 4, draw.projection);
+  }
+  if (program.texMtx != kNoUniform) {
+    glUniform4fv(program.texMtx, 3 * kTexCoords, &inputs.texMatrices[0][0]);
+  }
+  if (program.constants != kNoUniform) {
+    glUniform4fv(program.constants, kProgramConstants, &inputs.constants[0][0]);
+  }
+  for (int i = 0; i < kSamplers; ++i) {
+    if (inputs.textures[i] != nullptr && program.samplers[i] != kNoUniform) {
+      glActiveTexture(GL_TEXTURE0 + i);
+      inputs.textures[i]->bind(inputs.samplers[i]);
+    }
+  }
+  apply_state(inputs.state, current, false);
+  glDrawArrays(GL_TRIANGLES, 0, count);
+}
+
 void draw_world(const std::vector<Draw>& draws) {
   if (draws.empty()) {
     return;
@@ -276,6 +501,30 @@ void draw_world(const std::vector<Draw>& draws) {
   for (GLint& env : unitEnv) {
     env = GL_MODULATE;
   }
+  // Generated programs: the one in use (0: the fixed-function path) and the generic attribute
+  // arrays it has on. A frame compiles a few new ones at most; their draws go fixed-function till then.
+  int compileBudget = kCompilesPerFrame;
+  GLuint usedProgram = 0;
+  uint32_t attribsOn = 0;
+  const auto enter_fixed_function = [&]() {
+    if (usedProgram == 0) {
+      return;
+    }
+    for (int i = 0; i < 32; ++i) {
+      if ((attribsOn & (1u << i)) != 0) {
+        glDisableVertexAttribArray(i);
+      }
+    }
+    attribsOn = 0;
+    glUseProgram(0);
+    usedProgram = 0;
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    for (int unit = 0; unit < kTexUnits; ++unit) {
+      glClientActiveTexture(GL_TEXTURE0 + unit);
+      glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+  };
   float matrix[16];
   // vitaGL's matrix calls are not free: the projection and the texture matrices change seldom
   // between draws (the modelview nearly always), so they are loaded only when they differ.
@@ -291,6 +540,27 @@ void draw_world(const std::vector<Draw>& draws) {
   float lastTexMatrix[kTexUnits][8];
   bool haveTexMatrix[kTexUnits] = {};
   for (const Draw& draw : draws) {
+    Program* program = draw.program.program.get();
+    if (program != nullptr) {
+      const int budgetBefore = compileBudget;
+      const bool ready = program->ready(compileBudget);
+      if (compileBudget != budgetBefore) {
+        // A program built just now was made current to set its samplers: back to the one in use.
+        glUseProgram(usedProgram);
+      }
+      if (!ready) {
+        program = nullptr;
+      }
+    }
+    if (program != nullptr) {
+      ++g_presentStats.programDraws;
+      draw_with_program(draw, *program, usedProgram, attribsOn, current);
+      continue;
+    }
+    if (draw.program.program != nullptr) {
+      ++g_presentStats.programPending;
+    }
+    enter_fixed_function();
     const GLsizei count = draw.mesh->bind();
     glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
     glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, color)));
@@ -298,7 +568,7 @@ void draw_world(const std::vector<Draw>& draws) {
     for (int unit = 0; unit < kTexUnits; ++unit) {
       glClientActiveTexture(GL_TEXTURE0 + unit);
       glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
-                        reinterpret_cast<const void*>(offsetof(Vertex, uv) + unit * sizeof(float[2])));
+                        reinterpret_cast<const void*>(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
     }
     for (int unit = 0; unit < kTexUnits; ++unit) {
       const TexUnit& texUnit = draw.units[unit];
@@ -340,6 +610,7 @@ void draw_world(const std::vector<Draw>& draws) {
     apply_state(draw.state, current, false);
     glDrawArrays(GL_TRIANGLES, 0, count);
   }
+  enter_fixed_function();
   // Back to GL's defaults for the overlay (ImGui's backend sets blending, depth and culling
   // itself, but not the alpha test, the masks or the winding).
   apply_state(RenderState{.depthTest = false}, current, true);
@@ -369,7 +640,7 @@ void draw_test_triangle() {
     std::vector<Vertex> triangle(3);
     const float corners[3][2] = {{-0.97f, 0.97f}, {-0.80f, 0.97f}, {-0.97f, 0.70f}};
     for (int i = 0; i < 3; ++i) {
-      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}};
+      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}, {255, 140, 0, 255}, 255};
     }
     return make_mesh(std::move(triangle));
   }();
@@ -438,9 +709,12 @@ void present(ImDrawData* overlay) noexcept {
   draw_world(take_frame());
   draw_test_triangle();
   if (++g_presentStats.presents == 300) {
-    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame", g_presentStats.presents,
-             g_presentStats.framesWithDraws,
-             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0);
+    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
+             "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling) in all",
+             g_presentStats.presents, g_presentStats.framesWithDraws,
+             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
+             g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
+             g_programStats.failed, g_programStats.compileMs);
     g_presentStats = {};
     log_memory("presents");
   }
