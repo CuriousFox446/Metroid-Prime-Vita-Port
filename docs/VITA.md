@@ -12,7 +12,7 @@ The screen stays black; the answer is in the log.
 | WebGPU | Dawn | `extern/aurora/platforms/vita/webgpu_null`: the WebGPU C API, accepting everything and drawing nothing. Objects, mapped buffers and callbacks behave as WebGPU says; GPU results read back as zeros. The renderer above it is unchanged. |
 | Disc reader | nod (Rust) | `extern/aurora/platforms/vita/nod`: the same C API over a **plain** GameCube image (`.iso`/`.gcm`). RVZ, WIA, CISO, NKit and Wii images are refused. |
 | Process setup | | `platform/vita/vita_platform.cpp`: 224 MB heap, 4 MB main stack, 444 MHz CPU, data folder, default variables. |
-| Enums | 4 bytes | ARM EABI short enums (what every Vita library is built with). The GX enums keep a fixed 32-bit type (`GXEnum.h`), as in the GameCube SDK. |
+| Enums | 4 bytes | 4 bytes too (`-fno-short-enums`), as the game needs: it reads disc data in place into structs with enum members. ARM EABI's default is short enums, so SDL3 and the other libraries are built from source with the flag; only newlib and libstdc++ stay prebuilt (their enums are plain ints, scoped, or padded to int). |
 | Crash handler, Discord, log copier | signals, Unix socket, forked process | none, unsupported, stdio reopened onto the log file |
 
 ## Build
@@ -51,14 +51,24 @@ is frames per second of the main loop's own time: game logic, GX translation and
 command recording, with no GPU. It must stay at 60 or above with room to spare,
 because a real renderer will add its own CPU work.
 
-## Known risks, not yet seen on hardware
+## On hardware so far
 
-- **Never run on a Vita yet.** Compiles, links and packages; the two new components
-  pass the host test. Nothing else is verified.
-- **Enum size in game data.** Short enums change the layout of any struct with an
-  enum member. Code that reads raw disc or save bytes straight into such a struct
-  would misread them; the decompiled game mostly parses field by field, but this is
-  the first suspect for wrong behaviour that the desktop build does not show.
+1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
+   libstdc++'s threads-active test (`pthread_cancel`) was not linked from the static
+   libpthread. Fixed by linking the whole archive.
+2. Exited after starting the null device: the port treats Null as "no GPU". Fixed by
+   setting `MP_NO_DISC_DIALOG` (no boxes, keep running) in the Vita setup.
+3. Booted, mounted the disc, played the intro cinematic with its streamed music for
+   about five minutes, then a data abort in `CMapArea::CMapAreaSurface::Draw`: the
+   32-bit in-place MAPA path, misaligned by 1-byte enums in `CMappableObject`. Fixed
+   by building everything with 32-bit enums. Throughput in that run was 130-157 FPS
+   at first, then slid from 58 to 7 FPS during the cinematic; padding in hashed
+   structs (cache misses growing each frame) is the suspect, with the same fix.
+
+## Known risks
+
+- **32-bit paths no other host runs.** The port's desktop and Android builds are all
+  64-bit; code under `UINTPTR_MAX == UINT32_MAX` was last run on a GameCube.
 - **Memory.** About 52 MB of static data plus the 224 MB heap needs the extended
   memory budget (`ATTRIBUTE2=12` in `param.sfo`). If it does not start at all,
   lower `_newlib_heap_size_user` first.

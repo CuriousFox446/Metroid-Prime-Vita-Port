@@ -23,6 +23,19 @@ if(VITA)
     # CMake only knows that for its Linux platform.
     set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
     set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    # The game is written for 32-bit enums, as MWCC sized them and every other host
+    # does: it reads disc data in place into structs with enum members (CMapArea's
+    # CMappableObject, which crashed on hardware) and hashes and compares structs
+    # bytewise. ARM EABI's default sizes an enum by its values, so everything built
+    # here, the fetched dependencies and SDL3 included, gets 32-bit enums. The
+    # prebuilt libraries left keep short ones (newlib, libstdc++, whose enums are
+    # scoped or padded to int), so ld's warning about the mix is expected.
+    add_compile_options(-fno-short-enums)
+    add_link_options(-Wl,--no-enum-size-warning)
+    # Built from source with that flag: SDL3 (its structs carry plain enums into the
+    # port, SDL_AudioSpec among them) and the libraries MP_BUNDLED_DEPS covers.
+    set(AURORA_SDL3_PROVIDER vendor CACHE STRING "How to provide SDL3")
+    set(_mp_vita_bundled ON)
 endif()
 
 # Build speed, used only when the tools are installed. ccache makes recompiling
@@ -66,7 +79,7 @@ option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build prob
 # in statically. SDL3, OpenSSL, zlib and zstd stay as they are: their sonames are
 # stable, and a static OpenSSL would look for CA certificates where the build
 # host's distro keeps them.
-if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR APPLE)
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR APPLE OR _mp_vita_bundled)
     set(_mp_bundled_default ON)
 else()
     set(_mp_bundled_default OFF)

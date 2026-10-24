@@ -211,10 +211,6 @@ if (AURORA_ENABLE_GX)
   endif ()
 
   aurora_find_system_package_global(Freetype QUIET)
-  if (VITA AND TARGET Freetype::Freetype)
-    # VitaSDK's static FreeType is built with bzip2 support, which FindFreetype omits.
-    set_property(TARGET Freetype::Freetype APPEND PROPERTY INTERFACE_LINK_LIBRARIES bz2)
-  endif ()
   if (NOT TARGET Freetype::Freetype AND NOT AURORA_BUNDLED_DEPS)
     find_package(PkgConfig)
     if (PkgConfig_FOUND AND NOT CMAKE_CROSSCOMPILING)

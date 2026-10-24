@@ -6,6 +6,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/power.h>
 
+#include <sys/lock.h>
 #include <sys/types.h>
 
 #include <cerrno>
@@ -33,6 +34,19 @@ int fchown(int, uid_t, gid_t) {
 ssize_t readlink(const char*, char*, size_t) {
   errno = EINVAL; // what readlink says of a path that is not a link
   return -1;
+}
+// fmt (built from source) locks a stream around a print; the Vita's newlib declares
+// these but does not build them. Its per-stream recursive lock is the one its own
+// stdio functions take (newlib's _flockfile, which is C only).
+void flockfile(FILE* file) {
+  if ((file->_flags & __SSTR) == 0) {
+    __lock_acquire_recursive(file->_lock);
+  }
+}
+void funlockfile(FILE* file) {
+  if ((file->_flags & __SSTR) == 0) {
+    __lock_release_recursive(file->_lock);
+  }
 }
 // astcenc's aligned allocations; newlib has memalign, whose blocks free() takes.
 int posix_memalign(void** out, size_t alignment, size_t size) {
