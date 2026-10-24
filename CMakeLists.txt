@@ -645,7 +645,12 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
 
 if(VITA)
     # Heap and stack sizes, clocks, and where the disc and saves live (ux0:data).
-    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp)
+    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp platform/vita/vita_printf.cpp)
+    # newlib's printf here lacks C99 length modifiers (%zu); every caller goes through
+    # platform/vita/vita_printf.cpp, which rewrites them.
+    target_link_options(metroid_prime_port PRIVATE
+        "LINKER:--wrap=printf,--wrap=fprintf,--wrap=sprintf,--wrap=snprintf"
+        "LINKER:--wrap=vprintf,--wrap=vfprintf,--wrap=vsprintf,--wrap=vsnprintf")
     target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
     # libstdc++ calls pthreads through weak references and treats threading as off
     # when pthread_cancel is missing; nothing references that (or pthread_once)

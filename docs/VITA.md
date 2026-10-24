@@ -51,6 +51,13 @@ is frames per second of the main loop's own time: game logic, GX translation and
 command recording, with no GPU. It must stay at 60 or above with room to spare,
 because a real renderer will add its own CPU work.
 
+Each is followed by a `[split]` line: the main thread's milliseconds per frame by
+phase (input, game tick, begin-wait for the render worker, the game's draw calls,
+loader time, end-scene, the rest) and how busy Aurora's render worker thread was,
+which processes the GX FIFO and encodes the frame. A high begin-wait with a busy
+worker means the GX translation is the bottleneck; a long tick or draw means the
+game itself is.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
@@ -62,8 +69,14 @@ because a real renderer will add its own CPU work.
    about five minutes, then a data abort in `CMapArea::CMapAreaSurface::Draw`: the
    32-bit in-place MAPA path, misaligned by 1-byte enums in `CMappableObject`. Fixed
    by building everything with 32-bit enums. Throughput in that run was 130-157 FPS
-   at first, then slid from 58 to 7 FPS during the cinematic; padding in hashed
-   structs (cache misses growing each frame) is the suspect, with the same fix.
+   at first, then slid from 58 to 7 FPS during the cinematic.
+4. Past the map, through the intro into the Exterior Docking Hangar, then a data
+   abort in strlen under printf: the Vita's newlib has no C99 formats, so a `%zu`
+   printed "zu", consumed nothing, and a later `%s` took a number for a string.
+   Fixed by wrapping the printf family (`platform/vita/vita_printf.cpp`). The
+   cinematic slide was unchanged by the enum fix, so it is load, not a leak:
+   18-25 FPS in the hangar, about 7 in the heaviest stretch, with the game logic
+   still at 60 ticks/s. The `[split]` lines now say where a frame's time goes.
 
 ## Known risks
 

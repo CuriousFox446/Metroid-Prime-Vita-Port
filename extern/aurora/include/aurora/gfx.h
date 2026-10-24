@@ -84,6 +84,9 @@ uint32_t aurora_get_resident_geometry_mib();
 // The bytes of it in use, as of the last frame processed.
 uint64_t aurora_get_resident_geometry_used();
 float aurora_get_fps();
+// Nanoseconds the render worker thread has spent on work items since it started (it
+// processes the GX FIFO and encodes the frame); sampled twice, the difference is its load.
+uint64_t aurora_render_worker_busy_ns();
 // Whether the device samples BC and ASTC 4x4 compressed textures (false until it exists).
 void aurora_get_texture_support(bool* bc, bool* astc);
 // A GX texture object's (GXTexObj*) base level decoded to RGBA8 into `out` (cap bytes); false for

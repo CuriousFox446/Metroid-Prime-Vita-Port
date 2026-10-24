@@ -10,6 +10,7 @@
 #include <chrono>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+#include <aurora/gfx.h>
 #include <aurora/phase.hpp>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_timer.h>
@@ -1159,7 +1160,11 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // the bottleneck, and a big area's first load took 20 s and more.
       const double beginSceneStart = archSupport->GetStopwatch2().GetElapsedTime();
       const uint64_t tickDoneNs = SDL_GetTicksNS();
+      // Port: where a drawn frame's time goes, for the MP_TRACE_TIMING breakdown.
+      uint64_t beginSceneDoneNs = tickDoneNs, drawDoneNs = tickDoneNs, idleDoneNs = tickDoneNs,
+               endSceneDoneNs = tickDoneNs;
       if (!x160_26_screenFading && gpRender->BeginScene()) {
+        beginSceneDoneNs = SDL_GetTicksNS();
         const double beginSceneWait =
             archSupport->GetStopwatch2().GetElapsedTime() - beginSceneStart;
         // Port: Aurora frames are bracketed inside CGraphics::Begin/EndScene.
@@ -1185,6 +1190,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         PortSpeedrunTimer::Draw();
         DrawDebugMetrics(t1, archSupport->GetStopwatch2());
 
+        drawDoneNs = SDL_GetTicksNS();
         double t2 = archSupport->GetStopwatch2().GetElapsedTime();
         AddFrameTime(x104_drawTimes, t2 / dt);
         x11c_averageDrawTime = x104_drawTimes.GetAverage().data();
@@ -1196,8 +1202,10 @@ int CMain::RsMain(int argc, const char* const* argv) {
         else
           idleMicros = 0;
         AsyncIdle(idleMicros);
+        idleDoneNs = SDL_GetTicksNS();
 
         gpRender->EndScene();
+        endSceneDoneNs = SDL_GetTicksNS();
         aurora::phase::set(aurora::phase::Main, "after EndScene");
         presented = true;
 
@@ -1256,6 +1264,51 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // two could never be told apart - which is the only thing worth reporting
       // when a frame overruns its budget.
       const uint64_t workEndNs = SDL_GetTicksNS();
+      // Port: with MP_TRACE_TIMING, once a second, what a frame's work was made of
+      // (main thread, per frame, in ms) and how busy Aurora's render worker was, so a
+      // slow device shows whether the game, its draw calls or the GX translation on
+      // the worker is the bottleneck. begin-wait is BeginScene waiting for the worker.
+      {
+        static const bool sSplit = port::EnvFlag("MP_TRACE_TIMING");
+        if (sSplit) {
+          static uint64_t sSpanStartNs = 0, sWorkerStartNs = 0;
+          static uint64_t sIn = 0, sTick = 0, sWait = 0, sDraw = 0, sIdle = 0, sEnd = 0, sRest = 0;
+          static uint32_t sFrames = 0, sTicks = 0;
+          if (sSpanStartNs == 0) {
+            sSpanStartNs = loopStartNs;
+            sWorkerStartNs = aurora_render_worker_busy_ns();
+          }
+          sIn += inputDoneNs - loopStartNs;
+          sTick += tickDoneNs - inputDoneNs;
+          sTicks += sTicksAdvanced;
+          ++sFrames;
+          if (presented) {
+            sWait += beginSceneDoneNs - tickDoneNs;
+            sDraw += drawDoneNs - beginSceneDoneNs;
+            sIdle += idleDoneNs - drawDoneNs;
+            sEnd += endSceneDoneNs - idleDoneNs;
+            sRest += workEndNs - endSceneDoneNs;
+          } else {
+            sRest += workEndNs - tickDoneNs;
+          }
+          if (workEndNs - sSpanStartNs >= 1000000000ull) {
+            const double frames = static_cast< double >(sFrames);
+            const auto perFrame = [frames](uint64_t ns) { return static_cast< double >(ns) / 1e6 / frames; };
+            const uint64_t workerNow = aurora_render_worker_busy_ns();
+            const double wallNs = static_cast< double >(workEndNs - sSpanStartNs);
+            PortLog::Write("[split] ms/frame: input %.1f, tick %.1f (%.1f ticks), begin-wait %.1f, draw %.1f, "
+                           "loader %.1f, end-scene %.1f, other %.1f | render worker busy %.0f%% (%.1f ms/frame)\n",
+                           perFrame(sIn), perFrame(sTick), sTicks / frames, perFrame(sWait), perFrame(sDraw),
+                           perFrame(sIdle), perFrame(sEnd), perFrame(sRest),
+                           100.0 * static_cast< double >(workerNow - sWorkerStartNs) / wallNs,
+                           perFrame(workerNow - sWorkerStartNs));
+            sSpanStartNs = workEndNs;
+            sWorkerStartNs = workerNow;
+            sIn = sTick = sWait = sDraw = sIdle = sEnd = sRest = 0;
+            sFrames = sTicks = 0;
+          }
+        }
+      }
       aurora::phase::set(aurora::phase::Main, "frame pacing");
       // 60 under the 60 FPS cap, else the FPS cap setting (0 = unlimited).
       const int frameRateCap = PortDebug::FrameRateCap();
