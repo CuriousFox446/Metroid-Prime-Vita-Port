@@ -13,6 +13,7 @@
 #include "gx/fifo.hpp"
 #include "gx/gx.hpp"
 #include "gx/texture.hpp"
+#include "gx/vita_draw.hpp"
 #include "imgui.hpp"
 #include "io.hpp"
 #include "vita_gl.hpp"
@@ -480,6 +481,12 @@ static bool deferred_frame_end() noexcept {
 static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
   // The Vita path's draws of this frame go to the present this frame end queues (vita_gl.hpp).
   vita_gl::end_frame_draws();
+  if (vita_gl::active()) {
+    static uint32_t sFrames = 0;
+    if (++sFrames % 300 == 0) {
+      gx::vita::log_stats();
+    }
+  }
   gx::texture::end_frame();
   gfx::finish();
 

@@ -93,6 +93,16 @@ before the overlay. Not drawn yet: lists with per-vertex matrices, positions mad
 time (CPU skinning), immediate primitives, lines and points. The WebGPU path still runs into
 the null device beside it.
 
+First run of milestone 2: nothing on screen, no line from the program (never used), the
+render worker as idle as before, while the game made about 1,680 retained list calls a
+frame; so no draw reached the render worker. The log could not say why, so now it does:
+`aurora::gx::vita` reports every 300 frames what became of the calls (recorded, positions
+not retained, decoded, not drawable and why), `aurora::vita_gl` every 300 presents how many
+frames had game draws and whether the program is ready, and an orange triangle in the
+screen's top-left corner is drawn every frame with the same program and identity matrices.
+The test that skipped run-time positions is now whether the position array is retained
+(the retail models' arrays are, whatever their byte order), not its byte order.
+
 The bigger binary first failed to package: `vita-elf-create` appends the module's import and
 export tables (4,660 bytes) to the end of the code segment, and only 1,656 bytes were left
 before the data segment. `-Wl,--defsym,__sce_headroom=0x10000` makes VitaSDK's linker

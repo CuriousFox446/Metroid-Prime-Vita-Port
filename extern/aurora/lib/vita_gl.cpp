@@ -177,10 +177,20 @@ std::vector<Draw> take_frame() {
   return draws;
 }
 
+// For the log: presents and draws since the last report (render worker).
+struct PresentStats {
+  uint32_t presents = 0;
+  uint32_t framesWithDraws = 0;
+  uint64_t draws = 0;
+};
+PresentStats g_presentStats;
+
 void draw_world(const std::vector<Draw>& draws) {
   if (draws.empty() || !use_program()) {
     return;
   }
+  ++g_presentStats.framesWithDraws;
+  g_presentStats.draws += draws.size();
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LEQUAL);
   glDepthMask(GL_TRUE);
@@ -208,6 +218,27 @@ void draw_world(const std::vector<Draw>& draws) {
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glUseProgram(0);
   glDisable(GL_DEPTH_TEST);
+}
+
+// An orange triangle in the screen's top-left corner, drawn every frame with the same program
+// and identity matrices: it shows that vitaGL's drawing reaches the screen whatever the game draws.
+void draw_test_triangle() {
+  static std::shared_ptr<Mesh> sMesh = [] {
+    std::vector<Vertex> triangle(3);
+    const float corners[3][2] = {{-0.97f, 0.97f}, {-0.80f, 0.97f}, {-0.97f, 0.70f}};
+    for (int i = 0; i < 3; ++i) {
+      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {0.f, 0.f, 1.f}, {255, 140, 0, 255}};
+    }
+    return make_mesh(std::move(triangle));
+  }();
+  Draw draw{.mesh = sMesh};
+  constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  std::memcpy(draw.modelView, kIdentity, sizeof(draw.modelView));
+  std::memcpy(draw.projection, kIdentity, sizeof(draw.projection));
+  const std::vector<Draw> draws{draw};
+  draw_world(draws);
+  --g_presentStats.framesWithDraws;
+  --g_presentStats.draws;
 }
 } // namespace
 
@@ -259,6 +290,14 @@ void present(ImDrawData* overlay) noexcept {
   glClearDepth(1.0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   draw_world(take_frame());
+  draw_test_triangle();
+  if (++g_presentStats.presents == 300) {
+    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; program {}", g_presentStats.presents,
+             g_presentStats.framesWithDraws,
+             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
+             g_program.program != 0 ? "ready" : g_program.tried ? "FAILED" : "not tried");
+    g_presentStats = {};
+  }
   if (overlay != nullptr && overlay->CmdListsCount > 0) {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }

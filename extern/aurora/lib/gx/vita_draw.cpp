@@ -29,6 +29,22 @@ struct Cached {
 };
 std::unordered_map<const void*, Cached> sCache;
 
+// For log_stats: what became of the calls since the last report, and why lists were not drawn.
+struct Stats {
+  u32 calls = 0;
+  u32 nativePositions = 0;
+  u32 decoded = 0;
+  u32 recorded = 0;
+  u32 failMatrixIndex = 0;
+  u32 failArray = 0;
+  u32 failCommand = 0;
+  u32 failEmpty = 0;
+};
+Stats sStats;
+enum class Fail { None, MatrixIndex, Array, Command, Empty };
+Fail sLastFail = Fail::None;
+bool sFirstFailLogged = false;
+
 u16 read16(const u8* p, bool le) noexcept {
   return le ? static_cast<u16>(p[0] | (p[1] << 8)) : static_cast<u16>((p[0] << 8) | p[1]);
 }
@@ -112,6 +128,7 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, vita_gl::Vertex& out) noex
     }
     const VtxAttrFmt& attrFmt = fmt.attrs[i];
     if (attr == GX_VA_PNMTXIDX) {
+      sLastFail = Fail::MatrixIndex;
       return false;
     }
     const u32 elemSize = attr >= GX_VA_PNMTXIDX && attr <= GX_VA_TEX7MTXIDX
@@ -132,6 +149,12 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, vita_gl::Vertex& out) noex
       const AttrArray& array = g_gxState.arrays[i];
       const u64 offset = u64(index + array.baseIndex) * array.stride;
       if (array.data == nullptr || offset + elemSize > array.size) {
+        sLastFail = Fail::Array;
+        if (!sFirstFailLogged) {
+          sFirstFailLogged = true;
+          Log.warn("first list not drawn: attribute {} index {} (+{}) stride {} past its array ({} bytes at {})", i,
+                   index, array.baseIndex, array.stride, array.size, array.data);
+        }
         return false;
       }
       data = static_cast<const u8*>(array.data) + offset;
@@ -175,6 +198,7 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size)
       continue;
     }
     if (cmd < 0x80 || end - pos < 2) {
+      sLastFail = Fail::Command;
       return {};
     }
     const auto fmt = static_cast<GXVtxFmt>(cmd & GX_VAT_MASK);
@@ -233,14 +257,37 @@ bool same_formats(const Cached& cached) noexcept {
 
 void draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
   ZoneScoped;
-  // Positions made at run time (CPU skinning) change under the same list: not drawn yet.
-  if (g_gxState.arrays[GX_VA_POS].le) {
+  ++sStats.calls;
+  // Positions made at run time (CPU skinning) change under the same list: not drawn yet. The
+  // retail models' own arrays are retained too (port_retail_resident), whatever their byte
+  // order; a workspace the game rewrites each frame is not.
+  if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
+    ++sStats.nativePositions;
     return;
   }
   Cached& cached = sCache[key];
   if (!same_formats(cached)) {
     ZoneScopedN("vita: decode a display list");
+    sLastFail = Fail::None;
     std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size);
+    if (triangles.empty()) {
+      switch (sLastFail) {
+      case Fail::MatrixIndex:
+        ++sStats.failMatrixIndex;
+        break;
+      case Fail::Array:
+        ++sStats.failArray;
+        break;
+      case Fail::Command:
+        ++sStats.failCommand;
+        break;
+      default:
+        ++sStats.failEmpty;
+        break;
+      }
+    } else {
+      ++sStats.decoded;
+    }
     cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles));
     cached.posArray = g_gxState.arrays[GX_VA_POS].data;
     cached.vtxDesc = g_gxState.vtxDesc;
@@ -261,7 +308,18 @@ void draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     draw.projection[12 + c] = proj.m3[c];
   }
   vita_gl::record(std::move(draw));
+  ++sStats.recorded;
 }
 
 void release(const void* key) noexcept { sCache.erase(key); }
+
+void log_stats() noexcept {
+  const Stats& s = sStats;
+  Log.info("lists: {} calls, {} recorded, {} with positions not retained; decoded {}, not drawable {} "
+           "(matrix index {}, array {}, command {}, empty {}); {} cached",
+           s.calls, s.recorded, s.nativePositions, s.decoded,
+           s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
+           s.failCommand, s.failEmpty, sCache.size());
+  sStats = {};
+}
 } // namespace aurora::gx::vita

@@ -13,8 +13,11 @@ namespace aurora::gx::vita {
 void draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept;
 // The list was released (GX_AURORA_RESIDENT_RELEASE): its decoded triangles go.
 void release(const void* key) noexcept;
+// Logs what became of the calls since the last call (FIFO thread, at a frame end).
+void log_stats() noexcept;
 #else
 inline void draw_resident(const void*, const resident::Entry&, u32) noexcept {}
 inline void release(const void*) noexcept {}
+inline void log_stats() noexcept {}
 #endif
 } // namespace aurora::gx::vita
