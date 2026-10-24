@@ -175,13 +175,26 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, vita_gl::Vertex& out) noex
 
 void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a, const vita_gl::Vertex& b,
                      const vita_gl::Vertex& c) {
-  // A face normal, in the model's space: the shader turns it with the position matrix.
+  // A face normal, in the model's space, shades the face (the fixed-function draw has no light):
+  // up-facing brightest (the game's world is Z-up), walls by which way they face, so the shapes
+  // read without textures.
   const float u[3] = {b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2]};
   const float v[3] = {c.pos[0] - a.pos[0], c.pos[1] - a.pos[1], c.pos[2] - a.pos[2]};
-  const float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+  float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+  const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+  float shade = 1.f;
+  if (len > 1e-8f) {
+    for (float& component : n) {
+      component /= len;
+    }
+    shade = 0.3f + 0.7f * (0.65f * std::fabs(n[2]) + 0.35f * std::fabs(n[0]));
+  }
   for (const vita_gl::Vertex* src : {&a, &b, &c}) {
     vita_gl::Vertex vertex = *src;
     std::memcpy(vertex.nrm, n, sizeof(n));
+    for (int i = 0; i < 3; ++i) {
+      vertex.color[i] = static_cast<u8>(std::min(255.f, vertex.color[i] * shade));
+    }
     out.push_back(vertex);
   }
 }

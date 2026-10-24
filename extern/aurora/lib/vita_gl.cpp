@@ -36,85 +36,18 @@ std::vector<Draw> g_recording;
 std::mutex g_framesMutex;
 std::deque<std::vector<Draw>> g_frames;
 
-// Milestone 2's one program: GX's position matrix and projection, shaded by the face normal
-// as seen from the camera, times the vertex colour. Rows rather than matrices, so no layout
-// question arises between GL and Cg.
-constexpr const char* kVertexShader = R"(
-void main(float3 aPos, float3 aNrm, float4 aColor,
-          uniform float4 uMv0, uniform float4 uMv1, uniform float4 uMv2,
-          uniform float4 uProj0, uniform float4 uProj1, uniform float4 uProj2, uniform float4 uProj3,
-          float4 out vColor : COLOR, float4 out vPos : POSITION) {
-  float4 p = float4(aPos, 1.0);
-  float4 v = float4(dot(uMv0, p), dot(uMv1, p), dot(uMv2, p), 1.0);
-  vPos = float4(dot(uProj0, v), dot(uProj1, v), dot(uProj2, v), dot(uProj3, v));
-  float3 n = float3(dot(uMv0.xyz, aNrm), dot(uMv1.xyz, aNrm), dot(uMv2.xyz, aNrm));
-  float len = length(n);
-  float shade = len > 0.0001 ? 0.35 + 0.65 * abs(n.z / len) : 1.0;
-  vColor = float4(aColor.rgb * shade, 1.0);
-}
-)";
-constexpr const char* kFragmentShader = R"(
-float4 main(float4 vColor : COLOR) : COLOR { return vColor; }
-)";
+// Milestone 2 draws with vitaGL's fixed-function pipeline (the one ImGui's OpenGL 2 backend
+// uses): GX's matrices go in through glLoadMatrixf, and the shading is in the vertex colours
+// (gx/vita_draw.cpp). A custom Cg program crashed inside glLinkProgram on hardware (a null
+// pointer in SceGxm, with both shaders reported compiled); generated Cg is milestone 4's.
 
-struct Program {
-  GLuint program = 0;
-  GLint mv[3]{};
-  GLint proj[4]{};
-  bool tried = false;
-};
-Program g_program;
-
-GLuint compile(GLenum type, const char* source) {
-  const GLuint shader = glCreateShader(type);
-  const GLint length = static_cast<GLint>(std::strlen(source));
-  glShaderSource(shader, 1, &source, &length);
-  glCompileShader(shader);
-  GLint ok = GL_FALSE;
-  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-  if (ok != GL_TRUE) {
-    char log[512] = {};
-    glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-    Log.error("{} shader did not compile: {}", type == GL_VERTEX_SHADER ? "vertex" : "fragment", log);
-  }
-  return shader;
-}
-
-// Render worker. The first call compiles (several seconds on a Vita, then from the shader cache).
-bool use_program() {
-  if (!g_program.tried) {
-    g_program.tried = true;
-    const GLuint vs = compile(GL_VERTEX_SHADER, kVertexShader);
-    const GLuint fs = compile(GL_FRAGMENT_SHADER, kFragmentShader);
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glBindAttribLocation(program, 0, "aPos");
-    glBindAttribLocation(program, 1, "aNrm");
-    glBindAttribLocation(program, 2, "aColor");
-    glLinkProgram(program);
-    GLint ok = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (ok != GL_TRUE) {
-      Log.error("the milestone 2 program did not link");
-      return false;
+// A GX matrix given as rows (3x4 or 4x4) as GL's column-major 4x4.
+void to_column_major(const float* rows, int rowCount, float out[16]) {
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      out[c * 4 + r] = r < rowCount ? rows[r * 4 + c] : (r == c ? 1.f : 0.f);
     }
-    static constexpr const char* kMv[3] = {"uMv0", "uMv1", "uMv2"};
-    static constexpr const char* kProj[4] = {"uProj0", "uProj1", "uProj2", "uProj3"};
-    for (int i = 0; i < 3; ++i) {
-      g_program.mv[i] = glGetUniformLocation(program, kMv[i]);
-    }
-    for (int i = 0; i < 4; ++i) {
-      g_program.proj[i] = glGetUniformLocation(program, kProj[i]);
-    }
-    g_program.program = program;
-    Log.info("the milestone 2 program is ready");
   }
-  if (g_program.program == 0) {
-    return false;
-  }
-  glUseProgram(g_program.program);
-  return true;
 }
 } // namespace
 
@@ -186,42 +119,45 @@ struct PresentStats {
 PresentStats g_presentStats;
 
 void draw_world(const std::vector<Draw>& draws) {
-  if (draws.empty() || !use_program()) {
+  if (draws.empty()) {
     return;
   }
   ++g_presentStats.framesWithDraws;
   g_presentStats.draws += draws.size();
+  glUseProgram(0);
+  glDisable(GL_TEXTURE_2D);
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LEQUAL);
   glDepthMask(GL_TRUE);
   glDisable(GL_CULL_FACE);
   glDisable(GL_BLEND);
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glEnableVertexAttribArray(2);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_COLOR_ARRAY);
+  float matrix[16];
   for (const Draw& draw : draws) {
     const GLsizei count = draw.mesh->bind();
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<const void*>(0));
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<const void*>(12));
-    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), reinterpret_cast<const void*>(24));
-    for (int i = 0; i < 3; ++i) {
-      glUniform4fv(g_program.mv[i], 1, draw.modelView + i * 4);
-    }
-    for (int i = 0; i < 4; ++i) {
-      glUniform4fv(g_program.proj[i], 1, draw.projection + i * 4);
-    }
+    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(0));
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(24));
+    glMatrixMode(GL_PROJECTION);
+    to_column_major(draw.projection, 4, matrix);
+    glLoadMatrixf(matrix);
+    glMatrixMode(GL_MODELVIEW);
+    to_column_major(draw.modelView, 3, matrix);
+    glLoadMatrixf(matrix);
     glDrawArrays(GL_TRIANGLES, 0, count);
   }
-  glDisableVertexAttribArray(0);
-  glDisableVertexAttribArray(1);
-  glDisableVertexAttribArray(2);
+  glDisableClientState(GL_COLOR_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
-  glUseProgram(0);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
   glDisable(GL_DEPTH_TEST);
 }
 
-// An orange triangle in the screen's top-left corner, drawn every frame with the same program
-// and identity matrices: it shows that vitaGL's drawing reaches the screen whatever the game draws.
+// An orange triangle in the screen's top-left corner, drawn every frame the same way with
+// identity matrices: it shows that vitaGL's drawing reaches the screen whatever the game draws.
 void draw_test_triangle() {
   static std::shared_ptr<Mesh> sMesh = [] {
     std::vector<Vertex> triangle(3);
@@ -292,10 +228,9 @@ void present(ImDrawData* overlay) noexcept {
   draw_world(take_frame());
   draw_test_triangle();
   if (++g_presentStats.presents == 300) {
-    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; program {}", g_presentStats.presents,
+    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame", g_presentStats.presents,
              g_presentStats.framesWithDraws,
-             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
-             g_program.program != 0 ? "ready" : g_program.tried ? "FAILED" : "not tried");
+             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0);
     g_presentStats = {};
   }
   if (overlay != nullptr && overlay->CmdListsCount > 0) {

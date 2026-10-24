@@ -103,6 +103,13 @@ screen's top-left corner is drawn every frame with the same program and identity
 The test that skipped run-time positions is now whether the position array is retained
 (the retail models' arrays are, whatever their byte order), not its byte order.
 
+That build crashed at its first frame inside `glLinkProgram` (a null pointer in SceGxm), when
+the test triangle first needed the Cg program; vitaGL had reported both shaders compiled. So
+milestone 2 now draws with vitaGL's fixed-function pipeline, which the overlay already uses:
+GX's matrices through `glLoadMatrixf` (as column-major 4x4s), vertex and colour pointers into
+each mesh's buffer, and the face shading baked into the vertex colours when a list is decoded
+(up-facing brightest, as the game's world is Z-up). Generated Cg returns with milestone 4.
+
 The bigger binary first failed to package: `vita-elf-create` appends the module's import and
 export tables (4,660 bytes) to the end of the code segment, and only 1,656 bytes were left
 before the data segment. `-Wl,--defsym,__sce_headroom=0x10000` makes VitaSDK's linker

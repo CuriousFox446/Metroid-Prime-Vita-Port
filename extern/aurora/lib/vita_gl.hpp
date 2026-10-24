@@ -14,7 +14,8 @@
 #include <imgui.h>
 
 namespace aurora::vita_gl {
-// A vertex of the Vita path's meshes (milestone 2: position, a face normal for shading, colour).
+// A vertex of the Vita path's meshes (milestone 2: position, its face's normal, and a colour with
+// the shading in it).
 struct Vertex {
   float pos[3];
   float nrm[3];
