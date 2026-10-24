@@ -88,11 +88,12 @@ struct RenderState {
   bool operator==(const RenderState&) const = default;
 };
 
-// A Cg program generated from a GX material's TEV configuration (gx/vita_tev.cpp). Compiled on
-// the render worker at its first draw, a few a frame, with vitaGL's Cg compiler; until it is
-// ready, or if it fails, its draws use the fixed-function path.
+// A Cg program generated from a GX material's TEV configuration (gx/vita_tev.cpp). Built on the
+// render worker at its first draw, one a frame at most: loaded from the memory card when a session
+// before compiled it (by `key`, a hash of its source), else compiled with vitaGL's Cg compiler and
+// saved there. Until it is ready, or if it fails, its draws use the fixed-function path.
 class Program;
-std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource) noexcept;
+std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept;
 
 // The constants a generated program reads, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and

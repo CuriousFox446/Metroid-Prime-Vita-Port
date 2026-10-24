@@ -400,3 +400,16 @@ draw drew with its program (a handful a window waited a frame for theirs). Three
   13 constants among them, against the fixed-function draw's matrix loads.
 - Memory: VRAM 39 MiB free of 96 at the end (about 60 before), with 32 MiB of textures in it, and
   the meshes' vertices are 56 bytes now; the game's heap at 160 MiB in use.
+
+**Programs kept on the memory card (built, not yet run on the Vita).** A program's two GXP
+binaries now go to `ux0:data/MetroidPrime/vita_programs/<key>.gxp` when it is compiled, the key
+being the XXH3 of its sources with a version seed (raised when what a source compiles to could
+change); a later session loads them with `vglShaderGxpBinary` (which registers a GXP with the
+shader patcher as a compile does) and links, without the compiler. The compile itself now calls
+vitashark (`shark_compile_shader`) directly for the GXP, as vitaGL's `glCompileShader` does for
+the `GL_CG_*` types; `vglGetShaderBinary` was no use for this: it writes vitaGL's own format
+(a uniform list ahead of the GXP) and cannot say its size without writing. A file holds a header
+(magic, both sources' lengths, which a hash collision would also have to match, both binaries'
+sizes) and is written aside and renamed, so a file cut short is never read; binaries that no
+longer link are removed for a compile next time. Loads have their own budget (eight a frame) apart
+from compiles (one), and the log gives the programs loaded from the card and the time they took.

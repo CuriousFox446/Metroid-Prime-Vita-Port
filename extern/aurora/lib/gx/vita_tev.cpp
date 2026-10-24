@@ -464,11 +464,14 @@ std::shared_ptr<vita_gl::Program> tev_program(const TevLayout& layout) noexcept 
       fmt::format("void main({}, {}, {}) {{\n{}}}\n", vertexParams, vertexUniforms, vertexOuts, vertexBody);
   std::string fragmentSource = fmt::format("float4 main({}) : COLOR {{\n{}}}\n", fragmentParams, body);
 
-  u64 key = XXH3_64bits(vertexSource.data(), vertexSource.size());
+  // The key also names the program's binaries on the memory card (vita_gl.cpp); the seed changes
+  // when what a source compiles to could (the compiler's options, the attribute layout).
+  constexpr u64 kBinaryVersion = 1;
+  u64 key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
   auto& program = sPrograms[key];
   if (!program) {
-    program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource));
+    program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
   }
   sProgramsByState.emplace(stateKey, program);
   return program;
