@@ -9,6 +9,8 @@
 
 #include <fmt/format.h>
 
+#include <pthread.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -227,7 +229,7 @@ public:
   bool ready(int& budget) noexcept {
     if (m_state == State::Pending && budget > 0) {
       --budget;
-      build();
+      build_on_compile_stack();
     }
     return m_state == State::Ready;
   }
@@ -242,6 +244,30 @@ public:
 
 private:
   enum class State : uint8_t { Pending, Ready, Failed };
+
+  // The Cg compiler (SceShaccCg) runs deep: it overflowed the render worker's 32 KiB stack (what
+  // VitaSDK gives a std::thread) at the 18th program of the first run. So a build runs on a thread
+  // of its own with a stack it fits in, while the render worker waits for it: the GL calls stay one
+  // at a time, and vitaGL keeps no per-thread context.
+  void build_on_compile_stack() noexcept {
+    constexpr size_t kCompileStack = 2 * 1024 * 1024;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kCompileStack);
+    pthread_t thread;
+    const auto run = [](void* self) -> void* {
+      static_cast<Program*>(self)->build();
+      return nullptr;
+    };
+    if (pthread_create(&thread, &attr, run, this) == 0) {
+      pthread_join(thread, nullptr);
+    } else {
+      Log.error("no thread for a program's compile: it stays fixed-function");
+      m_state = State::Failed;
+      ++g_programStats.failed;
+    }
+    pthread_attr_destroy(&attr);
+  }
 
   void build() noexcept {
     const auto start = std::chrono::steady_clock::now();

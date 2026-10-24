@@ -381,3 +381,10 @@ The meshes now carry four coordinate sets, the vertex colour as GX has it and th
 (56 bytes a vertex, 32 before). The log adds the draws recorded with a program and the programs
 generated (the materials line), and the draws drawn with theirs, waiting, and compiled, failed
 and the time spent compiling (the presents line).
+
+Its first run (a30f548): the programs work. Seventeen built, none failed, about 350 ms each
+(6 s in all), and every draw in those seconds drew with its program, none waiting. Then the
+render worker crashed inside SceShaccCg compiling the eighteenth: its stack is 32 KiB (the dump's
+thread record: base 0x820e9000, size 0x8000, what VitaSDK gives every `std::thread`), and the
+crash's stack pointer, 0x820e8ad0, was below its base. The compiler overflowed it. A program now
+builds on a thread of its own with a 2 MiB stack while the render worker waits for it.
