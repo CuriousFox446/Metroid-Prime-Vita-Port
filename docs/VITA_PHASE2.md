@@ -223,3 +223,13 @@ So, second part:
 - A Vita copy is made only for the textures the Vita path resolves (`VitaCopyScope`), from their
   first level alone; a texture Aurora cached before the Vita path drew with it gets its copy
   then, from the source the game is drawing with. The rest are not converted at all.
+
+Its run (fa769be, five minutes, no errors): the hulls by the hangar are solid again, the HUD's
+frame, radar and energy bar, Tallon IV and the asteroids draw as they should. Blended draws fell
+from nearly all to about one in eight; TEV's alpha is a worked-out constant for about a fifth of
+the draws and reads a texture for the rest; no draw failed its alpha test outright. The game's
+heap is back where it was before textures (about 156 MiB in the hangar, 181 the run before),
+and the heavy seconds ran at 17.5 FPS. Still missing, and the likeliest reason for trim floating
+with no body outside the hangar: what the Vita path does not draw yet, the lists whose positions
+the CPU makes each frame (skinned models, about 30 calls a frame there), and the immediate draws
+(particles, about 28 a frame, and the rest of `push_gx_draw`).
