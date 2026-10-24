@@ -27,14 +27,26 @@ struct TevLayout {
   std::array<s8, MaxTevStages> stageMap{};
 };
 
+// A generated program and the constants it declares: the vertex program's count
+// (vita_gl::kProgramVertexConstants' layout), and the fragment program's, as the slots of
+// vita_gl::kProgramConstants they hold in order.
+struct TevProgram {
+  std::shared_ptr<vita_gl::Program> program;
+  int vertexCount = 0;
+  int constantCount = 0;
+  std::array<u8, vita_gl::kProgramConstants> constantSlots{};
+};
+
 // The layout of the current GX state (supported false when a program cannot draw it).
 TevLayout tev_layout() noexcept;
-// The program for the current GX state with that layout, generated once (cached by its source).
-std::shared_ptr<vita_gl::Program> tev_program(const TevLayout& layout) noexcept;
-// The constants a program reads (vita_gl::kProgramConstants), from the current GX state.
-void tev_constants(float out[vita_gl::kProgramConstants][4]) noexcept;
-// A coordinate generator's matrix as three rows of four, for GX's (s, t, 1, 1) input.
-void tev_texgen_rows(const TcgConfig& tcg, float out[12]) noexcept;
+// The program for the current GX state with that layout, generated once (cached by its source;
+// the pointer stays valid for the session).
+const TevProgram* tev_program(const TevLayout& layout) noexcept;
+// The fragment constants `program` declares, packed, from the current GX state.
+void tev_constants(const TevProgram& program, float out[vita_gl::kProgramConstants][4]) noexcept;
+// A coordinate generator's matrix rows for GX's (s, t, 1, 1) input: three for a projective
+// generator, else two. Returns the rows written.
+int tev_texgen_rows(const TcgConfig& tcg, float (*out)[4]) noexcept;
 // Programs generated so far.
 size_t tev_program_count() noexcept;
 // False with MP_VITA_TEV=0: every draw fixed-function.

@@ -984,7 +984,7 @@ struct Material {
   vita_gl::RenderState state; // before TEV's constant alpha is folded in (record_draw)
   // Its generated program (vita_tev.hpp; null: fixed-function only), with the textures it samples,
   // its coordinate generators (the mesh's sets in order) and its state (the program alpha-tests).
-  std::shared_ptr<vita_gl::Program> program;
+  const TevProgram* program = nullptr;
   std::shared_ptr<vita_gl::Texture> programTextures[kSamplers];
   vita_gl::Sampler programSamplers[kSamplers] = {};
   int coordCount = 0;
@@ -1193,17 +1193,30 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     sStats.additiveUnits += draw.units[unit].envMode == kGlAdd ? 1 : 0;
   }
   draw.state = state;
-  if (material.program) {
+  if (material.program != nullptr) {
     vita_gl::ProgramInputs& inputs = draw.program;
-    inputs.program = material.program;
+    inputs.program = material.program->program;
     for (int m = 0; m < kSamplers; ++m) {
       inputs.textures[m] = material.programTextures[m];
       inputs.samplers[m] = material.programSamplers[m];
     }
-    for (int c = 0; c < material.coordCount; ++c) {
-      tev_texgen_rows(*material.coordTcgs[c], inputs.texMatrices[c]);
+    // The projection times the position matrix (a 3x4 with (0, 0, 0, 1) below), here on the FIFO
+    // thread: the render worker is the busier one.
+    for (int r = 0; r < 4; ++r) {
+      const float* p = &draw.projection[4 * r];
+      for (int c = 0; c < 4; ++c) {
+        inputs.vertex[r][c] = p[0] * draw.modelView[c] + p[1] * draw.modelView[4 + c] + p[2] * draw.modelView[8 + c] +
+                              (c == 3 ? p[3] : 0.f);
+      }
     }
-    tev_constants(inputs.constants);
+    int row = 4;
+    for (int c = 0; c < material.coordCount; ++c) {
+      row += tev_texgen_rows(*material.coordTcgs[c], &inputs.vertex[row]);
+    }
+    // Never more than the program declares (the generators' types made both counts).
+    inputs.vertexCount = static_cast<u8>(std::min(row, material.program->vertexCount));
+    tev_constants(*material.program, inputs.constants);
+    inputs.constantCount = static_cast<u8>(material.program->constantCount);
     inputs.state = material.programState;
     ++sStats.withProgram;
   }

@@ -126,6 +126,9 @@ public:
     }
   }
 
+  // Render worker: true when binding it again with `sampler` would change nothing.
+  bool holds(const Sampler& sampler) const noexcept { return m_id != 0 && m_samplerSet && sampler == m_sampler; }
+
   // Render worker: binds it to the active unit (made from the CPU copy at the first draw) and
   // sets its sampler state where it changed.
   void bind(const Sampler& sampler) noexcept {
@@ -185,6 +188,21 @@ struct ProgramStats {
   uint32_t failuresLogged = 0;
 };
 ProgramStats g_programStats;
+
+// For the log: program draws' uniform arrays sent, and left alone as the program held them already;
+// textures bound, and left alone as their unit held them already (render worker, since the last
+// report).
+struct UniformStats {
+  struct Side {
+    uint64_t uploaded = 0;
+    uint64_t skipped = 0;
+  };
+  Side vertex;
+  Side fragment;
+  uint64_t textureBinds = 0;
+  uint64_t texturesKept = 0;
+};
+UniformStats g_uniformStats;
 
 // vitaGL's uniform locations are its uniform records' addresses negated, so any value but -1
 // (not found) is one; attribute locations are plain indices.
@@ -314,14 +332,36 @@ public:
 
   GLuint id() const noexcept { return m_id; }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
-  GLint mv = -1;
-  GLint proj = -1;
-  GLint texMtx = -1;
-  GLint constants = -1;
   GLint samplers[kSamplers] = {-1, -1, -1, -1};
+
+  // Render worker, this program in use: sets its constants where they differ from what it holds.
+  // vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only after a
+  // glUniform call (or glUseProgram) marked that side, so an unchanged side costs nothing.
+  void set_constants(const ProgramInputs& inputs) noexcept {
+    upload(m_vertexLocation, m_vertex, m_vertexCount, inputs.vertex, inputs.vertexCount, g_uniformStats.vertex);
+    upload(m_constantsLocation, m_constants, m_constantCount, inputs.constants, inputs.constantCount,
+           g_uniformStats.fragment);
+  }
 
 private:
   enum class State : uint8_t { Pending, Ready, Failed };
+
+  template <size_t N>
+  static void upload(GLint location, float (&held)[N][4], int& heldCount, const float (*values)[4], int count,
+                     UniformStats::Side& stats) noexcept {
+    if (location == kNoUniform || count == 0) {
+      return;
+    }
+    const size_t bytes = sizeof(float[4]) * count;
+    if (count == heldCount && std::memcmp(held, values, bytes) == 0) {
+      ++stats.skipped;
+      return;
+    }
+    std::memcpy(held, values, bytes);
+    heldCount = count;
+    glUniform4fv(location, count, values[0]);
+    ++stats.uploaded;
+  }
 
   // The Cg compiler (SceShaccCg) runs deep: it overflowed the render worker's 32 KiB stack (what
   // VitaSDK gives a std::thread) at the 18th program of the first run. So a build runs on a thread
@@ -419,10 +459,8 @@ private:
       for (int i = 0; i < kAttrCount; ++i) {
         m_attrs[i] = glGetAttribLocation(m_id, kAttrNames[i]);
       }
-      mv = glGetUniformLocation(m_id, "uMv");
-      proj = glGetUniformLocation(m_id, "uProj");
-      texMtx = glGetUniformLocation(m_id, "uTexMtx");
-      constants = glGetUniformLocation(m_id, "uConst");
+      m_vertexLocation = glGetUniformLocation(m_id, "uVert");
+      m_constantsLocation = glGetUniformLocation(m_id, "uConst");
       static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3"};
       glUseProgram(m_id);
       for (int i = 0; i < kSamplers; ++i) {
@@ -445,6 +483,13 @@ private:
   bool m_inCache = false;
   GLuint m_id = 0;
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1};
+  GLint m_vertexLocation = kNoUniform;
+  GLint m_constantsLocation = kNoUniform;
+  // What its uniforms hold (count 0: nothing set yet).
+  float m_vertex[kProgramVertexConstants][4];
+  int m_vertexCount = 0;
+  float m_constants[kProgramConstants][4];
+  int m_constantCount = 0;
   State m_state = State::Pending;
 };
 
@@ -542,10 +587,29 @@ void apply_state(const RenderState& state, RenderState& current, bool force) {
 constexpr int kCompilesPerFrame = 1;
 constexpr int kLoadsPerFrame = 8;
 
+// The texture each unit holds, in a frame's draws (render worker): binding one again is skipped.
+struct BoundTextures {
+  const Texture* units[kSamplers] = {};
+
+  // Binds `texture` to `unit`, which must be the active unit when `active` (else it is made so).
+  void bind(int unit, Texture& texture, const Sampler& sampler, bool active) noexcept {
+    if (units[unit] == &texture && texture.holds(sampler)) {
+      ++g_uniformStats.texturesKept;
+      return;
+    }
+    if (!active) {
+      glActiveTexture(GL_TEXTURE0 + unit);
+    }
+    texture.bind(sampler);
+    units[unit] = &texture;
+    ++g_uniformStats.textureBinds;
+  }
+};
+
 // A draw with its generated program (render worker). Leaving the fixed-function path turns its
 // arrays off; a program switch turns on the generic arrays the new one reads.
-void draw_with_program(const Draw& draw, const Program& program, GLuint& usedProgram, uint32_t& attribsOn,
-                       RenderState& current) {
+void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn,
+                       RenderState& current, BoundTextures& bound) {
   if (usedProgram != program.id()) {
     if (usedProgram == 0) {
       glDisableClientState(GL_VERTEX_ARRAY);
@@ -593,22 +657,10 @@ void draw_with_program(const Draw& draw, const Program& program, GLuint& usedPro
     }
   }
   const ProgramInputs& inputs = draw.program;
-  if (program.mv != kNoUniform) {
-    glUniform4fv(program.mv, 3, draw.modelView);
-  }
-  if (program.proj != kNoUniform) {
-    glUniform4fv(program.proj, 4, draw.projection);
-  }
-  if (program.texMtx != kNoUniform) {
-    glUniform4fv(program.texMtx, 3 * kTexCoords, &inputs.texMatrices[0][0]);
-  }
-  if (program.constants != kNoUniform) {
-    glUniform4fv(program.constants, kProgramConstants, &inputs.constants[0][0]);
-  }
+  program.set_constants(inputs);
   for (int i = 0; i < kSamplers; ++i) {
     if (inputs.textures[i] != nullptr && program.samplers[i] != kNoUniform) {
-      glActiveTexture(GL_TEXTURE0 + i);
-      inputs.textures[i]->bind(inputs.samplers[i]);
+      bound.bind(i, *inputs.textures[i], inputs.samplers[i], false);
     }
   }
   apply_state(inputs.state, current, false);
@@ -679,6 +731,7 @@ void draw_world(const std::vector<Draw>& draws) {
   bool haveProjection = false;
   float lastTexMatrix[kTexUnits][8];
   bool haveTexMatrix[kTexUnits] = {};
+  BoundTextures bound;
   for (const Draw& draw : draws) {
     Program* program = draw.program.program.get();
     if (program != nullptr) {
@@ -694,7 +747,7 @@ void draw_world(const std::vector<Draw>& draws) {
     }
     if (program != nullptr) {
       ++g_presentStats.programDraws;
-      draw_with_program(draw, *program, usedProgram, attribsOn, current);
+      draw_with_program(draw, *program, usedProgram, attribsOn, current, bound);
       continue;
     }
     if (draw.program.program != nullptr) {
@@ -724,7 +777,7 @@ void draw_world(const std::vector<Draw>& draws) {
       if (!on) {
         continue;
       }
-      texUnit.texture->bind(texUnit.sampler);
+      bound.bind(unit, *texUnit.texture, texUnit.sampler, true);
       if (texUnit.envMode != unitEnv[unit]) {
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, texUnit.envMode);
         unitEnv[unit] = texUnit.envMode;
@@ -854,12 +907,15 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
-             "{:.0f} ms) in all",
+             "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
-             g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs);
+             g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs,
+             g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
+             g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept);
     g_presentStats = {};
+    g_uniformStats = {};
     log_memory("presents");
   }
   if (overlay != nullptr && overlay->CmdListsCount > 0) {

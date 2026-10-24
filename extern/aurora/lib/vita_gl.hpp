@@ -95,20 +95,26 @@ struct RenderState {
 class Program;
 std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept;
 
-// The constants a generated program reads, as vec4s: the konst colours (4), the TEV registers
+// The constants a generated program may read, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
-// the alpha compare's references (x, y).
+// the alpha compare's references (x, y). A program declares only those its source reads, packed
+// in this order (gx/vita_tev.cpp).
 constexpr int kProgramConstants = 13;
+// The vertex program's: the projection times the position matrix (4 rows), then each texture
+// coordinate set's matrix (3 rows of 4 for a projective set, else 2, for GX's (s, t, 1, 1) input).
+constexpr int kProgramVertexConstants = 4 + 3 * kTexCoords;
 
-// A draw's generated program and what it reads besides the matrices: its textures (sampler slot
-// order), the texture coordinates' matrices (3 rows of 4 each, for GX's (s, t, 1, 1) input), the
-// constants, and the fixed-function state it draws with (the program does the alpha test).
+// A draw's generated program and what it reads: its textures (sampler slot order), its vertex and
+// fragment constants (the first vertexCount and constantCount of each, as the program declares
+// them), and the fixed-function state it draws with (the program does the alpha test).
 struct ProgramInputs {
   std::shared_ptr<Program> program;
   std::shared_ptr<Texture> textures[kSamplers];
   Sampler samplers[kSamplers];
-  float texMatrices[kTexCoords][12];
+  float vertex[kProgramVertexConstants][4];
   float constants[kProgramConstants][4];
+  uint8_t vertexCount = 0;
+  uint8_t constantCount = 0;
   RenderState state;
 };
 

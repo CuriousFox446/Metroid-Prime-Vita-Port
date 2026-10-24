@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace aurora::gx::vita {
@@ -16,16 +17,24 @@ namespace {
 using vita_gl::kSamplers;
 using vita_gl::kTexCoords;
 
-// uConst's layout (vita_gl::kProgramConstants): konst colours, TEV registers, the channels'
-// material and ambient colours, the alpha compare's references.
+// The constants' slots (vita_gl::kProgramConstants): konst colours, TEV registers, the channels'
+// material and ambient colours, the alpha compare's references. Sources name them so,
+// uConst[slot], until pack_constants renumbers them to the ones the source reads.
 constexpr int kConstKonst = 0;
 constexpr int kConstReg = 4;
 constexpr int kConstMat0 = 8;
 constexpr int kConstAlphaRef = 12;
 
-// Programs by the hash of their source, and by the hash of the GX state they were made from.
-std::unordered_map<u64, std::shared_ptr<vita_gl::Program>> sPrograms;
-std::unordered_map<u64, std::shared_ptr<vita_gl::Program>> sProgramsByState;
+// Programs by the hash of their source (an unordered_map's elements stay where they are), and by
+// the hash of the GX state they were made from.
+std::unordered_map<u64, TevProgram> sPrograms;
+std::unordered_map<u64, const TevProgram*> sProgramsByState;
+
+// The TEV register (0 PREV, 1-3 REG0-2) an argument reads, or -1.
+int color_register(GXTevColorArg arg) noexcept {
+  return arg <= GX_CC_A2 ? static_cast<int>(arg) / 2 : -1;
+}
+int alpha_register(GXTevAlphaArg arg) noexcept { return arg <= GX_CA_A2 ? static_cast<int>(arg) : -1; }
 
 bool reads_texture(const TevStage& stage) noexcept {
   const auto& c = stage.colorPass;
@@ -247,11 +256,24 @@ const char* coord_type(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG
 // The fragment program's body: the stages, then the alpha compare.
 std::string fragment_body(const TevLayout& layout) {
   const GXState& s = g_gxState;
-  std::string body = "  float4 R0 = uConst[4];\n  float4 R1 = uConst[5];\n  float4 R2 = uConst[6];\n  float4 R3 = uConst[7];\n";
+  std::string body;
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   u32 lastOut = 0;
+  // A register starts at its value from GX only where something reads it (its constant is then
+  // declared); one only written starts at zero.
+  bool registerRead[4] = {};
   for (u32 i = 0; i < stages; ++i) {
     const TevStage& stage = s.tevStages[i];
+    for (const GXTevColorArg arg : {stage.colorPass.a, stage.colorPass.b, stage.colorPass.c, stage.colorPass.d}) {
+      if (const int reg = color_register(arg); reg >= 0) {
+        registerRead[reg] = true;
+      }
+    }
+    for (const GXTevAlphaArg arg : {stage.alphaPass.a, stage.alphaPass.b, stage.alphaPass.c, stage.alphaPass.d}) {
+      if (const int reg = alpha_register(arg); reg >= 0) {
+        registerRead[reg] = true;
+      }
+    }
     body += fmt::format("  {{ // stage {}\n", i);
     if (layout.stageMap[i] >= 0) {
       const int coord = layout.stageCoord[i];
@@ -324,7 +346,48 @@ std::string fragment_body(const TevLayout& layout) {
     body += fmt::format("  if (!{}) {{\n    discard;\n  }}\n", pass);
   }
   body += fmt::format("  return R{};\n", lastOut);
-  return body;
+  // The result's register is read at the end (its alpha may be from before the last stage).
+  registerRead[lastOut] = true;
+  std::string registers;
+  for (int reg = 0; reg < 4; ++reg) {
+    registers += registerRead[reg] ? fmt::format("  float4 R{} = uConst[{}];\n", reg, kConstReg + reg)
+                                   : fmt::format("  float4 R{} = float4(0.0);\n", reg);
+  }
+  return registers + body;
+}
+
+// Renumbers a fragment source's uConst[slot] to the constants it reads, packed in slot order,
+// and declares only those: the fewer a program has, the less a draw uploads.
+std::string pack_constants(const std::string& source, TevProgram& program) {
+  static constexpr std::string_view kTag = "uConst[";
+  std::array<int, vita_gl::kProgramConstants> packed;
+  packed.fill(-1);
+  for (size_t pos = source.find(kTag); pos != std::string::npos; pos = source.find(kTag, pos)) {
+    pos += kTag.size();
+    const int slot = std::atoi(source.c_str() + pos);
+    if (slot >= 0 && slot < vita_gl::kProgramConstants) {
+      packed[slot] = 0;
+    }
+  }
+  program.constantCount = 0;
+  for (int slot = 0; slot < vita_gl::kProgramConstants; ++slot) {
+    if (packed[slot] == 0) {
+      packed[slot] = program.constantCount;
+      program.constantSlots[program.constantCount++] = static_cast<u8>(slot);
+    }
+  }
+  std::string out;
+  out.reserve(source.size());
+  size_t last = 0;
+  for (size_t pos = source.find(kTag); pos != std::string::npos; pos = source.find(kTag, last)) {
+    pos += kTag.size();
+    const size_t end = source.find(']', pos);
+    out.append(source, last, pos - last);
+    out += std::to_string(packed[std::atoi(source.c_str() + pos)]);
+    last = end;
+  }
+  out.append(source, last, std::string::npos);
+  return out;
 }
 } // namespace
 
@@ -388,7 +451,7 @@ TevLayout tev_layout() noexcept {
   return layout;
 }
 
-std::shared_ptr<vita_gl::Program> tev_program(const TevLayout& layout) noexcept {
+const TevProgram* tev_program(const TevLayout& layout) noexcept {
   const GXState& s = g_gxState;
   // What the source is made from, hashed: generating it is the costly part, and most materials
   // share a program with another.
@@ -412,16 +475,19 @@ std::shared_ptr<vita_gl::Program> tev_program(const TevLayout& layout) noexcept 
   if (const auto it = sProgramsByState.find(stateKey); it != sProgramsByState.end()) {
     return it->second;
   }
-  const std::string body = fragment_body(layout);
+  TevProgram info;
+  const std::string body = pack_constants(fragment_body(layout), info);
   const bool raw = body.find("vRaw") != std::string::npos;
   const bool shade = body.find("vShade") != std::string::npos;
 
+  // uVert (vita_gl::kProgramVertexConstants): the projection times the position matrix, then the
+  // coordinate sets' matrix rows.
   std::string fragmentParams;
   std::string vertexParams = "float3 aPos";
   std::string vertexOuts = "float4 out vPos : POSITION";
   std::string vertexBody = "  float4 p = float4(aPos, 1.0);\n"
-                           "  float4 v = float4(dot(uMv[0], p), dot(uMv[1], p), dot(uMv[2], p), 1.0);\n"
-                           "  vPos = float4(dot(uProj[0], v), dot(uProj[1], v), dot(uProj[2], v), dot(uProj[3], v));\n";
+                           "  vPos = float4(dot(uVert[0], p), dot(uVert[1], p), dot(uVert[2], p), dot(uVert[3], p));\n";
+  int row = 4;
   const auto add = [](std::string& list, const std::string& item) {
     list += list.empty() ? item : ", " + item;
   };
@@ -444,64 +510,70 @@ std::shared_ptr<vita_gl::Program> tev_program(const TevLayout& layout) noexcept 
     add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
     vertexBody += fmt::format("  float4 t{0} = float4(aUv{0}, 1.0, 1.0);\n", c);
     if (tcg.type == GX_TG_MTX3x4) {
-      vertexBody += fmt::format("  vUv{0} = float3(dot(uTexMtx[{1}], t{0}), dot(uTexMtx[{2}], t{0}), dot(uTexMtx[{3}], t{0}));\n",
-                                c, 3 * c, 3 * c + 1, 3 * c + 2);
+      vertexBody += fmt::format("  vUv{0} = float3(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}), dot(uVert[{3}], t{0}));\n",
+                                c, row, row + 1, row + 2);
+      row += 3;
     } else {
-      vertexBody += fmt::format("  vUv{0} = float2(dot(uTexMtx[{1}], t{0}), dot(uTexMtx[{2}], t{0}));\n", c, 3 * c,
-                                3 * c + 1);
+      vertexBody += fmt::format("  vUv{0} = float2(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}));\n", c, row, row + 1);
+      row += 2;
     }
     add(fragmentParams, fmt::format("{} vUv{} : TEXCOORD{}", type, c, c));
   }
+  info.vertexCount = row;
   for (int m = 0; m < layout.samplerCount; ++m) {
     add(fragmentParams, fmt::format("uniform sampler2D uTex{0} : TEXUNIT{0}", m));
   }
-  add(fragmentParams, fmt::format("uniform float4 uConst[{}]", vita_gl::kProgramConstants));
-  std::string vertexUniforms = "uniform float4 uMv[3], uniform float4 uProj[4]";
-  if (layout.coordCount != 0) {
-    vertexUniforms += fmt::format(", uniform float4 uTexMtx[{}]", 3 * kTexCoords);
+  if (info.constantCount != 0) {
+    add(fragmentParams, fmt::format("uniform float4 uConst[{}]", info.constantCount));
   }
+  const std::string vertexUniforms = fmt::format("uniform float4 uVert[{}]", row);
   std::string vertexSource =
       fmt::format("void main({}, {}, {}) {{\n{}}}\n", vertexParams, vertexUniforms, vertexOuts, vertexBody);
   std::string fragmentSource = fmt::format("float4 main({}) : COLOR {{\n{}}}\n", fragmentParams, body);
 
-  // The key also names the program's binaries on the memory card (vita_gl.cpp); the seed changes
+  // The key also names the program's binary on the memory card (vita_gl.cpp); the seed changes
   // when what a source compiles to could (the compiler's options, the attribute layout).
-  constexpr u64 kBinaryVersion = 1;
+  constexpr u64 kBinaryVersion = 2;
   u64 key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
-  auto& program = sPrograms[key];
-  if (!program) {
-    program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
+  TevProgram& program = sPrograms[key];
+  if (!program.program) {
+    info.program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
+    program = std::move(info);
   }
-  sProgramsByState.emplace(stateKey, program);
-  return program;
+  sProgramsByState.emplace(stateKey, &program);
+  return &program;
 }
 
-void tev_constants(float out[vita_gl::kProgramConstants][4]) noexcept {
+void tev_constants(const TevProgram& program, float out[vita_gl::kProgramConstants][4]) noexcept {
   const GXState& s = g_gxState;
-  for (int i = 0; i < 4; ++i) {
-    for (int c = 0; c < 4; ++c) {
-      out[kConstKonst + i][c] = s.kcolors[i][c];
-      out[kConstReg + i][c] = s.colorRegs[i][c];
+  for (int i = 0; i < program.constantCount; ++i) {
+    const int slot = program.constantSlots[i];
+    float* value = out[i];
+    if (slot < kConstReg) {
+      std::memcpy(value, &s.kcolors[slot - kConstKonst], sizeof(float[4]));
+    } else if (slot < kConstMat0) {
+      std::memcpy(value, &s.colorRegs[slot - kConstReg], sizeof(float[4]));
+    } else if (slot < kConstAlphaRef) {
+      const int n = (slot - kConstMat0) / 2;
+      const bool ambient = ((slot - kConstMat0) & 1) != 0;
+      const ColorChannelState& color = s.colorChannelState[GX_COLOR0 + n];
+      const ColorChannelState& alpha = s.colorChannelState[GX_ALPHA0 + n];
+      const auto& rgb = ambient ? color.ambColor : color.matColor;
+      value[0] = rgb[0];
+      value[1] = rgb[1];
+      value[2] = rgb[2];
+      value[3] = (ambient ? alpha.ambColor : alpha.matColor)[3];
+    } else {
+      value[0] = static_cast<float>(s.alphaCompare.ref0 & 0xFF);
+      value[1] = static_cast<float>(s.alphaCompare.ref1 & 0xFF);
+      value[2] = 0.f;
+      value[3] = 0.f;
     }
   }
-  for (int n = 0; n < 2; ++n) {
-    const ColorChannelState& color = s.colorChannelState[GX_COLOR0 + n];
-    const ColorChannelState& alpha = s.colorChannelState[GX_ALPHA0 + n];
-    for (int c = 0; c < 3; ++c) {
-      out[kConstMat0 + 2 * n][c] = color.matColor[c];
-      out[kConstMat0 + 2 * n + 1][c] = color.ambColor[c];
-    }
-    out[kConstMat0 + 2 * n][3] = alpha.matColor[3];
-    out[kConstMat0 + 2 * n + 1][3] = alpha.ambColor[3];
-  }
-  out[kConstAlphaRef][0] = static_cast<float>(s.alphaCompare.ref0 & 0xFF);
-  out[kConstAlphaRef][1] = static_cast<float>(s.alphaCompare.ref1 & 0xFF);
-  out[kConstAlphaRef][2] = 0.f;
-  out[kConstAlphaRef][3] = 0.f;
 }
 
-void tev_texgen_rows(const TcgConfig& tcg, float out[12]) noexcept {
+int tev_texgen_rows(const TcgConfig& tcg, float (*out)[4]) noexcept {
   static constexpr float kIdentity[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
   const float* rows = kIdentity;
   if (tcg.mtx != GX_IDENTITY) {
@@ -513,10 +585,9 @@ void tev_texgen_rows(const TcgConfig& tcg, float out[12]) noexcept {
       rows = reinterpret_cast<const float*>(&g_gxState.texMtxs[index - MaxPnMtx]);
     }
   }
-  std::memcpy(out, rows, sizeof(float) * (tcg.type == GX_TG_MTX3x4 ? 12 : 8));
-  if (tcg.type != GX_TG_MTX3x4) {
-    std::memcpy(out + 8, kIdentity + 8, sizeof(float) * 4);
-  }
+  const int count = tcg.type == GX_TG_MTX3x4 ? 3 : 2;
+  std::memcpy(out, rows, sizeof(float[4]) * count);
+  return count;
 }
 
 size_t tev_program_count() noexcept { return sPrograms.size(); }

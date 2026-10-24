@@ -449,3 +449,22 @@ Map Facility, no crash:
   35 ms a frame there. VRAM 42 MiB free at the end.
 
 The card cache is done. What a program draw costs the render worker is next.
+
+**Cheaper program draws (built, not yet run on the Vita).** vitaGL keeps each program's
+uniforms and, at a draw, reserves and fills a side's uniform buffer only when a `glUniform` call
+or `glUseProgram` has marked that side since (`dirty` flags in `_glDrawArrays_CustomShadersIMPL`).
+Every program draw sent four arrays, so both sides were filled every draw. Now:
+- The vertex program reads one array, `uVert`: the projection times the position matrix (worked
+  out on the FIFO thread, which waits on the render worker), then only the rows each coordinate
+  set uses (three for a projective one, else two), against seven matrix rows and all twelve
+  texture rows before.
+- The fragment program declares only the constants its source reads, renumbered in order
+  (`pack_constants`); a TEV register's constant is read only where a stage reads the register or
+  it holds the result.
+- Each program remembers what its two arrays hold, and the render worker sends one only when the
+  draw's differs, so the fragment side, whose colours seldom change between draws, is mostly left
+  alone, and the vertex side too between draws under one matrix.
+- A texture already on its unit with the same sampler state is not bound again (both paths).
+The sources change, so the first session compiles every program again (about 22 s of hitches in
+all), saved for later. The log's present line gives uniform arrays sent and kept a side, and
+textures bound and kept.
