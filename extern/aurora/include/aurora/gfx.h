@@ -87,6 +87,22 @@ float aurora_get_fps();
 // Nanoseconds the render worker thread has spent on work items since it started (it
 // processes the GX FIFO and encodes the frame); sampled twice, the difference is its load.
 uint64_t aurora_render_worker_busy_ns();
+// What became of retained display lists' calls (GXPortRetainResident) since the last read:
+// drawn from their resident triangle lists, or sent as they are; and the conversions, with
+// why each that failed did.
+typedef struct {
+  uint32_t calls;          // resident calls the processor took
+  uint32_t drawnResident;  // drawn from the resident triangle lists
+  uint32_t sent;           // processed as sent: not convertible, or no room
+  uint32_t builds;         // conversions tried
+  uint32_t failCommand;    // held a command other than a triangle draw...
+  uint8_t lastCommand;     // ...the last such byte seen
+  uint32_t failIndices;    // a draw that makes no whole triangles, or too many indices
+  uint32_t failVertexSize; // a vertex format the processor has no size for, or a short list
+  uint32_t failRoom;       // no room in the resident buffers
+  uint32_t rebuilds;       // converted again: the vertex format changed since
+} AuroraResidentDlStats;
+void aurora_take_resident_dl_stats(AuroraResidentDlStats* out);
 // Whether the device samples BC and ASTC 4x4 compressed textures (false until it exists).
 void aurora_get_texture_support(bool* bc, bool* astc);
 // A GX texture object's (GXTexObj*) base level decoded to RGBA8 into `out` (cap bytes); false for

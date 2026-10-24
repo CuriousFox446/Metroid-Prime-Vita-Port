@@ -24,7 +24,10 @@
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
+#include <aurora/gfx.h>
+
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -769,11 +772,22 @@ static u32 current_vtx_size(GXVtxFmt fmt) noexcept {
   return g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calc_vtx_size(fmt);
 }
 
+// For aurora_take_resident_dl_stats: written on the processor thread, read and reset by
+// the game's thread.
+static struct {
+  std::atomic<uint32_t> calls{0}, drawnResident{0}, sent{0}, builds{0}, failCommand{0}, failIndices{0},
+      failVertexSize{0}, failRoom{0}, rebuilds{0};
+  std::atomic<uint8_t> lastCommand{0};
+} sResidentStats;
+
+static void count(std::atomic<uint32_t>& counter) noexcept { counter.fetch_add(1, std::memory_order_relaxed); }
+
 // Makes a retained display list into triangle lists in the resident buffers, as the
 // processor would draw it now (merged draws, with their index buffers). False when it holds
 // anything but triangle draws, or there is no room for it.
 static bool build_resident_dl(resident::Entry& entry) noexcept {
   ZoneScoped;
+  count(sResidentStats.builds);
   const std::vector<u8>& bytes = *entry.bytes;
   std::array<u32, GX_MAX_VTXFMT> sizes{};
   std::vector<resident::Chunk> chunks;
@@ -787,6 +801,8 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
       continue;
     }
     if (cmd < 0x80 || bytes.size() - pos < 2) {
+      count(sResidentStats.failCommand);
+      sResidentStats.lastCommand.store(cmd, std::memory_order_relaxed);
       return false;
     }
     const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -795,6 +811,8 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     pos += 2;
     const u32 numIndices = triangle_index_count(prim, vtxCount);
     if (numIndices == 0 || numIndices > 0xFFFF) {
+      count(sResidentStats.failIndices);
+      sResidentStats.lastCommand.store(cmd, std::memory_order_relaxed);
       return false;
     }
     if (sizes[fmt] == 0) {
@@ -802,6 +820,7 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     }
     const size_t vtxBytes = size_t(vtxCount) * sizes[fmt];
     if (sizes[fmt] == 0 || vtxBytes > bytes.size() - pos) {
+      count(sResidentStats.failVertexSize);
       return false;
     }
     if (chunks.empty() || chunks.back().fmt != fmt || u32(chunks.back().vtxCount) + vtxCount > 0xFFFF) {
@@ -827,7 +846,12 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     chunk.vertSize += static_cast<u32>(vtxBytes);
     chunk.idxCount += made;
   }
-  if (chunks.empty() || !resident::store_dl(entry, verts, indices)) {
+  if (chunks.empty()) {
+    count(sResidentStats.failCommand); // nothing but NOPs
+    return false;
+  }
+  if (!resident::store_dl(entry, verts, indices)) {
+    count(sResidentStats.failRoom);
     return false;
   }
   entry.vtxSizes = sizes;
@@ -837,6 +861,7 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
 
 static void call_resident_dl(const void* key, u32 size) noexcept {
   ZoneScoped;
+  count(sResidentStats.calls);
   resident::Entry* const entry = resident::find(key);
   if (entry == nullptr || size > entry->bytes->size()) {
     Log.error("GX_AURORA_RESIDENT_CALL_DL: {} is not retained with {} bytes", key, size);
@@ -848,6 +873,7 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
       const u32 parsed = entry->vtxSizes[fmt];
       if (parsed != 0 && parsed != current_vtx_size(static_cast<GXVtxFmt>(fmt))) {
         resident::free_dl(*entry);
+        count(sResidentStats.rebuilds);
         break;
       }
     }
@@ -858,9 +884,11 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
   }
   if (entry->chunks.empty()) {
     // As GXCallDisplayList would have sent it.
+    count(sResidentStats.sent);
     process(entry->bytes->data(), size);
     return;
   }
+  count(sResidentStats.drawnResident);
   for (const resident::Chunk& chunk : entry->chunks) {
     const gfx::Range vertRange{entry->vert.offset + chunk.vertOffset, chunk.vertSize};
     const gfx::Range idxRange{entry->idx.offset + chunk.idxOffset, chunk.idxCount * u32(sizeof(u16))};
@@ -1668,3 +1696,20 @@ void clear_draw_cache() noexcept {
 }
 
 } // namespace aurora::gx::fifo
+
+void aurora_take_resident_dl_stats(AuroraResidentDlStats* out) {
+  auto& s = aurora::gx::fifo::sResidentStats;
+  const auto take = [](std::atomic<uint32_t>& counter) { return counter.exchange(0, std::memory_order_relaxed); };
+  *out = AuroraResidentDlStats{
+      .calls = take(s.calls),
+      .drawnResident = take(s.drawnResident),
+      .sent = take(s.sent),
+      .builds = take(s.builds),
+      .failCommand = take(s.failCommand),
+      .lastCommand = s.lastCommand.load(std::memory_order_relaxed),
+      .failIndices = take(s.failIndices),
+      .failVertexSize = take(s.failVertexSize),
+      .failRoom = take(s.failRoom),
+      .rebuilds = take(s.rebuilds),
+  };
+}

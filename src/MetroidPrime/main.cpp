@@ -1306,6 +1306,17 @@ int CMain::RsMain(int argc, const char* const* argv) {
                            100.0 * static_cast< double >(workerNow - sWorkerStartNs) / wallNs,
                            perFrame(workerNow - sWorkerStartNs),
                            static_cast< double >(aurora_get_resident_geometry_used()) / (1024.0 * 1024.0));
+            // What became of the retained display lists' calls (MP_RETAIL_RESIDENT).
+            AuroraResidentDlStats dl;
+            aurora_take_resident_dl_stats(&dl);
+            if (dl.calls != 0 || dl.builds != 0) {
+              PortLog::Write("[resident] per frame: %.1f calls, %.1f drawn resident, %.1f sent as they are; "
+                             "this second %u conversions (failed: %u command, last 0x%02x; %u indices; "
+                             "%u vertex size; %u room), %u redone for a changed vertex format\n",
+                             dl.calls / frames, dl.drawnResident / frames, dl.sent / frames, dl.builds,
+                             dl.failCommand, dl.lastCommand, dl.failIndices, dl.failVertexSize, dl.failRoom,
+                             dl.rebuilds);
+            }
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });
             sSpanStartNs = workEndNs;
