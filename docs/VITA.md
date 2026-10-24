@@ -5,6 +5,56 @@ anything**. It exists to answer one question before a real Vita graphics backend
 written: can the Vita's CPU run the game logic plus the GX translation at 60 Hz?
 The screen stays black; the answer is in the log.
 
+## Phase 1 summary
+
+**Answer: not at 60 Hz, and not yet at 30.** On a Vita at 444 MHz the game runs stably
+(the last run: 9.5 minutes, intro to the Exterior Docking Hangar, no crash, heap about 138
+of 224 MiB) at about **15.6 FPS** in the hangar's heavy seconds (1,500 draws or more), with
+the simulation at about 39 of its 60 ticks a second; lighter scenes run at 30 to 65 FPS.
+All runs had the zone profiler on, which costs a little.
+
+| Step | Hangar, heavy seconds |
+|---|---|
+| Retail display lists sent every primitive | about 7.5 FPS |
+| World and model geometry resident (`MP_RETAIL_RESIDENT`) | about 10 |
+| Fewer FIFO commands, PC lighting off, 4 MiB uniforms | 8.6 to 9.5 |
+| VFX scene copy on the FIFO thread | 9.6 |
+| Frame end deferred to the FIFO thread (`AURORA_DEFERRED_FRAME_END`) | 14.7 |
+| Controls profile once a frame, smooth frames off | 15.0 |
+| Pad reads once per event pump | 15.6 |
+
+Where a heavy frame goes now (about 64 ms):
+
+- **Game thread, about 59 ms of work.** Input 3 ms. Ticks 27.5 ms: 3.8 a frame at about
+  7.3 ms each (entity Think 8.3, of which particles about 3; actor touches 3.2; HUD 2.7;
+  platforms and doors 2.1; PreThink 1.7; sorted lists 1.2; input generator 3.3). Draw
+  28.6 ms (opaque world 11; sorted geometry 2.6; PreRender 3.5; CPU skinning 2.6; HUD 1.7;
+  gun 1.2). It waits a few ms more for the FIFO thread at the next frame.
+- **FIFO thread, about 47 ms.** About 1,790 draws at about 23 µs each, nearly all in
+  `push_gx_draw`: bind groups 9.5, uniforms 9.0, texture resolve 5.3, the rest pipeline
+  lookup and recording. The ~13,000 extension commands a frame are a small part.
+- **Particles** are not the lever they looked: about 3 ms a frame, mostly updating
+  existing particles in busy moments (about 800 particles and 57 system steps a frame);
+  the port's Remastered extras on them cost next to nothing.
+
+What this means for Phase 2:
+
+- **The FIFO thread's cost is mostly the WebGPU translation.** A native GXM backend would
+  replace most of `push_gx_draw`'s bind group and uniform work. Separate GXM prototypes on
+  the same Vita drew at about 5 µs a draw on the CPU.
+- **The game thread is the next limit.** At 30 FPS a frame would run two ticks (about
+  15 ms) plus the draw (about 29 ms) plus input: about 47 ms, over the 33 ms budget. The
+  game's own draw code (per-surface material and GX state setup in the world pass) has to
+  get cheaper too, whatever the backend.
+- **The GPU is a limit of its own.** The GXM prototypes drew the Landing Site from inside
+  at 30 to 35 FPS with simple shaders; full TEV shading will likely need a lower render
+  resolution.
+- **Shaders must be compiled ahead or cached.** The Vita compiles a Cg shader in 0.1 to 6 s
+  (libshacccg), and Aurora makes one per pipeline configuration, hundreds in the hangar.
+
+Realistic target after Phase 2: 20 to 25 FPS in the heaviest rooms, 30 in lighter ones,
+with more game-side draw work to go further.
+
 ## What is different from the desktop build
 
 | Part | Desktop | Vita |
@@ -183,6 +233,13 @@ last read until the next one. The particle update has zones per stage (the port'
 steps, `UpdateExistingParticles`, `CreateNewParticles`, the Remastered VFX update, the
 bounds; child systems are inside their parents' stages) and a `[particles]` line counts the
 system steps, particles updated and particles created per frame.
+
+On hardware (the last Phase 1 run) that took the heavy seconds to 15.6 FPS: the input
+generator from 7.7 to 3.3 ms a frame and the ticks from 35.3 to 27.5 ms (7.3 ms each). The
+particle update averaged about 3 ms a frame over about 57 system steps and 800 particles;
+in busy moments `UpdateExistingParticles` was most of it, and the other stages (the port's
+mover steps, the bounds, the Remastered VFX update) were negligible. See the summary at the
+top.
 
 ## On hardware so far
 
