@@ -428,7 +428,7 @@ about 120 ms, so the throwaway compile did run. Both reached the Emergency Evacu
 fixed-function, 11.2 FPS in the heavy seconds, VRAM 49 MiB free. Why vitashark fails when called
 from outside vitaGL is not known, and the direct calls are dropped.
 
-**Programs kept as GL program binaries (built, not yet run on the Vita).** Compiles are back on
+**Programs kept as GL program binaries.** Compiles are back on
 vitaGL's `glCompileShader` with the `GL_CG_*` types and a link, the path that built 61 programs
 in 9f6d5cf. A linked program is then saved with `glGetProgramBinary` (its size from
 `glGetProgramiv(GL_PROGRAM_BINARY_LENGTH)`; vitaGL writes the whole binary whatever the buffer
@@ -437,3 +437,15 @@ and both shaders' GXPs with their parameter tables; `glProgramBinary` rebuilds t
 from them, registers them with the shader patcher and links, with no compiler. The file's header
 is now magic `VTP2`, both sources' lengths, the binary's format and size; the rest (key, writing
 aside and renaming, removal of a binary that does not link, the two budgets) is as before.
+
+Its two runs (6c5f443; the build stamp still reads a48830e-dirty), both about five minutes to the
+Map Facility, no crash:
+- First, empty card: 53 programs compiled, none failed, 22.5 s of compiling in all (about 420 ms
+  each, as in 9f6d5cf), and each saved.
+- Second: 53 loaded from the card in 414 ms in all, about 8 ms each, none failed to link; one new
+  program (a state the first run did not reach) compiled in 368 ms and was saved. At most one draw
+  a window went fixed-function waiting for its program, against 256 in the first run's worst.
+- Speed unchanged, as expected: 11.3 FPS in the heavy seconds both runs, the render worker about
+  35 ms a frame there. VRAM 42 MiB free at the end.
+
+The card cache is done. What a program draw costs the render worker is next.
