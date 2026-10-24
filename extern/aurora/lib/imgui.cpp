@@ -241,6 +241,24 @@ DrawData freeze() noexcept {
 void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexcept {
   ZoneScoped;
 
+  if (g_useSdlRenderer) {
+    // Without a WebGPU device ImGui is all that reaches the screen, so when it stops
+    // drawing (a menu just closed) one cleared frame has to replace its last one, or
+    // that stays up; after that, an empty frame needs no present.
+    static bool s_sdlShowing = false;
+    const bool hasContent = drawData.m_impl && drawData.m_impl->drawData.CmdListsCount > 0;
+    if (!hasContent && !s_sdlShowing) {
+      return;
+    }
+    SDL_Renderer* renderer = window::get_sdl_renderer();
+    SDL_RenderClear(renderer);
+    if (hasContent) {
+      ImGui_ImplSDLRenderer3_RenderDrawData(&drawData.m_impl->drawData, renderer);
+    }
+    SDL_RenderPresent(renderer);
+    s_sdlShowing = hasContent;
+    return;
+  }
   if (!drawData.m_impl) {
     return;
   }
@@ -248,16 +266,9 @@ void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexc
   if (data->CmdListsCount == 0) {
     return;
   }
-  if (g_useSdlRenderer) {
-    SDL_Renderer* renderer = window::get_sdl_renderer();
-    SDL_RenderClear(renderer);
-    ImGui_ImplSDLRenderer3_RenderDrawData(data, renderer);
-    SDL_RenderPresent(renderer);
-  } else {
-    pass.PushDebugGroup("Aurora: Dear Imgui");
-    ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
-    pass.PopDebugGroup();
-  }
+  pass.PushDebugGroup("Aurora: Dear Imgui");
+  ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
+  pass.PopDebugGroup();
 }
 
 ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) noexcept {
