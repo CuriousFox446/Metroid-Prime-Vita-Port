@@ -75,8 +75,11 @@ std::string findDisc() {
   return found;
 }
 
-struct VitaSetup {
-  VitaSetup() {
+// Runs before every constructor of default priority, so the game's static
+// initialisers (some reach Aurora: CStopwatch reads OSGetTime) find the environment
+// set and their output, a std::terminate message among it, lands in the files.
+__attribute__((constructor(101))) void vitaSetup() {
+  {
     // The highest clocks a homebrew app may set; the stock 333 MHz CPU clock is not enough.
     scePowerSetArmClockFrequency(444);
     scePowerSetBusClockFrequency(222);
@@ -109,8 +112,6 @@ struct VitaSetup {
       }
     }
   }
-};
-
-VitaSetup s_setup;
+}
 
 } // namespace

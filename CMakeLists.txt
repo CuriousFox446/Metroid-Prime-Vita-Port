@@ -634,6 +634,12 @@ if(VITA)
     # Heap and stack sizes, clocks, and where the disc and saves live (ux0:data).
     target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp)
     target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
+    # libstdc++ calls pthreads through weak references and treats threading as off
+    # when pthread_cancel is missing; nothing references that (or pthread_once)
+    # strongly, so from a static libpthread they were never linked, and the first
+    # std::call_once threw system_error(-1) before main (the first crash on
+    # hardware). Link all of it.
+    target_link_libraries(metroid_prime_port PRIVATE "-Wl,--whole-archive" pthread "-Wl,--no-whole-archive")
     include("${VITASDK}/share/vita.cmake" REQUIRED)
     set(MP_VITA_TITLEID "MPPT00001" CACHE STRING "Vita title ID (4 letters, 5 digits)")
     vita_create_self(eboot.bin metroid_prime_port UNSAFE)
