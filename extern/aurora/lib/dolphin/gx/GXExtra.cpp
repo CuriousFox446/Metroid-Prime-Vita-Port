@@ -510,6 +510,11 @@ u64 GXPortDrawShader(u32 serial) { return aurora::gx::draw_shader_hash(serial); 
 
 GXBool GXPortShaderOverridden(u64 hash) { return aurora::gx::shader_overridden(hash) ? GX_TRUE : GX_FALSE; }
 
+void GXPortVfxCaptureScene(void) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_VFX_CAPTURE_SCENE);
+  aurora::gx::fifo::publish();
+}
+
 void GXCopyProbeFace(u32 face) {
   GX_WRITE_AURORA(GX_AURORA_COPY_PROBE_FACE);
   GX_WRITE_U8(static_cast<u8>(face));

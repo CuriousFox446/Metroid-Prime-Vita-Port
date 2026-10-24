@@ -69,6 +69,9 @@ u32 GXPortCopySerial(void);
 // for it (AuroraConfig::residentGeometryMiB), it is sent every frame as before.
 void GXPortRetainResident(const void* data, u32 size);
 void GXPortReleaseResident(const void* data);
+// Aurora extension: queues the VFX opaque scene copy (aurora::gfx::vfx::capture_scene) at this
+// point of the FIFO (GX_AURORA_PORT_VFX_CAPTURE_SCENE).
+void GXPortVfxCaptureScene(void);
 // Aurora extension: the PBR environment probe (see GX_AURORA_COPY_PROBE_FACE and
 // GX_AURORA_SET_PBR_PROBE).
 void GXCopyProbeFace(u32 face);

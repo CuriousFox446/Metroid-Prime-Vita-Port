@@ -120,6 +120,17 @@ thread, per frame, by call site; `tools/vita_drain_sites.sh <log>` names the sit
 the same build's ELF (`build/vita/metroid_prime_port`). Removing the waits alone cannot
 beat the FIFO thread's own time per frame, which is the ceiling until it does less.
 
+On hardware, the hangar's heavy seconds (1,500 draws or more) went from 8.6 to 9.5 FPS
+throughput, the FIFO thread's `process` from about 72 to 63 ms a frame, and the heap to
+about 140 MiB. `[ops]` then showed about 12,800 commands a frame: about 1,770 resident
+calls, 1,740 draw tags (one a surface now), 1,640 texture loads and about 6,500 array
+bases (eleven arrays per model draw). Of the two drains, one is `end_frame`'s; the other
+was `vfx::capture_scene`, Remastered's opaque scene copy in the middle of the world draw,
+which waited up to 32 ms a frame for the FIFO thread to catch up. The copy reads the
+recorder that the FIFO thread owns, so it is now a FIFO command
+(`GX_AURORA_PORT_VFX_CAPTURE_SCENE`) made where the FIFO thread reaches it, and the
+game no longer waits there. The VFX draws that read the copy still drain first.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because

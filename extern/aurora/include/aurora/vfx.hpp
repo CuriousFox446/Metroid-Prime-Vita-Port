@@ -247,6 +247,9 @@ void draw_triangles(const DrawDesc& desc, const Vertex* verts, uint32_t triCount
 // scene, else the RGBA8 display copy) for the later draws of this frame to read, at one pass break.
 // Call once per frame from the game thread. Draws of a frame without a copy, before it, or into
 // another target (an offscreen pass) bind 1x1 dummies, do no DepthSoften and draw no SceneWarp.
+// It goes into the GX FIFO, so the game does not wait for what was drawn before it.
 void capture_scene();
+// The copy itself, on the FIFO thread (GX_AURORA_PORT_VFX_CAPTURE_SCENE).
+void capture_scene_now();
 void shutdown();
 } // namespace aurora::gfx::vfx

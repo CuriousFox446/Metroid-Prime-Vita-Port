@@ -25,6 +25,7 @@
 #include <tracy/Tracy.hpp>
 
 #include <aurora/gfx.h>
+#include <aurora/vfx.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -1441,6 +1442,8 @@ void handle_aurora(ByteReader& reader) noexcept {
         Log.warn("GX_AURORA_PORT_SCENE_HDR: switch to {} refused", value);
       }
     }
+  } else if (subCmd == GX_AURORA_PORT_VFX_CAPTURE_SCENE) {
+    gfx::vfx::capture_scene_now();
   } else if (subCmd == GX_AURORA_PORT_COPY_SCENE) {
     const u8 value = reader.read<u8>();
     if (value > 1) {
