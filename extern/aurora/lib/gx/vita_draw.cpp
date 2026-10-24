@@ -19,15 +19,55 @@ namespace aurora::gx::vita {
 namespace {
 constexpr Module Log{"aurora::gx::vita"};
 
-// A list's decoded triangles, and what they were decoded with: the same list called with other
-// arrays or vertex formats is decoded again.
+// The GX state a decode read: the vertex descriptor, the vertex formats the list's primitives
+// name, and the position and colour arrays. The same list called with other state is decoded
+// again; formats the list does not use change all the time (the HUD, particles) and do not count.
+struct DecodeState {
+  std::array<GXAttrType, MaxVtxAttr> vtxDesc{};
+  u8 fmtMask = 0;
+  std::array<VtxFmt, MaxVtxFmt> vtxFmts{}; // only those in fmtMask are compared
+  std::array<AttrArray, 2> arrays{};       // GX_VA_POS, GX_VA_CLR0
+
+  bool matches_current() const noexcept {
+    if (vtxDesc != g_gxState.vtxDesc) {
+      return false;
+    }
+    for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
+      if ((fmtMask & (1u << fmt)) != 0 &&
+          std::memcmp(&vtxFmts[fmt], &g_gxState.vtxFmts[fmt], sizeof(VtxFmt)) != 0) {
+        return false;
+      }
+    }
+    // An array counts only when the descriptor indexes it.
+    constexpr GXAttr attrs[2] = {GX_VA_POS, GX_VA_CLR0};
+    for (int i = 0; i < 2; ++i) {
+      if (vtxDesc[attrs[i]] != GX_INDEX8 && vtxDesc[attrs[i]] != GX_INDEX16) {
+        continue;
+      }
+      const AttrArray* current = &g_gxState.arrays[attrs[i]];
+      if (arrays[i].data != current->data || arrays[i].stride != current->stride ||
+          arrays[i].baseIndex != current->baseIndex) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+// A list's decoded triangles, and the state they were decoded with. A list can be called in a
+// few states in turn (one model's lists under two vertex formats), so a few are kept.
 struct Cached {
   std::shared_ptr<vita_gl::Mesh> mesh; // null: the list cannot be drawn this way
-  const void* posArray = nullptr;
-  std::array<GXAttrType, MaxVtxAttr> vtxDesc{};
-  std::array<VtxFmt, MaxVtxFmt> vtxFmts{};
+  DecodeState state;
 };
-std::unordered_map<const void*, Cached> sCache;
+constexpr size_t kVariantsPerList = 4;
+struct CachedList {
+  std::array<Cached, kVariantsPerList> variants;
+  size_t count = 0;
+  size_t nextReplace = 0;
+  size_t newest = 0;
+};
+std::unordered_map<const void*, CachedList> sCache;
 
 // For log_stats: what became of the calls since the last report, and why lists were not drawn.
 struct Stats {
@@ -39,6 +79,10 @@ struct Stats {
   u32 failArray = 0;
   u32 failCommand = 0;
   u32 failEmpty = 0;
+  // Decodes of a list already cached, by what differed from its newest variant.
+  u32 redecodeDesc = 0;
+  u32 redecodeFmt = 0;
+  u32 redecodeArray = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -199,8 +243,9 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
   }
 }
 
-// The list's triangles, or none when it holds anything this path cannot draw yet.
-std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size) noexcept {
+// The list's triangles, or none when it holds anything this path cannot draw yet; fmtMask gets
+// the vertex formats it read.
+std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size, u8& fmtMask) noexcept {
   std::vector<vita_gl::Vertex> triangles;
   std::vector<vita_gl::Vertex> prim;
   size_t pos = 0;
@@ -215,6 +260,7 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size)
       return {};
     }
     const auto fmt = static_cast<GXVtxFmt>(cmd & GX_VAT_MASK);
+    fmtMask |= static_cast<u8>(1u << fmt);
     const auto type = static_cast<GXPrimitive>(cmd & GX_OPCODE_MASK);
     const u16 count = static_cast<u16>((bytes[pos] << 8) | bytes[pos + 1]);
     pos += 2;
@@ -262,13 +308,60 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size)
   return triangles;
 }
 
-bool same_formats(const Cached& cached) noexcept {
-  return cached.posArray == g_gxState.arrays[GX_VA_POS].data && cached.vtxDesc == g_gxState.vtxDesc &&
-         std::memcmp(cached.vtxFmts.data(), g_gxState.vtxFmts.data(), sizeof(cached.vtxFmts)) == 0;
+// The list's entry for the current state, decoding it into a new or the oldest variant when
+// none matches.
+const Cached& lookup(const void* key, const resident::Entry& entry, u32 size) noexcept {
+  CachedList& list = sCache[key];
+  for (size_t i = 0; i < list.count; ++i) {
+    if (list.variants[i].state.matches_current()) {
+      return list.variants[i];
+    }
+  }
+  ZoneScopedN("vita: decode a display list");
+  if (list.count != 0) {
+    DecodeState formatsOnly = list.variants[list.newest].state;
+    if (formatsOnly.vtxDesc != g_gxState.vtxDesc) {
+      ++sStats.redecodeDesc;
+    } else {
+      formatsOnly.arrays = {g_gxState.arrays[GX_VA_POS], g_gxState.arrays[GX_VA_CLR0]};
+      ++(formatsOnly.matches_current() ? sStats.redecodeArray : sStats.redecodeFmt);
+    }
+  }
+  list.newest = list.count < kVariantsPerList ? list.count++ : list.nextReplace++ % kVariantsPerList;
+  Cached& cached = list.variants[list.newest];
+  sLastFail = Fail::None;
+  DecodeState& state = cached.state;
+  state.fmtMask = 0;
+  std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size, state.fmtMask);
+  if (triangles.empty()) {
+    switch (sLastFail) {
+    case Fail::MatrixIndex:
+      ++sStats.failMatrixIndex;
+      break;
+    case Fail::Array:
+      ++sStats.failArray;
+      break;
+    case Fail::Command:
+      ++sStats.failCommand;
+      break;
+    default:
+      ++sStats.failEmpty;
+      break;
+    }
+  } else {
+    ++sStats.decoded;
+  }
+  cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles));
+  state.vtxDesc = g_gxState.vtxDesc;
+  for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
+    state.vtxFmts[fmt] = (state.fmtMask & (1u << fmt)) != 0 ? g_gxState.vtxFmts[fmt] : VtxFmt{};
+  }
+  state.arrays = {g_gxState.arrays[GX_VA_POS], g_gxState.arrays[GX_VA_CLR0]};
+  return cached;
 }
 } // namespace
 
-void draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
+bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
   ZoneScoped;
   ++sStats.calls;
   // Positions made at run time (CPU skinning) change under the same list: not drawn yet. The
@@ -276,38 +369,11 @@ void draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   // order; a workspace the game rewrites each frame is not.
   if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
     ++sStats.nativePositions;
-    return;
+    return false;
   }
-  Cached& cached = sCache[key];
-  if (!same_formats(cached)) {
-    ZoneScopedN("vita: decode a display list");
-    sLastFail = Fail::None;
-    std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size);
-    if (triangles.empty()) {
-      switch (sLastFail) {
-      case Fail::MatrixIndex:
-        ++sStats.failMatrixIndex;
-        break;
-      case Fail::Array:
-        ++sStats.failArray;
-        break;
-      case Fail::Command:
-        ++sStats.failCommand;
-        break;
-      default:
-        ++sStats.failEmpty;
-        break;
-      }
-    } else {
-      ++sStats.decoded;
-    }
-    cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles));
-    cached.posArray = g_gxState.arrays[GX_VA_POS].data;
-    cached.vtxDesc = g_gxState.vtxDesc;
-    cached.vtxFmts = g_gxState.vtxFmts;
-  }
+  const Cached& cached = lookup(key, entry, size);
   if (!cached.mesh) {
-    return;
+    return false;
   }
   vita_gl::Draw draw{.mesh = cached.mesh};
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
@@ -322,6 +388,7 @@ void draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   }
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
+  return true;
 }
 
 void release(const void* key) noexcept { sCache.erase(key); }
@@ -329,10 +396,11 @@ void release(const void* key) noexcept { sCache.erase(key); }
 void log_stats() noexcept {
   const Stats& s = sStats;
   Log.info("lists: {} calls, {} recorded, {} with positions not retained; decoded {}, not drawable {} "
-           "(matrix index {}, array {}, command {}, empty {}); {} cached",
+           "(matrix index {}, array {}, command {}, empty {}); decoded again for a changed vertex descriptor {}, "
+           "vertex format {}, array {}; {} cached",
            s.calls, s.recorded, s.nativePositions, s.decoded,
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
-           s.failCommand, s.failEmpty, sCache.size());
+           s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeFmt, s.redecodeArray, sCache.size());
   sStats = {};
 }
 } // namespace aurora::gx::vita

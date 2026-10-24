@@ -871,10 +871,10 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
     Log.error("GX_AURORA_RESIDENT_CALL_DL: {} is not retained with {} bytes", key, size);
     return;
   }
-  if (vita_gl::active()) {
-    // The Vita's own draw of it (vita_draw.hpp); the WebGPU one below still runs, into the
-    // null device, until the Vita path stands on its own.
-    vita::draw_resident(key, *entry, size);
+  if (vita_gl::active() && vita::draw_resident(key, *entry, size)) {
+    // Drawn by the Vita path (vita_draw.hpp). The WebGPU draw below would only feed the null
+    // device; lists the Vita path cannot draw yet still go there.
+    return;
   }
   if (!entry->chunks.empty()) {
     // Parsed with other vertex sizes: what the vertices are has changed since.

@@ -9,14 +9,14 @@
 
 namespace aurora::gx::vita {
 #ifdef AURORA_VITA_GL
-// A call of a retained display list (call_resident_dl).
-void draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept;
+// A call of a retained display list (call_resident_dl); false when this path cannot draw it.
+bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept;
 // The list was released (GX_AURORA_RESIDENT_RELEASE): its decoded triangles go.
 void release(const void* key) noexcept;
 // Logs what became of the calls since the last call (FIFO thread, at a frame end).
 void log_stats() noexcept;
 #else
-inline void draw_resident(const void*, const resident::Entry&, u32) noexcept {}
+inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline void release(const void*) noexcept {}
 inline void log_stats() noexcept {}
 #endif

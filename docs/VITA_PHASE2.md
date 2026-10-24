@@ -81,7 +81,7 @@ Second run: vitaGL up at 960x544, 4 minutes without errors, the hangar's heavy s
 16.0 FPS (15.6 before); begin-wait rose from about 4 to 11 ms (the swap's wait for vblank
 holding a frame slot, most likely).
 
-**Milestone 2 (built, not yet run on the Vita).** `lib/gx/vita_draw.cpp`, on the FIFO
+**Milestone 2 (done; on the Vita).** `lib/gx/vita_draw.cpp`, on the FIFO
 thread: each call of a retained display list (`call_resident_dl`) decodes the list once
 (positions and colour 0 from the arrays or the list, any primitive type made into
 triangles, a face normal per triangle), caches it by the list and the arrays and vertex
@@ -114,3 +114,20 @@ The bigger binary first failed to package: `vita-elf-create` appends the module'
 export tables (4,660 bytes) to the end of the code segment, and only 1,656 bytes were left
 before the data segment. `-Wl,--defsym,__sce_headroom=0x10000` makes VitaSDK's linker
 script keep room there.
+
+Third run (c3783cf): the hangar on screen. Walls, tunnels, doors, the ship's surroundings and
+the arm cannon and visor frame, grey-shaded, in perspective and depth tested, with the test
+triangle in the corner. Up to about 1,750 retained list calls a frame, nearly all drawn (the
+rest have run-time positions); 1,749 lists cached. But the hangar's heavy seconds fell to
+8.9 FPS (15.6 in Phase 1), the game thread waiting about 52 ms a frame for the FIFO thread,
+which spent about 55 ms a frame in `vita::draw_resident`: in those seconds about 84 lists a
+frame were decoded again. A list's cache entry compared all eight GX vertex formats, and the
+HUD and particles change the ones a world list never uses. The render worker drew about
+1,250 draws in about 14 ms a frame.
+
+So a list's decode now remembers only what it read (the vertex descriptor, the formats its
+primitives name, and the position and colour arrays when indexed), keeps up to four such
+variants, and the log counts any decode of a list already cached by what changed. A list the
+Vita path has drawn no longer also goes through the WebGPU path into the null device (about
+45 ms a frame of the FIFO thread's time in the same seconds); lists it cannot draw yet still
+do.

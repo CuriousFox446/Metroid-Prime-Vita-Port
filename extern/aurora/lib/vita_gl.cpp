@@ -89,13 +89,17 @@ std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept {
 void record(Draw draw) noexcept { g_recording.push_back(std::move(draw)); }
 
 void end_frame_draws() noexcept {
-  std::lock_guard lock{g_framesMutex};
-  g_frames.push_back(std::move(g_recording));
-  g_recording = {};
-  // A frame the render worker never presented must not hold on to its meshes for good.
-  while (g_frames.size() > 3) {
-    g_frames.pop_front();
+  const size_t drawn = g_recording.size();
+  {
+    std::lock_guard lock{g_framesMutex};
+    g_frames.push_back(std::move(g_recording));
+    // A frame the render worker never presented must not hold on to its meshes for good.
+    while (g_frames.size() > 3) {
+      g_frames.pop_front();
+    }
   }
+  g_recording = {};
+  g_recording.reserve(drawn);
 }
 
 namespace {
