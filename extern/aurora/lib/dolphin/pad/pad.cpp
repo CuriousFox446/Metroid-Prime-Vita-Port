@@ -502,6 +502,13 @@ static void UnbindMissingTriggerClick(aurora::input::GameController* controller)
 
 void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */
 {
+#ifdef __vita__
+  // The Vita's pad (SDL calls it a standard one) has no analog triggers, so the standard layout
+  // left L and R on axes that never move and Z on the R button. Its shoulders become L (lock on)
+  // and R (free look), and Z (the map) goes on Select, as on the NSO GameCube pad.
+  controller->m_buttonMapping = g_defaultButtonsNSOGamecube;
+  return;
+#endif
   switch (SDL_GetGamepadType(controller->m_controller)) {
   case SDL_GAMEPAD_TYPE_XBOX360:
     controller->m_buttonMapping = g_defaultButtonsXBox360;

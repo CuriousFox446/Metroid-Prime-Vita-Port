@@ -131,3 +131,14 @@ variants, and the log counts any decode of a list already cached by what changed
 Vita path has drawn no longer also goes through the WebGPU path into the null device (about
 45 ms a frame of the FIFO thread's time in the same seconds); lists it cannot draw yet still
 do.
+
+Fourth run (8583a7c): no list decoded again all run, and the seconds with 1,500 or more list
+calls a frame at 20.5 FPS (15.6 in Phase 1, 8.8 the run before). The game thread no longer
+waits (begin-wait 0.9 ms); the FIFO thread spends about 22 ms a frame on the lists (15 ms of
+it in `draw_resident`, about 9 µs a call) and the render worker about 11 ms. The game's own
+tick and draw (about 19 and 28 ms) are now the frame.
+
+Controls: SDL calls the Vita's pad a standard one, whose default layout put Z on R and L and R
+on analog triggers the Vita does not have, so L never locked on. On the Vita the default is now
+the NSO GameCube pad's layout: L and R on the shoulders, Z on Select. Select + Start still opens
+the overlay, and no longer opens the map as well.
