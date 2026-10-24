@@ -15,6 +15,7 @@
 #include "gx/texture.hpp"
 #include "imgui.hpp"
 #include "io.hpp"
+#include "vita_gl.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
 #include <webgpu/webgpu_cpp.h>
@@ -305,8 +306,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     std::exit(1);
   }
 
-  // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend
-  if (webgpu::g_backendType == wgpu::BackendType::Null) {
+  // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend. The Vita draws through
+  // vitaGL instead (vita_gl.hpp): SDL's renderer there is GXM too, and two GXM users clash.
+  if (webgpu::g_backendType == wgpu::BackendType::Null && !vita_gl::initialize()) {
     AURORA_ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
   }
 #else

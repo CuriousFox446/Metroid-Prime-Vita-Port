@@ -58,3 +58,14 @@ Each ends with a run on the Vita.
    vitaGL's per-draw cost shows.
 
 Phase 1's profile stays in the log throughout, so each step shows its cost.
+
+## Status
+
+**Milestone 1 (built, not yet run on the Vita).** `extern/aurora/lib/vita_gl.cpp` starts
+vitaGL at 960x544 in place of SDL's renderer (`aurora.cpp`), with its fixed-function
+shader cache in `ux0:data/MetroidPrime/vitagl_shader_cache` and 32 MiB of RAM left to the
+system. The render worker clears every frame to dark blue, draws the overlay with ImGui's
+OpenGL 2 backend (its `GL/gl.h` is vitaGL's, `platforms/vita/vitagl_shim`) and swaps; the
+font atlas is built on the game thread and uploaded on the render worker. ImGui images
+(`aurora_imgui_add_texture`) are made there too. The game's GX draws still go to the null
+WebGPU, so the screen shows only the blue and the overlay.

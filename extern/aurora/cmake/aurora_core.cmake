@@ -30,6 +30,12 @@ if (VITA)
     # The zone profiler (Tracy's zones go to it on the Vita; the game's PORT_ZONE too).
     target_sources(aurora_core PRIVATE platforms/vita/profile/zone_profile.cpp)
     target_include_directories(aurora_core PUBLIC platforms/vita/profile)
+    # The screen through vitaGL (lib/vita_gl.hpp, docs/VITA_PHASE2.md); vitaGL comes with VitaSDK.
+    target_sources(aurora_core PRIVATE lib/vita_gl.cpp)
+    target_compile_definitions(aurora_core PRIVATE AURORA_VITA_GL)
+    target_link_libraries(aurora_core PUBLIC
+            vitaGL vitashark SceShaccCgExt mathneon taihen_stub SceShaccCg_stub SceKernelDmacMgr_stub
+            SceGxm_stub SceDisplay_stub SceAppMgr_stub SceCommonDialog_stub SceIme_stub SceSysmodule_stub)
 endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)

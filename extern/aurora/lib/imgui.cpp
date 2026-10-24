@@ -15,6 +15,7 @@
 
 #include "internal.hpp"
 #include "gfx/render_worker.hpp"
+#include "vita_gl.hpp"
 #include "webgpu/gpu.hpp"
 #include "window.hpp"
 
@@ -102,6 +103,13 @@ void create_context() noexcept {
 
 void initialize() noexcept {
   ZoneScoped;
+  if (vita_gl::active()) {
+    // The Vita draws through vitaGL; SDL only brings the window and its events.
+    ImGui_ImplSDL3_InitForOther(window::get_sdl_window());
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
+    vita_gl::init_imgui();
+    return;
+  }
   SDL_Renderer* renderer = window::get_sdl_renderer();
   ImGui_ImplSDL3_InitForSDLRenderer(window::get_sdl_window(), renderer);
   // The application feeds the gamepad keys itself (it knows which pad is the
@@ -122,7 +130,9 @@ void initialize() noexcept {
 
 void shutdown() noexcept {
   ZoneScoped;
-  if (g_useSdlRenderer) {
+  if (vita_gl::active()) {
+    vita_gl::shutdown_imgui();
+  } else if (g_useSdlRenderer) {
     ImGui_ImplSDLRenderer3_Shutdown();
   } else {
     ImGui_ImplWGPU_Shutdown();
@@ -179,7 +189,17 @@ void new_frame(const AuroraWindowSize& size) noexcept {
   };
   ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
 
-  if (g_useSdlRenderer) {
+  if (vita_gl::active()) {
+    // The atlas is built here; its texture is made on the render worker (vita_gl::present).
+    ImFontAtlas* fonts = ImGui::GetIO().Fonts;
+    if (g_scale != size.scale || !fonts->IsBuilt()) {
+      if (!fonts->IsBuilt()) {
+        fonts->Build();
+      }
+      vita_gl::fonts_changed();
+      g_scale = size.scale;
+    }
+  } else if (g_useSdlRenderer) {
     if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
       float renderScaleX = 1.0f;
       float renderScaleY = 1.0f;
@@ -241,6 +261,11 @@ DrawData freeze() noexcept {
 void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexcept {
   ZoneScoped;
 
+  if (vita_gl::active()) {
+    // Every frame clears and swaps, overlay or not.
+    vita_gl::present(drawData.m_impl ? &drawData.m_impl->drawData : nullptr);
+    return;
+  }
   if (g_useSdlRenderer) {
     // Without a WebGPU device ImGui is all that reaches the screen, so when it stops
     // drawing (a menu just closed) one cleared frame has to replace its last one, or
@@ -272,6 +297,9 @@ void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexc
 }
 
 ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) noexcept {
+  if (vita_gl::active()) {
+    return vita_gl::add_texture(width, height, data);
+  }
   if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, width, height);
     SDL_UpdateTexture(texture, nullptr, data, width * 4);
@@ -321,6 +349,10 @@ ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) no
 }
 
 void remove_texture(ImTextureID id) noexcept {
+  if (vita_gl::active()) {
+    vita_gl::remove_texture(id);
+    return;
+  }
   if (g_useSdlRenderer || window::get_sdl_renderer() != nullptr) {
     const auto found = std::find(g_sdlTextures.begin(), g_sdlTextures.end(), reinterpret_cast<SDL_Texture*>(id));
     if (found != g_sdlTextures.end()) {

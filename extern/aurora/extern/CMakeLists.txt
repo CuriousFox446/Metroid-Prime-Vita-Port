@@ -272,6 +272,17 @@ if (AURORA_ENABLE_GX)
     )
     target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
     target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
+    if (VITA)
+      # The overlay through vitaGL (lib/vita_gl.hpp): ImGui's OpenGL 2 backend, whose GL/gl.h
+      # is vitaGL's.
+      target_sources(imgui_backends PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+      target_include_directories(imgui_backends PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/vitagl_shim)
+      # After this archive on the link line, or the GL calls only it makes stay unresolved; and
+      # vitaGL's own dependencies after vitaGL (as in cmake/aurora_core.cmake).
+      target_link_libraries(imgui_backends PRIVATE
+        vitaGL vitashark SceShaccCgExt mathneon taihen_stub SceShaccCg_stub SceKernelDmacMgr_stub
+        SceGxm_stub SceDisplay_stub SceAppMgr_stub SceCommonDialog_stub SceIme_stub SceSysmodule_stub)
+    endif ()
     target_link_libraries(imgui PUBLIC imgui_backends)
 
     if (TARGET Freetype::Freetype)
