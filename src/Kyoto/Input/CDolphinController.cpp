@@ -2,6 +2,7 @@
 #include "port_console.h"
 #include "port_debug.h"
 #include "port_freecam.h"
+#include "port_profile.h"
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
@@ -115,7 +116,10 @@ void CDolphinController::ReadDevices() {
   const PortInputDevices::SPoll devices = PortInputDevices::Poll(held, inputFocused);
   PADSetPortOverride(0, &devices.status);
   PADStatus status[4]{};
-  PADRead(status);
+  {
+    PORT_ZONE_TIMED("input: PADRead");
+    PADRead(status);
+  }
   PADClamp(status);
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear

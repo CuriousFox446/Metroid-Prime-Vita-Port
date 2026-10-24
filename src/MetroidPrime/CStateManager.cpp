@@ -1436,21 +1436,7 @@ void CStateManager::Think(float dt) {
         }
 
         if (camList->GetObjectById(ent->GetUniqueId()) == nullptr) {
-#ifdef TARGET_PC
-          // The profile splits the entities' Think three ways (port_profile.h; empty elsewhere).
-          if (ent == x84c_player) {
-            PORT_ZONE_TIMED("SM: Think: player");
-            ent->Think(dt, *this);
-          } else if (patterned != nullptr) {
-            PORT_ZONE_TIMED("SM: Think: AI (CPatterned)");
-            ent->Think(dt, *this);
-          } else {
-            PORT_ZONE_TIMED("SM: Think: other entities");
-            ent->Think(dt, *this);
-          }
-#else
           ent->Think(dt, *this);
-#endif
         }
       }
     }

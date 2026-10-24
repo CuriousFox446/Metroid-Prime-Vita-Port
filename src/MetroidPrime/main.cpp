@@ -16,6 +16,7 @@
 #include <SDL3/SDL_timer.h>
 
 #include "port_debug.h"
+#include "port_input_devices.h"
 #include "port_photo.h"
 #include "port_pointer.h"
 #include "port_savestate.h"
@@ -1132,6 +1133,8 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // Port: swap the HD texture set if the active controller changed, and
       // re-icon the prompts if a binding changed.
       PortTextures::Poll();
+      // The ticks below poll the pad once each: the controls profile is built once a frame.
+      PortInputDevices::BeginFrame();
       PortPrompts::Poll();
       const uint64_t inputDoneNs = SDL_GetTicksNS();
       // Port: run ARAM transfer callbacks completed by Aurora's ARQ.

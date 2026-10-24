@@ -7,6 +7,7 @@
 #include "port_paths.h"
 #include "port_photo.h"
 #include "port_pointer.h"
+#include "port_profile.h"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/Player/CPlayerGun.hpp"
@@ -57,6 +58,10 @@ uint64_t sUserVersion = 0;
 bool sUserLoaded = false;
 std::filesystem::file_time_type sUserTime{};
 std::chrono::steady_clock::time_point sUserChecked{};
+
+// BeginFrame's count, which Poll builds its profile once per value of (0: no frames
+// counted, so every poll builds it).
+uint64_t sFrame = 0;
 
 // Touch overlay controls held now (codes 0..kTouchControlCount-1, and the added
 // buttons' from kTouchCustomBase), set from Android's UI thread.
@@ -1129,26 +1134,42 @@ PADStatus Synthesize(const PortInput::Output& out) {
   return s;
 }
 
+void BeginFrame() { ++sFrame; }
+
 SPoll Poll(unsigned mouseHeld, bool focused) {
+  PORT_ZONE_TIMED("input: PortInputDevices::Poll");
   static Profile sProfile;
   static PortInput::Runtime sRuntime;
   static bool sInit = false;
   static double sClockMs = 0.0;
+  static uint64_t sProfileFrame = 0;
 
-  Profile next;
-  BuildProfile(next);
-  ApplyMenuButtons(next);
-  if (!sInit || next != sProfile) {
-    UpdatePromptBindings(next);
-    sProfile = std::move(next);
-    sRuntime.SetProfile(&sProfile);
-    sInit = true;
+  // The game polls once a tick, several times a frame when ticks catch up; nothing the
+  // profile is built from changes between them, and building it (the default mappings,
+  // the user's bindings, the menu rows) and comparing it cost a Vita about 2.7 ms a
+  // poll. So it is built once a frame (BeginFrame), or every poll without frames.
+  if (!sInit || sFrame == 0 || sProfileFrame != sFrame) {
+    PORT_ZONE_TIMED("input: build the controls profile");
+    sProfileFrame = sFrame;
+    Profile next;
+    BuildProfile(next);
+    ApplyMenuButtons(next);
+    if (!sInit || next != sProfile) {
+      UpdatePromptBindings(next);
+      sProfile = std::move(next);
+      sRuntime.SetProfile(&sProfile);
+      sInit = true;
+    }
   }
 
   PortInput::RawState raw;
-  FillRawState(raw, mouseHeld, focused);
+  {
+    PORT_ZONE_TIMED("input: read the devices");
+    FillRawState(raw, mouseHeld, focused);
+  }
   sClockMs += static_cast< double >(PortDebug::TickPeriod()) * 1000.0;
   const uint16_t contexts = GameContexts();
+  PORT_ZONE_TIMED("input: bindings engine");
   const PortInput::Output& out =
       sRuntime.Poll(raw, contexts, sClockMs, QuietContexts(sRuntime.ActiveContexts(), contexts));
   SPoll r;

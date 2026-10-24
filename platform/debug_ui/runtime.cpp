@@ -87,14 +87,27 @@ struct WorldSweep {
 } sWorldSweep;
 } // namespace
 
+// Smooth frames blend each drawn frame between the last two ticks, which needs every tick
+// to snapshot the actors, poses and particles. On the Vita frames come slower than ticks
+// (three or four ticks a frame), so the blend shows nothing and the snapshots cost about
+// 0.5 ms a tick: off there unless MP_SMOOTH_FRAMES=1.
+static bool SmoothFramesAllowed() {
+#ifdef __vita__
+  static const bool allowed = port::EnvFlag("MP_SMOOTH_FRAMES", false);
+  return allowed;
+#else
+  return true;
+#endif
+}
+
 bool FrameInterpolation() {
   EnsureInitialized();
-  return sFrameInterpolation && !sOriginalExperience;
+  return sFrameInterpolation && !sOriginalExperience && SmoothFramesAllowed();
 }
 
 bool SmoothFrames() {
   EnsureInitialized();
-  return sSmoothFrames && !sOriginalExperience;
+  return sSmoothFrames && !sOriginalExperience && SmoothFramesAllowed();
 }
 
 void SetSmoothFrames(bool enabled) {
@@ -106,7 +119,7 @@ void SetSmoothFrames(bool enabled) {
 
 bool ActorInterpolation() {
   EnsureInitialized();
-  return sActorInterpolation && !sOriginalExperience;
+  return sActorInterpolation && !sOriginalExperience && SmoothFramesAllowed();
 }
 
 void SetActorInterpolation(bool enabled) {
@@ -116,7 +129,7 @@ void SetActorInterpolation(bool enabled) {
 
 bool PoseInterpolation() {
   EnsureInitialized();
-  return sPoseInterpolation && !sOriginalExperience;
+  return sPoseInterpolation && !sOriginalExperience && SmoothFramesAllowed();
 }
 
 void SetPoseInterpolation(bool enabled) {
@@ -149,7 +162,7 @@ bool RoomGeoResidentAtStartup() {
 
 bool ParticleInterpolation() {
   EnsureInitialized();
-  return sParticleInterpolation && !sOriginalExperience;
+  return sParticleInterpolation && !sOriginalExperience && SmoothFramesAllowed();
 }
 
 void SetParticleInterpolation(bool enabled) {

@@ -43,6 +43,9 @@ struct SPoll {
 // changed, runs the engine and synthesises the status. mouseHeld: the held mouse
 // buttons (SDL mask order); focused: the window takes input.
 SPoll Poll(unsigned mouseHeld, bool focused);
+// The main loop's frame boundary: Poll then builds its profile once a frame instead of
+// once a poll (once a tick). Without any call it builds it every poll.
+void BeginFrame();
 
 // Runs the port's own actions (port menu, save/load state, screenshot, Original
 // experience) from their bindings; called once a frame from the overlay update.

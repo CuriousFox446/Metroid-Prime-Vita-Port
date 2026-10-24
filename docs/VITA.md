@@ -159,6 +159,20 @@ touches, Think, camera, world, sounds, area streaming), with Think split into th
 animation (`CAnimData::DoAdvance`, `AdvanceParticles`) are counted across all of them. Around
 the ticks: `ARQPoll + AIPortPoll`, `AsyncIdlePakLoading`, `ARAM garbage + DMAs`.
 
+On hardware the ticks took about 39 ms a heavy frame (3.8 ticks): `SM::Update` about 26
+(entity Think 11, with about 950 entities thinking a tick and particle updates of 3 to 12
+ms inside; touches 3.3, platforms and doors 2.2, actor snapshots 2.0, PreThink 1.7, sorted
+lists 1.5), the HUD 2.6, and the input generator 10.2: about 2.7 ms a tick in the port's
+input engine, which rebuilt and compared the whole controls profile on every poll. Now:
+
+- the controls profile is built once a frame (`PortInputDevices::BeginFrame` from the main
+  loop), not once a tick; the input zones (`input: ...`) split what is left;
+- smooth frames (actor, pose and particle interpolation between ticks) are off on the Vita
+  unless `MP_SMOOTH_FRAMES=1`: frames come slower than ticks there, so the blend shows
+  nothing and its snapshots cost every tick;
+- the per-entity Think zones are gone again (2,000 to 3,600 entries a frame distorted the
+  times); `SM: Think (all entities)` stays.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
