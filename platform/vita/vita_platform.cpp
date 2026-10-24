@@ -113,6 +113,10 @@ __attribute__((constructor(101))) void vitaSetup() {
     // second, and boot straight into a new game, since the menus cannot be seen.
     setenv("MP_TRACE_TIMING", "1", 0);
     setenv("MP_FAST_BOOT", "1", 0);
+    // Nothing can show or answer a box here: no disc dialog or message boxes, and
+    // Aurora keeps running on its Null backend instead of exiting (which a missing
+    // GPU means on a desktop, and is the point of this build).
+    setenv("MP_NO_DISC_DIALOG", "1", 0);
     const char* disc = std::getenv("MP_DISC");
     if (disc == nullptr || disc[0] == '\0') {
       const std::string found = findDisc();
