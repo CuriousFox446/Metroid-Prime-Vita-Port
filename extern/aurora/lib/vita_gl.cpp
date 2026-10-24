@@ -201,6 +201,20 @@ constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aUv0"
 // vitaGL takes for GLSL, translated at glLinkProgram, VGL_MODE_POSTPONED: Cg source failed there and
 // left an invalid program glLinkProgram read, the crash of milestone 2's first program.)
 bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t>& gxp, std::string& error) {
+  // vitaGL starts the compiler (shark_init, with its own allocators) at the first glCompileShader,
+  // and only there; called before it, the compiler fails with "fatal internal error" (every
+  // program of a session whose fixed-function shaders all came from vitaGL's cache). So the first
+  // compile goes through glCompileShader once, with a shader that is thrown away.
+  static bool sCompilerStarted = false;
+  if (!sCompilerStarted) {
+    sCompilerStarted = true;
+    const GLuint starter = glCreateShader(GL_CG_FRAGMENT_SHADER_EXT);
+    const char* text = "float4 main() : COLOR { return float4(1.0); }";
+    const auto length = static_cast<GLint>(std::strlen(text));
+    glShaderSource(starter, 1, &text, &length);
+    glCompileShader(starter);
+    glDeleteShader(starter);
+  }
   uint32_t size = 0;
   const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
   if (program == nullptr || size == 0) {

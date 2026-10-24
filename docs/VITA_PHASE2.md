@@ -413,3 +413,11 @@ the `GL_CG_*` types; `vglGetShaderBinary` was no use for this: it writes vitaGL'
 sizes) and is written aside and renamed, so a file cut short is never read; binaries that no
 longer link are removed for a compile next time. Loads have their own budget (eight a frame) apart
 from compiles (one), and the log gives the programs loaded from the card and the time they took.
+
+Its run (685daf0): every compile failed at once, "the Cg compiler failed; fatal internal error",
+so nothing was saved and every draw went fixed-function. vitaGL starts the compiler
+(`start_shader_compiler`: `shark_set_allocators`, `shark_init`) only inside `glCompileShader`,
+at the first compile it is needed for; this session's fixed-function shaders all came from its
+shader cache, so nothing had started it when vitashark was called directly. The first compile now
+goes through `glCompileShader` once, with a throwaway shader, so vitaGL starts the compiler its
+own way.
