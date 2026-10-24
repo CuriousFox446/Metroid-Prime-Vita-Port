@@ -572,18 +572,29 @@ bool CGameArchitectureSupport::UpdateTicks() {
       }
       break;
     }
+    PORT_ZONE_TIMED("tick");
     PortDebug::BeginFrameMouse();
     // A tick that doesn't reach CStateManager::Update (paused) leaves every
     // actor's snapshot stale, so actors don't blend between old transforms.
-    CActor::PortBeginTickSnapshot();
-    if (!x30_inputGenerator.Update(tickPeriod, x4_archQueue)) {
-      terminate = true;
+    {
+      PORT_ZONE_TIMED("tick: actor snapshots");
+      CActor::PortBeginTickSnapshot();
+    }
+    {
+      PORT_ZONE_TIMED("tick: input generator");
+      if (!x30_inputGenerator.Update(tickPeriod, x4_archQueue)) {
+        terminate = true;
+      }
     }
     x4_archQueue.Push(MakeMsg::CreateTimerTick(kAMT_Game, tickPeriod));
-    x58_ioWinMgr.PumpMessages(x4_archQueue);
+    {
+      PORT_ZONE_TIMED("tick: PumpMessages (every IOWin)");
+      x58_ioWinMgr.PumpMessages(x4_archQueue);
+    }
     ++sTicksAdvanced;
   }
 
+  PORT_ZONE_TIMED("UpdateTicks: final PumpMessages");
   x58_ioWinMgr.PumpMessages(x4_archQueue);
   return !terminate;
 }
@@ -1125,19 +1136,33 @@ int CMain::RsMain(int argc, const char* const* argv) {
       const uint64_t inputDoneNs = SDL_GetTicksNS();
       // Port: run ARAM transfer callbacks completed by Aurora's ARQ.
       aurora::phase::set(aurora::phase::Main, "audio and loader polling");
-      ARQPoll();
-      // Port: service the streamed-audio AI DMA callback on the main thread.
-      AIPortPoll();
+      {
+        PORT_ZONE_TIMED("ARQPoll + AIPortPoll");
+        ARQPoll();
+        // Port: service the streamed-audio AI DMA callback on the main thread.
+        AIPortPoll();
+      }
       archSupport->GetStopwatch2().Reset();
       aurora::phase::set(aurora::phase::Main, "resource loading (AsyncIdlePakLoading)");
-      gpResourceFactory->GetResLoader().AsyncIdlePakLoading();
+      {
+        PORT_ZONE_TIMED("AsyncIdlePakLoading");
+        gpResourceFactory->GetResLoader().AsyncIdlePakLoading();
+      }
       if (gpMemoryCard == nullptr && gpResourceFactory->GetResLoader().AreAllPaksLoaded()) {
         MemoryCardInitializePump();
       }
-      CARAMManager::CollectGarbage();
-      CARAMToken::UpdateAllDMAs();
+      {
+        PORT_ZONE_TIMED("ARAM garbage + DMAs");
+        CARAMManager::CollectGarbage();
+        CARAMToken::UpdateAllDMAs();
+      }
       aurora::phase::set(aurora::phase::Main, "game tick (UpdateTicks)");
-      if (!archSupport->UpdateTicks()) {
+      bool ticked;
+      {
+        PORT_ZONE_TIMED("UpdateTicks");
+        ticked = archSupport->UpdateTicks();
+      }
+      if (!ticked) {
         PortSaveState::ResumeQuitCleanly();
         x160_24_finished = true;
       }

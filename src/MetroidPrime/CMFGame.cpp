@@ -103,6 +103,7 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
     break;
   }
   case kAM_TimerTick: {
+    PORT_ZONE_TIMED("CMFGame tick");
     bool wasInitialized = mInitialized;
     mInitialized = true;
     float dt = MakeMsg::GetParmTimerTick(message).GetReal();
@@ -140,7 +141,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
     // Fall through.
     case kGFS_InGame:
 #ifdef TARGET_PC
-      PortPhoto::Tick(*mStateManager, mFlowState == kGFS_InGame);
+      {
+        PORT_ZONE_TIMED("CMFGame tick: PortPhoto::Tick");
+        PortPhoto::Tick(*mStateManager, mFlowState == kGFS_InGame);
+      }
 #endif
       mStateManager->SetRandomAvailable(true);
       switch (mStateManager->GetDeferredStateTransition()) {
@@ -201,7 +205,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
       CSfxManager::mCurrentChannel = channel;
     }
     PortDebug::SetMouseGameplayActive(mouseActive);
-    mGuiManager->Update(mgr, dt, queue, IsCameraActiveFlow());
+    {
+      PORT_ZONE_TIMED("CMFGame tick: CInGameGuiManager::Update (HUD)");
+      mGuiManager->Update(mgr, dt, queue, IsCameraActiveFlow());
+    }
     if (!wasInitialized)
       gpGameState->WorldTransitionManager()->EndTransition();
     return kMR_Exit;

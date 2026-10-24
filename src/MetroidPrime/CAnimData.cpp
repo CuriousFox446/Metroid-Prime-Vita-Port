@@ -245,6 +245,7 @@ float CAnimData::GetAverageVelocity(int animIn) const {
 
 void CAnimData::AdvanceParticles(const CTransform4f& xf, float dt, const CVector3f& scale,
                                  CStateManager& mgr) {
+  PORT_ZONE_TIMED("CAnimData::AdvanceParticles");
   x120_particleDB.Update(dt, x224_pose, **xcc_layoutData, xf, scale, mgr);
 }
 
@@ -399,6 +400,7 @@ CAdvancementDeltas CAnimData::Advance(float dt, const CVector3f& scale, CStateMa
 
 CAdvancementDeltas CAnimData::DoAdvance(float dt, bool& suspendParticles, CRandom16& random,
                                         bool advTree) {
+  PORT_ZONE_TIMED("CAnimData::DoAdvance (animation)");
   suspendParticles = false;
 
   CVector3f offset(0.f, 0.f, 0.f);

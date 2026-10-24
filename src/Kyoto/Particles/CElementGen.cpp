@@ -754,6 +754,15 @@ void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
 
 const bool CElementGen::Update(double dt) {
 #ifdef TARGET_PC
+  // The profile times only the outermost update: a child generator's is inside its parent's.
+  static int sPortUpdateDepth = 0;
+  if (sPortUpdateDepth == 0) {
+    PORT_ZONE_TIMED("CElementGen::Update (particles)");
+    ++sPortUpdateDepth;
+    const bool result = Update(dt);
+    --sPortUpdateDepth;
+    return result;
+  }
   PortFx::UpdateScope fxScope(dt);
   if (fxScope.skip) {
     return false;

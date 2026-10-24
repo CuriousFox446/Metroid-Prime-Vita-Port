@@ -150,6 +150,15 @@ It is now the game thread's own work that sets the frame: input about 3 ms, the 
 37 ms (3 to 4 a frame at about 12 ms each, the simulation at about 35 of 60 ticks a second)
 and the draw about 31 ms, against the FIFO thread's roughly 65 ms alongside.
 
+So the tick now has zones too, and `[zones]` lists up to 32 main-thread lines. `UpdateTicks`
+holds a `tick` zone per tick (its actor snapshots, input generator and message pump);
+`CMFGame tick` splits off the HUD (`CInGameGuiManager::Update`); `SM::Update` splits into its
+stages (`SM: ...`: the port's per-tick hooks, PreThink, platforms, player input and collision,
+touches, Think, camera, world, sounds, area streaming), with Think split into the player, AI
+(`CPatterned`) and other entities. Particle updates (the outermost `CElementGen::Update`) and
+animation (`CAnimData::DoAdvance`, `AdvanceParticles`) are counted across all of them. Around
+the ticks: `ARQPoll + AIPortPoll`, `AsyncIdlePakLoading`, `ARAM garbage + DMAs`.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
