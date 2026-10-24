@@ -4,11 +4,14 @@
 #include "../internal.hpp"
 #include "../vita_gl.hpp"
 #include "gx.hpp"
+#include "shader_info.hpp"
+#include "texture.hpp"
 
 #include <dolphin/gx/GXCommandList.h>
 
 #include <tracy/Tracy.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -132,10 +135,17 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
-  // Recorded draws by their state.
+  // Recorded draws by their state (after the constant alpha is folded in).
   u32 blended = 0;
   u32 alphaTested = 0;
   u32 culled = 0;
+  // TEV's final alpha: a constant worked out, of those the draws its alpha test rejects outright,
+  // and the draws whose alpha reads a texture; the rest depend on a lit or vertex alpha.
+  u32 alphaConstant = 0;
+  u32 alphaRejected = 0;
+  u32 alphaTexture = 0;
+  // Vita copies made for textures cached before the Vita path drew with them.
+  u32 lateCopies = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -585,6 +595,187 @@ vita_gl::RenderState render_state() noexcept {
   return state;
 }
 
+// A texture Aurora cached before the Vita path first drew with it (made for a WebGPU draw, with no
+// Vita copy) gets its copy now, from the source the game is drawing with. Not for palette
+// formats (their colours come from a TLUT) or render targets.
+void add_missing_copy(gfx::TextureRef& ref, const GXTexObj_& obj) noexcept {
+  const u32 format = obj.format();
+  if (ref.attachmentTextureView || !obj.has_data() || format == GX_TF_C4 || format == GX_TF_C8 ||
+      format == GX_TF_C14X2 || obj.width() != ref.size.width || obj.height() != ref.size.height) {
+    return;
+  }
+  const size_t bytes = texture::texture_source_size(format, obj.width(), obj.height(), obj.mip_count());
+  ref.vitaTexture = gfx::make_vita_texture(obj.width(), obj.height(), format,
+                                           {static_cast<const u8*>(obj.data), bytes});
+  ++sStats.lateCopies;
+}
+
+// TEV's final alpha, worked out on the CPU where it does not come from a texture: the fixed-function
+// draw's own alpha is the vertex colour's times the textures', which on most of the game's
+// surfaces is not what TEV computes (an opaque surface is often drawn blended with an alpha of
+// one from a constant, over textures whose alpha holds something else).
+struct TevAlpha {
+  float value = 0.f;
+  bool known = true;    // a constant, worked out
+  bool texture = false; // reads a texture's alpha
+};
+
+TevAlpha konst_alpha(const TevStage& stage) noexcept {
+  const u32 sel = stage.kaSel;
+  if (sel <= GX_TEV_KASEL_1_8) {
+    return {static_cast<float>(8 - sel) / 8.f};
+  }
+  if (sel >= GX_TEV_KASEL_K0_R && sel <= GX_TEV_KASEL_K3_A) {
+    const u32 component = (sel - GX_TEV_KASEL_K0_R) / 4;
+    const u32 reg = (sel - GX_TEV_KASEL_K0_R) % 4;
+    return {g_gxState.kcolors[reg][component]};
+  }
+  return {.known = false};
+}
+
+// The rasterised alpha: a constant when the stage's channel is unlit and takes its material
+// alpha from the register.
+TevAlpha raster_alpha(const TevStage& stage) noexcept {
+  switch (stage.channelId) {
+  case GX_COLOR0:
+  case GX_COLOR1:
+  case GX_ALPHA0:
+  case GX_ALPHA1:
+  case GX_COLOR0A0:
+  case GX_COLOR1A1:
+    break;
+  case GX_COLOR_ZERO:
+  case GX_COLOR_NULL:
+    return {0.f};
+  default:
+    return {.known = false};
+  }
+  if (g_gxState.tevSwapTable[stage.tevSwapRas].alpha != GX_CH_ALPHA) {
+    return {.known = false};
+  }
+  const u32 channel = GX_ALPHA0 + color_channel(stage.channelId);
+  const ColorChannelConfig& config = g_gxState.colorChannelConfig[channel];
+  if (config.lightingEnabled || config.matSrc != GX_SRC_REG) {
+    return {.known = false};
+  }
+  return {g_gxState.colorChannelState[channel].matColor[3]};
+}
+
+TevAlpha tev_alpha() noexcept {
+  std::array<TevAlpha, MaxTevRegs> regs;
+  for (u32 i = 0; i < MaxTevRegs; ++i) {
+    regs[i] = {g_gxState.colorRegs[i][3]};
+  }
+  TevAlpha last = regs[GX_TEVPREV];
+  for (u32 s = 0; s < g_gxState.numTevStages && s < MaxTevStages; ++s) {
+    const TevStage& stage = g_gxState.tevStages[s];
+    const auto input = [&](GXTevAlphaArg arg) -> TevAlpha {
+      switch (arg) {
+      case GX_CA_APREV:
+      case GX_CA_A0:
+      case GX_CA_A1:
+      case GX_CA_A2:
+        return regs[arg - GX_CA_APREV];
+      case GX_CA_TEXA:
+        return {.known = false, .texture = true};
+      case GX_CA_RASA:
+        return raster_alpha(stage);
+      case GX_CA_KONST:
+        return konst_alpha(stage);
+      default:
+        return {0.f};
+      }
+    };
+    const TevAlpha a = input(stage.alphaPass.a);
+    const TevAlpha b = input(stage.alphaPass.b);
+    const TevAlpha c = input(stage.alphaPass.c);
+    const TevAlpha d = input(stage.alphaPass.d);
+    const TevOp& op = stage.alphaOp;
+    TevAlpha out;
+    out.texture = a.texture || b.texture || c.texture || d.texture;
+    // The compare ops are not worked out.
+    out.known = a.known && b.known && c.known && d.known && op.op <= GX_TEV_SUB;
+    if (out.known) {
+      const float cc = std::clamp(c.value, 0.f, 1.f);
+      const float lerp = a.value * (1.f - cc) + b.value * cc;
+      float value = op.op == GX_TEV_SUB ? d.value - lerp : d.value + lerp;
+      value += op.bias == GX_TB_ADDHALF ? 0.5f : op.bias == GX_TB_SUBHALF ? -0.5f : 0.f;
+      constexpr float kScale[] = {1.f, 2.f, 4.f, 0.5f};
+      value *= kScale[op.scale & 3];
+      out.value = op.clamp ? std::clamp(value, 0.f, 1.f) : value;
+    }
+    regs[op.outReg & 3] = out;
+    last = out;
+  }
+  return last;
+}
+
+bool alpha_compare(GXCompare compare, u32 alpha, u32 ref) noexcept {
+  switch (compare) {
+  case GX_NEVER:
+    return false;
+  case GX_LESS:
+    return alpha < ref;
+  case GX_EQUAL:
+    return alpha == ref;
+  case GX_LEQUAL:
+    return alpha <= ref;
+  case GX_GREATER:
+    return alpha > ref;
+  case GX_NEQUAL:
+    return alpha != ref;
+  case GX_GEQUAL:
+    return alpha >= ref;
+  default:
+    return true;
+  }
+}
+
+// With TEV's alpha a known constant, the alpha test and blending need not read the draw's alpha:
+// the test passes or fails for the whole draw, and blending by a source alpha of one or zero is a
+// fixed blend. False: the draw fails the alpha test everywhere and draws nothing.
+bool fold_constant_alpha(float alpha, vita_gl::RenderState& state) noexcept {
+  const u32 alpha8 = static_cast<u32>(std::lround(std::clamp(alpha, 0.f, 1.f) * 255.f));
+  const AlphaCompare& compare = g_gxState.alphaCompare;
+  const bool pass0 = alpha_compare(compare.comp0, alpha8, compare.ref0 & 0xFF);
+  const bool pass1 = alpha_compare(compare.comp1, alpha8, compare.ref1 & 0xFF);
+  bool pass = true;
+  switch (compare.op) {
+  case GX_AOP_AND:
+    pass = pass0 && pass1;
+    break;
+  case GX_AOP_OR:
+    pass = pass0 || pass1;
+    break;
+  case GX_AOP_XOR:
+    pass = pass0 != pass1;
+    break;
+  case GX_AOP_XNOR:
+    pass = pass0 == pass1;
+    break;
+  default:
+    break;
+  }
+  if (!pass) {
+    return false;
+  }
+  state.alphaFunc = kGlAlways;
+  if (state.blend && (alpha8 == 255 || alpha8 == 0)) {
+    const auto fold = [alpha8](u16 factor) -> u16 {
+      if (factor == kGlSrcAlpha) {
+        return alpha8 == 255 ? kGlOne : kGlZero;
+      }
+      if (factor == kGlOneMinusSrcAlpha) {
+        return alpha8 == 255 ? kGlZero : kGlOne;
+      }
+      return factor;
+    };
+    state.blendSrc = fold(state.blendSrc);
+    state.blendDst = fold(state.blendDst);
+  }
+  return true;
+}
+
 vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
   const auto wrap = [](GXTexWrapMode mode) -> u16 {
     switch (mode) {
@@ -632,9 +823,15 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     for (int i = 0; i < chosen; ++i) {
       sSampled.sampledTextures.set(choices[i].map);
     }
-    resolve_sampled_textures(sSampled);
+    {
+      const gfx::VitaCopyScope copies;
+      resolve_sampled_textures(sSampled);
+    }
     for (int i = 0; i < chosen; ++i) {
       const gfx::TextureBind& bind = g_gxState.textures[choices[i].map];
+      if (bind.ref && !bind.ref->vitaTexture) {
+        add_missing_copy(*bind.ref, g_gxState.loadedTextures[choices[i].map]);
+      }
       if (!bind.ref || !bind.ref->vitaTexture) {
         ++sStats.unitsWithoutCopy;
         continue;
@@ -667,6 +864,20 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     draw.units[unit] = std::move(units[unit]);
   }
   draw.state = render_state();
+  const TevAlpha alpha = tev_alpha();
+  if (alpha.known) {
+    ++sStats.alphaConstant;
+    if (!fold_constant_alpha(alpha.value, draw.state)) {
+      ++sStats.alphaRejected;
+      return true; // its alpha test fails everywhere: nothing to draw
+    }
+  } else if (alpha.texture) {
+    ++sStats.alphaTexture;
+  }
+  if (draw.state.blend && draw.state.blendEquation == kGlFuncAdd && draw.state.blendSrc == kGlOne &&
+      draw.state.blendDst == kGlZero) {
+    draw.state.blend = false;
+  }
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
@@ -686,10 +897,10 @@ void log_stats() noexcept {
            s.calls, s.recorded, s.nativePositions, s.decoded,
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
-  Log.info("textures: draws with none {}, one {}, two {}; {} left out without a Vita copy; state: {} blended, {} "
-           "alpha-tested, {} culled",
-           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.blended, s.alphaTested,
-           s.culled);
+  Log.info("textures: draws with none {}, one {}, two {}; {} left out without a Vita copy, {} copies made late; "
+           "state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} rejected), {} from a texture",
+           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.blended,
+           s.alphaTested, s.culled, s.alphaConstant, s.alphaRejected, s.alphaTexture);
   sStats = {};
 }
 } // namespace aurora::gx::vita

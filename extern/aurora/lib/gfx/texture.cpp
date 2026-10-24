@@ -135,43 +135,56 @@ static TextureHandle new_texture_2d(uint32_t width, uint32_t height, uint32_t mi
                                     wgpu::TextureFormat wgpuFormat, const char* label) noexcept;
 
 #ifdef AURORA_VITA_GL
-// The PS Vita draws with its own copy of each static texture (vita_gl.hpp): the first level, as
-// BC1 for an opaque CMPR texture and RGBA8 otherwise. The WebGPU texture beside it is only what
-// Aurora's caches hold, on the null device, and nothing is uploaded to it. Palettes (tlut) are
-// not sampled by the Vita path and get no copy.
-static TextureHandle new_vita_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format,
-                                                ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept {
+namespace {
+// Set while the Vita path resolves its draws' textures (VitaCopyScope, FIFO thread).
+thread_local bool t_vitaCopies = false;
+} // namespace
+
+VitaCopyScope::VitaCopyScope() noexcept { t_vitaCopies = true; }
+VitaCopyScope::~VitaCopyScope() { t_vitaCopies = false; }
+
+std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t height, u32 format,
+                                                    ArrayRef<uint8_t> data) noexcept {
+  ZoneScoped;
   std::vector<uint8_t> level0;
   auto texelFormat = vita_gl::TexelFormat::RGBA8;
-  auto wgpuFormat = to_wgpu(format);
-  bool hasArbitraryMips = false;
-  if (format == GX_TF_CMPR && !tlut) {
+  if (format == GX_TF_CMPR) {
     const ByteBuffer bc1 = convert_cmpr_level0_to_bc1(width, height, data);
     if (!bc1.empty()) {
       level0.assign(bc1.data(), bc1.data() + bc1.size());
       texelFormat = vita_gl::TexelFormat::BC1;
     }
   }
-  if (level0.empty() && !tlut) {
+  if (level0.empty()) {
     ConvertedTexture converted;
     ArrayRef<uint8_t> texels = data;
+    auto texelWgpuFormat = to_wgpu(format);
     if (format != InvalidTextureFormat) {
-      converted = convert_texture(format, width, height, mips, data, false);
+      converted = convert_texture(format, width, height, 1, data, false);
     }
     if (!converted.data.empty()) {
       texels = converted.data;
-      wgpuFormat = converted.format;
-      hasArbitraryMips = converted.hasArbitraryMips;
+      texelWgpuFormat = converted.format;
     }
     const size_t level0Bytes = size_t{width} * height * 4;
-    if (wgpuFormat == wgpu::TextureFormat::RGBA8Unorm && texels.size() >= level0Bytes) {
-      level0.assign(texels.data(), texels.data() + level0Bytes);
+    if (texelWgpuFormat != wgpu::TextureFormat::RGBA8Unorm || texels.size() < level0Bytes) {
+      return {};
     }
+    level0.assign(texels.data(), texels.data() + level0Bytes);
   }
-  auto handle = new_texture_2d(width, height, mips, format, wgpuFormat, label);
-  handle->hasArbitraryMips = hasArbitraryMips;
-  if (!level0.empty()) {
-    handle->vitaTexture = vita_gl::make_texture(width, height, texelFormat, std::move(level0));
+  return vita_gl::make_texture(width, height, texelFormat, std::move(level0));
+}
+
+// The PS Vita draws with its own copy of a static texture (make_vita_texture), made only for the
+// textures its draws resolve: the others (HUD, particles, still drawn through the WebGPU path)
+// would hold their copies' CPU bytes for good, never uploaded. The WebGPU texture is only what
+// Aurora's caches hold, on the null device, with nothing converted or uploaded for it. Palettes
+// (tlut) are not sampled by the Vita path.
+static TextureHandle new_vita_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format,
+                                                ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept {
+  auto handle = new_texture_2d(width, height, mips, format, to_wgpu(format), label);
+  if (t_vitaCopies && !tlut) {
+    handle->vitaTexture = make_vita_texture(width, height, format, data);
   }
   return handle;
 }

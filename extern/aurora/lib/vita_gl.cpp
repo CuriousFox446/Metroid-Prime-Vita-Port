@@ -38,17 +38,17 @@ std::atomic_bool g_fontsChanged{false};
 std::atomic<int64_t> g_textureCount[2];
 std::atomic<int64_t> g_textureBytes[2];
 
-// vitaGL's memory by pool, free of total (MiB), and the game's heap left to it (newlib).
+// vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
 void log_memory(const char* when) {
   constexpr double kMiB = 1024.0 * 1024.0;
   const auto pool = [](vglMemType type) {
     return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
   };
-  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; newlib free {:.1f}; "
+  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
            "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB)",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
-           vglMemFree(VGL_MEM_EXTERNAL) / kMiB, g_textureCount[0].load(), g_textureBytes[0].load() / kMiB,
-           g_textureCount[1].load(), g_textureBytes[1].load() / kMiB);
+           g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
+           g_textureBytes[1].load() / kMiB);
 }
 
 // The frames' draws: recorded on the FIFO thread, handed over at each frame's end, drawn by the

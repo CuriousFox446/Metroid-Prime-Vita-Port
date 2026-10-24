@@ -178,7 +178,7 @@ MiB in use, of the 224 the heap may take), though the textures' CPU copies are f
 uploaded. The likeliest cause is vitaGL placing textures in the game's heap once its own pools
 are full; to be measured (vitaGL's free memory by pool, in the log) before larger areas.
 
-**Milestone 4, first part (built, not yet run on the Vita): GX's fixed-function state.** Each
+**Milestone 4, first part (run on the Vita): GX's fixed-function state.** Each
 draw now carries GX's blending, alpha test, depth and culling, mapped to GL on the FIFO thread
 (`render_state` in `vita_draw.cpp`) and set on the render worker only where it changes:
 - blending: GX's blend mode and factors as Aurora's WebGPU path maps them (a source factor of
@@ -195,3 +195,31 @@ whose alpha GX computes otherwise blends and tests with the wrong value until th
 shaders. The log counts blended, alpha-tested and culled draws, and every 300 presents gives
 vitaGL's free memory by pool (VRAM, RAM, phycont, budget), the game heap's free memory, and the
 textures on the GPU by format.
+
+Its run (b0fff8b, seven minutes, to the Frigate's map facility, no errors): blending works where
+the game blends for real, Tallon IV now shows as the orange textured planet behind the hangar,
+the nebula and the radar draw, and the heavy seconds held at 18.0 FPS. But nearly every draw
+counted as blended, and solid hulls and towers outside the hangar turned see-through, leaving
+their glowing trim floating. The game draws most opaque surfaces blended, with an alpha of one
+that TEV takes from a constant, while the fixed-function draw blended with the textures' alpha,
+which on those textures holds something else. Culling is not the cause: vitaGL turns `GL_BACK`
+with `GL_CW` into the matching GXM cull mode, minding whether it draws to the display or to a
+framebuffer (read from its `glCullFace` and `glFrontFace`).
+
+vitaGL's pools are not what grew the game's heap: VRAM had 75 to 83 MiB free of 96 all run, and
+the game's textures took about 5 MiB of it. The heap grew because every static texture got a Vita
+copy where Aurora made it, the HUD's, the particles' and the fonts' too, which the WebGPU path
+still draws: those copies were never uploaded, so their CPU bytes (RGBA8, four times a 4-bit
+source) stayed for as long as Aurora cached the texture.
+
+So, second part:
+- TEV's final alpha is worked out on the CPU where it does not come from a texture (`tev_alpha`):
+  the stages' alpha passes over the TEV registers, the konst alphas, and an unlit channel's
+  register material alpha; compare ops and lit or vertex alpha are not. With it a constant, the
+  alpha test passes or fails for the whole draw (a draw that fails is not drawn), and blending by
+  a source alpha of one or zero becomes a fixed blend (an opaque one is not blended at all).
+  vitaGL has no constant blend colour, so a constant in between still blends with the draw's
+  own alpha.
+- A Vita copy is made only for the textures the Vita path resolves (`VitaCopyScope`), from their
+  first level alone; a texture Aurora cached before the Vita path drew with it gets its copy
+  then, from the source the game is drawing with. The rest are not converted at all.
