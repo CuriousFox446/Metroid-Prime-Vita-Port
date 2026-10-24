@@ -318,3 +318,8 @@ Also seen: the upside-down Samus in front of the camera is `CCubeRenderer::Cache
 pass, which draws the player from a reflection camera (its up is -Z) into a 256x256 corner of the
 EFB and copies it to a texture for the helmet and ball reflections. The Vita path ignores the
 viewport, the copy and its clear, so the pass lands on the screen. Left for milestone 5.
+
+So the material hash now takes in only what the stages name: the texture slots and coordinate
+generators they read, and of the vertex descriptor only those generators' source attributes
+(the rest of it differs from model to model and the material does not read it). The cache grew
+to 1,024 entries.

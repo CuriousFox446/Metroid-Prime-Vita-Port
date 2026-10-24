@@ -946,17 +946,20 @@ struct Material {
   const TcgConfig* tcgs[kTexUnits] = {};
   vita_gl::RenderState state; // before TEV's constant alpha is folded in (record_draw)
 };
-constexpr size_t kMaterials = 256;
+// Direct-mapped: a heavy frame of the opening works out several hundred materials.
+constexpr size_t kMaterials = 1024;
 std::array<Material, kMaterials> sMaterials;
 u32 sWindow = 0;
 // The material of the last draw, and the texture bind generation it was resolved under.
 Material* sLastMaterial = nullptr;
 u64 sLastGeneration = 0;
 
-// A hash of the GX state a Material reads: the TEV stages, texture coordinate generation, the
-// vertex descriptor (which texture coordinates the list has), the loaded textures and their
-// palettes, Aurora's texture bind generation, blending, depth, culling, the colour mask and the
-// alpha compare. Not the matrices nor the colour constants: those are read for every draw.
+// A hash of the GX state a Material reads: the TEV stages, Aurora's texture bind generation,
+// blending, depth, culling, the colour mask and the alpha compare, and of what the stages name, the
+// texture coordinate generators, the vertex descriptor's entries for their sources, and the loaded
+// textures with their palettes. The game leaves slots and generators no stage reads holding
+// whatever it set last, so they are left out, as are the matrices and the colour constants (read
+// for every draw).
 u64 material_hash(u64 generation) noexcept {
   const GXState& s = g_gxState;
   const AlphaCompare& alpha = s.alphaCompare;
@@ -971,11 +974,35 @@ u64 material_hash(u64 generation) noexcept {
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   h = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), h);
-  h = XXH3_64bits_withSeed(s.tcgs.data(), sizeof(s.tcgs), h);
-  h = XXH3_64bits_withSeed(s.vtxDesc.data(), sizeof(s.vtxDesc), h);
+  u32 usedMaps = 0;
+  u32 usedCoords = 0;
+  for (u32 i = 0; i < stages; ++i) {
+    const TevStage& stage = s.tevStages[i];
+    usedMaps |= stage.texMapId < MaxTextures ? 1u << stage.texMapId : 0;
+    usedCoords |= stage.texCoordId < MaxTexCoord ? 1u << stage.texCoordId : 0;
+  }
+  // A generator, and the descriptor's entry for its source attribute.
+  struct {
+    TcgConfig tcg;
+    u32 sourceType;
+  } coords[MaxTexCoord]{};
+  for (u32 i = 0; i < MaxTexCoord; ++i) {
+    if ((usedCoords & (1u << i)) == 0) {
+      continue;
+    }
+    coords[i].tcg = s.tcgs[i];
+    const GXTexGenSrc src = s.tcgs[i].src;
+    coords[i].sourceType = src >= GX_TG_TEX0 && src <= GX_TG_TEX7
+                               ? static_cast<u32>(s.vtxDesc[GX_VA_TEX0 + (src - GX_TG_TEX0)]) + 1
+                               : 0;
+  }
+  h = XXH3_64bits_withSeed(coords, sizeof(coords), h);
   // A texture by what identifies its contents and sampling, and a palette texture's palette.
-  u32 textures[MaxTextures][12];
+  u32 textures[MaxTextures][12]{};
   for (u32 i = 0; i < MaxTextures; ++i) {
+    if ((usedMaps & (1u << i)) == 0) {
+      continue;
+    }
     const GXTexObj_& obj = s.loadedTextures[i];
     const u32 format = obj.format();
     const bool palette = format == GX_TF_C4 || format == GX_TF_C8 || format == GX_TF_C14X2;
