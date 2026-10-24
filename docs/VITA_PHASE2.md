@@ -285,3 +285,23 @@ no draw used for a stats window (300 frames) is dropped with the textures it hol
 render worker, the projection and texture matrices are loaded only when they differ from the
 last draw's. The log adds the cache's hits and misses, and zones for the hash, the working out,
 the list lookup and the recording.
+
+Its run (f869dbc, the opening again, no errors, no change on screen) made it slower: about half
+the draws found their material, the hash cost about 10 µs a call (with its zone's own timing), and
+the seconds with 1,500 calls a frame ran at 10.2 FPS (11.5 before). The colour constants in the
+hash (konst and TEV registers, which the game sets per model) split the cache, and the skinned
+calls stood out on their own: about 12 a frame at about 2 ms each, decoded whole every call.
+
+So, second try:
+- A material is the last draw's while none of the registers it reads has been written since.
+  Aurora already marks those writes (`DirtyPipeline` for TEV, texgens, blend, depth, cull, alpha
+  compare and the vertex descriptor; `DirtyTextures` for texture slots); its dirty bits are now
+  a `DirtyBits` that sets every bit in a second set the Vita path reads and clears, so the WebGPU
+  path keeps its own. Only when they are set, or the texture bind generation moved, is the state
+  hashed, and the hash leaves out the colour constants.
+- TEV's constant alpha is worked out per draw, and only for materials whose alpha test or
+  blending reads it.
+- A skinned list is decoded once into a template, with each triangle vertex's position index;
+  a call copies it and reads only the positions, from the array as it is now. The faces keep the
+  shading of the pose the template was made in.
+- The zones inside a call are gone again, but for working out a material and a skinned call.

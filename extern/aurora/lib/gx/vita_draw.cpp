@@ -78,7 +78,8 @@ struct DecodeState {
     }
   }
 
-  bool matches_current(const TexAttrs& wanted) const noexcept {
+  // skipPositions: the position array does not count (a skinned template reads it as it is).
+  bool matches_current(const TexAttrs& wanted, bool skipPositions = false) const noexcept {
     if (texAttrs != wanted || vtxDesc != g_gxState.vtxDesc) {
       return false;
     }
@@ -90,7 +91,7 @@ struct DecodeState {
     }
     // An array counts only when the descriptor indexes it.
     const auto attrs = array_attrs();
-    for (size_t i = 0; i < attrs.size(); ++i) {
+    for (size_t i = skipPositions ? 1 : 0; i < attrs.size(); ++i) {
       if (attrs[i] == kNoTexAttr || (vtxDesc[attrs[i]] != GX_INDEX8 && vtxDesc[attrs[i]] != GX_INDEX16)) {
         continue;
       }
@@ -118,6 +119,18 @@ struct CachedList {
   size_t newest = 0;
 };
 std::unordered_map<const void*, CachedList> sCache;
+
+// A list called with positions the CPU makes each frame (skinned models): decoded once into its
+// triangles with, for each vertex, the array index its position comes from; each call copies them
+// and reads the positions again from the array as it is now. The faces keep the shading of the
+// pose the template was made in.
+struct SkinnedTemplate {
+  DecodeState state; // compared without the position array (matches_current's skipPositions)
+  GXVtxFmt fmt = GX_VTXFMT0; // the one vertex format the list's primitives name
+  std::vector<vita_gl::Vertex> vertices;
+  std::vector<u32> posIndices;
+};
+std::unordered_map<const void*, SkinnedTemplate> sSkinned;
 
 // For log_stats: what became of the calls since the last report, and why lists were not drawn.
 struct Stats {
@@ -157,9 +170,13 @@ struct Stats {
   u32 lateCopies = 0;
   // Second units added on top (GL_ADD) rather than modulated.
   u32 additiveUnits = 0;
-  // Draws whose material (current_material) was in the cache, and those that worked it out.
+  // Draws whose material (current_material) was the last draw's, was in the cache, was worked out.
+  u32 materialReused = 0;
   u32 materialHits = 0;
   u32 materialMisses = 0;
+  // Skinned list calls drawn from their template, and templates made.
+  u32 skinnedFromTemplate = 0;
+  u32 skinnedTemplates = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -237,9 +254,10 @@ void read_color(const u8* p, GXCompType type, u8 out[4]) noexcept {
 
 // One GX vertex's position, colour (grey without one) and the texture units' coordinates, from
 // its bytes in the list (which advance past it). False when it has a per-vertex matrix (not drawn
-// yet) or reads outside an array.
-bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, u8 grey,
-                   vita_gl::Vertex& out) noexcept {
+// yet) or reads outside an array. posIndex, when given, gets the position's array index
+// (UINT32_MAX for a position in the list).
+bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, u8 grey, vita_gl::Vertex& out,
+                   u32* posIndex = nullptr) noexcept {
   out = {};
   out.color[0] = out.color[1] = out.color[2] = grey;
   out.color[3] = 255;
@@ -266,12 +284,18 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, 
       if (!wanted) {
         continue;
       }
+      if (attr == GX_VA_POS && posIndex != nullptr) {
+        *posIndex = UINT32_MAX;
+      }
     } else {
       const bool nbt3 = attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3;
       const u32 index = type == GX_INDEX8 ? vtx[0] : read16(vtx, false);
       vtx += (type == GX_INDEX8 ? 1 : 2) * (nbt3 ? 3 : 1);
       if (!wanted) {
         continue;
+      }
+      if (attr == GX_VA_POS && posIndex != nullptr) {
+        *posIndex = index;
       }
       const AttrArray& array = g_gxState.arrays[i];
       const u64 offset = u64(index + array.baseIndex) * array.stride;
@@ -338,46 +362,55 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
 u8 grey_for(const TexAttrs& texAttrs) noexcept { return texAttrs[0] != kNoTexAttr ? 255 : 200; }
 
 // Decodes `count` vertices from `vtx` (which advances past them), false when one cannot be.
+// posIndices, when given, gets each one's position index (decode_vertex).
 bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, const TexAttrs& texAttrs,
-                     std::vector<vita_gl::Vertex>& out) noexcept {
+                     std::vector<vita_gl::Vertex>& out, std::vector<u32>* posIndices = nullptr) noexcept {
   const u8 grey = grey_for(texAttrs);
   out.resize(count);
+  if (posIndices != nullptr) {
+    posIndices->assign(count, UINT32_MAX);
+  }
   for (u32 i = 0; i < count; ++i) {
-    if (vtx >= end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], texAttrs, grey, out[i])) {
+    if (vtx >= end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], texAttrs, grey, out[i],
+                                     posIndices != nullptr ? &(*posIndices)[i] : nullptr)) {
       return false;
     }
   }
   return vtx <= end;
 }
 
-// One primitive's vertices as triangles, appended to `triangles`. Lines and points add none.
-void triangulate(GXPrimitive type, const std::vector<vita_gl::Vertex>& prim, bool textured,
-                 std::vector<vita_gl::Vertex>& triangles) noexcept {
-  const u32 count = static_cast<u32>(prim.size());
+// The vertices of a primitive of `count` as triangles, three indices apiece, appended to `order`.
+// Lines and points add none.
+void triangle_order(GXPrimitive type, u32 count, std::vector<u32>& order) noexcept {
+  const auto add = [&order](u32 a, u32 b, u32 c) {
+    order.push_back(a);
+    order.push_back(b);
+    order.push_back(c);
+  };
   switch (type) {
   case GX_TRIANGLES:
     for (u32 i = 0; i + 2 < count; i += 3) {
-      append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
+      add(i, i + 1, i + 2);
     }
     break;
   case GX_TRIANGLESTRIP:
     for (u32 i = 0; i + 2 < count; ++i) {
       if ((i & 1) == 0) {
-        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
+        add(i, i + 1, i + 2);
       } else {
-        append_triangle(triangles, prim[i + 1], prim[i], prim[i + 2], textured);
+        add(i + 1, i, i + 2);
       }
     }
     break;
   case GX_TRIANGLEFAN:
     for (u32 i = 1; i + 1 < count; ++i) {
-      append_triangle(triangles, prim[0], prim[i], prim[i + 1], textured);
+      add(0, i, i + 1);
     }
     break;
   case GX_QUADS:
     for (u32 i = 0; i + 3 < count; i += 4) {
-      append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
-      append_triangle(triangles, prim[i], prim[i + 2], prim[i + 3], textured);
+      add(i, i + 1, i + 2);
+      add(i, i + 2, i + 3);
     }
     break;
   default:
@@ -385,13 +418,32 @@ void triangulate(GXPrimitive type, const std::vector<vita_gl::Vertex>& prim, boo
   }
 }
 
+// One primitive's vertices as triangles, appended to `triangles`; with primPos given, outPos gets
+// the position index of each vertex appended.
+void triangulate(GXPrimitive type, const std::vector<vita_gl::Vertex>& prim, bool textured,
+                 std::vector<vita_gl::Vertex>& triangles, const std::vector<u32>* primPos = nullptr,
+                 std::vector<u32>* outPos = nullptr) noexcept {
+  static std::vector<u32> order;
+  order.clear();
+  triangle_order(type, static_cast<u32>(prim.size()), order);
+  for (size_t i = 0; i + 2 < order.size(); i += 3) {
+    append_triangle(triangles, prim[order[i]], prim[order[i + 1]], prim[order[i + 2]], textured);
+    if (primPos != nullptr && outPos != nullptr) {
+      for (size_t k = 0; k < 3; ++k) {
+        outPos->push_back((*primPos)[order[i + k]]);
+      }
+    }
+  }
+}
+
 // The list's triangles, or none when it holds anything this path cannot draw yet; fmtMask gets
-// the vertex formats it read.
+// the vertex formats it read, and posIndices (when given) each triangle vertex's position index.
 std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size, const TexAttrs& texAttrs,
-                                         u8& fmtMask) noexcept {
+                                         u8& fmtMask, std::vector<u32>* posIndices = nullptr) noexcept {
   const bool textured = texAttrs[0] != kNoTexAttr;
   std::vector<vita_gl::Vertex> triangles;
   std::vector<vita_gl::Vertex> prim;
+  std::vector<u32> primPos;
   size_t pos = 0;
   const size_t end = std::min<size_t>(size, bytes.size());
   while (pos < end) {
@@ -409,11 +461,12 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size,
     const u16 count = static_cast<u16>((bytes[pos] << 8) | bytes[pos + 1]);
     pos += 2;
     const u8* vtx = bytes.data() + pos;
-    if (!decode_vertices(vtx, bytes.data() + end, fmt, count, texAttrs, prim)) {
+    if (!decode_vertices(vtx, bytes.data() + end, fmt, count, texAttrs, prim,
+                         posIndices != nullptr ? &primPos : nullptr)) {
       return {};
     }
     pos = static_cast<size_t>(vtx - bytes.data());
-    triangulate(type, prim, textured, triangles);
+    triangulate(type, prim, textured, triangles, posIndices != nullptr ? &primPos : nullptr, posIndices);
   }
   return triangles;
 }
@@ -877,36 +930,35 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
   return unitCount;
 }
 
-// What the GX state decides for a draw apart from its matrices: its texture units (textures,
-// samplers, combine), the attributes their coordinates come from, and the fixed-function state
-// with TEV's constant alpha folded in. Working it out is most of a call's cost, and the game draws
-// run after run of calls under one material, so it is kept, by a hash of the state it reads.
+// What the GX state decides for a draw apart from its matrices and constants: its texture units
+// (textures, samplers, combine), the attributes their coordinates come from, and the
+// fixed-function state. Working it out is most of a call's cost, so it is kept: for the next
+// draws while no register it reads changes (the Vita's own dirty bits, DirtyBits), and in a cache
+// by a hash of that state for when a material comes back.
 struct Material {
   u64 hash = 0;
   bool valid = false;
   u32 window = 0;     // the stats window it was last used in (log_stats frees the idle ones)
   int unitCount = 0;  // -1: a texture without a Vita copy (resolve_units)
-  bool rejected = false; // its alpha test fails everywhere
-  u8 alphaKind = 0;   // 1: a worked-out constant, 2: read from a texture
+  bool alphaMatters = false; // its alpha test or blending reads the fragment's alpha
   TexAttrs texAttrs = kNoTexAttrs;
   vita_gl::TexUnit units[kTexUnits];
   const TcgConfig* tcgs[kTexUnits] = {};
-  vita_gl::RenderState state;
+  vita_gl::RenderState state; // before TEV's constant alpha is folded in (record_draw)
 };
 constexpr size_t kMaterials = 256;
 std::array<Material, kMaterials> sMaterials;
 u32 sWindow = 0;
+// The material of the last draw, and the texture bind generation it was resolved under.
+Material* sLastMaterial = nullptr;
+u64 sLastGeneration = 0;
 
 // A hash of the GX state a Material reads: the TEV stages, texture coordinate generation, the
 // vertex descriptor (which texture coordinates the list has), the loaded textures and their
-// palettes, Aurora's texture bind generation, blending, depth, culling and the colour mask, the
-// alpha compare, and the constants TEV's alpha may read (konst and register colours, the alpha
-// channels' configuration and material colours, the swap tables). Not the matrices: those are
-// read for every draw.
-u64 material_hash() noexcept {
-  ZoneScopedN("vita: material hash");
+// palettes, Aurora's texture bind generation, blending, depth, culling, the colour mask and the
+// alpha compare. Not the matrices nor the colour constants: those are read for every draw.
+u64 material_hash(u64 generation) noexcept {
   const GXState& s = g_gxState;
-  const u64 generation = texture::current_bind_generation();
   const AlphaCompare& alpha = s.alphaCompare;
   const u32 fixed[] = {
       s.numTevStages,  static_cast<u32>(s.blendMode),   static_cast<u32>(s.blendFacSrc),
@@ -943,21 +995,25 @@ u64 material_hash() noexcept {
     textures[i][11] = tlut != nullptr ? tlut->tlutDataVersion : 0;
   }
   h = XXH3_64bits_withSeed(textures, sizeof(textures), h);
-  h = XXH3_64bits_withSeed(s.kcolors.data(), sizeof(s.kcolors), h);
-  h = XXH3_64bits_withSeed(s.colorRegs.data(), sizeof(s.colorRegs), h);
-  h = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), h);
-  const float alphaMaterials[2] = {s.colorChannelState[GX_ALPHA0].matColor[3],
-                                   s.colorChannelState[GX_ALPHA1].matColor[3]};
-  h = XXH3_64bits_withSeed(alphaMaterials, sizeof(alphaMaterials), h);
-  h = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), h);
   return h;
 }
 
-// The Material for the current GX state, worked out when the cache does not hold it.
+// The Material for the current GX state: the last draw's while none of the registers it reads has
+// been written since, else from the cache, else worked out.
 const Material& current_material() noexcept {
-  const u64 hash = material_hash();
+  const u8 changed = g_gxState.dirty.vita & (DirtyPipeline | DirtyTextures);
+  g_gxState.dirty.vita = 0;
+  const u64 generation = texture::current_bind_generation();
+  if (sLastMaterial != nullptr && changed == 0 && generation == sLastGeneration) {
+    ++sStats.materialReused;
+    sLastMaterial->window = sWindow;
+    return *sLastMaterial;
+  }
+  sLastGeneration = generation;
+  const u64 hash = material_hash(generation);
   Material& material = sMaterials[hash % kMaterials];
   material.window = sWindow;
+  sLastMaterial = &material;
   if (material.valid && material.hash == hash) {
     ++sStats.materialHits;
     return material;
@@ -973,31 +1029,32 @@ const Material& current_material() noexcept {
     return material;
   }
   material.state = render_state();
-  const TevAlpha alpha = tev_alpha();
-  if (alpha.known) {
-    material.alphaKind = 1;
-    material.rejected = !fold_constant_alpha(alpha.value, material.state);
-  } else if (alpha.texture) {
-    material.alphaKind = 2;
-  }
-  vita_gl::RenderState& state = material.state;
-  if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
-    state.blend = false;
-  }
+  const AlphaCompare& compare = g_gxState.alphaCompare;
+  const auto readsAlpha = [](u16 factor) { return factor == kGlSrcAlpha || factor == kGlOneMinusSrcAlpha; };
+  material.alphaMatters = compare.comp0 != GX_ALWAYS || compare.comp1 != GX_ALWAYS ||
+                          (material.state.blend && (readsAlpha(material.state.blendSrc) ||
+                                                    readsAlpha(material.state.blendDst)));
   return material;
 }
 
-// Records a draw of `mesh` with GX's current matrices and the material's units and state.
+// Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
+// alpha folded in where it is a constant (its inputs are constants that change between draws).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
-  ZoneScopedN("vita: record a draw");
-  if (material.alphaKind == 1) {
-    ++sStats.alphaConstant;
-  } else if (material.alphaKind == 2) {
-    ++sStats.alphaTexture;
+  vita_gl::RenderState state = material.state;
+  if (material.alphaMatters) {
+    const TevAlpha alpha = tev_alpha();
+    if (alpha.known) {
+      ++sStats.alphaConstant;
+      if (!fold_constant_alpha(alpha.value, state)) {
+        ++sStats.alphaRejected;
+        return; // its alpha test fails everywhere: nothing to draw
+      }
+    } else if (alpha.texture) {
+      ++sStats.alphaTexture;
+    }
   }
-  if (material.rejected) {
-    ++sStats.alphaRejected;
-    return; // its alpha test fails everywhere: nothing to draw
+  if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
+    state.blend = false;
   }
   vita_gl::Draw draw{.mesh = std::move(mesh)};
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
@@ -1016,13 +1073,74 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     tex_matrix(*material.tcgs[unit], draw.units[unit].matrix);
     sStats.additiveUnits += draw.units[unit].envMode == kGlAdd ? 1 : 0;
   }
-  draw.state = material.state;
+  draw.state = state;
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[material.unitCount];
+}
+
+// A skinned list call's triangles from its template (SkinnedTemplate), made at its first call
+// under this state. False when the list cannot have one (positions not indexed, or more than one
+// vertex format) or a position index falls outside the array as it is now: it is then decoded
+// whole.
+bool skinned_from_template(const void* key, const resident::Entry& entry, u32 size, const TexAttrs& texAttrs,
+                           std::vector<vita_gl::Vertex>& out) noexcept {
+  const GXAttrType posType = g_gxState.vtxDesc[GX_VA_POS];
+  if (posType != GX_INDEX8 && posType != GX_INDEX16) {
+    return false;
+  }
+  SkinnedTemplate& t = sSkinned[key];
+  const bool built = !t.vertices.empty() || t.state.fmtMask != 0;
+  if (!built || !t.state.matches_current(texAttrs, true)) {
+    ++sStats.skinnedTemplates;
+    DecodeState& state = t.state;
+    state.fmtMask = 0;
+    sLastFail = Fail::None;
+    t.posIndices.clear();
+    t.vertices = decode_list(*entry.bytes, size, texAttrs, state.fmtMask, &t.posIndices);
+    state.vtxDesc = g_gxState.vtxDesc;
+    for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
+      state.vtxFmts[fmt] = (state.fmtMask & (1u << fmt)) != 0 ? g_gxState.vtxFmts[fmt] : VtxFmt{};
+    }
+    state.texAttrs = texAttrs;
+    state.capture_arrays();
+    const bool usable = !t.vertices.empty() && std::has_single_bit(state.fmtMask) &&
+                        t.posIndices.size() == t.vertices.size() &&
+                        std::find(t.posIndices.begin(), t.posIndices.end(), UINT32_MAX) == t.posIndices.end();
+    if (!usable) {
+      // Kept as not usable (fmtMask set, no vertices), so the next calls decode whole at once.
+      state.fmtMask = state.fmtMask != 0 ? state.fmtMask : 1;
+      t.vertices.clear();
+      t.posIndices.clear();
+      return false;
+    }
+    t.fmt = static_cast<GXVtxFmt>(std::countr_zero(state.fmtMask));
+  }
+  if (t.vertices.empty()) {
+    return false;
+  }
+  const VtxAttrFmt& posFmt = g_gxState.vtxFmts[t.fmt].attrs[GX_VA_POS];
+  const AttrArray& array = g_gxState.arrays[GX_VA_POS];
+  const u32 cnt = std::min<u32>(comp_cnt_count(GX_VA_POS, posFmt.cnt), 3);
+  const u32 step = comp_type_size(GX_VA_POS, posFmt.type);
+  if (array.data == nullptr) {
+    return false;
+  }
+  const auto* base = static_cast<const u8*>(array.data);
+  out = t.vertices;
+  for (size_t i = 0; i < out.size(); ++i) {
+    const u64 offset = u64(t.posIndices[i] + array.baseIndex) * array.stride;
+    if (offset + cnt * step > array.size) {
+      return false;
+    }
+    for (u32 c = 0; c < cnt; ++c) {
+      out[i].pos[c] = read_component(base + offset + c * step, posFmt.type, posFmt.frac, array.le);
+    }
+  }
+  return true;
 }
 } // namespace
 
@@ -1039,22 +1157,24 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   // retained (port_retail_resident), whatever their byte order; a workspace the game rewrites
   // each frame is not.
   if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
-    ZoneScopedN("vita: decode a list call");
-    u8 fmtMask = 0;
-    sLastFail = Fail::None;
-    std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size, texAttrs, fmtMask);
+    ZoneScopedN("vita: skinned list call");
+    std::vector<vita_gl::Vertex> triangles;
+    if (skinned_from_template(key, entry, size, texAttrs, triangles)) {
+      ++sStats.skinnedFromTemplate;
+    } else {
+      u8 fmtMask = 0;
+      sLastFail = Fail::None;
+      triangles = decode_list(*entry.bytes, size, texAttrs, fmtMask);
+      ++sStats.perCall;
+    }
     if (triangles.empty()) {
       ++sStats.perCallFailed;
       return false;
     }
-    ++sStats.perCall;
     record_draw(vita_gl::make_mesh(std::move(triangles)), material);
     return true;
   }
-  const Cached& cached = [&]() -> const Cached& {
-    ZoneScopedN("vita: list lookup");
-    return lookup(key, entry, size, texAttrs);
-  }();
+  const Cached& cached = lookup(key, entry, size, texAttrs);
   if (!cached.mesh) {
     return false;
   }
@@ -1127,7 +1247,10 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
   return true;
 }
 
-void release(const void* key) noexcept { sCache.erase(key); }
+void release(const void* key) noexcept {
+  sCache.erase(key);
+  sSkinned.erase(key);
+}
 
 void log_stats() noexcept {
   const Stats& s = sStats;
@@ -1140,8 +1263,11 @@ void log_stats() noexcept {
     materials += material.valid ? 1 : 0;
   }
   ++sWindow;
-  Log.info("materials: {} draws found theirs cached, {} worked one out; {} cached", s.materialHits,
-           s.materialMisses, materials);
+  sLastMaterial = nullptr;
+  Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out; {} cached; "
+           "skinned calls: {} from their template, {} decoded whole, {} templates made",
+           s.materialReused, s.materialHits, s.materialMisses, materials, s.skinnedFromTemplate, s.perCall,
+           s.skinnedTemplates);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);
