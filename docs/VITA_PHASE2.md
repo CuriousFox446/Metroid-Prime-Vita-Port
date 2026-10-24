@@ -331,3 +331,12 @@ in every window: Aurora's texture bind generation, in the hash, moves at every E
 (`GXCopyTex` calls `invalidate_bindings`), several a frame, and each move left every cached
 material unreachable. A static texture is named in the hash by its identity already, so the
 generation now goes into it only when a slot the stages read holds an EFB copy's destination.
+
+Its run (b4ef5c5, 18 minutes to the Frigate's reactor core, no errors): the cache holds. Once a
+room's materials are in it, about 3 a frame are worked out (900 per 300 frames, from tens of
+thousands), the cache holding 300 to 900 of its 1,024; in the opening's heaviest seconds, where
+new materials keep coming, 270 a frame (590 the run before, 750 before that). `draw_resident`
+is 40 ms a frame there (63 before the material work), the game thread's wait for the FIFO thread
+10 ms (24), 13.8 FPS. The frame is now the game thread's own: about 31 ms of tick and 30 of
+draw. The FIFO thread's remaining cost per call (about 19 µs with the material reused: the list
+lookup, recording the draw) is the next of its costs, but no longer what sets the frame rate.
