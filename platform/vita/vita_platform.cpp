@@ -130,8 +130,18 @@ __attribute__((constructor(101))) void vitaSetup() {
     // The retail world geometry's display lists made into GPU-side triangle lists once,
     // instead of re-read primitive by primitive every frame (port_retail_resident.h).
     setenv("MP_RETAIL_RESIDENT", "1", 0);
-    // The zone profiler ([zones] lines) stays off: its clock reads slow per-draw code
-    // several fold. A build that wants it sets MP_PROFILE=1 here.
+    // Aurora's staging buffers (five of them, each holding a frame's vertices, uniforms,
+    // indices, arrays and texture uploads) are sized for a desktop frame that sends all its
+    // geometry: about 30 MiB each, 150 MiB in all, which the null GPU backs with heap. With
+    // the geometry resident a frame sends little of it, so the vertex, index and array
+    // parts start at 1 MiB (mask 1|4|8; uniforms, one block a draw, keep theirs). A frame
+    // that needs more spills into extra buffers. The [heap] line says what a frame used.
+    setenv("AURORA_STAGING_START_KIB", "1024", 0);
+    setenv("AURORA_STAGING_START_MASK", "13", 0);
+    // The zone profiler ([zones] lines): with the geometry resident its per-primitive
+    // zones hardly run, so its clock reads no longer dominate; on for the per-draw
+    // breakdown, at some cost to the [timing] numbers.
+    setenv("MP_PROFILE", "1", 0);
     // Nothing can show or answer a box here: no disc dialog or message boxes, and
     // Aurora keeps running on its Null backend instead of exiting (which a missing
     // GPU means on a desktop, and is the point of this build).

@@ -63,9 +63,14 @@ void Report(uint32_t frames, void (*write)(const char* line)) {
     write(line);
   }
   const struct mallinfo heap = mallinfo();
-  std::snprintf(line, sizeof(line), "[heap] %.1f MiB in use of %.1f MiB taken from the system\n",
+  const AuroraStats* stats = aurora_get_stats();
+  std::snprintf(line, sizeof(line),
+                "[heap] %.1f MiB in use of %.1f MiB taken from the system | last frame's staging: vertices %u KiB, "
+                "uniforms %u KiB, indices %u KiB, arrays %u KiB, textures %u KiB; %u draws (%u merged)\n",
                 static_cast< double >(heap.uordblks) / (1024.0 * 1024.0),
-                static_cast< double >(heap.arena) / (1024.0 * 1024.0));
+                static_cast< double >(heap.arena) / (1024.0 * 1024.0), stats->lastVertSize >> 10,
+                stats->lastUniformSize >> 10, stats->lastIndexSize >> 10, stats->lastStorageSize >> 10,
+                stats->lastTextureUploadSize >> 10, stats->drawCallCount, stats->mergedDrawCallCount);
   write(line);
 }
 
