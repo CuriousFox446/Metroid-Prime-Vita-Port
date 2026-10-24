@@ -1,4 +1,5 @@
 #include "Kyoto/Graphics/CCubeModel.hpp"
+#include "port_profile.h"
 #include "port_env.h"
 #include "Kyoto/Basics/CBasics.hpp"
 #include <cstring>
@@ -1191,6 +1192,7 @@ bool CCubeModel::TryLockTextures() const {
 }
 
 void CCubeModel::DrawSurfaces(const CModelFlags& flags) const {
+  PORT_ZONE("CCubeModel::DrawSurfaces");
   if (sDrawingWireframe) {
     for (CCubeSurface surface = GetNormalSurfaces(); surface.IsValid();
          surface = surface.GetNextSurface()) {

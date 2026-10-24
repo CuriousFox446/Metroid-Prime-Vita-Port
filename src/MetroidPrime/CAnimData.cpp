@@ -1,4 +1,5 @@
 #include "MetroidPrime/CAnimData.hpp"
+#include "port_profile.h"
 
 #include "Kyoto/Animation/CAnimTreeBlend.hpp"
 #include "Kyoto/Animation/CAnimTreeNode.hpp"
@@ -565,6 +566,7 @@ void CAnimData::PrimitiveSetToTokenVector(const rstl::set< CPrimitive >& primSet
 }
 
 void CAnimData::BuildPose() {
+  PORT_ZONE("CAnimData::BuildPose");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;
@@ -581,6 +583,7 @@ void CAnimData::BuildPose() {
 }
 
 void CAnimData::PreRender() {
+  PORT_ZONE("CAnimData::PreRender");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;

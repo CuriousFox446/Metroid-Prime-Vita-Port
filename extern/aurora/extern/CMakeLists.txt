@@ -400,7 +400,10 @@ if (NOT TARGET Tracy::TracyClient AND VITA)
   )
   FetchContent_MakeAvailable(tracy)
   add_library(TracyClient INTERFACE)
-  target_include_directories(TracyClient INTERFACE "${tracy_SOURCE_DIR}/public")
+  # The zone profiler's tracy/Tracy.hpp shim first: it #include_next's Tracy's own and
+  # sends ZoneScoped to platforms/vita/profile.
+  target_include_directories(TracyClient INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/profile" "${tracy_SOURCE_DIR}/public")
   add_library(Tracy::TracyClient ALIAS TracyClient)
 endif ()
 if (NOT TARGET Tracy::TracyClient)

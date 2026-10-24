@@ -58,6 +58,13 @@ which processes the GX FIFO and encodes the frame. A high begin-wait with a busy
 worker means the GX translation is the bottleneck; a long tick or draw means the
 game itself is.
 
+Then `[zones]` lines (`MP_PROFILE`, on by default here): the main thread's most
+expensive zones for the same second, in ms and calls per frame, longest first, and
+the busiest zones on other threads. Zones are the game's draw stages (`PORT_ZONE` in
+the world draw, renderer, CPU skinning, particles, HUD, gun) and Aurora's own Tracy
+zones, which `extern/aurora/platforms/vita/profile` receives in place of Tracy.
+Times are inclusive: a zone includes the zones it calls.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because

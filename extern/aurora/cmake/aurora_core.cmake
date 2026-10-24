@@ -26,6 +26,12 @@ if (AURORA_ENABLE_GX AND AURORA_CACHE_USE_ZSTD)
     target_link_libraries(aurora_core PRIVATE zstd::libzstd)
 endif ()
 
+if (VITA)
+    # The zone profiler (Tracy's zones go to it on the Vita; the game's PORT_ZONE too).
+    target_sources(aurora_core PRIVATE platforms/vita/profile/zone_profile.cpp)
+    target_include_directories(aurora_core PUBLIC platforms/vita/profile)
+endif ()
+
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
     # stuff for fetching system info.
     target_link_libraries(aurora_core PRIVATE wbemuuid.lib comsuppw.lib ntdll.lib DXGI.lib)

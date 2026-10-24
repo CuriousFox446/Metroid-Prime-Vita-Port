@@ -1,4 +1,5 @@
 #include "MetroidPrime/HUD/CSamusHud.hpp"
+#include "port_profile.h"
 #include "port_env.h"
 
 #include "Collision/CollisionUtil.hpp"
@@ -1621,6 +1622,7 @@ void CSamusHud::DrawHelmet(const CStateManager& mgr, float camYOff) {
 
 void CSamusHud::Draw(const CStateManager& mgr, float alpha, uint helmetVis, bool hudVis,
                      bool targetingManager) const {
+  PORT_ZONE("CSamusHud::Draw");
   if (x2bc_nextState == kHS_None) {
     return;
   }

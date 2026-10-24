@@ -1,4 +1,5 @@
 #include "MetroidPrime/CMFGame.hpp"
+#include "port_profile.h"
 #include "Kyoto/CResFactory.hpp"
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
@@ -261,6 +262,7 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 }
 
 void CMFGame::Draw() const {
+  PORT_ZONE("CMFGame::Draw");
 #ifdef TARGET_PC
   // Do not let a request survive a non-game draw (or an early return) into another frame.
   CStateManager::sPortSceneHdrRequest = false;

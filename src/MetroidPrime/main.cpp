@@ -26,6 +26,7 @@
 #include "port_textures.h"
 #include "port_prompts.h"
 #include "port_crash.h"
+#include "port_profile.h"
 #include "port_watchdog.h"
 
 #include "stdint.h"
@@ -942,6 +943,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
     // point is where the game's own loading is done.
     uint64_t firstFrameNs = 0;
     const uint64_t loopBeganNs = SDL_GetTicksNS();
+    PORT_PROFILE_SET_MAIN_THREAD();
     unsigned s_frameLog = 0;
     // Frame milestones in the log: where a slow start or a slow device shows up.
     // The counter line above is only the first frame.
@@ -1302,6 +1304,8 @@ int CMain::RsMain(int argc, const char* const* argv) {
                            perFrame(sIdle), perFrame(sEnd), perFrame(sRest),
                            100.0 * static_cast< double >(workerNow - sWorkerStartNs) / wallNs,
                            perFrame(workerNow - sWorkerStartNs));
+            // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
+            PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });
             sSpanStartNs = workEndNs;
             sWorkerStartNs = workerNow;
             sIn = sTick = sWait = sDraw = sIdle = sEnd = sRest = 0;

@@ -1,5 +1,6 @@
 #define CSTATEMANAGER_OUT_OF_LINE_GETPLAYER
 #include "MetroidPrime/CStateManager.hpp"
+#include "port_profile.h"
 #include "port_actor_shadow.h"
 #include "port_apclient.h"
 #include "port_beam_doors.h"
@@ -2558,6 +2559,7 @@ void CStateManager::RecursiveDrawTree(TUniqueId uid) const {
 }
 
 void CStateManager::RendererDrawCallback(const void* drawable, const void* context, int type) {
+  PORT_ZONE("CStateManager::RendererDrawCallback");
   const CStateManager& mgr = *static_cast< const CStateManager* >(context);
   switch (type) {
   case 0: {
@@ -2657,6 +2659,7 @@ bool CStateManager::GetVisSetForArea(const TAreaId areaA, const TAreaId areaB, C
 CGameArea::CChainIterator CWorld::AliveAreasEnd() { return skGlobalNonConstEnd; }
 
 void CStateManager::PreRender() {
+  PORT_ZONE("CStateManager::PreRender");
   if (!xf94_24_readyToRender) {
     return;
   }
@@ -3303,6 +3306,7 @@ float CStateManager::PortZoomedFov(float fov) {
 #endif
 
 void CStateManager::DrawWorld() const {
+  PORT_ZONE("CStateManager::DrawWorld");
 #ifdef TARGET_PC
   // A zoomed pass (sharp scan window) draws before the frame's own: the frame's captures and
   // the gun belong to that one.

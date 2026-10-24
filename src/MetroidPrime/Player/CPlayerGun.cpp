@@ -1,4 +1,5 @@
 #include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "port_profile.h"
 #include "port_debug.h"
 #include "port_power_charge_release.h"
 #include "port_room_env.h"
@@ -717,6 +718,7 @@ CTransform4f CPlayerGun::PortGunView(const CStateManager& mgr,
 
 void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
                         const CModelFlags& flags) const {
+  PORT_ZONE("CPlayerGun::Render");
 #ifdef TARGET_PC
   const CVector3f probePos = mgr.GetPlayer()->GetTranslation();
   const float probeXyz[3] = {probePos.GetX(), probePos.GetY(), probePos.GetZ()};

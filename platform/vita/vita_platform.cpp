@@ -127,6 +127,8 @@ __attribute__((constructor(101))) void vitaSetup() {
     // second, and boot straight into a new game, since the menus cannot be seen.
     setenv("MP_TRACE_TIMING", "1", 0);
     setenv("MP_FAST_BOOT", "1", 0);
+    // And which parts of a frame are slow: the zone profiler's [zones] lines.
+    setenv("MP_PROFILE", "1", 0);
     // Nothing can show or answer a box here: no disc dialog or message boxes, and
     // Aurora keeps running on its Null backend instead of exiting (which a missing
     // GPU means on a desktop, and is the point of this build).

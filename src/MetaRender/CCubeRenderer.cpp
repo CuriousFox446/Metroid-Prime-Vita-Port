@@ -1,4 +1,5 @@
 #include "MetaRender/CCubeRenderer.hpp"
+#include "port_profile.h"
 #include "Kyoto/Basics/CBasics.hpp"
 
 #include "Collision/CollisionUtil.hpp"
@@ -326,6 +327,7 @@ void CCubeRenderer::PortRestoreBuckets(int slot) {
 }
 
 void CCubeRenderer::PortDrawSortedDrawables(int areaIdx) {
+  PORT_ZONE("CCubeRenderer::PortDrawSortedDrawables");
   sPortDrawablesOnly = true;
   DrawSortedGeometry(areaIdx, 0, 0);
   sPortDrawablesOnly = false;
@@ -709,6 +711,7 @@ void CCubeRenderer::AddWorldSurfaces(CCubeModel& model) {
 void CCubeRenderer::DrawRenderBucketsDebug() {}
 
 void CCubeRenderer::RenderBucketItems(const CAreaListItem* areaListItem) {
+  PORT_ZONE("CCubeRenderer::RenderBucketItems");
   AUTO_CONST_REF(bucketData, Buckets::GetBucketData());
   AUTO_CONST_REF(bucketHolder, Buckets::GetBucketHolder());
 
@@ -796,6 +799,7 @@ void CCubeRenderer::HandleUnsortedModelWireframe(const CAreaListItem* areaListIt
 }
 
 void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask) {
+  PORT_ZONE("CCubeRenderer::DrawUnsortedGeometry");
   const CAreaListItem* areaListItem = nullptr;
 
   SetupRendererStates(true);
@@ -853,6 +857,7 @@ void CCubeRenderer::DrawUnsortedGeometry(int areaIdx, uint mask, uint targetMask
 }
 
 void CCubeRenderer::DrawSortedGeometry(int areaIdx, uint mask, uint targetMask) {
+  PORT_ZONE("CCubeRenderer::DrawSortedGeometry");
   (void)mask;
   (void)targetMask;
 
@@ -2120,6 +2125,7 @@ struct fog_sorter {
 } // namespace
 
 void CCubeRenderer::PostRenderFogs() {
+  PORT_ZONE("CCubeRenderer::PostRenderFogs");
   for (AUTO(warpIt, x2c4_spaceWarps.begin()); warpIt != x2c4_spaceWarps.end(); ++warpIt) {
     _DrawSpaceWarp(warpIt->first, warpIt->second);
   }
@@ -2261,6 +2267,7 @@ void CCubeRenderer::DrawModelDisintegrate(const CModel& model, const CTexture& t
 
 void CCubeRenderer::DrawModelFlat(const CModel& model, const CModelFlags& flags, const bool unsortedOnly,
                                   const float* pos, const float* nrm) {
+  PORT_ZONE("CCubeRenderer::DrawModelFlat");
   const char blendMode = static_cast< char >(flags.GetBlendMode());
   if (blendMode > 6) {
     CGX::SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_CLEAR);
@@ -2295,6 +2302,7 @@ void CCubeRenderer::DrawModelFlat(const CModel& model, const CModelFlags& flags,
 }
 
 void CCubeRenderer::DrawAreaGeometry(int areaIdx, uint mask, uint targetMask) {
+  PORT_ZONE("CCubeRenderer::DrawAreaGeometry");
   x318_30_inAreaDraw = true;
   SetupRendererStates(true);
 
@@ -2428,6 +2436,7 @@ void CCubeRenderer::PrepareDynamicLights(const rstl::vector< CLight >& lights) {
 
 void CCubeRenderer::FindOverlappingWorldModels(rstl::vector< uint >& modelBits,
                                                const CAABox& aabb) {
+  PORT_ZONE("CCubeRenderer::FindOverlappingWorldModels");
   int wordCount = 0;
   for (AUTO(it, x1c_areaListItems.begin()); it != x1c_areaListItems.end(); ++it) {
     if (it->x4_octTree != 0) {
@@ -2531,6 +2540,7 @@ int CCubeRenderer::DrawOverlappingWorldModelIDs(int alphaVal, rstl::vector< uint
 
 void CCubeRenderer::DrawOverlappingWorldModelShadows(int alphaVal, rstl::vector< uint >& modelBits,
                                                      const CAABox& aabb, int, int) {
+  PORT_ZONE("CCubeRenderer::DrawOverlappingWorldModelShadows");
   const GXColor black = {0, 0, 0, 0};
   GXColor color = black;
 

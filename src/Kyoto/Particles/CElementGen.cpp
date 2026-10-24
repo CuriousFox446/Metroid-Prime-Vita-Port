@@ -1,4 +1,5 @@
 #include "Kyoto/Particles/CElementGen.hpp"
+#include "port_profile.h"
 
 #include "Kyoto/Basics/CStopwatch.hpp"
 #include "Kyoto/CRandom16.hpp"
@@ -2358,6 +2359,7 @@ bool CElementGen::IsSystemDeletable() const {
 }
 
 void CElementGen::Render() {
+  PORT_ZONE("CElementGen::Render (particles)");
   CStopwatch timer;
 #ifdef TARGET_PC
   PortFx::RenderScope fxScope(x28_loadedGenDesc->xPortUnfogged);
