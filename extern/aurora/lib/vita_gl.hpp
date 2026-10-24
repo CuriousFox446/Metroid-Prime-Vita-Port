@@ -8,10 +8,33 @@
 // render worker, where frames are presented.
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include <imgui.h>
 
 namespace aurora::vita_gl {
+// A vertex of the Vita path's meshes (milestone 2: position, a face normal for shading, colour).
+struct Vertex {
+  float pos[3];
+  float nrm[3];
+  uint8_t color[4];
+};
+static_assert(sizeof(Vertex) == 28);
+
+// Triangles decoded once from a GX display list (gx/vita_draw.cpp). Uploaded to the GPU on the
+// render worker at its first draw; freed there once no frame draws it.
+class Mesh;
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept;
+
+// One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
+// GL's depth range).
+struct Draw {
+  std::shared_ptr<Mesh> mesh;
+  float modelView[12];
+  float projection[16];
+};
+
 #ifdef AURORA_VITA_GL
 // Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
 // too, must never be created.
@@ -22,6 +45,10 @@ void init_imgui() noexcept;
 void shutdown_imgui() noexcept;
 // The font atlas was rebuilt: its texture is uploaded again before the next present.
 void fonts_changed() noexcept;
+// FIFO thread: a draw of the frame being processed, and that frame's end (its draws go to the
+// render worker's next present).
+void record(Draw draw) noexcept;
+void end_frame_draws() noexcept;
 // Render worker: clears the screen, draws the overlay (null: none) and swaps.
 void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
@@ -33,6 +60,8 @@ inline bool active() noexcept { return false; }
 inline void init_imgui() noexcept {}
 inline void shutdown_imgui() noexcept {}
 inline void fonts_changed() noexcept {}
+inline void record(Draw) noexcept {}
+inline void end_frame_draws() noexcept {}
 inline void present(ImDrawData*) noexcept {}
 inline ImTextureID add_texture(uint32_t, uint32_t, const uint8_t*) noexcept { return ImTextureID{}; }
 inline void remove_texture(ImTextureID) noexcept {}

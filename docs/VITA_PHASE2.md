@@ -76,3 +76,24 @@ for a failure: it created SDL's renderer, whose own GXM init failed ("already in
 and crashed in its cleanup. This vitaGL's init returns true only when the requested size was
 beyond the display's and it clamped it; false is the normal case. The return is now only
 logged, and SDL's renderer is never created once vitaGL has run.
+
+Second run: vitaGL up at 960x544, 4 minutes without errors, the hangar's heavy seconds at
+16.0 FPS (15.6 before); begin-wait rose from about 4 to 11 ms (the swap's wait for vblank
+holding a frame slot, most likely).
+
+**Milestone 2 (built, not yet run on the Vita).** `lib/gx/vita_draw.cpp`, on the FIFO
+thread: each call of a retained display list (`call_resident_dl`) decodes the list once
+(positions and colour 0 from the arrays or the list, any primitive type made into
+triangles, a face normal per triangle), caches it by the list and the arrays and vertex
+formats it was decoded with, and records a draw with GX's current position matrix and its
+projection (row 2 as `2 * row 2 + row 3` for GL's depth range). The frame's draws go to the
+render worker at the frame end (`vita_gl::end_frame_draws`), which draws them with one Cg
+program (the face normal shaded towards the camera, times the vertex colour), depth tested,
+before the overlay. Not drawn yet: lists with per-vertex matrices, positions made at run
+time (CPU skinning), immediate primitives, lines and points. The WebGPU path still runs into
+the null device beside it.
+
+The bigger binary first failed to package: `vita-elf-create` appends the module's import and
+export tables (4,660 bytes) to the end of the code segment, and only 1,656 bytes were left
+before the data segment. `-Wl,--defsym,__sce_headroom=0x10000` makes VitaSDK's linker
+script keep room there.

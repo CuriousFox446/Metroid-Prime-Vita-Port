@@ -32,6 +32,10 @@ if(VITA)
     # scoped or padded to int), so ld's warning about the mix is expected.
     add_compile_options(-fno-short-enums)
     add_link_options(-Wl,--no-enum-size-warning)
+    # vita-elf-create appends the module's import and export tables (a few KiB) to the end of
+    # the code segment; VitaSDK's linker script keeps __sce_headroom bytes free there before the
+    # data segment's 64 KiB alignment. Without it the room left is luck, and once it was 1.6 KiB.
+    add_link_options(-Wl,--defsym,__sce_headroom=0x10000)
     # Built from source with that flag: SDL3 (its structs carry plain enums into the
     # port, SDL_AudioSpec among them) and the libraries MP_BUNDLED_DEPS covers.
     set(AURORA_SDL3_PROVIDER vendor CACHE STRING "How to provide SDL3")

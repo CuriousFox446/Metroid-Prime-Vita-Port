@@ -9,7 +9,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <system_error>
 
@@ -26,6 +29,186 @@ constexpr int kLegacyPool = 256 * 1024;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
+
+// The frames' draws: recorded on the FIFO thread, handed over at each frame's end, drawn by the
+// render worker's present for that frame, in order.
+std::vector<Draw> g_recording;
+std::mutex g_framesMutex;
+std::deque<std::vector<Draw>> g_frames;
+
+// Milestone 2's one program: GX's position matrix and projection, shaded by the face normal
+// as seen from the camera, times the vertex colour. Rows rather than matrices, so no layout
+// question arises between GL and Cg.
+constexpr const char* kVertexShader = R"(
+void main(float3 aPos, float3 aNrm, float4 aColor,
+          uniform float4 uMv0, uniform float4 uMv1, uniform float4 uMv2,
+          uniform float4 uProj0, uniform float4 uProj1, uniform float4 uProj2, uniform float4 uProj3,
+          float4 out vColor : COLOR, float4 out vPos : POSITION) {
+  float4 p = float4(aPos, 1.0);
+  float4 v = float4(dot(uMv0, p), dot(uMv1, p), dot(uMv2, p), 1.0);
+  vPos = float4(dot(uProj0, v), dot(uProj1, v), dot(uProj2, v), dot(uProj3, v));
+  float3 n = float3(dot(uMv0.xyz, aNrm), dot(uMv1.xyz, aNrm), dot(uMv2.xyz, aNrm));
+  float len = length(n);
+  float shade = len > 0.0001 ? 0.35 + 0.65 * abs(n.z / len) : 1.0;
+  vColor = float4(aColor.rgb * shade, 1.0);
+}
+)";
+constexpr const char* kFragmentShader = R"(
+float4 main(float4 vColor : COLOR) : COLOR { return vColor; }
+)";
+
+struct Program {
+  GLuint program = 0;
+  GLint mv[3]{};
+  GLint proj[4]{};
+  bool tried = false;
+};
+Program g_program;
+
+GLuint compile(GLenum type, const char* source) {
+  const GLuint shader = glCreateShader(type);
+  const GLint length = static_cast<GLint>(std::strlen(source));
+  glShaderSource(shader, 1, &source, &length);
+  glCompileShader(shader);
+  GLint ok = GL_FALSE;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+  if (ok != GL_TRUE) {
+    char log[512] = {};
+    glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+    Log.error("{} shader did not compile: {}", type == GL_VERTEX_SHADER ? "vertex" : "fragment", log);
+  }
+  return shader;
+}
+
+// Render worker. The first call compiles (several seconds on a Vita, then from the shader cache).
+bool use_program() {
+  if (!g_program.tried) {
+    g_program.tried = true;
+    const GLuint vs = compile(GL_VERTEX_SHADER, kVertexShader);
+    const GLuint fs = compile(GL_FRAGMENT_SHADER, kFragmentShader);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "aPos");
+    glBindAttribLocation(program, 1, "aNrm");
+    glBindAttribLocation(program, 2, "aColor");
+    glLinkProgram(program);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+      Log.error("the milestone 2 program did not link");
+      return false;
+    }
+    static constexpr const char* kMv[3] = {"uMv0", "uMv1", "uMv2"};
+    static constexpr const char* kProj[4] = {"uProj0", "uProj1", "uProj2", "uProj3"};
+    for (int i = 0; i < 3; ++i) {
+      g_program.mv[i] = glGetUniformLocation(program, kMv[i]);
+    }
+    for (int i = 0; i < 4; ++i) {
+      g_program.proj[i] = glGetUniformLocation(program, kProj[i]);
+    }
+    g_program.program = program;
+    Log.info("the milestone 2 program is ready");
+  }
+  if (g_program.program == 0) {
+    return false;
+  }
+  glUseProgram(g_program.program);
+  return true;
+}
+} // namespace
+
+class Mesh {
+public:
+  explicit Mesh(std::vector<Vertex> triangles) noexcept
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())) {}
+  ~Mesh() {
+    if (m_vbo != 0) {
+      const GLuint vbo = m_vbo;
+      gfx::render_worker::enqueue_work([vbo] { glDeleteBuffers(1, &vbo); });
+    }
+  }
+
+  // Render worker: binds the vertex buffer (made from the CPU copy at the first draw).
+  GLsizei bind() noexcept {
+    if (m_vbo == 0) {
+      glGenBuffers(1, &m_vbo);
+      glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+      glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_cpu.size() * sizeof(Vertex)), m_cpu.data(),
+                   GL_STATIC_DRAW);
+      std::vector<Vertex>().swap(m_cpu);
+    } else {
+      glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    }
+    return m_count;
+  }
+
+private:
+  std::vector<Vertex> m_cpu;
+  GLuint m_vbo = 0;
+  GLsizei m_count;
+};
+
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept {
+  return std::make_shared<Mesh>(std::move(triangles));
+}
+
+void record(Draw draw) noexcept { g_recording.push_back(std::move(draw)); }
+
+void end_frame_draws() noexcept {
+  std::lock_guard lock{g_framesMutex};
+  g_frames.push_back(std::move(g_recording));
+  g_recording = {};
+  // A frame the render worker never presented must not hold on to its meshes for good.
+  while (g_frames.size() > 3) {
+    g_frames.pop_front();
+  }
+}
+
+namespace {
+// Render worker: the oldest frame handed over and not yet drawn.
+std::vector<Draw> take_frame() {
+  std::lock_guard lock{g_framesMutex};
+  if (g_frames.empty()) {
+    return {};
+  }
+  std::vector<Draw> draws = std::move(g_frames.front());
+  g_frames.pop_front();
+  return draws;
+}
+
+void draw_world(const std::vector<Draw>& draws) {
+  if (draws.empty() || !use_program()) {
+    return;
+  }
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LEQUAL);
+  glDepthMask(GL_TRUE);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_BLEND);
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glEnableVertexAttribArray(2);
+  for (const Draw& draw : draws) {
+    const GLsizei count = draw.mesh->bind();
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<const void*>(0));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<const void*>(12));
+    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), reinterpret_cast<const void*>(24));
+    for (int i = 0; i < 3; ++i) {
+      glUniform4fv(g_program.mv[i], 1, draw.modelView + i * 4);
+    }
+    for (int i = 0; i < 4; ++i) {
+      glUniform4fv(g_program.proj[i], 1, draw.projection + i * 4);
+    }
+    glDrawArrays(GL_TRIANGLES, 0, count);
+  }
+  glDisableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+  glDisableVertexAttribArray(2);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glUseProgram(0);
+  glDisable(GL_DEPTH_TEST);
+}
 } // namespace
 
 bool initialize() noexcept {
@@ -73,7 +256,9 @@ void present(ImDrawData* overlay) noexcept {
   glDisable(GL_SCISSOR_TEST);
   // Dark blue, so a screen drawn by this path is told apart from a black one at a glance.
   glClearColor(0.05f, 0.08f, 0.16f, 1.f);
+  glClearDepth(1.0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  draw_world(take_frame());
   if (overlay != nullptr && overlay->CmdListsCount > 0) {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }

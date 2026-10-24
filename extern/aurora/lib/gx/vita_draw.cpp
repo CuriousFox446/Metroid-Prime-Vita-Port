@@ -1,0 +1,267 @@
+#include "vita_draw.hpp"
+
+#include "../internal.hpp"
+#include "../vita_gl.hpp"
+#include "gx.hpp"
+
+#include <dolphin/gx/GXCommandList.h>
+
+#include <tracy/Tracy.hpp>
+
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <unordered_map>
+#include <vector>
+
+namespace aurora::gx::vita {
+namespace {
+constexpr Module Log{"aurora::gx::vita"};
+
+// A list's decoded triangles, and what they were decoded with: the same list called with other
+// arrays or vertex formats is decoded again.
+struct Cached {
+  std::shared_ptr<vita_gl::Mesh> mesh; // null: the list cannot be drawn this way
+  const void* posArray = nullptr;
+  std::array<GXAttrType, MaxVtxAttr> vtxDesc{};
+  std::array<VtxFmt, MaxVtxFmt> vtxFmts{};
+};
+std::unordered_map<const void*, Cached> sCache;
+
+u16 read16(const u8* p, bool le) noexcept {
+  return le ? static_cast<u16>(p[0] | (p[1] << 8)) : static_cast<u16>((p[0] << 8) | p[1]);
+}
+
+u32 read32(const u8* p, bool le) noexcept {
+  return le ? static_cast<u32>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24))
+            : static_cast<u32>((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+}
+
+float read_component(const u8* p, GXCompType type, u8 frac, bool le) noexcept {
+  const float scale = 1.f / static_cast<float>(1u << frac);
+  switch (type) {
+  case GX_U8:
+    return p[0] * scale;
+  case GX_S8:
+    return static_cast<s8>(p[0]) * scale;
+  case GX_U16:
+    return read16(p, le) * scale;
+  case GX_S16:
+    return static_cast<s16>(read16(p, le)) * scale;
+  case GX_F32:
+    return std::bit_cast<float>(read32(p, le));
+  default:
+    return 0.f;
+  }
+}
+
+void read_color(const u8* p, GXCompType type, u8 out[4]) noexcept {
+  switch (type) {
+  case GX_RGB565: {
+    const u16 v = read16(p, false);
+    out[0] = static_cast<u8>(((v >> 11) & 31) * 255 / 31);
+    out[1] = static_cast<u8>(((v >> 5) & 63) * 255 / 63);
+    out[2] = static_cast<u8>((v & 31) * 255 / 31);
+    out[3] = 255;
+    break;
+  }
+  case GX_RGB8:
+  case GX_RGBX8:
+    out[0] = p[0];
+    out[1] = p[1];
+    out[2] = p[2];
+    out[3] = 255;
+    break;
+  case GX_RGBA4: {
+    const u16 v = read16(p, false);
+    out[0] = static_cast<u8>(((v >> 12) & 15) * 17);
+    out[1] = static_cast<u8>(((v >> 8) & 15) * 17);
+    out[2] = static_cast<u8>(((v >> 4) & 15) * 17);
+    out[3] = static_cast<u8>((v & 15) * 17);
+    break;
+  }
+  case GX_RGBA6: {
+    const u32 v = (u32(p[0]) << 16) | (u32(p[1]) << 8) | p[2];
+    out[0] = static_cast<u8>(((v >> 18) & 63) * 255 / 63);
+    out[1] = static_cast<u8>(((v >> 12) & 63) * 255 / 63);
+    out[2] = static_cast<u8>(((v >> 6) & 63) * 255 / 63);
+    out[3] = static_cast<u8>((v & 63) * 255 / 63);
+    break;
+  }
+  case GX_RGBA8:
+    std::memcpy(out, p, 4);
+    break;
+  default:
+    out[0] = out[1] = out[2] = out[3] = 255;
+    break;
+  }
+}
+
+// One GX vertex's position and colour, from its bytes in the list (which advance past it).
+// False when it has a per-vertex matrix (not drawn yet) or reads outside an array.
+bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, vita_gl::Vertex& out) noexcept {
+  out = {};
+  out.color[0] = out.color[1] = out.color[2] = 200;
+  out.color[3] = 255;
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto attr = static_cast<GXAttr>(i);
+    const GXAttrType type = g_gxState.vtxDesc[i];
+    if (type == GX_NONE) {
+      continue;
+    }
+    const VtxAttrFmt& attrFmt = fmt.attrs[i];
+    if (attr == GX_VA_PNMTXIDX) {
+      return false;
+    }
+    const u32 elemSize = attr >= GX_VA_PNMTXIDX && attr <= GX_VA_TEX7MTXIDX
+                             ? 1
+                             : u32(comp_type_size(attr, attrFmt.type)) * comp_cnt_count(attr, attrFmt.cnt);
+    const u8* data;
+    bool le = false;
+    if (type == GX_DIRECT) {
+      data = vtx;
+      vtx += elemSize;
+    } else {
+      const bool nbt3 = attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3;
+      const u32 index = type == GX_INDEX8 ? vtx[0] : read16(vtx, false);
+      vtx += (type == GX_INDEX8 ? 1 : 2) * (nbt3 ? 3 : 1);
+      if (attr != GX_VA_POS && attr != GX_VA_CLR0) {
+        continue;
+      }
+      const AttrArray& array = g_gxState.arrays[i];
+      const u64 offset = u64(index + array.baseIndex) * array.stride;
+      if (array.data == nullptr || offset + elemSize > array.size) {
+        return false;
+      }
+      data = static_cast<const u8*>(array.data) + offset;
+      le = array.le;
+    }
+    if (attr == GX_VA_POS) {
+      const u32 cnt = comp_cnt_count(attr, attrFmt.cnt);
+      const u32 step = comp_type_size(attr, attrFmt.type);
+      for (u32 c = 0; c < cnt; ++c) {
+        out.pos[c] = read_component(data + c * step, attrFmt.type, attrFmt.frac, le);
+      }
+    } else if (attr == GX_VA_CLR0) {
+      read_color(data, attrFmt.type, out.color);
+    }
+  }
+  return true;
+}
+
+void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a, const vita_gl::Vertex& b,
+                     const vita_gl::Vertex& c) {
+  // A face normal, in the model's space: the shader turns it with the position matrix.
+  const float u[3] = {b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2]};
+  const float v[3] = {c.pos[0] - a.pos[0], c.pos[1] - a.pos[1], c.pos[2] - a.pos[2]};
+  const float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+  for (const vita_gl::Vertex* src : {&a, &b, &c}) {
+    vita_gl::Vertex vertex = *src;
+    std::memcpy(vertex.nrm, n, sizeof(n));
+    out.push_back(vertex);
+  }
+}
+
+// The list's triangles, or none when it holds anything this path cannot draw yet.
+std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size) noexcept {
+  std::vector<vita_gl::Vertex> triangles;
+  std::vector<vita_gl::Vertex> prim;
+  size_t pos = 0;
+  const size_t end = std::min<size_t>(size, bytes.size());
+  while (pos < end) {
+    const u8 cmd = bytes[pos++];
+    if (cmd == GX_NOP) {
+      continue;
+    }
+    if (cmd < 0x80 || end - pos < 2) {
+      return {};
+    }
+    const auto fmt = static_cast<GXVtxFmt>(cmd & GX_VAT_MASK);
+    const auto type = static_cast<GXPrimitive>(cmd & GX_OPCODE_MASK);
+    const u16 count = static_cast<u16>((bytes[pos] << 8) | bytes[pos + 1]);
+    pos += 2;
+    prim.resize(count);
+    const u8* vtx = bytes.data() + pos;
+    for (u16 i = 0; i < count; ++i) {
+      if (vtx >= bytes.data() + end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], prim[i])) {
+        return {};
+      }
+    }
+    pos = static_cast<size_t>(vtx - bytes.data());
+    if (pos > end) {
+      return {};
+    }
+    switch (type) {
+    case GX_TRIANGLES:
+      for (u32 i = 0; i + 2 < count; i += 3) {
+        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2]);
+      }
+      break;
+    case GX_TRIANGLESTRIP:
+      for (u32 i = 0; i + 2 < count; ++i) {
+        if ((i & 1) == 0) {
+          append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2]);
+        } else {
+          append_triangle(triangles, prim[i + 1], prim[i], prim[i + 2]);
+        }
+      }
+      break;
+    case GX_TRIANGLEFAN:
+      for (u32 i = 1; i + 1 < count; ++i) {
+        append_triangle(triangles, prim[0], prim[i], prim[i + 1]);
+      }
+      break;
+    case GX_QUADS:
+      for (u32 i = 0; i + 3 < count; i += 4) {
+        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2]);
+        append_triangle(triangles, prim[i], prim[i + 2], prim[i + 3]);
+      }
+      break;
+    default:
+      break; // lines and points: not drawn yet
+    }
+  }
+  return triangles;
+}
+
+bool same_formats(const Cached& cached) noexcept {
+  return cached.posArray == g_gxState.arrays[GX_VA_POS].data && cached.vtxDesc == g_gxState.vtxDesc &&
+         std::memcmp(cached.vtxFmts.data(), g_gxState.vtxFmts.data(), sizeof(cached.vtxFmts)) == 0;
+}
+} // namespace
+
+void draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
+  ZoneScoped;
+  // Positions made at run time (CPU skinning) change under the same list: not drawn yet.
+  if (g_gxState.arrays[GX_VA_POS].le) {
+    return;
+  }
+  Cached& cached = sCache[key];
+  if (!same_formats(cached)) {
+    ZoneScopedN("vita: decode a display list");
+    std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size);
+    cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles));
+    cached.posArray = g_gxState.arrays[GX_VA_POS].data;
+    cached.vtxDesc = g_gxState.vtxDesc;
+    cached.vtxFmts = g_gxState.vtxFmts;
+  }
+  if (!cached.mesh) {
+    return;
+  }
+  vita_gl::Draw draw{.mesh = cached.mesh};
+  const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
+  std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
+  // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
+  const Mat4x4<float>& proj = g_gxState.proj;
+  for (int c = 0; c < 4; ++c) {
+    draw.projection[c] = proj.m0[c];
+    draw.projection[4 + c] = proj.m1[c];
+    draw.projection[8 + c] = 2.f * proj.m2[c] + proj.m3[c];
+    draw.projection[12 + c] = proj.m3[c];
+  }
+  vita_gl::record(std::move(draw));
+}
+
+void release(const void* key) noexcept { sCache.erase(key); }
+} // namespace aurora::gx::vita

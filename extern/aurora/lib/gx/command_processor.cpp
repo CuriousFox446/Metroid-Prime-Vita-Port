@@ -20,6 +20,8 @@
 #include "resident.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
+#include "vita_draw.hpp"
+#include "../vita_gl.hpp"
 
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
@@ -869,6 +871,11 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
     Log.error("GX_AURORA_RESIDENT_CALL_DL: {} is not retained with {} bytes", key, size);
     return;
   }
+  if (vita_gl::active()) {
+    // The Vita's own draw of it (vita_draw.hpp); the WebGPU one below still runs, into the
+    // null device, until the Vita path stands on its own.
+    vita::draw_resident(key, *entry, size);
+  }
   if (!entry->chunks.empty()) {
     // Parsed with other vertex sizes: what the vertices are has changed since.
     for (int fmt = 0; fmt < GX_MAX_VTXFMT; ++fmt) {
@@ -1098,6 +1105,7 @@ void handle_aurora(ByteReader& reader) noexcept {
   } else if (subCmd == GX_AURORA_RESIDENT_RELEASE) {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     resident::release(key);
+    vita::release(key);
     // An array still set to it reads its resident copy no more.
     for (auto& array : g_gxState.arrays) {
       if (array.data == key) {
