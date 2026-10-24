@@ -7,8 +7,6 @@
 
 #include "backends/imgui_impl_opengl2.h"
 
-#include <vitashark.h>
-
 #include <cstdio>
 
 #include <fmt/format.h>
@@ -196,84 +194,75 @@ constexpr GLint kNoUniform = -1;
 enum ProgramAttr { kAttrPos, kAttrRaw, kAttrShade, kAttrUv0, kAttrCount = kAttrUv0 + kTexCoords };
 constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aUv0", "aUv1", "aUv2", "aUv3"};
 
-// Compiles Cg source to a GXP binary with vitaGL's Cg compiler (vitashark over SceShaccCg), as
-// glCompileShader does for the GL_CG_* types. (GL_VERTEX_SHADER and GL_FRAGMENT_SHADER source
-// vitaGL takes for GLSL, translated at glLinkProgram, VGL_MODE_POSTPONED: Cg source failed there and
-// left an invalid program glLinkProgram read, the crash of milestone 2's first program.)
-bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t>& gxp, std::string& error) {
-  // vitaGL starts the compiler (shark_init, with its own allocators) at the first glCompileShader,
-  // and only there; called before it, the compiler fails with "fatal internal error" (every
-  // program of a session whose fixed-function shaders all came from vitaGL's cache). So the first
-  // compile goes through glCompileShader once, with a shader that is thrown away.
-  static bool sCompilerStarted = false;
-  if (!sCompilerStarted) {
-    sCompilerStarted = true;
-    const GLuint starter = glCreateShader(GL_CG_FRAGMENT_SHADER_EXT);
-    const char* text = "float4 main() : COLOR { return float4(1.0); }";
-    const auto length = static_cast<GLint>(std::strlen(text));
-    glShaderSource(starter, 1, &text, &length);
-    glCompileShader(starter);
-    glDeleteShader(starter);
-  }
-  uint32_t size = 0;
-  const SceGxmProgram* program = shark_compile_shader(source.c_str(), &size, type);
-  if (program == nullptr || size == 0) {
-    const SceShaccCgCompileOutput* output = shark_get_internal_compile_output();
-    error = "the Cg compiler failed";
-    for (int i = 0; output != nullptr && i < output->diagnosticCount && i < 4; ++i) {
-      if (output->diagnostics[i].message != nullptr) {
-        error += "; ";
-        error += output->diagnostics[i].message;
-      }
-    }
-    shark_clear_output();
-    return false;
-  }
-  const auto* bytes = reinterpret_cast<const uint8_t*>(program);
-  gxp.assign(bytes, bytes + size);
-  shark_clear_output();
-  return true;
-}
-
-// A GL shader from a GXP binary: vglShaderGxpBinary registers it with the shader patcher, as a
-// compile would. The GL_CG_* type keeps the link from treating it as GLSL left to translate.
-GLuint load_gxp(GLenum type, const std::vector<uint8_t>& gxp) {
+// Compiles Cg source. The GL_CG_* types matter: vitaGL takes GL_VERTEX_SHADER and
+// GL_FRAGMENT_SHADER source for GLSL, translates it at glLinkProgram (VGL_MODE_POSTPONED), and a
+// Cg source that fails there leaves an invalid GXM program that glLinkProgram reads (the crash of
+// milestone 2's first program). With the Cg types the compile happens here, and its status holds.
+// (Calling vitashark directly for the GXP failed every compile with "fatal internal error", even
+// after a glCompileShader had started the compiler: runs of 685daf0 and a48830e.)
+GLuint compile_cg(GLenum type, const std::string& source, std::string& error) {
   const GLuint shader = glCreateShader(type);
-  vglShaderGxpBinary(1, &shader, gxp.data(), static_cast<GLsizei>(gxp.size()));
+  const char* text = source.c_str();
+  const auto length = static_cast<GLint>(source.size());
+  glShaderSource(shader, 1, &text, &length);
+  glCompileShader(shader);
+  GLint ok = GL_FALSE;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+  if (ok != GL_TRUE) {
+    char log[1024] = {};
+    glGetShaderInfoLog(shader, sizeof(log) - 1, nullptr, log);
+    error = log;
+    glDeleteShader(shader);
+    return 0;
+  }
   return shader;
 }
 
-// Generated programs' GXP binaries on the memory card, by their source's hash (vita_tev.cpp):
-// vitaGL's shader cache does not keep these Cg programs (a session compiled the same 61 again,
-// 23 s of hitches), so a program is compiled once and loaded after. A file holds a header (magic,
-// both sources' lengths, which a hash collision would have to match as well, both binaries'
-// sizes) and the two binaries.
-constexpr uint32_t kCacheMagic = 0x31505456; // "VTP1"
+// Generated programs on the memory card, by their source's hash (vita_tev.cpp): vitaGL's shader
+// cache does not keep these Cg programs (a session compiled the same 61 again, 23 s of hitches),
+// so a program is compiled once and loaded after. A file holds a header (magic, both sources'
+// lengths, which a hash collision would have to match as well, the binary's format and size) and
+// the program binary from glGetProgramBinary, which glProgramBinary takes back: vitaGL's own
+// format, both shaders' GXPs with their parameter tables, relinked on load without the compiler.
+constexpr uint32_t kCacheMagic = 0x32505456; // "VTP2"
+constexpr uint32_t kMaxBinary = 1u << 20;
 std::string g_programCacheDir;
 
 std::string cache_path(uint64_t key) { return fmt::format("{}/{:016x}.gxp", g_programCacheDir, key); }
 
-bool load_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, std::vector<uint8_t>& vertex,
-                 std::vector<uint8_t>& fragment) {
+bool load_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum& format,
+                 std::vector<uint8_t>& binary) {
   std::FILE* file = std::fopen(cache_path(key).c_str(), "rb");
   if (file == nullptr) {
     return false;
   }
   uint32_t header[5] = {};
   bool ok = std::fread(header, sizeof(header), 1, file) == 1 && header[0] == kCacheMagic &&
-            header[1] == vertexLength && header[2] == fragmentLength && header[3] != 0 && header[4] != 0 &&
-            header[3] < (1u << 20) && header[4] < (1u << 20);
+            header[1] == vertexLength && header[2] == fragmentLength && header[4] != 0 && header[4] < kMaxBinary;
   if (ok) {
-    vertex.resize(header[3]);
-    fragment.resize(header[4]);
-    ok = std::fread(vertex.data(), vertex.size(), 1, file) == 1 && std::fread(fragment.data(), fragment.size(), 1, file) == 1;
+    format = header[3];
+    binary.resize(header[4]);
+    ok = std::fread(binary.data(), binary.size(), 1, file) == 1;
   }
   std::fclose(file);
   return ok;
 }
 
-void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, const std::vector<uint8_t>& vertex,
-                 const std::vector<uint8_t>& fragment) {
+void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLuint program) {
+  // vitaGL's glGetProgramBinary writes the whole binary whatever the buffer's size, so the buffer
+  // is the length vitaGL gives first, with room to spare.
+  GLint length = 0;
+  glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+  if (length <= 0 || static_cast<uint32_t>(length) >= kMaxBinary) {
+    return;
+  }
+  std::vector<uint8_t> binary(static_cast<size_t>(length) + 4096);
+  GLsizei written = 0;
+  GLenum format = 0;
+  glGetProgramBinary(program, static_cast<GLsizei>(binary.size()), &written, &format, binary.data());
+  if (written <= 0 || static_cast<size_t>(written) > binary.size()) {
+    return;
+  }
   // Written aside and renamed, so a file cut short (the power, a crash) is never read.
   const std::string path = cache_path(key);
   const std::string temp = path + ".tmp";
@@ -281,11 +270,9 @@ void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, c
   if (file == nullptr) {
     return;
   }
-  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, static_cast<uint32_t>(vertex.size()),
-                              static_cast<uint32_t>(fragment.size())};
+  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(written)};
   const bool ok = std::fwrite(header, sizeof(header), 1, file) == 1 &&
-                  std::fwrite(vertex.data(), vertex.size(), 1, file) == 1 &&
-                  std::fwrite(fragment.data(), fragment.size(), 1, file) == 1;
+                  std::fwrite(binary.data(), static_cast<size_t>(written), 1, file) == 1;
   std::fclose(file);
   std::error_code ec;
   if (ok) {
@@ -363,18 +350,25 @@ private:
   void build() noexcept {
     const auto start = std::chrono::steady_clock::now();
     std::string error;
-    std::vector<uint8_t> vertexGxp;
-    std::vector<uint8_t> fragmentGxp;
     const auto vertexLength = static_cast<uint32_t>(m_vertexSource.size());
     const auto fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
-    const bool cached = load_cached(m_key, vertexLength, fragmentLength, vertexGxp, fragmentGxp);
-    bool binaries = cached;
-    if (!cached && compile_gxp(m_vertexSource, SHARK_VERTEX_SHADER, vertexGxp, error) &&
-        compile_gxp(m_fragmentSource, SHARK_FRAGMENT_SHADER, fragmentGxp, error)) {
-      binaries = true;
+    GLenum format = 0;
+    std::vector<uint8_t> binary;
+    const bool cached = load_cached(m_key, vertexLength, fragmentLength, format, binary);
+    if (cached) {
+      // glProgramBinary rebuilds both shaders from their GXPs and links them.
+      const GLuint program = glCreateProgram();
+      glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
+      GLint ok = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (ok == GL_TRUE) {
+        m_id = program;
+      } else {
+        glDeleteProgram(program);
+      }
     }
-    const GLuint vs = binaries ? load_gxp(GL_CG_VERTEX_SHADER_EXT, vertexGxp) : 0;
-    const GLuint fs = binaries ? load_gxp(GL_CG_FRAGMENT_SHADER_EXT, fragmentGxp) : 0;
+    const GLuint vs = cached ? 0 : compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
+    const GLuint fs = vs != 0 ? compile_cg(GL_CG_FRAGMENT_SHADER_EXT, m_fragmentSource, error) : 0;
     if (vs != 0 && fs != 0) {
       // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
       // and passes the result on unchecked, so a name the compiler dropped would crash it. The
@@ -403,16 +397,16 @@ private:
       g_programStats.loadMs += ms;
       ++g_programStats.loaded;
       if (m_id == 0) {
-        // Binaries that no longer link (another compiler, a damaged card) go, for a compile next time.
+        // A binary that no longer links (another vitaGL, a damaged card) goes, for a compile next time.
         std::error_code ec;
         std::filesystem::remove(cache_path(m_key), ec);
-        error = "its binaries from the card did not link (removed)";
+        error = "its binary from the card did not link (removed)";
       }
     } else {
-      g_programStats.compileMs += ms;
       if (m_id != 0) {
-        save_cached(m_key, vertexLength, fragmentLength, vertexGxp, fragmentGxp);
+        save_cached(m_key, vertexLength, fragmentLength, m_id);
       }
+      g_programStats.compileMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
     if (m_id == 0) {
       m_state = State::Failed;

@@ -421,3 +421,19 @@ at the first compile it is needed for; this session's fixed-function shaders all
 shader cache, so nothing had started it when vitashark was called directly. The first compile now
 goes through `glCompileShader` once, with a throwaway shader, so vitaGL starts the compiler its
 own way.
+
+Its two runs (a48830e; the build stamp reads 685daf0-dirty): the same, 44 and 46 programs
+failed, none built or loaded, "fatal internal error" every time, though the first compile took
+about 120 ms, so the throwaway compile did run. Both reached the Emergency Evacuation Area all
+fixed-function, 11.2 FPS in the heavy seconds, VRAM 49 MiB free. Why vitashark fails when called
+from outside vitaGL is not known, and the direct calls are dropped.
+
+**Programs kept as GL program binaries (built, not yet run on the Vita).** Compiles are back on
+vitaGL's `glCompileShader` with the `GL_CG_*` types and a link, the path that built 61 programs
+in 9f6d5cf. A linked program is then saved with `glGetProgramBinary` (its size from
+`glGetProgramiv(GL_PROGRAM_BINARY_LENGTH)`; vitaGL writes the whole binary whatever the buffer
+says, so the buffer has room to spare). vitaGL's format holds the program's attribute bindings
+and both shaders' GXPs with their parameter tables; `glProgramBinary` rebuilds the two shaders
+from them, registers them with the shader patcher and links, with no compiler. The file's header
+is now magic `VTP2`, both sources' lengths, the binary's format and size; the rest (key, writing
+aside and renaming, removal of a binary that does not link, the two budgets) is as before.
