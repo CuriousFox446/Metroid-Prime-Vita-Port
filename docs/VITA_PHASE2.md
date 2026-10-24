@@ -147,7 +147,7 @@ Fifth run (f2a9715): 15 minutes, to the Frigate's reactor core, without an error
 seconds at 18.4 FPS (in other rooms than the run before). The Vita's own pad layout followed it:
 cross fires (A), circle jumps (B), square morphs (X), triangle fires missiles (Y).
 
-**Milestone 3 (built, not yet run on the Vita).** Each static GX texture gets a copy for the
+**Milestone 3 (done; on the Vita).** Each static GX texture gets a copy for the
 Vita's GPU where Aurora creates it (`new_static_texture_2d`): its first level, as BC1 (DXT1)
 for an opaque CMPR texture, a lossless re-pack, and RGBA8 for every other format (decoded by
 Aurora's converters, palettes applied). The WebGPU texture beside it stays as the handle
@@ -164,3 +164,16 @@ unit 1, which is right for a lightmap and a diffuse pass and wrong for GX's othe
 until milestone 4. Not yet: mipmaps (first level only), EFB copies and dynamic textures as
 textures, texture coordinates made from positions or normals (reflections), the post-transform
 matrices. The log adds a line of draws by how many textures they took.
+
+First run (2ade6f8): six minutes, Frigate exterior and interior, without an error. The rooms are
+textured: the hangar's floor tiles and walls, the sky's stars and nebula, the corridors' panels,
+the doors, the arm cannon, and the visor frame and energy bar of the HUD. Most draws take two
+textures (lightmap and diffuse), and all but a handful found a Vita copy. Still wrong, as
+expected before milestone 4: surfaces GX blends (glass, glow, decals) are drawn opaque, as flat
+grey or white patches; the radar and map panels of the HUD are white (render targets). The
+heavy seconds at 17.9 FPS (18.4 untextured), the render worker at 17.6 ms a frame (11 before).
+
+The game's heap settled about 25 MiB higher in the same hangar than the untextured run (181
+MiB in use, of the 224 the heap may take), though the textures' CPU copies are freed once
+uploaded. The likeliest cause is vitaGL placing textures in the game's heap once its own pools
+are full; to be measured (vitaGL's free memory by pool, in the log) before larger areas.
