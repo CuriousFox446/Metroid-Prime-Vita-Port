@@ -752,6 +752,13 @@ void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
   SetGlobalTranslation(xf.GetTranslation());
 }
 
+#ifdef TARGET_PC
+// PortTakeUpdateStats: counted on the game thread, where particles update.
+static uint sPortStatSteps = 0;
+static uint sPortStatParticles = 0;
+static uint sPortStatCreated = 0;
+#endif
+
 const bool CElementGen::Update(double dt) {
 #ifdef TARGET_PC
   // The profile times only the outermost update: a child generator's is inside its parent's.
@@ -838,10 +845,18 @@ bool CElementGen::InternalUpdate(double dt) {
     CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
 #endif
 #ifdef TARGET_PC
-    PortStepMover();
-    PortStepPemv();
+    ++sPortStatSteps;
+    sPortStatParticles += static_cast< uint >(x30_particles.size());
+    {
+      PORT_ZONE_TIMED("particles: port mover (PortStepMover, PortStepPemv)");
+      PortStepMover();
+      PortStepPemv();
+    }
 #endif
-    UpdateExistingParticles();
+    {
+      PORT_ZONE_TIMED("particles: UpdateExistingParticles");
+      UpdateExistingParticles();
+    }
     CParticleGlobals::SetParticleLifetime(x268_PSLT);
 
 #ifdef TARGET_PC
@@ -872,6 +887,10 @@ bool CElementGen::InternalUpdate(double dt) {
         x28_loadedGenDesc->x1c_MAXP->GetValue(x74_curFrame, x90_MAXP);
       }
 
+#ifdef TARGET_PC
+      sPortStatCreated += static_cast< uint >(rstl::max_val(genCount, 0));
+#endif
+      PORT_ZONE_TIMED("particles: CreateNewParticles");
       CreateNewParticles(genCount);
     }
 
@@ -907,6 +926,7 @@ bool CElementGen::InternalUpdate(double dt) {
 
 #ifdef TARGET_PC
   if (frameUpdateCount > 0 && x28_loadedGenDesc->xPortVfx) {
+    PORT_ZONE_TIMED("particles: Remastered VFX update");
     PortVfxUpdateSystem();
   }
   // Only a system that stepped exactly one frame this tick can be drawn
@@ -924,11 +944,23 @@ bool CElementGen::InternalUpdate(double dt) {
   }
 #endif
 
-  BuildParticleSystemBounds();
+  {
+    PORT_ZONE_TIMED("particles: BuildParticleSystemBounds");
+    BuildParticleSystemBounds();
+  }
 
   x2cc = sw.GetElapsedTime();
   return false;
 }
+
+#ifdef TARGET_PC
+void CElementGen::PortTakeUpdateStats(uint& steps, uint& particles, uint& created) {
+  steps = sPortStatSteps;
+  particles = sPortStatParticles;
+  created = sPortStatCreated;
+  sPortStatSteps = sPortStatParticles = sPortStatCreated = 0;
+}
+#endif
 
 void CElementGen::UpdateLightParameters() {
 #ifdef TARGET_PC

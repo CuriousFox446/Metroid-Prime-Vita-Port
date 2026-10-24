@@ -52,6 +52,7 @@ bool g_frameBufferAspectFit = false;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::deque<std::string> g_eventStrings;
+uint64_t g_pumpGeneration = 0; // pump_generation
 std::atomic_bool g_backgrounded = false;
 #if defined(SDL_PLATFORM_ANDROID)
 std::atomic_bool g_surfaceReady = false;
@@ -340,8 +341,11 @@ const AuroraEvent* poll_events() {
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
   });
+  ++g_pumpGeneration;
   return g_events.data();
 }
+
+uint64_t pump_generation() noexcept { return g_pumpGeneration; }
 
 bool create_window(AuroraBackend backend) {
   SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;

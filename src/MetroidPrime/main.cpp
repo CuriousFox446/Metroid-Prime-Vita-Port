@@ -1345,6 +1345,12 @@ int CMain::RsMain(int argc, const char* const* argv) {
                              dl.failCommand, dl.lastCommand, dl.failIndices, dl.failVertexSize, dl.failRoom,
                              dl.rebuilds);
             }
+            {
+              uint steps, particles, created;
+              CElementGen::PortTakeUpdateStats(steps, particles, created);
+              PortLog::Write("[particles] per frame: %.1f system steps, %.1f particles updated, %.1f created\n",
+                             steps / frames, particles / frames, created / frames);
+            }
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });
             sSpanStartNs = workEndNs;

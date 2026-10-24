@@ -173,6 +173,17 @@ input engine, which rebuilt and compared the whole controls profile on every pol
 - the per-entity Think zones are gone again (2,000 to 3,600 entries a frame distorted the
   times); `SM: Think (all entities)` stays.
 
+On hardware that took the heavy seconds from 14.7 to 15.0 FPS: the input generator from
+10.2 to 7.7 ms a frame and the ticks from 38.9 to 35.3 ms, with the profile build now 0.6
+ms a frame. Most of what was left was reading the devices (about 1 ms a tick) and `PADRead`
+(about 0.5 ms a tick), dozens of SDL pad calls each, though SDL's pad state only changes
+when events are pumped (`poll_events`, once a frame). Aurora now counts the pumps
+(`window::pump_generation`) and `PADGetRawState` and `PADRead`'s extra buttons keep their
+last read until the next one. The particle update has zones per stage (the port's mover
+steps, `UpdateExistingParticles`, `CreateNewParticles`, the Remastered VFX update, the
+bounds; child systems are inside their parents' stages) and a `[particles]` line counts the
+system steps, particles updated and particles created per frame.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because

@@ -2,6 +2,7 @@
 #include "../../device.hpp"
 #include "../../internal.hpp"
 #include "../../io.hpp"
+#include "../../window.hpp"
 #include <dolphin/pad.h>
 #include <dolphin/si.h>
 #include <SDL3/SDL_mouse.h>
@@ -922,11 +923,23 @@ u32 PADRead(PADStatus* status) {
           {SDL_GAMEPAD_BUTTON_TOUCHPAD, PAD_BUTTON_TOUCHPAD},
       }};
 
-      for (const auto& [native, button] : kExtButtonMappings) {
-        if (SDL_GetGamepadButton(controller->m_controller, native)) {
-          status[i].extButton |= button;
+      // As PADGetRawState: the pad's buttons stand until the next event pump.
+      static uint64_t sExtGeneration[PAD_CHANMAX] = {};
+      static const void* sExtController[PAD_CHANMAX] = {};
+      static u32 sExtButtons[PAD_CHANMAX] = {};
+      const uint64_t generation = aurora::window::pump_generation();
+      if (generation == 0 || sExtGeneration[i] != generation || sExtController[i] != controller) {
+        u32 ext = 0;
+        for (const auto& [native, button] : kExtButtonMappings) {
+          if (SDL_GetGamepadButton(controller->m_controller, native)) {
+            ext |= button;
+          }
         }
+        sExtGeneration[i] = generation;
+        sExtController[i] = controller;
+        sExtButtons[i] = ext;
       }
+      status[i].extButton |= sExtButtons[i];
 
       if (!overridden) {
         bool leftTriggerSet = false;
@@ -1088,6 +1101,25 @@ BOOL PADGetRawState(const u32 port, PADRawState* state) {
     return FALSE;
   }
   EnsureMappingLoaded(controller);
+  // SDL's pad state changes only when events are pumped, but a game polls once a tick, several
+  // times between two pumps when its ticks catch up: the last read stands until the next pump
+  // (a Vita spent about 1 ms a tick on these SDL calls).
+  struct Cached {
+    uint64_t generation = 0;
+    const void* controller = nullptr;
+    u16 leftActivation = 0;
+    u16 rightActivation = 0;
+    PADRawState state{};
+  };
+  static Cached sCached[PAD_CHANMAX];
+  const uint64_t generation = aurora::window::pump_generation();
+  Cached& cached = sCached[port];
+  if (generation != 0 && cached.generation == generation && cached.controller == controller &&
+      cached.leftActivation == controller->m_deadZones.leftTriggerActivationZone &&
+      cached.rightActivation == controller->m_deadZones.rightTriggerActivationZone) {
+    *state = cached.state;
+    return TRUE;
+  }
   static_assert(SDL_GAMEPAD_BUTTON_COUNT <= PAD_RAW_BUTTON_TRIGGER_LEFT);
   for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
     if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(b))) {
@@ -1112,6 +1144,13 @@ BOOL PADGetRawState(const u32 port, PADRawState* state) {
   if (tr > controller->m_deadZones.rightTriggerActivationZone) {
     state->buttons |= 1u << PAD_RAW_BUTTON_TRIGGER_RIGHT_CLICK;
   }
+  cached = Cached{
+      .generation = generation,
+      .controller = controller,
+      .leftActivation = static_cast<u16>(controller->m_deadZones.leftTriggerActivationZone),
+      .rightActivation = static_cast<u16>(controller->m_deadZones.rightTriggerActivationZone),
+      .state = *state,
+  };
   return TRUE;
 }
 

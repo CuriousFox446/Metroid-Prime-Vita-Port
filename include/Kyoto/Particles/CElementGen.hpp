@@ -206,6 +206,11 @@ public:
 
   static void Initialize();
   static void ShutDown();
+#ifdef TARGET_PC
+  // For the Vita profile's [particles] line: system steps (one a generator per 60 Hz frame
+  // it advances), particles updated and particles created since the last call.
+  static void PortTakeUpdateStats(uint& steps, uint& particles, uint& created);
+#endif
 
   void SetGlobalOrientAndTrans(const CTransform4f& xf);
   void SetLeaveLightsEnabledForModelRender(bool b) { x26d_26_modelsUseLights = b; }
