@@ -249,3 +249,12 @@ WebGPU path. A draw whose texture has no Vita copy (an EFB copy, a dynamic textu
 out rather than drawn without it, since the full-screen passes over a copy of the screen would
 otherwise cover it in a flat colour. The log adds a line of immediate draws (drawn, lines or
 points, not decodable) and list calls decoded each frame.
+
+Its run (a56f00a, no crash; its log stayed on the memory card): the opening cutscene draws,
+Samus walking out in the third person, the gunship, the engine glow and other particles, and
+the HUD's numbers (energy 99, missiles 15). But parts of Samus's suit and the gunship were flat
+black with only their green lights showing: a glow or incandescence pass, whose texture is black
+but for its lights, was multiplied over the diffuse texture where GX adds it. So a unit now takes
+its stage's combine: a stage that adds its texture to a register (d a register, the operation
+an add) becomes a `GL_ADD` unit; the first unit, which takes the vertex colour, always
+modulates. The log counts the second units added.

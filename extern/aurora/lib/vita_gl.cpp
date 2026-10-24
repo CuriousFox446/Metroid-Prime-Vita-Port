@@ -272,6 +272,10 @@ void draw_world(const std::vector<Draw>& draws) {
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
   }
   bool unitOn[kTexUnits] = {};
+  GLint unitEnv[kTexUnits];
+  for (GLint& env : unitEnv) {
+    env = GL_MODULATE;
+  }
   float matrix[16];
   for (const Draw& draw : draws) {
     const GLsizei count = draw.mesh->bind();
@@ -298,6 +302,10 @@ void draw_world(const std::vector<Draw>& draws) {
         continue;
       }
       texUnit.texture->bind(texUnit.sampler);
+      if (texUnit.envMode != unitEnv[unit]) {
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, texUnit.envMode);
+        unitEnv[unit] = texUnit.envMode;
+      }
       glMatrixMode(GL_TEXTURE);
       to_column_major(texUnit.matrix, 2, matrix);
       glLoadMatrixf(matrix);
@@ -318,6 +326,7 @@ void draw_world(const std::vector<Draw>& draws) {
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glClientActiveTexture(GL_TEXTURE0 + unit);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisable(GL_TEXTURE_2D);
     glMatrixMode(GL_TEXTURE);

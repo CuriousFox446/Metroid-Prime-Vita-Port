@@ -49,6 +49,8 @@ constexpr u16 kGlFuncAdd = 0x8006;
 constexpr u16 kGlFuncReverseSubtract = 0x800B;
 constexpr u16 kGlNever = 0x0200; // GL's compare functions run in GX's order from here
 constexpr u16 kGlAlways = 0x0207;
+constexpr u16 kGlModulate = 0x2100;
+constexpr u16 kGlAdd = 0x0104;
 constexpr u16 kGlFront = 0x0404;
 constexpr u16 kGlBack = 0x0405;
 constexpr u16 kGlFrontAndBack = 0x0408;
@@ -152,6 +154,8 @@ struct Stats {
   u32 alphaTexture = 0;
   // Vita copies made for textures cached before the Vita path drew with them.
   u32 lateCopies = 0;
+  // Second units added on top (GL_ADD) rather than modulated.
+  u32 additiveUnits = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -465,11 +469,20 @@ const Cached& lookup(const void* key, const resident::Entry& entry, u32 size, co
   return cached;
 }
 
-// A TEV stage's texture as a unit of the draw.
+// A TEV stage's texture as a unit of the draw, and whether the stage adds it to what came
+// before (d a register, the texture's colour among a, b and c: a glow or incandescence pass, whose
+// texture is black but for its lights) rather than multiplying or blending with it.
 struct UnitChoice {
   GXTexMapID map;
   const TcgConfig* tcg;
+  bool additive;
 };
+
+bool adds_texture(const TevStage& stage) noexcept {
+  const auto& pass = stage.colorPass;
+  const bool registerD = pass.d == GX_CC_CPREV || pass.d == GX_CC_C0 || pass.d == GX_CC_C1 || pass.d == GX_CC_C2;
+  return registerD && stage.colorOp.op == GX_TEV_ADD;
+}
 
 // The textures a draw takes, in TEV order: those of stages whose colour reads their texture
 // (TEXC), with coordinates a matrix makes from a vertex attribute the list has, up to the units
@@ -495,7 +508,7 @@ int choose_units(UnitChoice out[kTexUnits]) noexcept {
         tcg.src > GX_TG_TEX7 || g_gxState.vtxDesc[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)] == GX_NONE) {
       continue;
     }
-    out[count++] = {stage.texMapId, &tcg};
+    out[count++] = {stage.texMapId, &tcg, adds_texture(stage)};
   }
   return count;
 }
@@ -850,6 +863,10 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], TexAttrs& texAttrs) noexcep
       unit.texture = bind.ref->vitaTexture;
       tex_matrix(*choices[i].tcg, unit.matrix);
       unit.sampler = sampler_for(bind.texObj);
+      // The first unit takes the vertex colour, so it always modulates; a later one adds when its
+      // stage does.
+      unit.envMode = unitCount > 0 && choices[i].additive ? kGlAdd : kGlModulate;
+      sStats.additiveUnits += unit.envMode == kGlAdd ? 1 : 0;
       texAttrs[unitCount] = static_cast<u8>(GX_VA_TEX0 + (choices[i].tcg->src - GX_TG_TEX0));
       ++unitCount;
     }
@@ -1013,9 +1030,10 @@ void log_stats() noexcept {
            s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
            "copies made late; "
-           "state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} rejected), {} from a texture",
-           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.blended,
-           s.alphaTested, s.culled, s.alphaConstant, s.alphaRejected, s.alphaTexture);
+           "{} second units added; state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} "
+           "rejected), {} from a texture",
+           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.additiveUnits,
+           s.blended, s.alphaTested, s.culled, s.alphaConstant, s.alphaRejected, s.alphaTexture);
   sStats = {};
 }
 } // namespace aurora::gx::vita

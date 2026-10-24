@@ -51,12 +51,14 @@ struct Sampler {
 };
 
 // A texture unit of a draw: its texture (null: unit off), the texture coordinates' matrix (GX's
-// rows 0 and 1, folded for GL's (s, t, 0, 1) input) and the sampler. Units modulate in order:
-// colour * unit 0 * unit 1.
+// rows 0 and 1, folded for GL's (s, t, 0, 1) input), the sampler, and how it combines with what
+// came before it, as GL's texture environment mode: GL_MODULATE (colour * unit 0 * unit 1) or
+// GL_ADD (a glow or incandescence pass added on top).
 struct TexUnit {
   std::shared_ptr<Texture> texture;
   float matrix[8];
   Sampler sampler;
+  uint16_t envMode = 0x2100; // GL_MODULATE
 };
 
 // A draw's fixed-function state, as GL enums (gx/vita_draw.cpp maps GX's to these): blending,
