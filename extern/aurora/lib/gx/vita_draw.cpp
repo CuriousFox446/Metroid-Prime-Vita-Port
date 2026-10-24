@@ -119,8 +119,14 @@ std::unordered_map<const void*, CachedList> sCache;
 // For log_stats: what became of the calls since the last report, and why lists were not drawn.
 struct Stats {
   u32 calls = 0;
-  u32 nativePositions = 0;
   u32 decoded = 0;
+  // List calls whose positions the CPU makes each frame (skinned models), decoded each call.
+  u32 perCall = 0;
+  u32 perCallFailed = 0;
+  // Immediate draws (GXBegin, uncalled display lists, GXBeginIndexed).
+  u32 immediate = 0;
+  u32 immediateLines = 0;
+  u32 immediateFailed = 0;
   u32 recorded = 0;
   u32 failMatrixIndex = 0;
   u32 failArray = 0;
@@ -320,13 +326,62 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
   }
 }
 
+// Without a colour of their own, textured faces take their textures' as they are.
+u8 grey_for(const TexAttrs& texAttrs) noexcept { return texAttrs[0] != kNoTexAttr ? 255 : 200; }
+
+// Decodes `count` vertices from `vtx` (which advances past them), false when one cannot be.
+bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, const TexAttrs& texAttrs,
+                     std::vector<vita_gl::Vertex>& out) noexcept {
+  const u8 grey = grey_for(texAttrs);
+  out.resize(count);
+  for (u32 i = 0; i < count; ++i) {
+    if (vtx >= end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], texAttrs, grey, out[i])) {
+      return false;
+    }
+  }
+  return vtx <= end;
+}
+
+// One primitive's vertices as triangles, appended to `triangles`. Lines and points add none.
+void triangulate(GXPrimitive type, const std::vector<vita_gl::Vertex>& prim, bool textured,
+                 std::vector<vita_gl::Vertex>& triangles) noexcept {
+  const u32 count = static_cast<u32>(prim.size());
+  switch (type) {
+  case GX_TRIANGLES:
+    for (u32 i = 0; i + 2 < count; i += 3) {
+      append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
+    }
+    break;
+  case GX_TRIANGLESTRIP:
+    for (u32 i = 0; i + 2 < count; ++i) {
+      if ((i & 1) == 0) {
+        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
+      } else {
+        append_triangle(triangles, prim[i + 1], prim[i], prim[i + 2], textured);
+      }
+    }
+    break;
+  case GX_TRIANGLEFAN:
+    for (u32 i = 1; i + 1 < count; ++i) {
+      append_triangle(triangles, prim[0], prim[i], prim[i + 1], textured);
+    }
+    break;
+  case GX_QUADS:
+    for (u32 i = 0; i + 3 < count; i += 4) {
+      append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
+      append_triangle(triangles, prim[i], prim[i + 2], prim[i + 3], textured);
+    }
+    break;
+  default:
+    break; // lines and points: not drawn yet
+  }
+}
+
 // The list's triangles, or none when it holds anything this path cannot draw yet; fmtMask gets
 // the vertex formats it read.
 std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size, const TexAttrs& texAttrs,
                                          u8& fmtMask) noexcept {
   const bool textured = texAttrs[0] != kNoTexAttr;
-  // Without a colour of their own, textured faces take their textures' as they are.
-  const u8 grey = textured ? 255 : 200;
   std::vector<vita_gl::Vertex> triangles;
   std::vector<vita_gl::Vertex> prim;
   size_t pos = 0;
@@ -345,46 +400,12 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size,
     const auto type = static_cast<GXPrimitive>(cmd & GX_OPCODE_MASK);
     const u16 count = static_cast<u16>((bytes[pos] << 8) | bytes[pos + 1]);
     pos += 2;
-    prim.resize(count);
     const u8* vtx = bytes.data() + pos;
-    for (u16 i = 0; i < count; ++i) {
-      if (vtx >= bytes.data() + end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], texAttrs, grey, prim[i])) {
-        return {};
-      }
-    }
-    pos = static_cast<size_t>(vtx - bytes.data());
-    if (pos > end) {
+    if (!decode_vertices(vtx, bytes.data() + end, fmt, count, texAttrs, prim)) {
       return {};
     }
-    switch (type) {
-    case GX_TRIANGLES:
-      for (u32 i = 0; i + 2 < count; i += 3) {
-        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
-      }
-      break;
-    case GX_TRIANGLESTRIP:
-      for (u32 i = 0; i + 2 < count; ++i) {
-        if ((i & 1) == 0) {
-          append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
-        } else {
-          append_triangle(triangles, prim[i + 1], prim[i], prim[i + 2], textured);
-        }
-      }
-      break;
-    case GX_TRIANGLEFAN:
-      for (u32 i = 1; i + 1 < count; ++i) {
-        append_triangle(triangles, prim[0], prim[i], prim[i + 1], textured);
-      }
-      break;
-    case GX_QUADS:
-      for (u32 i = 0; i + 3 < count; i += 4) {
-        append_triangle(triangles, prim[i], prim[i + 1], prim[i + 2], textured);
-        append_triangle(triangles, prim[i], prim[i + 2], prim[i + 3], textured);
-      }
-      break;
-    default:
-      break; // lines and points: not drawn yet
-    }
+    pos = static_cast<size_t>(vtx - bytes.data());
+    triangulate(type, prim, textured, triangles);
   }
   return triangles;
 }
@@ -797,25 +818,14 @@ vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
       .magFilter = obj.mag_filter() == GX_LINEAR ? kGlLinear : kGlNearest,
   };
 }
-} // namespace
-
-bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
-  ZoneScoped;
-  ++sStats.calls;
-  // Positions made at run time (CPU skinning) change under the same list: not drawn yet. The
-  // retail models' own arrays are retained too (port_retail_resident), whatever their byte
-  // order; a workspace the game rewrites each frame is not.
-  if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
-    ++sStats.nativePositions;
-    return false;
-  }
-
-  // The textures, through Aurora's texture cache as the WebGPU draw would resolve them; a unit
-  // whose texture has no Vita copy is left out.
+// The draw's textures as units, through Aurora's texture cache as the WebGPU draw would resolve
+// them. texAttrs gets the attributes their coordinates come from. Returns how many units there
+// are, or -1 when a texture has no Vita copy (an EFB copy, a dynamic texture): drawn without it,
+// a full-screen pass over a copy of the screen would cover the screen in its vertex colour.
+int resolve_units(vita_gl::TexUnit units[kTexUnits], TexAttrs& texAttrs) noexcept {
   UnitChoice choices[kTexUnits];
   const int chosen = choose_units(choices);
-  vita_gl::TexUnit units[kTexUnits];
-  TexAttrs texAttrs = kNoTexAttrs;
+  texAttrs = kNoTexAttrs;
   int unitCount = 0;
   if (chosen != 0) {
     static ShaderInfo sSampled;
@@ -834,7 +844,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       }
       if (!bind.ref || !bind.ref->vitaTexture) {
         ++sStats.unitsWithoutCopy;
-        continue;
+        return -1;
       }
       vita_gl::TexUnit& unit = units[unitCount];
       unit.texture = bind.ref->vitaTexture;
@@ -844,12 +854,12 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       ++unitCount;
     }
   }
+  return unitCount;
+}
 
-  const Cached& cached = lookup(key, entry, size, texAttrs);
-  if (!cached.mesh) {
-    return false;
-  }
-  vita_gl::Draw draw{.mesh = cached.mesh};
+// Records a draw of `mesh` with GX's current matrices and state, and the units resolve_units made.
+void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, vita_gl::TexUnit units[kTexUnits], int unitCount) noexcept {
+  vita_gl::Draw draw{.mesh = std::move(mesh)};
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
@@ -869,7 +879,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     ++sStats.alphaConstant;
     if (!fold_constant_alpha(alpha.value, draw.state)) {
       ++sStats.alphaRejected;
-      return true; // its alpha test fails everywhere: nothing to draw
+      return; // its alpha test fails everywhere: nothing to draw
     }
   } else if (alpha.texture) {
     ++sStats.alphaTexture;
@@ -884,6 +894,107 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[unitCount];
+}
+} // namespace
+
+bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
+  ZoneScoped;
+  ++sStats.calls;
+  vita_gl::TexUnit units[kTexUnits];
+  TexAttrs texAttrs;
+  const int unitCount = resolve_units(units, texAttrs);
+  if (unitCount < 0) {
+    return false;
+  }
+  // Positions made at run time (CPU skinning) change under the same list, so such a call is
+  // decoded each time, into a mesh for this frame alone. The retail models' own arrays are
+  // retained (port_retail_resident), whatever their byte order; a workspace the game rewrites
+  // each frame is not.
+  if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
+    ZoneScopedN("vita: decode a list call");
+    u8 fmtMask = 0;
+    sLastFail = Fail::None;
+    std::vector<vita_gl::Vertex> triangles = decode_list(*entry.bytes, size, texAttrs, fmtMask);
+    if (triangles.empty()) {
+      ++sStats.perCallFailed;
+      return false;
+    }
+    ++sStats.perCall;
+    record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
+    return true;
+  }
+  const Cached& cached = lookup(key, entry, size, texAttrs);
+  if (!cached.mesh) {
+    return false;
+  }
+  record_draw(cached.mesh, units, unitCount);
+  return true;
+}
+
+bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept {
+  ZoneScoped;
+  if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
+    ++sStats.immediateLines;
+    return false;
+  }
+  vita_gl::TexUnit units[kTexUnits];
+  TexAttrs texAttrs;
+  const int unitCount = resolve_units(units, texAttrs);
+  if (unitCount < 0) {
+    return false;
+  }
+  std::vector<vita_gl::Vertex> prims;
+  const u8* vtx = vertices.data();
+  sLastFail = Fail::None;
+  if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, prims)) {
+    ++sStats.immediateFailed;
+    return false;
+  }
+  std::vector<vita_gl::Vertex> triangles;
+  triangulate(prim, prims, texAttrs[0] != kNoTexAttr, triangles);
+  if (triangles.empty()) {
+    ++sStats.immediateFailed;
+    return false;
+  }
+  ++sStats.immediate;
+  record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
+  return true;
+}
+
+bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept {
+  ZoneScoped;
+  vita_gl::TexUnit units[kTexUnits];
+  TexAttrs texAttrs;
+  const int unitCount = resolve_units(units, texAttrs);
+  if (unitCount < 0) {
+    return false;
+  }
+  std::vector<vita_gl::Vertex> prims;
+  const u8* vtx = vertices.data();
+  sLastFail = Fail::None;
+  if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, prims)) {
+    ++sStats.immediateFailed;
+    return false;
+  }
+  // GXBeginIndexed's indices are 16-bit, in the host's byte order, three to a triangle.
+  const bool textured = texAttrs[0] != kNoTexAttr;
+  const size_t indexCount = indices.size() / sizeof(u16);
+  std::vector<vita_gl::Vertex> triangles;
+  triangles.reserve(indexCount);
+  for (size_t i = 0; i + 2 < indexCount; i += 3) {
+    u16 idx[3];
+    std::memcpy(idx, indices.data() + i * sizeof(u16), sizeof(idx));
+    if (idx[0] >= prims.size() || idx[1] >= prims.size() || idx[2] >= prims.size()) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    append_triangle(triangles, prims[idx[0]], prims[idx[1]], prims[idx[2]], textured);
+  }
+  if (triangles.empty()) {
+    return false;
+  }
+  ++sStats.immediate;
+  record_draw(vita_gl::make_mesh(std::move(triangles)), units, unitCount);
   return true;
 }
 
@@ -891,13 +1002,17 @@ void release(const void* key) noexcept { sCache.erase(key); }
 
 void log_stats() noexcept {
   const Stats& s = sStats;
-  Log.info("lists: {} calls, {} recorded, {} with positions not retained; decoded {}, not drawable {} "
+  Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
+           "each frame: {} decoded and drawn, {} not decodable",
+           s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);
+  Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
            "(matrix index {}, array {}, command {}, empty {}); decoded again for a changed vertex descriptor {}, "
            "textures {}, vertex format {}, array {}; {} cached",
-           s.calls, s.recorded, s.nativePositions, s.decoded,
+           s.calls, s.recorded, s.decoded,
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
-  Log.info("textures: draws with none {}, one {}, two {}; {} left out without a Vita copy, {} copies made late; "
+  Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
+           "copies made late; "
            "state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.blended,
            s.alphaTested, s.culled, s.alphaConstant, s.alphaRejected, s.alphaTexture);

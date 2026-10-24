@@ -233,3 +233,19 @@ and the heavy seconds ran at 17.5 FPS. Still missing, and the likeliest reason f
 with no body outside the hangar: what the Vita path does not draw yet, the lists whose positions
 the CPU makes each frame (skinned models, about 30 calls a frame there), and the immediate draws
 (particles, about 28 a frame, and the rest of `push_gx_draw`).
+
+**The rest of the geometry (built, not yet run on the Vita).** Two kinds of draw went only to the
+null WebGPU, and now come to the Vita path too, decoded each time into a mesh for that frame
+alone (a vertex buffer freed once the frame is drawn):
+- a call of a retained list whose positions the CPU makes each frame (skinned models): the list
+  is decoded again with the positions as they are now;
+- the immediate draws: a primitive's vertices as the FIFO carries them (`GXBegin`, and display
+  lists called without being retained) in `draw_prim`, and `GXBeginIndexed`'s vertices with
+  its host-order indices (`GX_AURORA_DRAW_INDEXED`). Inline vertex data is big-endian, as in
+  display lists, so the same decoder reads it.
+
+They share the resident draws' textures, matrices and state. Lines and points still go to the
+WebGPU path. A draw whose texture has no Vita copy (an EFB copy, a dynamic texture) is now left
+out rather than drawn without it, since the full-screen passes over a copy of the screen would
+otherwise cover it in a flat colour. The log adds a line of immediate draws (drawn, lines or
+points, not decodable) and list calls decoded each frame.

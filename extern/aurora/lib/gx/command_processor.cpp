@@ -700,6 +700,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   if (totalVtxBytes > reader.remaining())
     UNLIKELY { handle_draw_overrun(totalVtxBytes, reader); }
 
+  const auto vertexData = reader.take(totalVtxBytes);
+  if (vita_gl::active() && vita::draw_immediate(prim, fmt, vtxCount, vertexData)) {
+    // Drawn by the Vita path; the WebGPU draw would only feed the null device.
+    return;
+  }
+
   // A cast-only draw pushes no command of its own, so it must not extend the last world draw.
   const bool cleanState = g_gxState.dirty == 0 && !g_gxState.shadowCasterOnly && g_gxState.actorLayer < 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
@@ -707,7 +713,6 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
 
   // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
-  const auto vertexData = reader.take(totalVtxBytes);
   gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), canMerge ? 0 : 4);
   if (drop_overflowed_draw(vertRange, "vertex")) {
     return;
@@ -1128,7 +1133,6 @@ void handle_aurora(ByteReader& reader) noexcept {
     const size_t idxBytes = static_cast<size_t>(indexCount) * sizeof(u16);
     // Index data is always host-endian; push it to the GPU buffer as-is
     const auto indexData = reader.take(idxBytes);
-    const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
     u32 vtxSize;
     if (g_gxState.lastVtxFmt == fmt) {
       vtxSize = g_gxState.lastVtxSize;
@@ -1137,6 +1141,10 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
     const u32 totalVtxBytes = vtxCount * vtxSize;
     const auto vertexData = reader.take(totalVtxBytes);
+    if (vita_gl::active() && vita::draw_indexed(fmt, vtxCount, vertexData, indexData)) {
+      return; // drawn by the Vita path
+    }
+    const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
     if (indexCount != 0) {
       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
