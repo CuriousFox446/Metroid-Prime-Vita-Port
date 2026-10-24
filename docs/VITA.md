@@ -74,6 +74,16 @@ for the GX FIFO thread, whose `process` (mostly `draw_prim`, Aurora's GX-to-WebG
 translation per draw) took about 200-300 ms a frame at the heaviest points. The
 game's own draw code was about 20 ms, CPU skinning 1-2 ms.
 
+Second (sampled) run, with exact call counts: the hangar sends about 25,300 GX
+primitives a frame (18,300 at the intro's heaviest), which Aurora merges into about
+1,720 draws; every primitive's vertices and indices are copied and translated again
+each frame (`draw_prim`, `push_verts`, `push_indices`). Aurora can keep retained display
+lists on the GPU instead (resident geometry, `GXPortRetainResident`), but the port uses
+it only for room-geometry mods, never the retail models. A game tick costs about
+8.5 ms. Even sampled, ~75,000 zone entries a frame still inflate the times several
+fold (hangar about 4 FPS profiled against about 20 without): trust counts and
+ranking, not milliseconds.
+
 ## On hardware so far
 
 1. Aborted before `main`: `std::call_once` threw `system_error(-1)` because
