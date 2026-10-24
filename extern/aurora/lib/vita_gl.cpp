@@ -7,6 +7,8 @@
 
 #include "backends/imgui_impl_opengl2.h"
 
+#include <fmt/format.h>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +32,24 @@ constexpr int kLegacyPool = 256 * 1024;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
+
+// The game's textures on the GPU, by format: count and bytes (uploaded on the render worker,
+// freed wherever their last holder lets go).
+std::atomic<int64_t> g_textureCount[2];
+std::atomic<int64_t> g_textureBytes[2];
+
+// vitaGL's memory by pool, free of total (MiB), and the game's heap left to it (newlib).
+void log_memory(const char* when) {
+  constexpr double kMiB = 1024.0 * 1024.0;
+  const auto pool = [](vglMemType type) {
+    return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
+  };
+  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; newlib free {:.1f}; "
+           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB)",
+           when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
+           vglMemFree(VGL_MEM_EXTERNAL) / kMiB, g_textureCount[0].load(), g_textureBytes[0].load() / kMiB,
+           g_textureCount[1].load(), g_textureBytes[1].load() / kMiB);
+}
 
 // The frames' draws: recorded on the FIFO thread, handed over at each frame's end, drawn by the
 // render worker's present for that frame, in order.
@@ -95,6 +115,9 @@ public:
     if (m_id != 0) {
       const GLuint id = m_id;
       gfx::render_worker::enqueue_work([id] { glDeleteTextures(1, &id); });
+      const int kind = static_cast<int>(m_format);
+      g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
+      g_textureBytes[kind].fetch_sub(m_bytes, std::memory_order_relaxed);
     }
   }
 
@@ -112,6 +135,10 @@ public:
       } else {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
       }
+      m_bytes = static_cast<int64_t>(m_cpu.size());
+      const int kind = static_cast<int>(m_format);
+      g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
+      g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
       std::vector<uint8_t>().swap(m_cpu);
     } else {
       glBindTexture(GL_TEXTURE_2D, m_id);
@@ -132,6 +159,7 @@ private:
   uint32_t m_height;
   TexelFormat m_format;
   GLuint m_id = 0;
+  int64_t m_bytes = 0;
   Sampler m_sampler{};
   bool m_samplerSet = false;
 };
@@ -177,6 +205,52 @@ struct PresentStats {
 };
 PresentStats g_presentStats;
 
+void set_enabled(GLenum cap, bool on) {
+  on ? glEnable(cap) : glDisable(cap);
+}
+
+// Sets the state where it differs from `current` (all of it when `force`).
+void apply_state(const RenderState& state, RenderState& current, bool force) {
+  if (force || state.blend != current.blend) {
+    set_enabled(GL_BLEND, state.blend);
+  }
+  if (force || state.blendEquation != current.blendEquation) {
+    glBlendEquation(state.blendEquation);
+  }
+  if (force || state.blendSrc != current.blendSrc || state.blendDst != current.blendDst) {
+    glBlendFunc(state.blendSrc, state.blendDst);
+  }
+  const bool alphaTest = state.alphaFunc != GL_ALWAYS;
+  if (force || alphaTest != (current.alphaFunc != GL_ALWAYS)) {
+    set_enabled(GL_ALPHA_TEST, alphaTest);
+  }
+  if (force || state.alphaFunc != current.alphaFunc || state.alphaRef != current.alphaRef) {
+    glAlphaFunc(state.alphaFunc, state.alphaRef);
+  }
+  if (force || state.depthTest != current.depthTest) {
+    set_enabled(GL_DEPTH_TEST, state.depthTest);
+  }
+  if (force || state.depthFunc != current.depthFunc) {
+    glDepthFunc(state.depthFunc);
+  }
+  if (force || state.depthWrite != current.depthWrite) {
+    glDepthMask(state.depthWrite ? GL_TRUE : GL_FALSE);
+  }
+  if (force || state.colorWrite != current.colorWrite || state.alphaWrite != current.alphaWrite) {
+    const GLboolean color = state.colorWrite ? GL_TRUE : GL_FALSE;
+    glColorMask(color, color, color, state.alphaWrite ? GL_TRUE : GL_FALSE);
+  }
+  if (force || (state.cullFace != 0) != (current.cullFace != 0)) {
+    set_enabled(GL_CULL_FACE, state.cullFace != 0);
+  }
+  // GL keeps the last face culled while culling is off: 0 records culling off, not the face.
+  const uint16_t heldFace = current.cullFace != 0 ? current.cullFace : 0xFFFF;
+  if (state.cullFace != 0 && (force || state.cullFace != heldFace)) {
+    glCullFace(state.cullFace);
+  }
+  current = state;
+}
+
 void draw_world(const std::vector<Draw>& draws) {
   if (draws.empty()) {
     return;
@@ -184,11 +258,10 @@ void draw_world(const std::vector<Draw>& draws) {
   ++g_presentStats.framesWithDraws;
   g_presentStats.draws += draws.size();
   glUseProgram(0);
-  glEnable(GL_DEPTH_TEST);
-  glDepthFunc(GL_LEQUAL);
-  glDepthMask(GL_TRUE);
-  glDisable(GL_CULL_FACE);
-  glDisable(GL_BLEND);
+  // GX's front faces are clockwise (Aurora's WebGPU pipelines say so too).
+  glFrontFace(GL_CW);
+  RenderState current;
+  apply_state(current, current, true);
   glEnableClientState(GL_VERTEX_ARRAY);
   glEnableClientState(GL_COLOR_ARRAY);
   for (int unit = 0; unit < kTexUnits; ++unit) {
@@ -235,8 +308,13 @@ void draw_world(const std::vector<Draw>& draws) {
     glMatrixMode(GL_MODELVIEW);
     to_column_major(draw.modelView, 3, matrix);
     glLoadMatrixf(matrix);
+    apply_state(draw.state, current, false);
     glDrawArrays(GL_TRIANGLES, 0, count);
   }
+  // Back to GL's defaults for the overlay (ImGui's backend sets blending, depth and culling
+  // itself, but not the alpha test, the masks or the winding).
+  apply_state(RenderState{.depthTest = false}, current, true);
+  glFrontFace(GL_CCW);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glClientActiveTexture(GL_TEXTURE0 + unit);
@@ -252,7 +330,6 @@ void draw_world(const std::vector<Draw>& draws) {
   glLoadIdentity();
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
-  glDisable(GL_DEPTH_TEST);
 }
 
 // An orange triangle in the screen's top-left corner, drawn every frame the same way with
@@ -294,6 +371,7 @@ bool initialize() noexcept {
   } else {
     Log.info("vitaGL started at {}x{}", kWidth, kHeight);
   }
+  log_memory("started");
   return true;
 }
 
@@ -323,6 +401,9 @@ void present(ImDrawData* overlay) noexcept {
   // Dark blue, so a screen drawn by this path is told apart from a black one at a glance.
   glClearColor(0.05f, 0.08f, 0.16f, 1.f);
   glClearDepth(1.0);
+  // The clear follows the masks; a draw's state may have left them off.
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDepthMask(GL_TRUE);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   draw_world(take_frame());
   draw_test_triangle();
@@ -331,6 +412,7 @@ void present(ImDrawData* overlay) noexcept {
              g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0);
     g_presentStats = {};
+    log_memory("presents");
   }
   if (overlay != nullptr && overlay->CmdListsCount > 0) {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);

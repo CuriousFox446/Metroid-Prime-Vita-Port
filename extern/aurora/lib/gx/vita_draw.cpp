@@ -26,12 +26,29 @@ constexpr u8 kNoTexAttr = 0xFF;
 using TexAttrs = std::array<u8, kTexUnits>;
 constexpr TexAttrs kNoTexAttrs{kNoTexAttr, kNoTexAttr};
 
-// GL's sampler enums (vitaGL.h is not included here).
+// GL's enums for the samplers and state (vitaGL.h is not included here).
 constexpr u16 kGlNearest = 0x2600;
 constexpr u16 kGlLinear = 0x2601;
 constexpr u16 kGlRepeat = 0x2901;
 constexpr u16 kGlClampToEdge = 0x812F;
 constexpr u16 kGlMirroredRepeat = 0x8370;
+constexpr u16 kGlZero = 0;
+constexpr u16 kGlOne = 1;
+constexpr u16 kGlSrcColor = 0x0300;
+constexpr u16 kGlOneMinusSrcColor = 0x0301;
+constexpr u16 kGlSrcAlpha = 0x0302;
+constexpr u16 kGlOneMinusSrcAlpha = 0x0303;
+constexpr u16 kGlDstAlpha = 0x0304;
+constexpr u16 kGlOneMinusDstAlpha = 0x0305;
+constexpr u16 kGlDstColor = 0x0306;
+constexpr u16 kGlOneMinusDstColor = 0x0307;
+constexpr u16 kGlFuncAdd = 0x8006;
+constexpr u16 kGlFuncReverseSubtract = 0x800B;
+constexpr u16 kGlNever = 0x0200; // GL's compare functions run in GX's order from here
+constexpr u16 kGlAlways = 0x0207;
+constexpr u16 kGlFront = 0x0404;
+constexpr u16 kGlBack = 0x0405;
+constexpr u16 kGlFrontAndBack = 0x0408;
 
 // The GX state a decode read: the vertex descriptor, the vertex formats the list's primitives
 // name, the attributes the texture units' coordinates come from, and the arrays of the position,
@@ -115,6 +132,10 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
+  // Recorded draws by their state.
+  u32 blended = 0;
+  u32 alphaTested = 0;
+  u32 culled = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -471,6 +492,99 @@ void tex_matrix(const TcgConfig& tcg, float out[8]) noexcept {
   }
 }
 
+u16 gl_compare(GXCompare compare) noexcept { return static_cast<u16>(kGlNever + (compare & 7)); }
+
+// GX's blend factors as Aurora's WebGPU path maps them (gx.cpp): the colour factors name the
+// other side's colour (a source factor of SRCCLR is the destination's colour).
+u16 gl_blend_factor(GXBlendFactor factor, bool isDst) noexcept {
+  switch (factor) {
+  case GX_BL_ZERO:
+    return kGlZero;
+  case GX_BL_ONE:
+    return kGlOne;
+  case GX_BL_SRCCLR:
+    return isDst ? kGlSrcColor : kGlDstColor;
+  case GX_BL_INVSRCCLR:
+    return isDst ? kGlOneMinusSrcColor : kGlOneMinusDstColor;
+  case GX_BL_SRCALPHA:
+    return kGlSrcAlpha;
+  case GX_BL_INVSRCALPHA:
+    return kGlOneMinusSrcAlpha;
+  case GX_BL_DSTALPHA:
+    return kGlDstAlpha;
+  case GX_BL_INVDSTALPHA:
+    return kGlOneMinusDstAlpha;
+  default:
+    return isDst ? kGlZero : kGlOne;
+  }
+}
+
+// GX's blending, alpha test, depth, colour mask and culling for the fixed-function draw.
+vita_gl::RenderState render_state() noexcept {
+  vita_gl::RenderState state;
+  switch (g_gxState.blendMode) {
+  case GX_BM_BLEND:
+    state.blend = true;
+    state.blendSrc = gl_blend_factor(g_gxState.blendFacSrc, false);
+    state.blendDst = gl_blend_factor(g_gxState.blendFacDst, true);
+    break;
+  case GX_BM_SUBTRACT:
+    state.blend = true;
+    state.blendEquation = kGlFuncReverseSubtract;
+    state.blendSrc = kGlOne;
+    state.blendDst = kGlOne;
+    break;
+  case GX_BM_LOGIC:
+    // The logic ops the WebGPU path draws: clear, and no-op (keep the destination); the rest copy.
+    if (g_gxState.blendOp == GX_LO_CLEAR || g_gxState.blendOp == GX_LO_NOOP) {
+      state.blend = true;
+      state.blendSrc = kGlZero;
+      state.blendDst = g_gxState.blendOp == GX_LO_NOOP ? kGlOne : kGlZero;
+    }
+    break;
+  default:
+    break;
+  }
+
+  // GL's alpha test takes one comparison, GX's two joined by an operator: the one that is not
+  // ALWAYS under AND (the usual cut-out), none when either passes under OR, else the first.
+  const AlphaCompare& alpha = g_gxState.alphaCompare;
+  GXCompare compare = alpha.comp0;
+  u32 ref = alpha.ref0;
+  if (alpha.op == GX_AOP_AND && alpha.comp0 == GX_ALWAYS) {
+    compare = alpha.comp1;
+    ref = alpha.ref1;
+  } else if (alpha.op == GX_AOP_OR && (alpha.comp0 == GX_ALWAYS || alpha.comp1 == GX_ALWAYS)) {
+    compare = GX_ALWAYS;
+  }
+  state.alphaFunc = gl_compare(compare);
+  state.alphaRef = static_cast<float>(ref & 0xFF) / 255.f;
+
+  // GX writes depth with its test off when asked to (the test then always passes); GL does not
+  // with GL_DEPTH_TEST off, so that case keeps the test on with ALWAYS.
+  state.depthTest = g_gxState.depthCompare || g_gxState.depthUpdate;
+  state.depthFunc = g_gxState.depthCompare ? gl_compare(g_gxState.depthFunc) : kGlAlways;
+  state.depthWrite = g_gxState.depthUpdate;
+  state.colorWrite = g_gxState.colorUpdate;
+  state.alphaWrite = g_gxState.alphaUpdate;
+
+  switch (g_gxState.cullMode) {
+  case GX_CULL_FRONT:
+    state.cullFace = kGlFront;
+    break;
+  case GX_CULL_BACK:
+    state.cullFace = kGlBack;
+    break;
+  case GX_CULL_ALL:
+    state.cullFace = kGlFrontAndBack;
+    break;
+  default:
+    state.cullFace = 0;
+    break;
+  }
+  return state;
+}
+
 vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
   const auto wrap = [](GXTexWrapMode mode) -> u16 {
     switch (mode) {
@@ -552,6 +666,10 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   for (int unit = 0; unit < unitCount; ++unit) {
     draw.units[unit] = std::move(units[unit]);
   }
+  draw.state = render_state();
+  sStats.blended += draw.state.blend ? 1 : 0;
+  sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
+  sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[unitCount];
@@ -568,8 +686,10 @@ void log_stats() noexcept {
            s.calls, s.recorded, s.nativePositions, s.decoded,
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
-  Log.info("textures: draws with none {}, one {}, two {}; {} left out without a Vita copy", s.drawsByUnits[0],
-           s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy);
+  Log.info("textures: draws with none {}, one {}, two {}; {} left out without a Vita copy; state: {} blended, {} "
+           "alpha-tested, {} culled",
+           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.blended, s.alphaTested,
+           s.culled);
   sStats = {};
 }
 } // namespace aurora::gx::vita

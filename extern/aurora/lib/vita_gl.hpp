@@ -59,13 +59,32 @@ struct TexUnit {
   Sampler sampler;
 };
 
+// A draw's fixed-function state, as GL enums (gx/vita_draw.cpp maps GX's to these): blending,
+// the alpha test, depth, the colour mask and culling. The defaults are an opaque, depth-tested draw.
+struct RenderState {
+  bool blend = false;
+  uint16_t blendEquation = 0x8006; // GL_FUNC_ADD
+  uint16_t blendSrc = 1;           // GL_ONE
+  uint16_t blendDst = 0;           // GL_ZERO
+  uint16_t alphaFunc = 0x0207;     // GL_ALWAYS: no alpha test
+  float alphaRef = 0.f;
+  bool depthTest = true;
+  uint16_t depthFunc = 0x0203; // GL_LEQUAL
+  bool depthWrite = true;
+  bool colorWrite = true;
+  bool alphaWrite = true;
+  uint16_t cullFace = 0; // 0: none; else GL_FRONT, GL_BACK or GL_FRONT_AND_BACK (GX's front is clockwise)
+  bool operator==(const RenderState&) const = default;
+};
+
 // One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
-// GL's depth range), and its texture units.
+// GL's depth range), its texture units and its state.
 struct Draw {
   std::shared_ptr<Mesh> mesh;
   float modelView[12];
   float projection[16];
   TexUnit units[kTexUnits];
+  RenderState state;
 };
 
 #ifdef AURORA_VITA_GL

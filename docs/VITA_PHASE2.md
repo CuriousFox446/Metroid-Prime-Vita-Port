@@ -177,3 +177,21 @@ The game's heap settled about 25 MiB higher in the same hangar than the untextur
 MiB in use, of the 224 the heap may take), though the textures' CPU copies are freed once
 uploaded. The likeliest cause is vitaGL placing textures in the game's heap once its own pools
 are full; to be measured (vitaGL's free memory by pool, in the log) before larger areas.
+
+**Milestone 4, first part (built, not yet run on the Vita): GX's fixed-function state.** Each
+draw now carries GX's blending, alpha test, depth and culling, mapped to GL on the FIFO thread
+(`render_state` in `vita_draw.cpp`) and set on the render worker only where it changes:
+- blending: GX's blend mode and factors as Aurora's WebGPU path maps them (a source factor of
+  SRCCLR is the destination's colour), subtract as reverse subtract, the clear and no-op logic
+  ops; the rest copy;
+- alpha test: GL takes one comparison and GX two joined by an operator, so the one that is not
+  ALWAYS under AND (the usual cut-out), none when either passes under OR, else the first;
+- depth: the test, its function and writes; GX writes depth with its test off when asked to,
+  which GL only does with the test on, so that case tests with ALWAYS;
+- colour and alpha writes, and culling, with GX's clockwise front faces.
+
+The fragment's alpha is still the vertex colour's times the textures', not TEV's, so a draw
+whose alpha GX computes otherwise blends and tests with the wrong value until the generated
+shaders. The log counts blended, alpha-tested and culled draws, and every 300 presents gives
+vitaGL's free memory by pool (VRAM, RAM, phycont, budget), the game heap's free memory, and the
+textures on the GPU by format.
