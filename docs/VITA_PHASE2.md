@@ -258,3 +258,16 @@ but for its lights, was multiplied over the diffuse texture where GX adds it. So
 its stage's combine: a stage that adds its texture to a register (d a register, the operation
 an add) becomes a `GL_ADD` unit; the first unit, which takes the vertex colour, always
 modulates. The log counts the second units added.
+
+Its run (f7efa12, four and a half minutes through the opening, no errors): Samus's suit and the
+gunship are whole, their glow added on top; every immediate draw decoded (none failed) and every
+skinned call drew (about 12 a frame in the cutscene). Lines and points are still left to the
+WebGPU path (up to 16,500 per 300 frames in play: the HUD's and visors' lines). Samus's
+textures are mostly RGBA8: 72 RGBA8 textures took 16.4 MiB of VRAM, 206 BC1 ones 2.9 MiB, with
+58 of 96 MiB free.
+
+The cost shows: the seconds with 1,500 or more list calls a frame (here the cutscene's) ran at
+11.5 FPS, the game thread waiting 24 ms a frame for the FIFO thread, which spent about 45 ms a
+frame in `draw_resident` (about 26 µs a call, a skinned call's decode about 1 ms of it) and the
+render worker 26 ms. What a call does each time it is drawn (resolving its textures, choosing
+units, working out TEV's alpha and state, building the draw) is the next thing to make cheaper.
