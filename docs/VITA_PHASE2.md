@@ -388,3 +388,15 @@ render worker crashed inside SceShaccCg compiling the eighteenth: its stack is 3
 thread record: base 0x820e9000, size 0x8000, what VitaSDK gives every `std::thread`), and the
 crash's stack pointer, 0x820e8ad0, was below its base. The compiler overflowed it. A program now
 builds on a thread of its own with a 2 MiB stack while the render worker waits for it.
+
+Its run (9f6d5cf, 20 minutes to the Frigate's reactor core, no errors, no crash): 61 programs
+built, none failed, about 375 ms each (23 s in all, spread as rooms come into view); nearly every
+draw drew with its program (a handful a window waited a frame for theirs). Three things to do:
+- The compiles are not kept: the first seventeen took the same 6 s as the run before, so
+  vitaGL's shader cache does not keep these Cg programs, and every session pays the 23 s again
+  in hitches. The programs' GXP binaries need a cache of our own on the memory card.
+- The draws cost the render worker more: about 35 ms a frame in the heavy seconds (25 before),
+  the game thread waiting 17 ms (10), 11.9 FPS there (13.8); four uniform uploads a draw, the
+  13 constants among them, against the fixed-function draw's matrix loads.
+- Memory: VRAM 39 MiB free of 96 at the end (about 60 before), with 32 MiB of textures in it, and
+  the meshes' vertices are 56 bytes now; the game's heap at 160 MiB in use.
