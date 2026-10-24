@@ -10,6 +10,7 @@
 #include "texture_convert.hpp"
 #include "probe.hpp"
 #include "../gx/gx_fmt.hpp"
+#include "../vita_gl.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -133,9 +134,57 @@ u16 wgpu_aniso(GXAnisotropy aniso) {
 static TextureHandle new_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                     wgpu::TextureFormat wgpuFormat, const char* label) noexcept;
 
+#ifdef AURORA_VITA_GL
+// The PS Vita draws with its own copy of each static texture (vita_gl.hpp): the first level, as
+// BC1 for an opaque CMPR texture and RGBA8 otherwise. The WebGPU texture beside it is only what
+// Aurora's caches hold, on the null device, and nothing is uploaded to it. Palettes (tlut) are
+// not sampled by the Vita path and get no copy.
+static TextureHandle new_vita_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format,
+                                                ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept {
+  std::vector<uint8_t> level0;
+  auto texelFormat = vita_gl::TexelFormat::RGBA8;
+  auto wgpuFormat = to_wgpu(format);
+  bool hasArbitraryMips = false;
+  if (format == GX_TF_CMPR && !tlut) {
+    const ByteBuffer bc1 = convert_cmpr_level0_to_bc1(width, height, data);
+    if (!bc1.empty()) {
+      level0.assign(bc1.data(), bc1.data() + bc1.size());
+      texelFormat = vita_gl::TexelFormat::BC1;
+    }
+  }
+  if (level0.empty() && !tlut) {
+    ConvertedTexture converted;
+    ArrayRef<uint8_t> texels = data;
+    if (format != InvalidTextureFormat) {
+      converted = convert_texture(format, width, height, mips, data, false);
+    }
+    if (!converted.data.empty()) {
+      texels = converted.data;
+      wgpuFormat = converted.format;
+      hasArbitraryMips = converted.hasArbitraryMips;
+    }
+    const size_t level0Bytes = size_t{width} * height * 4;
+    if (wgpuFormat == wgpu::TextureFormat::RGBA8Unorm && texels.size() >= level0Bytes) {
+      level0.assign(texels.data(), texels.data() + level0Bytes);
+    }
+  }
+  auto handle = new_texture_2d(width, height, mips, format, wgpuFormat, label);
+  handle->hasArbitraryMips = hasArbitraryMips;
+  if (!level0.empty()) {
+    handle->vitaTexture = vita_gl::make_texture(width, height, texelFormat, std::move(level0));
+  }
+  return handle;
+}
+#endif
+
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
                                     bool tlut, const char* label) noexcept {
   ZoneScoped;
+#ifdef AURORA_VITA_GL
+  if (vita_gl::active()) {
+    return new_vita_static_texture_2d(width, height, mips, format, data, tlut, label);
+  }
+#endif
 
   ConvertedTexture converted;
   if (format != InvalidTextureFormat) {

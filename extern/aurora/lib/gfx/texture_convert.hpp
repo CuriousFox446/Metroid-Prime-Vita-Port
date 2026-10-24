@@ -58,5 +58,8 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
                                          ArrayRef<uint8_t> textureData, GXTlutFmt tlutFormat, uint16_t tlutEntries,
                                          ArrayRef<uint8_t> tlutData);
 ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data);
+// An opaque CMPR texture's first level as BC1 (sides multiples of 4), whatever the WebGPU device
+// supports; empty otherwise. For the PS Vita's own copy (vita_gl.hpp).
+ByteBuffer convert_cmpr_level0_to_bc1(uint32_t width, uint32_t height, ArrayRef<uint8_t> data);
 GXTexFmt tlut_texture_format(GXTlutFmt format) noexcept;
 } // namespace aurora::gfx

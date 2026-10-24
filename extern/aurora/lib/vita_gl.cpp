@@ -8,6 +8,7 @@
 #include "backends/imgui_impl_opengl2.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -86,6 +87,60 @@ std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept {
   return std::make_shared<Mesh>(std::move(triangles));
 }
 
+class Texture {
+public:
+  Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> level0) noexcept
+  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {}
+  ~Texture() {
+    if (m_id != 0) {
+      const GLuint id = m_id;
+      gfx::render_worker::enqueue_work([id] { glDeleteTextures(1, &id); });
+    }
+  }
+
+  // Render worker: binds it to the active unit (made from the CPU copy at the first draw) and
+  // sets its sampler state where it changed.
+  void bind(const Sampler& sampler) noexcept {
+    if (m_id == 0) {
+      glGenTextures(1, &m_id);
+      glBindTexture(GL_TEXTURE_2D, m_id);
+      const auto width = static_cast<GLsizei>(m_width);
+      const auto height = static_cast<GLsizei>(m_height);
+      if (m_format == TexelFormat::BC1) {
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, width, height, 0,
+                               static_cast<GLsizei>(m_cpu.size()), m_cpu.data());
+      } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
+      }
+      std::vector<uint8_t>().swap(m_cpu);
+    } else {
+      glBindTexture(GL_TEXTURE_2D, m_id);
+    }
+    if (!m_samplerSet || !(sampler == m_sampler)) {
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, sampler.wrapS);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, sampler.wrapT);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sampler.minFilter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sampler.magFilter);
+      m_sampler = sampler;
+      m_samplerSet = true;
+    }
+  }
+
+private:
+  std::vector<uint8_t> m_cpu;
+  uint32_t m_width;
+  uint32_t m_height;
+  TexelFormat m_format;
+  GLuint m_id = 0;
+  Sampler m_sampler{};
+  bool m_samplerSet = false;
+};
+
+std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
+                                      std::vector<uint8_t> level0) noexcept {
+  return std::make_shared<Texture>(width, height, format, std::move(level0));
+}
+
 void record(Draw draw) noexcept { g_recording.push_back(std::move(draw)); }
 
 void end_frame_draws() noexcept {
@@ -129,7 +184,6 @@ void draw_world(const std::vector<Draw>& draws) {
   ++g_presentStats.framesWithDraws;
   g_presentStats.draws += draws.size();
   glUseProgram(0);
-  glDisable(GL_TEXTURE_2D);
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LEQUAL);
   glDepthMask(GL_TRUE);
@@ -137,11 +191,44 @@ void draw_world(const std::vector<Draw>& draws) {
   glDisable(GL_BLEND);
   glEnableClientState(GL_VERTEX_ARRAY);
   glEnableClientState(GL_COLOR_ARRAY);
+  for (int unit = 0; unit < kTexUnits; ++unit) {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glClientActiveTexture(GL_TEXTURE0 + unit);
+    glDisable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+  }
+  bool unitOn[kTexUnits] = {};
   float matrix[16];
   for (const Draw& draw : draws) {
     const GLsizei count = draw.mesh->bind();
-    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(0));
-    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(24));
+    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, color)));
+    // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
+    for (int unit = 0; unit < kTexUnits; ++unit) {
+      glClientActiveTexture(GL_TEXTURE0 + unit);
+      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
+                        reinterpret_cast<const void*>(offsetof(Vertex, uv) + unit * sizeof(float[2])));
+    }
+    for (int unit = 0; unit < kTexUnits; ++unit) {
+      const TexUnit& texUnit = draw.units[unit];
+      const bool on = texUnit.texture != nullptr;
+      if (!on && !unitOn[unit]) {
+        continue;
+      }
+      glActiveTexture(GL_TEXTURE0 + unit);
+      if (on != unitOn[unit]) {
+        on ? glEnable(GL_TEXTURE_2D) : glDisable(GL_TEXTURE_2D);
+        unitOn[unit] = on;
+      }
+      if (!on) {
+        continue;
+      }
+      texUnit.texture->bind(texUnit.sampler);
+      glMatrixMode(GL_TEXTURE);
+      to_column_major(texUnit.matrix, 2, matrix);
+      glLoadMatrixf(matrix);
+    }
     glMatrixMode(GL_PROJECTION);
     to_column_major(draw.projection, 4, matrix);
     glLoadMatrixf(matrix);
@@ -149,6 +236,14 @@ void draw_world(const std::vector<Draw>& draws) {
     to_column_major(draw.modelView, 3, matrix);
     glLoadMatrixf(matrix);
     glDrawArrays(GL_TRIANGLES, 0, count);
+  }
+  for (int unit = kTexUnits - 1; unit >= 0; --unit) {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glClientActiveTexture(GL_TEXTURE0 + unit);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisable(GL_TEXTURE_2D);
+    glMatrixMode(GL_TEXTURE);
+    glLoadIdentity();
   }
   glDisableClientState(GL_COLOR_ARRAY);
   glDisableClientState(GL_VERTEX_ARRAY);
@@ -167,7 +262,7 @@ void draw_test_triangle() {
     std::vector<Vertex> triangle(3);
     const float corners[3][2] = {{-0.97f, 0.97f}, {-0.80f, 0.97f}, {-0.97f, 0.70f}};
     for (int i = 0; i < 3; ++i) {
-      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {0.f, 0.f, 1.f}, {255, 140, 0, 255}};
+      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}};
     }
     return make_mesh(std::move(triangle));
   }();

@@ -740,6 +740,14 @@ ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, ui
   };
 }
 
+ByteBuffer convert_cmpr_level0_to_bc1(uint32_t width, uint32_t height, ArrayRef<uint8_t> data) {
+  if (width % 4 != 0 || height % 4 != 0 || data.size() < width * height / 2 ||
+      CMPRHasTransparentTexels(width, height, 1, data.data())) {
+    return {};
+  }
+  return BuildBC1FromCMPR(width, height, 1, data.data());
+}
+
 ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data) {
   ByteBuffer converted;
   switch (format) {

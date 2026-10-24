@@ -1,9 +1,14 @@
 #pragma once
 #include <dolphin/gx.h>
 
+#include <memory>
 #include <utility>
 
 #include "types.hpp"
+
+namespace aurora::vita_gl {
+class Texture;
+} // namespace aurora::vita_gl
 
 namespace aurora::gfx {
 struct TextureUpload {
@@ -47,6 +52,9 @@ struct TextureRef {
   bool isReplacement = false;
   // The creation label (interned, so it outlives the texture), for the live-texture breakdown.
   const char* label = nullptr;
+  // The PS Vita's own copy, which its draws sample (vita_gl.hpp); null elsewhere, and for textures
+  // the Vita path does not copy yet (render targets, dynamic textures).
+  std::shared_ptr<vita_gl::Texture> vitaTexture;
 
   TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
              wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat,

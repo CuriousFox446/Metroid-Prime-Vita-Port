@@ -142,6 +142,23 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsNSOGamecube{{
     {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
 }};
 
+// The Vita's pad: no analog triggers, so L and R on the shoulders and Z on Select. Cross fires,
+// circle jumps, square morphs and triangle fires missiles.
+std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsVita{{
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
+    {SDL_GAMEPAD_BUTTON_BACK, PAD_TRIGGER_Z},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, PAD_TRIGGER_L},
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_R},
+    {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_BUTTON_UP},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, PAD_BUTTON_DOWN},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, PAD_BUTTON_LEFT},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
+}};
+
 // Nintendo pads map by printed label (A on the right, B at the bottom, X on
 // top, Y on the left), so the glyphs and the buttons agree.
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
@@ -504,9 +521,8 @@ void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLIN
 {
 #ifdef __vita__
   // The Vita's pad (SDL calls it a standard one) has no analog triggers, so the standard layout
-  // left L and R on axes that never move and Z on the R button. Its shoulders become L (lock on)
-  // and R (free look), and Z (the map) goes on Select, as on the NSO GameCube pad.
-  controller->m_buttonMapping = g_defaultButtonsNSOGamecube;
+  // left L and R on axes that never move and Z on the R button.
+  controller->m_buttonMapping = g_defaultButtonsVita;
   return;
 #endif
   switch (SDL_GetGamepadType(controller->m_controller)) {

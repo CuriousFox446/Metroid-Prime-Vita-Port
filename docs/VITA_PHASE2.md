@@ -142,3 +142,25 @@ Controls: SDL calls the Vita's pad a standard one, whose default layout put Z on
 on analog triggers the Vita does not have, so L never locked on. On the Vita the default is now
 the NSO GameCube pad's layout: L and R on the shoulders, Z on Select. Select + Start still opens
 the overlay, and no longer opens the map as well.
+
+Fifth run (f2a9715): 15 minutes, to the Frigate's reactor core, without an error; the heavy
+seconds at 18.4 FPS (in other rooms than the run before). The Vita's own pad layout followed it:
+cross fires (A), circle jumps (B), square morphs (X), triangle fires missiles (Y).
+
+**Milestone 3 (built, not yet run on the Vita).** Each static GX texture gets a copy for the
+Vita's GPU where Aurora creates it (`new_static_texture_2d`): its first level, as BC1 (DXT1)
+for an opaque CMPR texture, a lossless re-pack, and RGBA8 for every other format (decoded by
+Aurora's converters, palettes applied). The WebGPU texture beside it stays as the handle
+Aurora's caches hold, on the null device, with nothing uploaded. The copy goes to the GPU on
+the render worker at its first draw.
+
+A draw takes up to two textures (vitaGL's fixed-function pipeline has two texture coordinate
+sets): those of the TEV stages whose colour reads their texture, in stage order, with
+coordinates a matrix makes from a vertex attribute. They are resolved through Aurora's texture
+cache as the WebGPU draw would, each list is decoded with those attributes' coordinates (a
+variant of its cache entry), and each unit gets GX's texture matrix (rows 0 and 1, folded for
+GL's (s, t, 0, 1) input), wrap modes and filters. The units modulate: vertex colour * unit 0 *
+unit 1, which is right for a lightmap and a diffuse pass and wrong for GX's other combinations
+until milestone 4. Not yet: mipmaps (first level only), EFB copies and dynamic textures as
+textures, texture coordinates made from positions or normals (reflections), the post-transform
+matrices. The log adds a line of draws by how many textures they took.
