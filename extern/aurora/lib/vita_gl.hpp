@@ -36,10 +36,15 @@ struct Vertex {
 };
 static_assert(sizeof(Vertex) == 56);
 
-// Triangles decoded once from a GX display list (gx/vita_draw.cpp). Uploaded to the GPU on the
-// render worker at its first draw; freed there once no frame draws it.
+// What made a mesh (gx/vita_draw.cpp), for the log: a display list decoded once and kept, a
+// skinned list call (positions made at run time, a mesh for that frame), an immediate draw or
+// an indexed one (each a mesh for that frame), or anything else.
+enum class MeshKind : uint8_t { List, Skinned, Immediate, Indexed, Other, Count };
+
+// Triangles decoded from GX's geometry (gx/vita_draw.cpp). Uploaded to the GPU on the render
+// worker at its first draw; freed once no frame draws it.
 class Mesh;
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept;
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept;
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
 // level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the

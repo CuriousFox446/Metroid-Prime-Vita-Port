@@ -528,7 +528,7 @@ const Cached& lookup(const void* key, const resident::Entry& entry, u32 size, co
   } else {
     ++sStats.decoded;
   }
-  cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles));
+  cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::List);
   state.vtxDesc = g_gxState.vtxDesc;
   for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
     state.vtxFmts[fmt] = (state.fmtMask & (1u << fmt)) != 0 ? g_gxState.vtxFmts[fmt] : VtxFmt{};
@@ -1317,7 +1317,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       ++sStats.perCallFailed;
       return false;
     }
-    record_draw(vita_gl::make_mesh(std::move(triangles)), material);
+    record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned), material);
     return true;
   }
   const Cached& cached = lookup(key, entry, size, texAttrs);
@@ -1353,7 +1353,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles)), material);
+  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Immediate), material);
   return true;
 }
 
@@ -1389,7 +1389,7 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles)), material);
+  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Indexed), material);
   return true;
 }
 

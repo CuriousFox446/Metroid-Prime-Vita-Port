@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 
 namespace aurora::vita_gl {
 namespace {
@@ -80,8 +82,8 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
 
 class Mesh {
 public:
-  explicit Mesh(std::vector<Vertex> triangles) noexcept
-  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())) {}
+  Mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -103,14 +105,20 @@ public:
     return m_count;
   }
 
+  // Render worker: whether its buffer is made yet (bind makes it).
+  bool uploaded() const noexcept { return m_vbo != 0; }
+  GLsizei count() const noexcept { return m_count; }
+  MeshKind kind() const noexcept { return m_kind; }
+
 private:
   std::vector<Vertex> m_cpu;
   GLuint m_vbo = 0;
   GLsizei m_count;
+  MeshKind m_kind;
 };
 
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles) noexcept {
-  return std::make_shared<Mesh>(std::move(triangles));
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept {
+  return std::make_shared<Mesh>(std::move(triangles), kind);
 }
 
 class Texture {
@@ -204,6 +212,91 @@ struct UniformStats {
   uint64_t texturesKept = 0;
 };
 UniformStats g_uniformStats;
+
+// Where the render worker's present goes, for the log: one frame in kTimedEvery is timed, section
+// by section (the timer costs about 0.7 microseconds a call, too much for every draw of every
+// frame). Each mark ends a section where the last one ended, so the sections add up to the present.
+enum Section {
+  kSetup, // the clear, ImGui's frame, taking the frame, draw_world's state reset
+  kBuild, // programs' readiness checks, and the builds (compiles, loads) made in the frame
+  kProgramSwitch,   // glUseProgram and the generic arrays turned on and off
+  kProgramUpload,   // the mesh's buffer bound, made and filled at its first draw
+  kProgramPointers, // the attribute pointers
+  kProgramCompare,  // the draw's uniform arrays against what the program holds
+  kProgramSend,     // glUniform4fv where they differ
+  kProgramTextures,
+  kProgramState,
+  kProgramDraw, // glDrawArrays
+  kFixedSwitch, // back to the fixed-function arrays
+  kFixedUpload,
+  kFixedPointers,
+  kFixedUnits, // texture units: enables, binds, env modes, texture matrices
+  kFixedMatrices,
+  kFixedState,
+  kFixedDraw,
+  kFinish,  // draw_world's state reset for the overlay, the frame handed to the reaper
+  kOther,   // the test triangle, the stats log
+  kOverlay, // ImGui
+  kSwap,    // vglSwapBuffers
+  kSectionCount
+};
+constexpr const char* kSectionNames[kSectionCount] = {
+    "setup",  "build",  "switch",   "upload",   "pointers", "compare", "send",  "textures", "state",   "draw", "switch",
+    "upload", "pointers", "units", "matrices", "state",    "draw",    "finish", "other",   "overlay", "swap"};
+constexpr uint32_t kTimedEvery = 8;
+
+// What made a draw's mesh (make_mesh), and the two draw paths, for the uploads' line.
+constexpr const char* kMeshKindNames[static_cast<int>(MeshKind::Count)] = {"lists", "skinned", "immediate",
+                                                                           "indexed", "other"};
+enum DrawPath { kPathProgram, kPathFixed, kPathCount };
+
+struct SectionClock {
+  bool on = false; // timing this present
+  uint64_t last = 0;
+  uint64_t us[kSectionCount] = {};
+  uint32_t frames = 0; // timed presents since the last report
+  uint64_t draws = 0;
+  uint64_t programDraws = 0;
+  uint64_t calls = 0; // timer calls, for their cost
+  uint64_t reportStart = 0;
+  uint32_t presents = 0;
+  double callUs = -1.0; // one timer call, measured once
+  // Timed presents' draws by path and mesh kind: draws, buffers made and their bytes, the upload
+  // section's time.
+  struct Uploads {
+    uint64_t draws = 0;
+    uint64_t made = 0;
+    uint64_t bytes = 0;
+    uint64_t us = 0;
+  };
+  Uploads uploads[kPathCount][static_cast<int>(MeshKind::Count)] = {};
+  // Timed presents' fixed-function draws: waiting for their program, or without one.
+  uint64_t fixedPending = 0;
+  uint64_t fixedUnsupported = 0;
+  // The largest mesh made for a fixed-function draw since the last report.
+  uint32_t largestFixedVertices = 0;
+  MeshKind largestFixedKind = MeshKind::Other;
+
+  void start() noexcept {
+    if (on) {
+      last = sceKernelGetProcessTimeWide();
+      ++calls;
+    }
+  }
+  // The section's time (0 when this present is not timed).
+  uint64_t mark(Section section) noexcept {
+    if (!on) {
+      return 0;
+    }
+    const uint64_t now = sceKernelGetProcessTimeWide();
+    const uint64_t spent = now - last;
+    us[section] += spent;
+    last = now;
+    ++calls;
+    return spent;
+  }
+};
+SectionClock g_clock;
 
 // vitaGL's uniform locations are its uniform records' addresses negated, so any value but -1
 // (not found) is one; attribute locations are plain indices.
@@ -354,13 +447,16 @@ private:
       return;
     }
     const size_t bytes = sizeof(float[4]) * count;
-    if (count == heldCount && std::memcmp(held, values, bytes) == 0) {
+    const bool same = count == heldCount && std::memcmp(held, values, bytes) == 0;
+    g_clock.mark(kProgramCompare);
+    if (same) {
       ++stats.skipped;
       return;
     }
     std::memcpy(held, values, bytes);
     heldCount = count;
     glUniform4fv(location, count, values[0]);
+    g_clock.mark(kProgramSend);
     ++stats.uploaded;
   }
 
@@ -526,6 +622,45 @@ std::vector<Draw> take_frame() {
   return draws;
 }
 
+// Frames drawn, destroyed on a thread of their own: a heavy frame's 1700 draws took the render
+// worker 4 ms to destroy (their meshes, textures and programs released, the meshes made for that
+// frame alone deleted). A mesh's or texture's destructor queues its GL delete for the render
+// worker, which runs it between presents.
+class FrameReaper {
+public:
+  void reap(std::vector<Draw> frame) noexcept {
+    {
+      std::lock_guard lock{m_mutex};
+      if (!m_started) {
+        m_started = true;
+        std::thread([this] { run(); }).detach();
+      }
+      m_frames.push_back(std::move(frame));
+    }
+    m_ready.notify_one();
+  }
+
+private:
+  void run() noexcept {
+    for (;;) {
+      std::vector<Draw> frame;
+      {
+        std::unique_lock lock{m_mutex};
+        m_ready.wait(lock, [this] { return !m_frames.empty(); });
+        frame = std::move(m_frames.front());
+        m_frames.pop_front();
+      }
+      // `frame` is destroyed here, outside the lock.
+    }
+  }
+
+  std::mutex m_mutex;
+  std::condition_variable m_ready;
+  std::deque<std::vector<Draw>> m_frames;
+  bool m_started = false;
+};
+FrameReaper g_reaper;
+
 // For the log: presents and draws since the last report (render worker).
 struct PresentStats {
   uint32_t presents = 0;
@@ -537,63 +672,6 @@ struct PresentStats {
 };
 PresentStats g_presentStats;
 
-// Where the render worker's present goes, for the log: one frame in kTimedEvery is timed, section
-// by section (the timer costs about a microsecond a call, too much for every draw of every frame).
-// Each mark ends a section where the last one ended, so the sections add up to the present.
-enum Section {
-  kSetup,          // the clear, ImGui's frame, taking the frame, draw_world's state reset
-  kBuild,          // programs' readiness checks, and the builds (compiles, loads) made in the frame
-  kProgramSwitch,  // glUseProgram and the generic arrays turned on and off
-  kProgramArrays,  // the mesh's buffer and attribute pointers
-  kProgramUniforms,
-  kProgramTextures,
-  kProgramState,
-  kProgramDraw, // glDrawArrays
-  kFixedSwitch, // back to the fixed-function arrays
-  kFixedArrays,
-  kFixedUnits, // texture units: enables, binds, env modes, texture matrices
-  kFixedMatrices,
-  kFixedState,
-  kFixedDraw,
-  kFinish,  // draw_world's state reset for the overlay
-  kOther,   // the test triangle, the stats log
-  kOverlay, // ImGui
-  kSwap,    // vglSwapBuffers
-  kSectionCount
-};
-constexpr const char* kSectionNames[kSectionCount] = {
-    "setup", "build", "switch", "arrays", "uniforms", "textures", "state", "draw", "switch", "arrays",
-    "units", "matrices", "state",   "draw",     "finish", "other", "overlay", "swap"};
-constexpr uint32_t kTimedEvery = 8;
-
-struct SectionClock {
-  bool on = false; // timing this present
-  uint64_t last = 0;
-  uint64_t us[kSectionCount] = {};
-  uint32_t frames = 0; // timed presents since the last report
-  uint64_t draws = 0;
-  uint64_t programDraws = 0;
-  uint64_t calls = 0; // timer calls, for their cost
-  uint64_t reportStart = 0;
-  uint32_t presents = 0;
-  double callUs = -1.0; // one timer call, measured once
-
-  void start() noexcept {
-    if (on) {
-      last = sceKernelGetProcessTimeWide();
-      ++calls;
-    }
-  }
-  void mark(Section section) noexcept {
-    if (on) {
-      const uint64_t now = sceKernelGetProcessTimeWide();
-      us[section] += now - last;
-      last = now;
-      ++calls;
-    }
-  }
-};
-SectionClock g_clock;
 
 void set_enabled(GLenum cap, bool on) {
   on ? glEnable(cap) : glDisable(cap);
@@ -665,6 +743,27 @@ struct BoundTextures {
   }
 };
 
+// Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
+GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
+  const bool fresh = !mesh.uploaded();
+  const GLsizei count = mesh.bind();
+  const uint64_t us = g_clock.mark(section);
+  if (g_clock.on) {
+    SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind())];
+    ++uploads.draws;
+    uploads.us += us;
+    if (fresh) {
+      ++uploads.made;
+      uploads.bytes += static_cast<uint64_t>(count) * sizeof(Vertex);
+    }
+  }
+  if (fresh && path == kPathFixed && static_cast<uint32_t>(count) > g_clock.largestFixedVertices) {
+    g_clock.largestFixedVertices = static_cast<uint32_t>(count);
+    g_clock.largestFixedKind = mesh.kind();
+  }
+  return count;
+}
+
 // A draw with its generated program (render worker). Leaving the fixed-function path turns its
 // arrays off; a program switch turns on the generic arrays the new one reads.
 void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn,
@@ -697,7 +796,7 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
     attribsOn = wanted;
   }
   g_clock.mark(kProgramSwitch);
-  const GLsizei count = draw.mesh->bind();
+  const GLsizei count = bind_mesh(*draw.mesh, kPathProgram, kProgramUpload);
   const auto pointer = [](size_t offset) { return reinterpret_cast<const void*>(offset); };
   if (program.attr(kAttrPos) >= 0) {
     glVertexAttribPointer(program.attr(kAttrPos), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
@@ -716,10 +815,9 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
                             pointer(offsetof(Vertex, uv) + coord * sizeof(float[2])));
     }
   }
-  g_clock.mark(kProgramArrays);
+  g_clock.mark(kProgramPointers);
   const ProgramInputs& inputs = draw.program;
   program.set_constants(inputs);
-  g_clock.mark(kProgramUniforms);
   for (int i = 0; i < kSamplers; ++i) {
     if (inputs.textures[i] != nullptr && program.samplers[i] != kNoUniform) {
       bound.bind(i, *inputs.textures[i], inputs.samplers[i], false);
@@ -824,9 +922,12 @@ void draw_world(const std::vector<Draw>& draws) {
     if (draw.program.program != nullptr) {
       ++g_presentStats.programPending;
     }
+    if (g_clock.on) {
+      ++(draw.program.program != nullptr ? g_clock.fixedPending : g_clock.fixedUnsupported);
+    }
     enter_fixed_function();
     g_clock.mark(kFixedSwitch);
-    const GLsizei count = draw.mesh->bind();
+    const GLsizei count = bind_mesh(*draw.mesh, kPathFixed, kFixedUpload);
     glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
     glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, color)));
     // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
@@ -835,7 +936,7 @@ void draw_world(const std::vector<Draw>& draws) {
       glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
                         reinterpret_cast<const void*>(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
     }
-    g_clock.mark(kFixedArrays);
+    g_clock.mark(kFixedPointers);
     for (int unit = 0; unit < kTexUnits; ++unit) {
       const TexUnit& texUnit = draw.units[unit];
       const bool on = texUnit.texture != nullptr;
@@ -912,7 +1013,7 @@ void draw_test_triangle() {
     for (int i = 0; i < 3; ++i) {
       triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}, {255, 140, 0, 255}, 255};
     }
-    return make_mesh(std::move(triangle));
+    return make_mesh(std::move(triangle), MeshKind::Other);
   }();
   Draw draw{.mesh = sMesh};
   constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -1006,6 +1107,23 @@ void report_sections() noexcept {
            "draws: {} | fixed-function draws: {} | frame: {} | timer {:.2f} us a call, {:.0f} calls a present",
            c.frames, ms(total), c.draws / frames, c.programDraws / frames, program, fixed, frame, c.callUs,
            c.calls / frames);
+  // By path and mesh kind, per timed present: draws, buffers made, their KiB, the upload section.
+  std::string uploads;
+  for (int path = 0; path < kPathCount; ++path) {
+    uploads += path == kPathProgram ? "program draws:" : " | fixed-function draws:";
+    for (int kind = 0; kind < static_cast<int>(MeshKind::Count); ++kind) {
+      const SectionClock::Uploads& u = c.uploads[path][kind];
+      if (u.draws != 0) {
+        uploads += fmt::format(" {} {:.0f}/{:.1f}/{:.0f}/{:.2f}", kMeshKindNames[kind], u.draws / frames,
+                               u.made / frames, static_cast<double>(u.bytes) / 1024.0 / frames, ms(u.us));
+      }
+    }
+  }
+  Log.info("[draw uploads] per timed present, draws/buffers made/KiB/ms by mesh kind: {} | fixed-function: {:.1f} "
+           "waiting for their program, {:.1f} without one; the largest mesh made for one since the last line {} "
+           "vertices ({})",
+           uploads, c.fixedPending / frames, c.fixedUnsupported / frames, c.largestFixedVertices,
+           kMeshKindNames[static_cast<int>(c.largestFixedKind)]);
   const double callUs = c.callUs;
   c = {};
   c.callUs = callUs;
@@ -1034,7 +1152,9 @@ void present(ImDrawData* overlay) noexcept {
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glDepthMask(GL_TRUE);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-  draw_world(take_frame());
+  std::vector<Draw> frame = take_frame();
+  draw_world(frame);
+  g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
   draw_test_triangle();
   if (++g_presentStats.presents == 300) {

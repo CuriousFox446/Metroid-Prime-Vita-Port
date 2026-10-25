@@ -524,3 +524,18 @@ a program-draw section):
   thread and read here, which the caches feel in every section.
 - `glDrawArrays` itself, 4.9 us a draw, is vitaGL's own work (patching and setting the programs,
   textures, streams, uniform buffers); fewer draws is the only lever on it from here.
+
+**Frames freed off the render worker, and the unclear sections split (built, not yet run on the
+Vita).** A drawn frame goes to a reaper thread of its own, which destroys its draws; the render
+worker's `enqueue_work` runs work at once when called on the render worker itself, so the
+deletes of the meshes made for that frame alone (`glDeleteBuffers`) were part of "finish" too.
+From the reaper they are queued and run on the render worker between presents (render worker
+busy time still, but not the present's). The timing now splits:
+- arrays into "upload" (the mesh's buffer bound, made and filled at its first draw) and
+  "pointers", on both paths;
+- uniforms into "compare" (against what the program holds) and "send" (`glUniform4fv`).
+A second line, `[draw uploads]`, gives per timed present for each path and mesh kind (`lists`
+decoded once and kept, `skinned` list calls, `immediate` and `indexed` draws, `other`: draws,
+buffers made, their KiB, and the upload section's time; for the fixed-function draws, how many
+wait for their program and how many have none (a material a program cannot draw yet), and the
+largest mesh made for one since the last line.
