@@ -185,6 +185,10 @@ struct Stats {
   u32 withProgram = 0;
   u32 constantsRecorded = 0;
   u32 constantsShared = 0;
+  // Materials worked out that sample an EFB copy (their hash moves with every copy), and those
+  // that replaced another still in use this window.
+  u32 materialMissesCopy = 0;
+  u32 materialEvictions = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -993,10 +997,15 @@ struct Material {
   int coordCount = 0;
   const TcgConfig* coordTcgs[kTexCoords] = {};
   vita_gl::RenderState programState;
+  u32 used = 0; // sMaterialClock at its last use, for the set's replacement
 };
-// Direct-mapped: a heavy frame of the opening works out several hundred materials.
-constexpr size_t kMaterials = 1024;
-std::array<Material, kMaterials> sMaterials;
+// Sets of four, the least recently used of a set replaced: the frigate's heavy rooms keep about a
+// thousand materials alive, which in 1024 direct-mapped slots evicted each other (some 210 worked
+// out again a frame).
+constexpr size_t kMaterialSets = 1024;
+constexpr size_t kMaterialWays = 4;
+std::array<Material, kMaterialSets * kMaterialWays> sMaterials;
+u32 sMaterialClock = 0;
 u32 sWindow = 0;
 // The material of the last draw, and the texture bind generation it was resolved under.
 Material* sLastMaterial = nullptr;
@@ -1008,7 +1017,7 @@ u64 sLastGeneration = 0;
 // textures with their palettes. The game leaves slots and generators no stage reads holding
 // whatever it set last, so they are left out, as are the matrices and the colour constants (read
 // for every draw).
-u64 material_hash(u64 generation) noexcept {
+u64 material_hash(u64 generation, bool& readsCopy) noexcept {
   const GXState& s = g_gxState;
   const AlphaCompare& alpha = s.alphaCompare;
   const u32 fixed[] = {
@@ -1077,9 +1086,11 @@ u64 material_hash(u64 generation) noexcept {
   // Aurora's bind generation moves at every EFB copy (several a frame), and a static texture is
   // already named by its identity above; only a slot holding a copy's destination resolves to
   // something new when it moves.
+  readsCopy = false;
   for (u32 i = 0; i < MaxTextures; ++i) {
     if ((usedMaps & (1u << i)) != 0 && s.copyTextures.contains(s.loadedTextures[i].data)) {
       h = XXH3_64bits_withSeed(&generation, sizeof(generation), h);
+      readsCopy = true;
       break;
     }
   }
@@ -1095,23 +1106,43 @@ const Material& current_material() noexcept {
   if (sLastMaterial != nullptr && changed == 0 && generation == sLastGeneration) {
     ++sStats.materialReused;
     sLastMaterial->window = sWindow;
+    sLastMaterial->used = ++sMaterialClock;
     return *sLastMaterial;
   }
   sLastGeneration = generation;
-  const u64 hash = material_hash(generation);
-  Material& material = sMaterials[hash % kMaterials];
+  bool readsCopy = false;
+  const u64 hash = material_hash(generation, readsCopy);
+  // Its set: the entry holding it, else an empty one, else the least recently used.
+  Material* const set = &sMaterials[(hash % kMaterialSets) * kMaterialWays];
+  Material* found = nullptr;
+  Material* victim = &set[0];
+  for (size_t way = 0; way < kMaterialWays; ++way) {
+    Material& entry = set[way];
+    if (entry.valid && entry.hash == hash) {
+      found = &entry;
+      break;
+    }
+    if (victim->valid && (!entry.valid || entry.used < victim->used)) {
+      victim = &entry;
+    }
+  }
+  Material& material = found != nullptr ? *found : *victim;
   material.window = sWindow;
+  material.used = ++sMaterialClock;
   sLastMaterial = &material;
-  if (material.valid && material.hash == hash) {
+  if (found != nullptr) {
     ++sStats.materialHits;
     return material;
   }
   ZoneScopedN("vita: work out a material");
   ++sStats.materialMisses;
+  sStats.materialMissesCopy += readsCopy ? 1 : 0;
+  sStats.materialEvictions += material.valid ? 1 : 0;
   material = {};
   material.hash = hash;
   material.valid = true;
   material.window = sWindow;
+  material.used = sMaterialClock;
   const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
   material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs, layout);
   if (material.unitCount < 0) {
@@ -1162,9 +1193,9 @@ const Material& current_material() noexcept {
 // Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
 // alpha folded in where it is a constant (its inputs are constants that change between draws).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
-  // For the FIFO thread's timing: since the material, the draw's triangles (its mesh made too);
-  // from here to the return, its recording.
-  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDecode);
+  // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
+  // argument); from here to the return, the draw's recording.
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMesh);
   struct Recorded {
     ~Recorded() { vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord); }
   } recorded;
@@ -1346,6 +1377,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       triangles = decode_list(*entry.bytes, size, texAttrs, fmtMask);
       ++sStats.perCall;
     }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
     if (triangles.empty()) {
       ++sStats.perCallFailed;
       return false;
@@ -1355,6 +1387,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     return true;
   }
   const Cached& cached = lookup(key, entry, size, texAttrs);
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kLookup);
   if (!cached.mesh) {
     return false;
   }
@@ -1383,6 +1416,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
   }
   std::vector<vita_gl::Vertex> triangles;
   triangulate(prim, prims, texAttrs[0] != kNoTexAttr, triangles);
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
   if (triangles.empty()) {
     ++sStats.immediateFailed;
     return false;
@@ -1422,6 +1456,7 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
     }
     append_triangle(triangles, prims[idx[0]], prims[idx[1]], prims[idx[2]], textured);
   }
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
   if (triangles.empty()) {
     return false;
   }
@@ -1448,11 +1483,13 @@ void log_stats() noexcept {
   }
   ++sWindow;
   sLastMaterial = nullptr;
-  Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out; {} cached; "
+  Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
+           "copy, {} replacing another); {} cached of {} ({} KiB); "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
            "program ({} generated), their constant arrays {} recorded, {} repeating the last",
-           s.materialReused, s.materialHits, s.materialMisses, materials, s.skinnedFromTemplate, s.perCall,
-           s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
+           s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, materials,
+           sMaterials.size(), sizeof(sMaterials) / 1024, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
+           tev_program_count(), s.constantsRecorded, s.constantsShared);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);

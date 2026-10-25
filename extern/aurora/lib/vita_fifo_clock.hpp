@@ -14,7 +14,10 @@ enum Section : uint8_t {
   kState,       // register writes (BP, CP, XF, indexed XF loads), the stream's own reading
   kCopies,      // EFB copies and clears (BP 0x52)
   kMaterial,    // the Vita path: a draw's material (current_material: texture copies, programs)
-  kDecode,      // the Vita path: a draw's triangles (cached lists' lookups, skinned and immediate decodes)
+  kLookup,      // the Vita path: a list call's cached triangles found (decoded first when none match)
+  kSkinned,     // the Vita path: a skinned list call's triangles, from its template or decoded whole
+  kImmediate,   // the Vita path: an immediate or indexed draw's vertices decoded and triangulated
+  kMesh,        // the Vita path: the mesh made of them (or a cached list's taken) for record_draw
   kRecord,      // the Vita path: record_draw (matrices, constants, the draw into the frame)
   kOtherDraws,  // the rest of a draw command: draws the Vita path did not take, to Aurora's WebGPU path
   kAurora,      // Aurora's other extension commands (texture and array loads, resident lists' retains...)

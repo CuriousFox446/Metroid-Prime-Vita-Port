@@ -648,3 +648,14 @@ each extension command that is not a draw):
   of these the 32 ms is needs the section split.
 - Record, 7.5 us a draw: the matrices, the texgen rows and constants worked out and compared, and
   the 410-byte draw with its `shared_ptr` copies pushed into the frame.
+
+**The material cache set-associative, decode split (built, not yet run on the Vita).**
+- 4096 materials in 1024 sets of four (1.1 MiB, 288 bytes each), the least recently used of a
+  set replaced (a use stamp on each, set at every use, the last draw's kept one included), an
+  empty entry first. The materials line now gives, of those worked out, how many sample an EFB
+  copy (their hash moves with each copy, so they are worked out again after one) and how many
+  replaced a material still in use that window, and the cache's size.
+- The FIFO timing's decode is four sections now: lookup (a cached list's triangles found, decoded
+  first when no variant matches), skinned (a skinned call's triangles from its template, or
+  decoded whole), immediate (an immediate or indexed draw's vertices decoded and triangulated),
+  mesh (the mesh made of the triangles, or a cached list's taken, up to `record_draw`).
