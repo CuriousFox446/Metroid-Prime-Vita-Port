@@ -62,8 +62,11 @@ enum class MeshKind : uint8_t { List, Skinned, Immediate, Indexed, Other, Count 
 // a program (`clientMemory`) has no buffer: vitaGL copies it into its per-frame pool at the draw
 // (one copy for a program's interleaved attributes), with no buffer to make, fill and delete. The
 // fixed-function path copies each attribute apart, so its meshes keep a buffer.
+// A mesh's primitives: triangles, or lines (two vertices each).
+enum class MeshPrimitive : uint8_t { Triangles, Lines };
 class Mesh;
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false) noexcept;
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false,
+                                MeshPrimitive primitive = MeshPrimitive::Triangles) noexcept;
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
 // level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the

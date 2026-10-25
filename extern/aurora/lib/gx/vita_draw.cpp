@@ -1298,6 +1298,14 @@ const Material& current_material() noexcept {
       }
       if (!bind.ref || !bind.ref->vitaTexture) {
         copies = false;
+        // An EFB copy's texture (the morph ball's shadow, a reflection) has none until milestone 5
+        // makes the copies: drawn without it, fixed-function with the other textures, such a pass
+        // covered what it shades (everything round the morph ball went pale). Left out instead.
+        if (g_gxState.copyTextures.contains(g_gxState.loadedTextures[layout.maps[m]].data)) {
+          ++sStats.unitsWithoutCopy;
+          material.unitCount = -1;
+          return material;
+        }
         break;
       }
       material.programTextures[m] = bind.ref->vitaTexture;
@@ -1579,7 +1587,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
 bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept {
   ZoneScoped;
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
-  if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
+  if (prim == GX_POINTS) {
     ++sStats.immediateLines;
     return false;
   }
@@ -1595,6 +1603,26 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
   if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, prims)) {
     ++sStats.immediateFailed;
     return false;
+  }
+  if (prim == GX_LINES || prim == GX_LINESTRIP) {
+    // As GL's lines, two vertices each (the map's outlines, among others). One pixel wide: GX's
+    // line width is not applied.
+    std::vector<vita_gl::Vertex> lines;
+    const size_t step = prim == GX_LINES ? 2 : 1;
+    for (size_t i = 0; i + 1 < prims.size(); i += step) {
+      lines.push_back(prims[i]);
+      lines.push_back(prims[i + 1]);
+    }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
+    if (lines.empty()) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    ++sStats.immediateLines;
+    record_draw(vita_gl::make_mesh(std::move(lines), vita_gl::MeshKind::Immediate, material.program != nullptr,
+                                   vita_gl::MeshPrimitive::Lines),
+                material);
+    return true;
   }
   std::vector<vita_gl::Vertex> triangles;
   triangulate(prim, prims, texAttrs[0] != kNoTexAttr, triangles);

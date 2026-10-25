@@ -92,8 +92,9 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
 
 class Mesh {
 public:
-  Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory) noexcept
-  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory) {}
+  Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
+    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -123,6 +124,8 @@ public:
   bool uploaded() const noexcept { return m_vbo != 0; }
   GLsizei count() const noexcept { return m_count; }
   MeshKind kind() const noexcept { return m_kind; }
+  // What glDrawArrays draws it as: GL_TRIANGLES or GL_LINES.
+  GLenum mode() const noexcept { return m_mode; }
   // What its arrays' offsets are from: its vertices in client memory, else the bound buffer's start.
   const uint8_t* base() const noexcept {
     return m_client ? reinterpret_cast<const uint8_t*>(m_cpu.data()) : nullptr;
@@ -134,10 +137,12 @@ private:
   GLsizei m_count;
   MeshKind m_kind;
   bool m_client;
+  GLenum m_mode;
 };
 
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory) noexcept {
-  return std::make_shared<Mesh>(std::move(triangles), kind, clientMemory);
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory,
+                                MeshPrimitive primitive) noexcept {
+  return std::make_shared<Mesh>(std::move(triangles), kind, clientMemory, primitive);
 }
 
 class Texture {
@@ -868,7 +873,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
   g_clock.mark(kProgramTextures);
   apply_state(inputs.state, current, false);
   g_clock.mark(kProgramState);
-  glDrawArrays(GL_TRIANGLES, 0, count);
+  glDrawArrays(draw.mesh->mode(), 0, count);
   g_clock.mark(kProgramDraw);
 }
 
@@ -1059,7 +1064,7 @@ void draw_world(const Frame& frame) {
     g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
     g_clock.mark(kFixedState);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDrawArrays(draw.mesh->mode(), 0, count);
     g_clock.mark(kFixedDraw);
   }
   enter_fixed_function();

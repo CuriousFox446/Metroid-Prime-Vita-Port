@@ -814,8 +814,7 @@ again. Thousands of draws a window with a smaller viewport and some hundreds of 
 off (bright, flat orange; asked for before), and the morph ball's light seems to turn the
 surfaces round it grey.
 
-**GX lighting in the generated programs (built, not yet run on the Vita; the rest of milestone
-4's lighting).** A lit channel was the material colour times the ambient colour plus a shading
+**GX lighting in the generated programs (the rest of milestone 4's lighting).** A lit channel was the material colour times the ambient colour plus a shading
 made up from the face's normal: none of the game's lights, their colours or the vertex normals,
 so lit models (Samus, the gunship, the creatures) came out flat, and a light like the morph
 ball's did nothing. Now, as Aurora's shaders do (shader.cpp, lighting_func):
@@ -836,3 +835,26 @@ ball's did nothing. Now, as Aurora's shaders do (shader.cpp, lighting_func):
   projective sampling after one), so such materials have a program instead of the fixed-function
   draw. kProgramVertexConstants is 194 rows now.
 - The sources changed (kBinaryVersion 3): the first session compiles every program again.
+
+Its run (76cab02; stamp aa68617-dirty): 17.6 minutes, no crash; 192 programs built, none
+failed (the lit ones compile: Cg as generated is right), but about a second each (205 s of
+compiling in the session, against 54 programs and 25 s before: the light counts make more
+programs, and lit ones are longer). No fixed-function draws left. The present's heavy frames:
+22.2 ms (19.6), vitaGL's draw 15.3 ms (10.1), the lit draws' uniform buffers being larger; the
+render worker's busy time and the 11.1 FPS were inflated by the compiles, one a frame at a second
+each. Photos and reports, in the morph ball: the surfaces round the ball pale and untextured; the
+shell disappearing at times; the ball's trails gone (they were there before this build); the
+map's outlines missing (always).
+- The pale surfaces: `CMorphBallShadow::Render` draws the surfaces in the shadow's volume again,
+  blended, black with the shadow in alpha, sampling the shadow's EFB copy (texture map 7). Without
+  a Vita copy of it the material had no program and drew fixed-function with the other textures,
+  a pale wash. A material whose program would sample an EFB copy's texture is left out now, until
+  milestone 5 makes the copies.
+- The shell and the trails: a 2x4 generator with a post-transform matrix was sampled projectively,
+  divided by what the post matrix makes of z; Aurora keeps its x and y. Environment maps take
+  that path (newly given programs by this build). Fixed.
+- The map's outlines are GX lines, which the Vita path never drew. Immediate lines and line
+  strips are drawn now as GL lines (meshes have a primitive), one pixel wide (GX's line width is
+  not applied); points are still not drawn.
+- The dark blue bands above and below in the morph ball are its HUD's strips, drawn opaque; to
+  look at.

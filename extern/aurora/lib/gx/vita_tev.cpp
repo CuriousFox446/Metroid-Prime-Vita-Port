@@ -265,9 +265,10 @@ std::string alpha_compare(GXCompare compare, const std::string& ref) {
 // A generator with a post-transform matrix (GX's dual texture matrices).
 bool has_post(const TcgConfig& tcg) noexcept { return tcg.postMtx != GX_PTIDENTITY; }
 
-// A generator whose coordinates are projective (sampled with tex2Dproj): a 3x4 matrix's, or after a
-// post-transform matrix, whose third row makes the divisor.
-bool projective(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4 || has_post(tcg); }
+// A generator whose coordinates are projective (sampled with tex2Dproj): a 3x4 matrix's, after a
+// post-transform matrix too. A 2x4 one keeps its x and y whatever the post matrix makes of z, as
+// Aurora's shaders do (shader.cpp): dividing those by it lost the environment maps (76cab02).
+bool projective(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4; }
 
 const char* coord_type(const TcgConfig& tcg) noexcept { return projective(tcg) ? "float3" : "float2"; }
 
