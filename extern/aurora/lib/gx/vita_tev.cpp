@@ -76,6 +76,13 @@ int light_count(int part) noexcept {
              : 0;
 }
 
+// The lights a program sums for a part summing `count`: rounded up to 1, 2, 4 or 8, the rest dark
+// (tev_vertex_rows). Each combination of the four parts' counts is a program of its own; exact
+// counts made 17 combinations, 257 lit programs, and a session's compiles took 143 s.
+int program_lights(int count) noexcept {
+  return count <= 2 ? count : count <= 4 ? 4 : 8;
+}
+
 // A channel's raster colour (n 0 or 1), as GX lights it: the material colour (the vertex colour
 // or the register), times the ambient colour plus the channel's lights, clamped. The vertex
 // program sums the lights (vLit, rgb the colour part's, a the alpha part's: lighting_code).
@@ -588,7 +595,7 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
                    (has_post(tcg) ? 1u : 0u) << 13;
   }
   for (int part = 0; part < 4; ++part) {
-    fixed[8 + part] = static_cast<u32>(light_count(part));
+    fixed[8 + part] = static_cast<u32>(program_lights(light_count(part)));
   }
   u64 stateKey = XXH3_64bits(fixed, sizeof(fixed));
   stateKey = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), stateKey);
@@ -611,7 +618,7 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   bool lit = false;
   for (int n = 0; n < 2; ++n) {
     for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
-      info.lightCounts[part] = static_cast<u8>(litChannel[n] ? light_count(part) : 0);
+      info.lightCounts[part] = static_cast<u8>(litChannel[n] ? program_lights(light_count(part)) : 0);
       lit = lit || info.lightCounts[part] != 0;
     }
   }
@@ -814,8 +821,13 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
           ++written;
         }
       }
+      // The program's lights past the mask's (program_lights rounds the count up): black, far off,
+      // with both attenuations' first coefficient 1, so every function a light's attenuation can
+      // use stays finite (an all-zero light divides zero by zero: NaN, which black does not cancel).
+      static constexpr float kDark[20] = {1e5f, 1e5f, 1e5f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                          0.f,  0.f,  1.f,  0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
       for (; written < program.lightCounts[part]; ++written) {
-        std::memset(out[row], 0, sizeof(float[20]));
+        std::memcpy(out[row], kDark, sizeof(kDark));
         row += 5;
       }
     }

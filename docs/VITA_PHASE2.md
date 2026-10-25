@@ -990,6 +990,13 @@ Lighting: 2 to 6 % of program draws lit (1.7 to 2.6 lights each, 27 to 31 vertex
 to 9 unlit): its per-draw cost is small. But 257 of the 359 programs light, in 17 light-count
 combinations, and this session compiled 111 programs in 143 s.
 
+Fewer lit programs: a part's light count picks its program rounded up to 0, 1, 2, 4 or 8
+(`program_lights`); the lights past the mask's are dark ones, black, far off, both attenuations
+(1, 0, 0) so no attenuation function divides zero by zero (the all-zero padding made NaN, which a
+black colour does not cancel). Programs for 1, 2, 4 and 8 lights already on the card stay valid;
+those for 3, 5, 6 and 7 go unused. The material key keeps the exact counts (materials with
+different counts share a program). The lighting line's light-count combinations show the cut.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
