@@ -1165,6 +1165,15 @@ the thermal visor's cold noise, particles with an indirect texture (CElementGen:
 distortion), the water's colour layer and environment map offset by its bump map
 (CFluidPlaneCPU), and the reflections that warp (CCubeMaterial).
 
+To reach those rooms from a save, the Vita runs the front end now: `vita_platform.cpp` no longer
+sets `MP_FAST_BOOT` (Phase 1's headless build, with nothing on the screen, went straight into a new
+game), so the boot logos, the title and file select show. The saves are the GCI folder
+`ux0:data/MetroidPrime/USA/Card A` (docs/VITA.md, Run). vitaGL's own splash screen, its logo drawn
+on a thread and GXM context of its own from `vglInit` to the first frame, is no longer started:
+the linker wraps `invoke_splashscreen` (CMakeLists) with an empty function, its "active" flag stays
+off and the first scene and the swaps take their usual paths, as in vitaGL's system app mode, which
+skips it too.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

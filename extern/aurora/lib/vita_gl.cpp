@@ -2207,4 +2207,10 @@ void __wrap_shark_clear_output() {
   __real_shark_clear_output();
   aurora::vita_gl::compiler_unlock();
 }
+
+// vitaGL's splash screen: its logo, which vglInit has a thread of its own draw on a GXM context of
+// its own until the first frame's scene. Not started (the linker wraps its start, CMakeLists): its
+// flag stays off, so that scene and the swaps take their usual paths, as in vitaGL's system app
+// mode, which skips it too.
+void __wrap_invoke_splashscreen() {}
 }

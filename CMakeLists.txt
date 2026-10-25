@@ -662,6 +662,9 @@ if(VITA)
     # from the compile to its output's release (extern/aurora/lib/vita_gl.cpp's wrappers).
     target_link_options(metroid_prime_port PRIVATE
         "LINKER:--wrap=shark_compile_shader_extended,--wrap=shark_clear_output")
+    # vitaGL's own splash screen (its logo, drawn from vglInit until the first frame) is not
+    # started: the game starts on black (vita_gl.cpp's __wrap_invoke_splashscreen).
+    target_link_options(metroid_prime_port PRIVATE "LINKER:--wrap=invoke_splashscreen")
     target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
     # libstdc++ calls pthreads through weak references and treats threading as off
     # when pthread_cancel is missing; nothing references that (or pthread_once)
