@@ -211,6 +211,7 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
+  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy
   // Recorded draws by their state (after the constant alpha is folded in).
   u32 blended = 0;
   u32 alphaTested = 0;
@@ -961,6 +962,13 @@ bool fold_constant_alpha(float alpha, vita_gl::RenderState& state) noexcept {
   return true;
 }
 
+// A 1x1 transparent black texture: an EFB copy's stand-in (current_material).
+const std::shared_ptr<vita_gl::Texture>& copy_stand_in() noexcept {
+  static const std::shared_ptr<vita_gl::Texture> sTexture =
+      vita_gl::make_texture(1, 1, vita_gl::TexelFormat::RGBA8, std::vector<uint8_t>(4, 0));
+  return sTexture;
+}
+
 vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
   const auto wrap = [](GXTexWrapMode mode) -> u16 {
     switch (mode) {
@@ -1297,15 +1305,18 @@ const Material& current_material() noexcept {
         add_missing_copy(*bind.ref, g_gxState.loadedTextures[layout.maps[m]]);
       }
       if (!bind.ref || !bind.ref->vitaTexture) {
-        copies = false;
-        // An EFB copy's texture (the morph ball's shadow, a reflection) has none until milestone 5
-        // makes the copies: drawn without it, fixed-function with the other textures, such a pass
-        // covered what it shades (everything round the morph ball went pale). Left out instead.
+        // An EFB copy's texture (a reflection, the morph ball's shadow) has none until milestone 5
+        // makes the copies: transparent black stands in. A reflection then adds nothing, and the
+        // shadow's alpha test fails. (Drawn fixed-function without it, the shadow washed out
+        // everything round the morph ball; left out, so were the shell and the reflective
+        // surfaces, and the menus' other textures' copies were never uploaded: the heap ran out.)
         if (g_gxState.copyTextures.contains(g_gxState.loadedTextures[layout.maps[m]].data)) {
-          ++sStats.unitsWithoutCopy;
-          material.unitCount = -1;
-          return material;
+          ++sStats.copyStandIns;
+          material.programTextures[m] = copy_stand_in();
+          material.programSamplers[m] = sampler_for(bind.texObj);
+          continue;
         }
+        copies = false;
         break;
       }
       material.programTextures[m] = bind.ref->vitaTexture;
@@ -1732,11 +1743,11 @@ void log_stats() noexcept {
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
-           "copies made late; "
+           "materials with black for an EFB copy, {} copies made late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
            "smaller viewport; {} EFB copies' clears; TEV alpha: {} constant ({} rejected), {} from a texture",
-           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.additiveUnits,
-           s.blended, s.alphaTested, s.culled, s.depthRanged, s.cornered, s.copyClears, s.alphaConstant,
+           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyStandIns, s.lateCopies,
+           s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged, s.cornered, s.copyClears, s.alphaConstant,
            s.alphaRejected, s.alphaTexture);
   sStats = {};
 }

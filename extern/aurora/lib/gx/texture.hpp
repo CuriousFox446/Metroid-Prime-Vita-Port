@@ -24,7 +24,14 @@ struct TextureStats {
 const TextureStats& texture_stats() noexcept;
 
 namespace texture {
+#ifdef AURORA_VITA_GL
+// The PS Vita's heap is some 220 MiB, the game's own in it, and a cached texture holds its Vita
+// copy too (whose pixels wait on the heap until a draw uploads them): a palette-animated screen
+// filled the desktop budget with new textures, one each frame, until the heap ran out.
+constexpr uint64_t ContentCacheBudgetBytes = 32ull * 1024ull * 1024ull;
+#else
 constexpr uint64_t ContentCacheBudgetBytes = 128ull * 1024ull * 1024ull;
+#endif
 constexpr uint64_t ObjectCacheIdleFrames = 600;
 constexpr bool AsyncTextureReplacements = true;
 constexpr uint32_t ReplacementThumbnailDim = 64;

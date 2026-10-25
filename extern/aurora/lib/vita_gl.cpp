@@ -259,7 +259,7 @@ enum Section {
   kFixedState,
   kFixedDraw,
   kFinish,  // draw_world's state reset for the overlay, the frame handed to the reaper
-  kOther,   // the test triangle, the stats log
+  kOther,   // the stats log
   kOverlay, // ImGui
   kSwap,    // vglSwapBuffers
   kSectionCount
@@ -1092,27 +1092,6 @@ void draw_world(const Frame& frame) {
   glLoadIdentity();
 }
 
-// An orange triangle in the screen's top-left corner, drawn every frame the same way with
-// identity matrices: it shows that vitaGL's drawing reaches the screen whatever the game draws.
-void draw_test_triangle() {
-  static std::shared_ptr<Mesh> sMesh = [] {
-    std::vector<Vertex> triangle(3);
-    const float corners[3][2] = {{-0.97f, 0.97f}, {-0.80f, 0.97f}, {-0.97f, 0.70f}};
-    for (int i = 0; i < 3; ++i) {
-      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}, {255, 140, 0, 255}, {}, 255};
-    }
-    return make_mesh(std::move(triangle), MeshKind::Other);
-  }();
-  Draw draw{.mesh = sMesh};
-  constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-  std::memcpy(draw.modelView, kIdentity, sizeof(draw.modelView));
-  std::memcpy(draw.projection, kIdentity, sizeof(draw.projection));
-  Frame frame;
-  frame.draws.push_back(draw);
-  draw_world(frame);
-  --g_presentStats.framesWithDraws;
-  --g_presentStats.draws;
-}
 } // namespace
 
 bool initialize() noexcept {
@@ -1245,7 +1224,6 @@ void present(ImDrawData* overlay) noexcept {
   draw_world(frame);
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
-  draw_test_triangle();
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "

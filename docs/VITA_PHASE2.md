@@ -858,3 +858,20 @@ map's outlines missing (always).
   not applied); points are still not drawn.
 - The dark blue bands above and below in the morph ball are its HUD's strips, drawn opaque; to
   look at.
+
+Its run (1b0ff54; stamp 76cab02-dirty): the trails back, the map's outlines drawn; but the shell
+mostly missing and pieces of the gun and some pipes coming and going; and a crash on the death
+screen (staying on its "continue" prompt): `std::bad_alloc` in `make_vita_texture`
+(`new_static_texture_2d`), the heap having grown from about 128 to 185 MiB in use (220 taken) in
+some ten seconds. 211 programs, 180 loaded from the card.
+- Leaving out a material that samples an EFB copy was wrong: the game's reflective materials (the
+  shell, the gun, pipes) sample the reflection, `CacheReflection`'s copy, and showed only when the
+  game swapped its black texture in. And the death screen draws over a copy of the last frame
+  with a palette-animated texture: a new conversion each frame (about 0.5 MiB, with its Vita copy)
+  for a draw then left out, so the copies' pixels were never uploaded and freed, and Aurora's
+  content cache (a 128 MiB desktop budget) kept them until the heap ran out.
+- Now an EFB copy's texture has a stand-in, 1x1 transparent black: a reflection adds nothing, the
+  morph ball's shadow fails its alpha test and draws nothing, and the material draws. The
+  textures line counts such materials.
+- The content cache's budget is 32 MiB on the Vita (`texture::ContentCacheBudgetBytes`).
+- The orange test triangle is gone.
