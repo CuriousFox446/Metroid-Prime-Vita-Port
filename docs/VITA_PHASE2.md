@@ -525,8 +525,7 @@ a program-draw section):
 - `glDrawArrays` itself, 4.9 us a draw, is vitaGL's own work (patching and setting the programs,
   textures, streams, uniform buffers); fewer draws is the only lever on it from here.
 
-**Frames freed off the render worker, and the unclear sections split (built, not yet run on the
-Vita).** A drawn frame goes to a reaper thread of its own, which destroys its draws; the render
+**Frames freed off the render worker, and the unclear sections split.** A drawn frame goes to a reaper thread of its own, which destroys its draws; the render
 worker's `enqueue_work` runs work at once when called on the render worker itself, so the
 deletes of the meshes made for that frame alone (`glDeleteBuffers`) were part of "finish" too.
 From the reaper they are queued and run on the render worker between presents (render worker
@@ -539,3 +538,29 @@ decoded once and kept, `skinned` list calls, `immediate` and `indexed` draws, `o
 buffers made, their KiB, and the upload section's time; for the fixed-function draws, how many
 wait for their program and how many have none (a material a program cannot draw yet), and the
 largest mesh made for one since the last line.
+
+Its run (7073285; stamp 61027ac-dirty): 5.6 minutes, no crash. The 43 timed presents of 1500
+draws or more: 1708 draws (1686 with programs), 27.3 ms with the timer's calls taken off (31.1
+before). With them taken off section by section:
+- finish: 0.03 ms (4.3). But the render worker's busy time hardly fell (32.4 to 31.5 ms a frame,
+  [split]): the deletes queued from the reaper run between presents now, about 2.5 ms of them, so
+  `glDeleteBuffers` on a buffer drawn that frame is itself dear in vitaGL.
+- upload: the kept lists' 1700 draws about 2 ms (a `glBindBuffer` each); the meshes made for the
+  frame cost the rest, about 3.5 ms for some 36: 28 immediate (175 KiB), 7 skinned (121 KiB) with
+  programs, and one skinned mesh without a program, 325 to 450 KiB (5934 to 8202 vertices) alone
+  taking 1.5 ms.
+- The fixed-function draws are 16 a heavy frame, none waiting for a program: materials a program
+  cannot draw yet (texture coordinates from normals or positions, most likely; the arm cannon's
+  reflection is one), and the big skinned mesh is among them.
+- compare: about 5.5 ms, 3.2 us a draw, though it is two `memcmp`s of a few hundred bytes. It is
+  the first read of the draw's program inputs (464 bytes, written by the FIFO thread on another
+  core), so it is cache misses, not the compare; send (`glUniform4fv`) is only 0.5 ms.
+- vitaGL's `glDrawArrays` 8.4 ms, pointers 1.1, textures 1.3, state 1.1, builds 0.8, switches 0.4.
+- 10.9 FPS in the heavy seconds (11.1 the run before; another mix of rooms).
+
+Two things follow. The meshes made for one frame should not get a buffer of their own:
+drawn from client memory, vitaGL copies them into its per-frame pool, with no buffer to make,
+fill and delete (about 3.5 ms of uploads and 2.5 ms of deletes for some 36 meshes). And a draw's
+program inputs should be smaller and read less: only the rows a program declares, in a per-frame
+arena, with a draw whose values repeat the last ones of its program in that frame pointing at the
+same ones, so that the render worker skips them without reading them.
