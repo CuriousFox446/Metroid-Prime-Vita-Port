@@ -32,8 +32,8 @@
 namespace aurora::vita_gl {
 namespace {
 constexpr Module Log{"aurora::vita_gl"};
-constexpr int kWidth = 960;
-constexpr int kHeight = 544;
+constexpr int kWidth = kScreenWidth;
+constexpr int kHeight = kScreenHeight;
 // vitaGL takes the RAM the game's heap leaves; this much of it stays free for the system's
 // own allocations (thread stacks, audio, file I/O).
 constexpr int kRamThreshold = 32 * 1024 * 1024;
@@ -935,11 +935,48 @@ void draw_world(const Frame& frame) {
   float lastTexMatrix[kTexUnits][8];
   bool haveTexMatrix[kTexUnits] = {};
   BoundTextures bound;
+  // GX's viewport and scissor as the draws carry them, set where they change; the scissor test
+  // stays on through the draws (present's clear and the overlay run without it).
+  ScreenRect viewport;
+  ScreenRect scissor;
+  glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+  glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
+  glEnable(GL_SCISSOR_TEST);
+  const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
+    if (!(v == viewport)) {
+      glViewport(v.x, v.y, v.width, v.height);
+      viewport = v;
+    }
+    if (!(s == scissor)) {
+      glScissor(s.x, s.y, s.width, s.height);
+      scissor = s;
+    }
+  };
   g_clock.mark(kSetup);
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
   for (const Draw& draw : draws) {
+    if (draw.clear) {
+      // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
+      // the scissor's alone), with the masks GX's updates give, then the draws' masks again.
+      set_rects(ScreenRect{}, draw.scissor);
+      const GLboolean color = draw.clearColor ? GL_TRUE : GL_FALSE;
+      glColorMask(color, color, color, draw.clearAlpha ? GL_TRUE : GL_FALSE);
+      glDepthMask(draw.clearDepth ? GL_TRUE : GL_FALSE);
+      glClearColor(draw.clearRgba[0], draw.clearRgba[1], draw.clearRgba[2], draw.clearRgba[3]);
+      glClearDepth(draw.clearZ);
+      const GLbitfield bits = (draw.clearColor || draw.clearAlpha ? GL_COLOR_BUFFER_BIT : 0) |
+                              (draw.clearDepth ? GL_DEPTH_BUFFER_BIT : 0);
+      if (bits != 0) {
+        glClear(bits);
+      }
+      const GLboolean drawColor = current.colorWrite ? GL_TRUE : GL_FALSE;
+      glColorMask(drawColor, drawColor, drawColor, current.alphaWrite ? GL_TRUE : GL_FALSE);
+      glDepthMask(current.depthWrite ? GL_TRUE : GL_FALSE);
+      continue;
+    }
+    set_rects(draw.viewport, draw.scissor);
     Program* program = draw.program.program.get();
     if (program != nullptr) {
       const int budgetBefore = compileBudget + loadBudget;
@@ -1027,6 +1064,8 @@ void draw_world(const Frame& frame) {
   // itself, but not the alpha test, the masks or the winding).
   apply_state(RenderState{.depthTest = false}, current, true);
   glFrontFace(GL_CCW);
+  glDisable(GL_SCISSOR_TEST);
+  glViewport(0, 0, kWidth, kHeight);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glClientActiveTexture(GL_TEXTURE0 + unit);

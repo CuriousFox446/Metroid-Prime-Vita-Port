@@ -790,3 +790,21 @@ in menus at all, while gameplay (`__PADSetDefaultMapping`) has the Vita layout. 
 `PADGetDefaultMapping` gives the Vita layout on the Vita too (L and R on the shoulders, Z on
 Select). Under twin stick the left shoulder is also the beam shift with the D-pad
 (port_input_devices.cpp); that chord is bound in menus too, which needs checking on the device.
+
+**Viewports, scissors and EFB copies' clears (built, not yet run on the Vita; a first piece of
+milestone 5).** Photos of the depth range build: an upside-down Samus over the view in the
+intro and in play, and a white background (gone in the scan visor). The upside-down Samus is
+`CCubeRenderer::CacheReflection`: the reflected view drawn into a 256x256 corner (viewport and
+scissor set to it), copied into the reflection texture and cleared (`GXCopyTex(..., clear)`). The
+shadows (`CMorphBallShadow`, `CProjectedShadow`, `CWorldShadow`) work the same way. The Vita path
+ignored the viewport and scissor rectangles and the copies' clears, so such a pass was drawn over
+the whole screen and stayed; the white is most likely a shadow pass's (none in the scan visor).
+- A draw carries GX's viewport and scissor (`logicalViewport`, `logicalScissor`, in the game's
+  render mode's framebuffer, `vi::configured_fb_size`, 846x480 for its widescreen one) scaled to
+  the 960x544 screen; the render worker sets `glViewport` and `glScissor` where they change, the
+  scissor test on through the frame's draws.
+- A texture copy that clears (BP 0x52, `bp_efb_copy`) records a clear among the frame's draws: its
+  source rectangle (`texCopySrc`), GX's clear colour and depth, with the colour, alpha and depth
+  updates as masks (as Dolphin clears). The copy itself is still not made, so reflections and
+  shadows sample nothing yet; their passes no longer show.
+- The textures line counts draws with a smaller viewport and the copies' clears.

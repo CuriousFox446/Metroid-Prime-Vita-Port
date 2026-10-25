@@ -18,6 +18,19 @@
 #include <imgui.h>
 
 namespace aurora::vita_gl {
+// The screen vitaGL draws to, in pixels.
+constexpr int kScreenWidth = 960;
+constexpr int kScreenHeight = 544;
+
+// A rectangle of the screen as GL takes it (glViewport, glScissor): pixels, origin at the bottom left.
+struct ScreenRect {
+  int16_t x = 0;
+  int16_t y = 0;
+  int16_t width = kScreenWidth;
+  int16_t height = kScreenHeight;
+  bool operator==(const ScreenRect&) const = default;
+};
+
 // The texture units a fixed-function draw can use: vitaGL's fixed-function pipeline has two
 // texture coordinate sets, each with its own texture matrix.
 constexpr int kTexUnits = 2;
@@ -132,7 +145,9 @@ struct ProgramInputs {
 
 // One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
 // GL's depth range); its fixed-function texture units and state; and its generated program, when
-// it has one (drawn with it once the program is ready).
+// it has one (drawn with it once the program is ready). GX's viewport and scissor, on the screen.
+// Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
+// colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears).
 struct Draw {
   std::shared_ptr<Mesh> mesh;
   float modelView[12];
@@ -140,6 +155,14 @@ struct Draw {
   TexUnit units[kTexUnits];
   RenderState state;
   ProgramInputs program;
+  ScreenRect viewport;
+  ScreenRect scissor;
+  bool clear = false;
+  bool clearColor = false;
+  bool clearAlpha = false;
+  bool clearDepth = false;
+  float clearRgba[4] = {};
+  float clearZ = 1.f;
 };
 
 #ifdef AURORA_VITA_GL

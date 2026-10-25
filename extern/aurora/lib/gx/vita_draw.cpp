@@ -209,6 +209,8 @@ struct Stats {
   u32 alphaTested = 0;
   u32 culled = 0;
   u32 depthRanged = 0; // drawn with a viewport depth range other than [0, 1]
+  u32 cornered = 0;    // drawn with a viewport other than the whole screen
+  u32 copyClears = 0;  // EFB copies' clears recorded
   // TEV's final alpha: a constant worked out, of those the draws its alpha test rejects outright,
   // and the draws whose alpha reads a texture; the rest depend on a lit or vertex alpha.
   u32 alphaConstant = 0;
@@ -1289,6 +1291,27 @@ const Material& current_material() noexcept {
   return material;
 }
 
+// A rectangle of GX's logical framebuffer (the viewport's and scissor's, an EFB copy's source;
+// origin top left) on the Vita's screen, as GL takes it (origin bottom left). `clamp` keeps it on
+// the screen (a scissor's or a clear's; a viewport may reach past it).
+vita_gl::ScreenRect screen_rect(float left, float top, float width, float height, bool clamp) noexcept {
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  const float sx = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
+  const float sy = fbHeight != 0 ? static_cast<float>(vita_gl::kScreenHeight) / static_cast<float>(fbHeight) : 1.f;
+  long x0 = std::lround(left * sx);
+  long x1 = std::lround((left + width) * sx);
+  long y0 = std::lround(top * sy);
+  long y1 = std::lround((top + height) * sy);
+  if (clamp) {
+    x0 = std::clamp<long>(x0, 0, vita_gl::kScreenWidth);
+    x1 = std::clamp<long>(x1, x0, vita_gl::kScreenWidth);
+    y0 = std::clamp<long>(y0, 0, vita_gl::kScreenHeight);
+    y1 = std::clamp<long>(y1, y0, vita_gl::kScreenHeight);
+  }
+  return {static_cast<int16_t>(x0), static_cast<int16_t>(vita_gl::kScreenHeight - y1),
+          static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+}
+
 // Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
 // alpha folded in where it is a constant (its inputs are constants that change between draws).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
@@ -1332,6 +1355,14 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     draw.projection[12 + c] = proj.m3[c];
   }
   sStats.depthRanged += n != 0.f || f != 1.f ? 1 : 0;
+  // GX's viewport and scissor: the game draws its reflection and shadows into a corner, then
+  // copies it into a texture and clears it (record_copy_clear).
+  const gfx::Viewport& vp = g_gxState.logicalViewport;
+  draw.viewport = screen_rect(vp.left, vp.top, vp.width, vp.height, false);
+  const gfx::ClipRect& sc = g_gxState.logicalScissor;
+  draw.scissor = screen_rect(static_cast<float>(sc.x), static_cast<float>(sc.y), static_cast<float>(sc.width),
+                             static_cast<float>(sc.height), true);
+  sStats.cornered += draw.viewport == vita_gl::ScreenRect{} ? 0 : 1;
   for (int unit = 0; unit < material.unitCount; ++unit) {
     draw.units[unit] = material.units[unit];
     // Texture matrices animate (scrolling, pulsing): read for every draw.
@@ -1573,6 +1604,23 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 
 void retained() noexcept { sPosAnswerKnown = false; }
 
+void record_copy_clear() noexcept {
+  const gfx::ClipRect& src = g_gxState.texCopySrc;
+  vita_gl::Draw draw;
+  draw.clear = true;
+  draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
+                             static_cast<float>(src.height), true);
+  draw.clearColor = g_gxState.colorUpdate;
+  draw.clearAlpha = g_gxState.alphaUpdate;
+  draw.clearDepth = g_gxState.depthUpdate;
+  for (int c = 0; c < 4; ++c) {
+    draw.clearRgba[c] = g_gxState.clearColor[c];
+  }
+  draw.clearZ = static_cast<float>(g_gxState.clearDepth) / 16777215.f;
+  vita_gl::record(std::move(draw));
+  ++sStats.copyClears;
+}
+
 void release(const void* key) noexcept {
   sPosAnswerKnown = false;
   sCache.erase(key);
@@ -1610,10 +1658,11 @@ void log_stats() noexcept {
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
            "copies made late; "
-           "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range; TEV alpha: "
-           "{} constant ({} rejected), {} from a texture",
+           "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
+           "smaller viewport; {} EFB copies' clears; TEV alpha: {} constant ({} rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.additiveUnits,
-           s.blended, s.alphaTested, s.culled, s.depthRanged, s.alphaConstant, s.alphaRejected, s.alphaTexture);
+           s.blended, s.alphaTested, s.culled, s.depthRanged, s.cornered, s.copyClears, s.alphaConstant,
+           s.alphaRejected, s.alphaTexture);
   sStats = {};
 }
 } // namespace aurora::gx::vita
