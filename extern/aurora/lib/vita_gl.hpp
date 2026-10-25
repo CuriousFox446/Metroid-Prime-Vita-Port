@@ -194,6 +194,9 @@ struct Draw {
   std::shared_ptr<Texture> copyTo;
   CopyKind copyKind = CopyKind::Rgb;
   bool copyHalf = false;
+  // For the log (gx/vita_draw.cpp's frame probe): its index in the frame, the render worker logs
+  // how it drew it (-1: not logged).
+  int16_t probe = -1;
 };
 
 #ifdef AURORA_VITA_GL

@@ -1230,6 +1230,19 @@ starts at GL_BACK) with GL's coordinates. Left: what the copies hold.
   are written to the card, `probe_copy2_*.ppm` and `probe_copy1_*.ppm`, the screen's rectangle before
   the blit (`_screen`) and the copy's texture after (`_texture`).
 
+Its run (f8c98b8): nothing changed on screen (the user). The pause screen first, a milestone 5
+item. Its backdrop (CPauseScreenBlur) is the camera blur's persistent copy (the whole screen into a
+half-size RGB565 texture in the spare buffer, once), drawn each frame as a seven-tap blur (one quad,
+K0 1/7 a tap), then the light quarters multiplied over it (`TXTR_MapLightQuarter`, I4, the blend
+zero/source colour: GX's SRCCLR as the destination factor, which `gl_blend_factor` maps right) and
+the scan lines; the world is not drawn while paused. All its programs built (none failed). The
+earlier probes were spent before the pause: the y-flattening matrices were the world's billboards.
+- Now a frame probe: from the camera blur's copy (the pause screen's, and the cinematics'), that
+  frame and the next two are logged item by item, `[probe] <n>:` for each draw (matrix, viewport,
+  scissor, state, units, textures with GX's size and format, generators, constants), copy and clear,
+  and `[probe] render <n>:` for how the render worker drew it (program, or fixed-function and why;
+  the textures' sizes as bound). Twice a session. The earlier probes are gone.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

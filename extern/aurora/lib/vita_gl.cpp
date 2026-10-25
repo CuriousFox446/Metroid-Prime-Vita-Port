@@ -369,6 +369,11 @@ public:
   }
 
   GLuint id() const noexcept { return m_id; }
+  // Its size now (a copy texture's: its latest copy's, in the screen's pixels), and how many render
+  // targets it keeps (for the log).
+  uint32_t width() const noexcept { return m_width; }
+  uint32_t height() const noexcept { return m_height; }
+  size_t targets() const noexcept { return m_targets.size(); }
 
 private:
   void settle_pending() noexcept {
@@ -1788,6 +1793,10 @@ void draw_world(const Frame& frame) {
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
       }
       const bool made = copy_on_gpu(draw);
+      if (draw.probe >= 0) {
+        Log.info("[probe] render {}: copy {} into {}x{} ({} targets)", draw.probe, made ? "made" : "waiting",
+                 draw.copyTo->width(), draw.copyTo->height(), draw.copyTo->targets());
+      }
       glEnableClientState(GL_VERTEX_ARRAY);
       glEnableClientState(GL_COLOR_ARRAY);
       for (int unit = 0; unit < kTexUnits; ++unit) {
@@ -1832,6 +1841,22 @@ void draw_world(const Frame& frame) {
         program = nullptr;
       }
       g_clock.mark(kBuild);
+    }
+    if (draw.probe >= 0) {
+      std::string textures;
+      for (int i = 0; i < kSamplers && program != nullptr; ++i) {
+        const Texture* texture = draw.program.textures[i].get();
+        textures += texture != nullptr ? fmt::format(" t{} {}x{}", i, texture->width(), texture->height()) : "";
+      }
+      for (int unit = 0; unit < kTexUnits && program == nullptr; ++unit) {
+        const Texture* texture = draw.units[unit].texture.get();
+        textures += texture != nullptr ? fmt::format(" u{} {}x{}", unit, texture->width(), texture->height()) : "";
+      }
+      Log.info("[probe] render {}: {}, {} vertices;{}", draw.probe,
+               program != nullptr                ? "program"
+               : draw.program.program != nullptr ? "fixed-function, its program not ready"
+                                                 : "fixed-function",
+               draw.mesh->count(), textures);
     }
     if (program != nullptr) {
       ++g_presentStats.programDraws;

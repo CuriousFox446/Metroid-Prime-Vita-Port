@@ -1440,18 +1440,56 @@ u8 screen_width(u8 sixths) noexcept {
   return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
 }
 
-// For the log (VITA_PHASE2.md: the pause screen's light quarters and the charged shot's warp drew
-// wrong): a draw, its matrix, state, textures (GX's size and format, EFB copy or not), coordinate
-// generators with their SU scales, and its program's constants by slot.
-void log_probe(const char* what, const Material& material, const vita_gl::Draw& draw,
+// The frame probe, for the log (VITA_PHASE2.md: the pause screen drew its backdrop dark): from the
+// camera blur's copy (the whole screen into a half-size RGB565 texture: CCameraBlurPass, the pause
+// screen's and the cinematics'), that frame's draws, copies and clears and the next two frames',
+// each under its index in the frame (the render worker logs how it drew it). Twice a session.
+struct FrameProbe {
+  int framesLeft = 0;
+  u32 serial = 0;
+  int index = 0;
+  int triggers = 2;
+};
+FrameProbe sFrameProbe;
+
+// The index to log a frame's item under, or -1 while the probe is off.
+s16 frame_probe_index() noexcept {
+  FrameProbe& probe = sFrameProbe;
+  if (probe.framesLeft == 0) {
+    return -1;
+  }
+  const u32 serial = vita_gl::recording_serial();
+  if (serial != probe.serial) {
+    probe.serial = serial;
+    probe.index = 0;
+    if (--probe.framesLeft == 0) {
+      return -1;
+    }
+    Log.info("[probe] frame {}", serial);
+  }
+  return static_cast<s16>(probe.index++);
+}
+
+// For the log (log_probe's callers): a draw, its matrix, state, textures (GX's size and format, EFB
+// copy or not), coordinate generators with their SU scales, and its program's constants by slot.
+void log_probe(const std::string& what, const Material& material, const vita_gl::Draw& draw,
                const float (*constants)[4]) noexcept {
   const GXState& s = g_gxState;
   std::string text = fmt::format("[probe] {}: model view", what);
   for (int i = 0; i < 12; ++i) {
     text += fmt::format("{}{:.3g}", i % 4 == 0 ? " | " : " ", draw.modelView[i]);
   }
-  text += fmt::format("; cull {} blend {} {:x}/{:x}; units {}; program {}", draw.state.cullFace, draw.state.blend,
-                      draw.state.blendSrc, draw.state.blendDst, material.unitCount, material.program != nullptr);
+  const vita_gl::RenderState& st = draw.state;
+  text += fmt::format("; viewport ({}, {}) {}x{} scissor ({}, {}) {}x{}; cull {} blend {} {:x} {:x}/{:x} depth {} "
+                      "{:x} write {} colour {} alpha {} alpha test {:x} {:.3g}; units {}; program {}",
+                      draw.viewport.x, draw.viewport.y, draw.viewport.width, draw.viewport.height, draw.scissor.x,
+                      draw.scissor.y, draw.scissor.width, draw.scissor.height, st.cullFace, st.blend,
+                      st.blendEquation, st.blendSrc, st.blendDst, st.depthTest, st.depthFunc, st.depthWrite,
+                      st.colorWrite, st.alphaWrite, st.alphaFunc, st.alphaRef, material.unitCount,
+                      material.program != nullptr);
+  for (int unit = 0; unit < material.unitCount; ++unit) {
+    text += fmt::format("; unit{} env {:x} coord {}", unit, draw.units[unit].envMode, draw.units[unit].coord);
+  }
   for (int m = 0; m < kSamplers && material.programTextures[m] != nullptr; ++m) {
     const GXTexObj_& obj = s.loadedTextures[material.mapIds[m]];
     text += fmt::format("; tex{} map {} {}x{} fmt {}{}", m, material.mapIds[m], obj.width(), obj.height(),
@@ -1490,6 +1528,9 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
       ++sStats.alphaConstant;
       if (!fold_constant_alpha(alpha.value, state)) {
         ++sStats.alphaRejected;
+        if (const s16 probe = frame_probe_index(); probe >= 0) {
+          Log.info("[probe] {}: draw not made, its constant alpha {:.3g} failing the alpha test", probe, alpha.value);
+        }
         return; // its alpha test fails everywhere: nothing to draw
       }
     } else if (alpha.texture) {
@@ -1501,6 +1542,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
   }
   vita_gl::Draw draw{.mesh = std::move(mesh)};
   draw.width = width;
+  draw.probe = frame_probe_index();
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
@@ -1554,10 +1596,8 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
     tev_constants(program, material.coordIds, material.mapIds, constants);
-    // The first two draws of each indirect program, for the log (log_probe).
-    static std::unordered_map<const TevProgram*, int> sProbed;
-    if (program.indirect && sProbed.size() < 24 && sProbed[&program]++ < 2) {
-      log_probe("indirect", material, draw, constants);
+    if (draw.probe >= 0) {
+      log_probe(fmt::format("{}: draw", draw.probe), material, draw, constants);
     }
     // Never more than the program declares (the generators' types made both counts).
     inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
@@ -1599,12 +1639,8 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
-  // Draws through a matrix flattening the model's y (CTransform4f::Scale(x, 0, z): the pause
-  // screen's light quarters, mirrored by the matrix's signs), the first 16, for the log (log_probe).
-  static int sFlatProbes = 0;
-  if (draw.modelView[1] == 0.f && draw.modelView[5] == 0.f && draw.modelView[9] == 0.f && sFlatProbes < 16) {
-    ++sFlatProbes;
-    log_probe("flat y", material, draw, nullptr);
+  if (draw.probe >= 0 && material.program == nullptr) {
+    log_probe(fmt::format("{}: draw", draw.probe), material, draw, nullptr);
   }
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
@@ -1954,6 +1990,24 @@ void record_copy() noexcept {
              g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<u32>(fmt), draw.copyHalf,
              draw.scissor.x, draw.scissor.y, draw.scissor.width, draw.scissor.height);
   }
+  // The camera blur's copy starts the frame probe (FrameProbe).
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  FrameProbe& probe = sFrameProbe;
+  if (fmt == GX_TF_RGB565 && draw.copyHalf && src.x == 0 && src.y == 0 && src.width == fbWidth &&
+      probe.framesLeft == 0 && probe.triggers > 0) {
+    --probe.triggers;
+    probe.framesLeft = 3;
+    probe.serial = vita_gl::recording_serial();
+    probe.index = 0;
+    Log.info("[probe] frame {}, from the camera blur's copy", probe.serial);
+  }
+  draw.probe = frame_probe_index();
+  if (draw.probe >= 0) {
+    Log.info("[probe] {}: copy into {} from GX ({}, {}) {}x{} to {}x{} fmt {}; screen ({}, {}) {}x{}", draw.probe,
+             g_gxState.texCopyDest, src.x, src.y, src.width, src.height, g_gxState.texCopyDstWidth,
+             g_gxState.texCopyDstHeight, static_cast<u32>(fmt), draw.scissor.x, draw.scissor.y, draw.scissor.width,
+             draw.scissor.height);
+  }
   vita_gl::record(std::move(draw));
 }
 
@@ -1970,6 +2024,12 @@ void record_copy_clear() noexcept {
     draw.clearRgba[c] = g_gxState.clearColor[c];
   }
   draw.clearZ = static_cast<float>(g_gxState.clearDepth) / 16777215.f;
+  if (const s16 probe = frame_probe_index(); probe >= 0) {
+    Log.info("[probe] {}: clear ({}, {}) {}x{} colour {} ({:.3g} {:.3g} {:.3g} {:.3g}) alpha {} depth {}", probe,
+             draw.scissor.x, draw.scissor.y, draw.scissor.width, draw.scissor.height, draw.clearColor,
+             draw.clearRgba[0], draw.clearRgba[1], draw.clearRgba[2], draw.clearRgba[3], draw.clearAlpha,
+             draw.clearDepth);
+  }
   vita_gl::record(std::move(draw));
   ++sStats.copyClears;
 }
