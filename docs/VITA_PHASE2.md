@@ -565,8 +565,7 @@ program inputs should be smaller and read less: only the rows a program declares
 arena, with a draw whose values repeat the last ones of its program in that frame pointing at the
 same ones, so that the render worker skips them without reading them.
 
-**Frame-only meshes from client memory, program constants in the frame's rows (built, not yet run
-on the Vita).**
+**Frame-only meshes from client memory, program constants in the frame's rows.**
 - A mesh made for one frame (skinned list calls, immediate and indexed draws) whose material has a
   program has no buffer now: its arrays point at its vertices in client memory, and vitaGL copies
   them into its per-frame pool at the draw. For a program's attributes that all lie within one
@@ -582,3 +581,25 @@ on the Vita).**
   whole frame (a build is tried there and the budget only shrinks), so its draws are sent in order;
   the first in each frame is always sent. A draw is about 460 bytes smaller (about 410 now).
 - The log's material line gives constant arrays recorded and those repeating the last.
+
+Its run (8f7e350; stamp 8d54e6c-dirty): 8 minutes, as far as the Reactor Core Entrance, no crash,
+nothing reported wrong on screen.
+- 86% of the draws' constant arrays repeated their program's last ones and were not stored again;
+  85% (vertex) and 86% (fragment) of program draws sent nothing.
+- The 48 timed presents of 1500 draws or more: 1676 draws, 19.6 ms with the timer's calls taken
+  off (27.3 the run before). The frame-only meshes with programs upload in 0.05 ms in all (about
+  2 ms before); compare is about 0.7 ms (5.5); vitaGL's draw went from 8.4 to 9 ms, its copy of
+  those vertices into its pool included. The one big skinned fixed-function mesh is still 1.6 ms.
+- The render worker's busy time in the heavy seconds: 24.0 ms a frame (31.5), with the deletes
+  of the frame-only buffers gone from between presents too.
+- But 11.5 FPS in the heavy seconds (10.9): the game thread now waits for the FIFO thread. Its
+  zones in those seconds: `begin_frame` 22.1 ms a frame, of it `finish_frame_end` (the FIFO
+  thread ending the last frame, AURORA_DEFERRED_FRAME_END) 21.0 ms; the render worker's frame
+  slots are free. A heavy frame of the game thread: input 3, tick 31 (particles' update 12, CPU
+  skinning 4 of it), begin-wait 24, draw 33 ms (DrawWorld 27), about 91 ms. The FIFO thread,
+  which works through the frame's GX commands as the draw sends them and ends the frame during
+  the next tick, needs some 85 ms a frame: it is the bottleneck now, and what it spends them on
+  (Aurora's command processing, the Vita's materials, decoding and recording, Aurora's own work
+  for its WebGPU frame) is not measured yet. Without its wait the game thread would be at about
+  67 ms, some 15 FPS.
+- VRAM 33 MiB free at the end (735 BC1 textures, 10 MiB, in the reactor rooms).
