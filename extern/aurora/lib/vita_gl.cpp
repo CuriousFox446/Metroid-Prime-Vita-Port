@@ -4,6 +4,7 @@
 #include "internal.hpp"
 
 #include <vitaGL.h>
+#include <psp2/kernel/processmgr.h>
 
 #include "backends/imgui_impl_opengl2.h"
 
@@ -536,6 +537,64 @@ struct PresentStats {
 };
 PresentStats g_presentStats;
 
+// Where the render worker's present goes, for the log: one frame in kTimedEvery is timed, section
+// by section (the timer costs about a microsecond a call, too much for every draw of every frame).
+// Each mark ends a section where the last one ended, so the sections add up to the present.
+enum Section {
+  kSetup,          // the clear, ImGui's frame, taking the frame, draw_world's state reset
+  kBuild,          // programs' readiness checks, and the builds (compiles, loads) made in the frame
+  kProgramSwitch,  // glUseProgram and the generic arrays turned on and off
+  kProgramArrays,  // the mesh's buffer and attribute pointers
+  kProgramUniforms,
+  kProgramTextures,
+  kProgramState,
+  kProgramDraw, // glDrawArrays
+  kFixedSwitch, // back to the fixed-function arrays
+  kFixedArrays,
+  kFixedUnits, // texture units: enables, binds, env modes, texture matrices
+  kFixedMatrices,
+  kFixedState,
+  kFixedDraw,
+  kFinish,  // draw_world's state reset for the overlay
+  kOther,   // the test triangle, the stats log
+  kOverlay, // ImGui
+  kSwap,    // vglSwapBuffers
+  kSectionCount
+};
+constexpr const char* kSectionNames[kSectionCount] = {
+    "setup", "build", "switch", "arrays", "uniforms", "textures", "state", "draw", "switch", "arrays",
+    "units", "matrices", "state",   "draw",     "finish", "other", "overlay", "swap"};
+constexpr uint32_t kTimedEvery = 8;
+
+struct SectionClock {
+  bool on = false; // timing this present
+  uint64_t last = 0;
+  uint64_t us[kSectionCount] = {};
+  uint32_t frames = 0; // timed presents since the last report
+  uint64_t draws = 0;
+  uint64_t programDraws = 0;
+  uint64_t calls = 0; // timer calls, for their cost
+  uint64_t reportStart = 0;
+  uint32_t presents = 0;
+  double callUs = -1.0; // one timer call, measured once
+
+  void start() noexcept {
+    if (on) {
+      last = sceKernelGetProcessTimeWide();
+      ++calls;
+    }
+  }
+  void mark(Section section) noexcept {
+    if (on) {
+      const uint64_t now = sceKernelGetProcessTimeWide();
+      us[section] += now - last;
+      last = now;
+      ++calls;
+    }
+  }
+};
+SectionClock g_clock;
+
 void set_enabled(GLenum cap, bool on) {
   on ? glEnable(cap) : glDisable(cap);
 }
@@ -637,6 +696,7 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
     }
     attribsOn = wanted;
   }
+  g_clock.mark(kProgramSwitch);
   const GLsizei count = draw.mesh->bind();
   const auto pointer = [](size_t offset) { return reinterpret_cast<const void*>(offset); };
   if (program.attr(kAttrPos) >= 0) {
@@ -656,15 +716,20 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
                             pointer(offsetof(Vertex, uv) + coord * sizeof(float[2])));
     }
   }
+  g_clock.mark(kProgramArrays);
   const ProgramInputs& inputs = draw.program;
   program.set_constants(inputs);
+  g_clock.mark(kProgramUniforms);
   for (int i = 0; i < kSamplers; ++i) {
     if (inputs.textures[i] != nullptr && program.samplers[i] != kNoUniform) {
       bound.bind(i, *inputs.textures[i], inputs.samplers[i], false);
     }
   }
+  g_clock.mark(kProgramTextures);
   apply_state(inputs.state, current, false);
+  g_clock.mark(kProgramState);
   glDrawArrays(GL_TRIANGLES, 0, count);
+  g_clock.mark(kProgramDraw);
 }
 
 void draw_world(const std::vector<Draw>& draws) {
@@ -732,6 +797,10 @@ void draw_world(const std::vector<Draw>& draws) {
   float lastTexMatrix[kTexUnits][8];
   bool haveTexMatrix[kTexUnits] = {};
   BoundTextures bound;
+  g_clock.mark(kSetup);
+  if (g_clock.on) {
+    g_clock.draws += draws.size();
+  }
   for (const Draw& draw : draws) {
     Program* program = draw.program.program.get();
     if (program != nullptr) {
@@ -744,9 +813,11 @@ void draw_world(const std::vector<Draw>& draws) {
       if (!ready) {
         program = nullptr;
       }
+      g_clock.mark(kBuild);
     }
     if (program != nullptr) {
       ++g_presentStats.programDraws;
+      g_clock.programDraws += g_clock.on ? 1 : 0;
       draw_with_program(draw, *program, usedProgram, attribsOn, current, bound);
       continue;
     }
@@ -754,6 +825,7 @@ void draw_world(const std::vector<Draw>& draws) {
       ++g_presentStats.programPending;
     }
     enter_fixed_function();
+    g_clock.mark(kFixedSwitch);
     const GLsizei count = draw.mesh->bind();
     glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
     glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, color)));
@@ -763,6 +835,7 @@ void draw_world(const std::vector<Draw>& draws) {
       glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
                         reinterpret_cast<const void*>(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
     }
+    g_clock.mark(kFixedArrays);
     for (int unit = 0; unit < kTexUnits; ++unit) {
       const TexUnit& texUnit = draw.units[unit];
       const bool on = texUnit.texture != nullptr;
@@ -790,6 +863,7 @@ void draw_world(const std::vector<Draw>& draws) {
         haveTexMatrix[unit] = true;
       }
     }
+    g_clock.mark(kFixedUnits);
     if (!haveProjection || std::memcmp(lastProjection, draw.projection, sizeof(draw.projection)) != 0) {
       set_matrix_mode(GL_PROJECTION);
       to_column_major(draw.projection, 4, matrix);
@@ -800,8 +874,11 @@ void draw_world(const std::vector<Draw>& draws) {
     set_matrix_mode(GL_MODELVIEW);
     to_column_major(draw.modelView, 3, matrix);
     glLoadMatrixf(matrix);
+    g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
+    g_clock.mark(kFixedState);
     glDrawArrays(GL_TRIANGLES, 0, count);
+    g_clock.mark(kFixedDraw);
   }
   enter_fixed_function();
   // Back to GL's defaults for the overlay (ImGui's backend sets blending, depth and culling
@@ -886,7 +963,62 @@ void shutdown_imgui() noexcept {
 
 void fonts_changed() noexcept { g_fontsChanged.store(true, std::memory_order_release); }
 
+namespace {
+// The timer's own cost, measured once: the log's sections each hold about one call of it a mark.
+double timer_call_us() noexcept {
+  constexpr int kCalls = 1000;
+  const uint64_t start = sceKernelGetProcessTimeWide();
+  uint64_t sink = 0;
+  for (int i = 0; i < kCalls; ++i) {
+    sink += sceKernelGetProcessTimeWide();
+  }
+  const uint64_t end = sceKernelGetProcessTimeWide();
+  return sink != 0 ? static_cast<double>(end - start) / kCalls : 0.0;
+}
+
+// Once a second of the render worker's presents: the timed presents' sections, per present.
+void report_sections() noexcept {
+  SectionClock& c = g_clock;
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  if (c.reportStart == 0) {
+    c.reportStart = now;
+    return;
+  }
+  if (now - c.reportStart < 1000000 || c.frames == 0) {
+    return;
+  }
+  const double frames = c.frames;
+  const auto ms = [frames](uint64_t us) { return static_cast<double>(us) / 1000.0 / frames; };
+  uint64_t total = 0;
+  for (const uint64_t us : c.us) {
+    total += us;
+  }
+  std::string program;
+  std::string fixed;
+  std::string frame;
+  for (int s = 0; s < kSectionCount; ++s) {
+    std::string& list = s >= kProgramSwitch && s <= kProgramDraw ? program
+                        : s >= kFixedSwitch && s <= kFixedDraw   ? fixed
+                                                                 : frame;
+    list += fmt::format("{}{} {:.2f}", list.empty() ? "" : ", ", kSectionNames[s], ms(c.us[s]));
+  }
+  Log.info("[draw path] ms/present over {} timed: {:.2f} in all, {:.0f} draws ({:.0f} with programs) | program "
+           "draws: {} | fixed-function draws: {} | frame: {} | timer {:.2f} us a call, {:.0f} calls a present",
+           c.frames, ms(total), c.draws / frames, c.programDraws / frames, program, fixed, frame, c.callUs,
+           c.calls / frames);
+  const double callUs = c.callUs;
+  c = {};
+  c.callUs = callUs;
+  c.reportStart = now;
+}
+} // namespace
+
 void present(ImDrawData* overlay) noexcept {
+  if (g_clock.callUs < 0.0) {
+    g_clock.callUs = timer_call_us();
+  }
+  g_clock.on = ++g_clock.presents % kTimedEvery == 0;
+  g_clock.start();
   // The font texture is made here, on the render worker, from the atlas the game thread built;
   // the atlas only changes when the fonts do (fonts_changed).
   if (g_fontsChanged.exchange(false, std::memory_order_acq_rel)) {
@@ -903,6 +1035,7 @@ void present(ImDrawData* overlay) noexcept {
   glDepthMask(GL_TRUE);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   draw_world(take_frame());
+  g_clock.mark(kFinish);
   draw_test_triangle();
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
@@ -918,10 +1051,18 @@ void present(ImDrawData* overlay) noexcept {
     g_uniformStats = {};
     log_memory("presents");
   }
+  g_clock.mark(kOther);
   if (overlay != nullptr && overlay->CmdListsCount > 0) {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }
+  g_clock.mark(kOverlay);
   vglSwapBuffers(GL_FALSE);
+  g_clock.mark(kSwap);
+  if (g_clock.on) {
+    ++g_clock.frames;
+  }
+  g_clock.on = false;
+  report_sections();
 }
 
 ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* rgba8) noexcept {

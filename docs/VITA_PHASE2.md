@@ -483,3 +483,14 @@ the HUD, scan icons and the map draw right, so the packing holds.
 - In the morph ball something covers the view until Samus unmorphs (not new). The ball's shadow
   is drawn into a texture by an EFB copy and projected onto the ground, so this is most likely
   milestone 5's copies.
+
+**The render worker's present, timed (built, not yet run on the Vita).** One present in eight is
+timed section by section with `sceKernelGetProcessTimeWide` (microseconds); each mark ends a
+section where the last ended, so the sections add up to the present. Once a second the log gives
+a `[draw path]` line, per timed present: the draws (and those with programs); for program draws
+the program switches, the arrays (buffer and attribute pointers), uniforms, textures, state and
+`glDrawArrays`; for fixed-function draws the switches, arrays, texture units, matrices, state and
+`glDrawArrays`; and for the frame the setup, program builds, the reset after the draws, the test
+triangle and stats, ImGui and `vglSwapBuffers`. The timer's own cost is measured once at the first
+present and given with the number of calls a timed present makes, so it can be taken off: each
+section holds about one call a mark. Timed presents are slower by that much, one in eight.
