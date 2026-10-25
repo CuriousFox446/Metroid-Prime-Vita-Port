@@ -981,6 +981,15 @@ without `lround`), then lays the corners out. A `lighting:` line (each 300 frame
 program draws, their lights and vertex rows against the unlit ones', the lit programs and their
 light-count combinations, and the skinned templates' corners against their distinct vertices.
 
+Its run (2fc89a4; 954 s, 25483 frames): no crash, the heap 148 MiB at the end; the user compared a
+Space Pirate with the PC version: alike. `skinned` a FIFO frame: median 4.1 ms, p90 12.7, max 54
+(was up to 49 in heavy frames); FIFO busy median 15 ms. But the templates' corners were only some
+1.2 times their distinct vertices: a vertex carries its face's fixed-function shading (`shade`, and
+the colour with it), so corners of different faces never match; the gain was the readers.
+Lighting: 2 to 6 % of program draws lit (1.7 to 2.6 lights each, 27 to 31 vertex rows against 8
+to 9 unlit): its per-draw cost is small. But 257 of the 359 programs light, in 17 light-count
+combinations, and this session compiled 111 programs in 143 s.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
