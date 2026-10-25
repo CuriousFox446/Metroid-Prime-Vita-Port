@@ -40,14 +40,15 @@ constexpr int kSamplers = 4;
 
 // A vertex of the Vita path's meshes: position, its texture coordinate sets, the colour the
 // fixed-function draw uses (the face's shading in it), the vertex colour as GX has it (white
-// without one) and the face's shading on its own (for a generated program's raster colour).
+// without one), its normal (model space, unit length times 127; zero without one: for a
+// generated program's lighting and texture coordinates) and the face's shading on its own.
 struct Vertex {
   float pos[3];
   float uv[kTexCoords][2];
   uint8_t color[4];
   uint8_t raw[4];
+  int8_t normal[3];
   uint8_t shade;
-  uint8_t pad[3];
 };
 static_assert(sizeof(Vertex) == 56);
 
@@ -123,9 +124,12 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
 // the alpha compare's references (x, y). A program declares only those its source reads, packed
 // in this order (gx/vita_tev.cpp).
 constexpr int kProgramConstants = 13;
-// The vertex program's: the projection times the position matrix (4 rows), then each texture
-// coordinate set's matrix (3 rows of 4 for a projective set, else 2, for GX's (s, t, 1, 1) input).
-constexpr int kProgramVertexConstants = 4 + 3 * kTexCoords;
+// The vertex program's (gx/vita_tev.cpp, tev_vertex_rows): the projection times the position
+// matrix (4 rows); each texture coordinate set's matrix (3 rows of 4 for a projective set, else 2)
+// and its post-transform matrix (3 more, when it has one); for a lit program the position and
+// normal matrices (3 rows each); and each lit channel's lights, five rows apiece (position,
+// direction, colour, angle and distance attenuation), up to GX's eight for each of four channels.
+constexpr int kProgramVertexConstants = 4 + 6 * kTexCoords + 6 + 4 * 8 * 5;
 
 // A draw's generated program and what it reads: its textures (sampler slot order), where its
 // vertex and fragment constants are among its frame's constant rows (record_constants; as many as

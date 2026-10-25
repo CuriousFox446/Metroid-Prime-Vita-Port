@@ -322,8 +322,8 @@ SectionClock g_clock;
 constexpr GLint kNoUniform = -1;
 
 // The vertex attributes a generated program may declare (gx/vita_tev.cpp), by name.
-enum ProgramAttr { kAttrPos, kAttrRaw, kAttrShade, kAttrUv0, kAttrCount = kAttrUv0 + kTexCoords };
-constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aUv0", "aUv1", "aUv2", "aUv3"};
+enum ProgramAttr { kAttrPos, kAttrRaw, kAttrShade, kAttrNrm, kAttrUv0, kAttrCount = kAttrUv0 + kTexCoords };
+constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aNrm", "aUv0", "aUv1", "aUv2", "aUv3"};
 
 // Compiles Cg source. The GL_CG_* types matter: vitaGL takes GL_VERTEX_SHADER and
 // GL_FRAGMENT_SHADER source for GLSL, translates it at glLinkProgram (VGL_MODE_POSTPONED), and a
@@ -604,7 +604,7 @@ private:
   bool m_cacheChecked = false;
   bool m_inCache = false;
   GLuint m_id = 0;
-  GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1};
+  GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
   GLint m_vertexLocation = kNoUniform;
   GLint m_constantsLocation = kNoUniform;
   Sent m_vertexSent;
@@ -847,6 +847,9 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
   if (program.attr(kAttrShade) >= 0) {
     glVertexAttribPointer(program.attr(kAttrShade), 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex),
                           pointer(offsetof(Vertex, shade)));
+  }
+  if (program.attr(kAttrNrm) >= 0) {
+    glVertexAttribPointer(program.attr(kAttrNrm), 3, GL_BYTE, GL_TRUE, sizeof(Vertex), pointer(offsetof(Vertex, normal)));
   }
   for (int coord = 0; coord < kTexCoords; ++coord) {
     if (program.attr(kAttrUv0 + coord) >= 0) {
@@ -1091,7 +1094,7 @@ void draw_test_triangle() {
     std::vector<Vertex> triangle(3);
     const float corners[3][2] = {{-0.97f, 0.97f}, {-0.80f, 0.97f}, {-0.97f, 0.70f}};
     for (int i = 0; i < 3; ++i) {
-      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}, {255, 140, 0, 255}, 255};
+      triangle[i] = Vertex{{corners[i][0], corners[i][1], 0.f}, {}, {255, 140, 0, 255}, {255, 140, 0, 255}, {}, 255};
     }
     return make_mesh(std::move(triangle), MeshKind::Other);
   }();

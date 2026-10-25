@@ -35,6 +35,11 @@ struct TevProgram {
   int vertexCount = 0;
   int constantCount = 0;
   std::array<u8, vita_gl::kProgramConstants> constantSlots{};
+  // Its vertex rows' layout (tev_vertex_rows): which coordinate sets have a post-transform matrix,
+  // and the lights each channel (GX_COLOR0, GX_COLOR1, GX_ALPHA0, GX_ALPHA1) sums, its mask's
+  // first ones in order (none: the position and normal matrices are left out too).
+  std::array<bool, vita_gl::kTexCoords> post{};
+  std::array<u8, 4> lightCounts{};
   // FIFO thread (record_draw): where its last draw's constants went among the rows of the frame
   // being recorded (`recordedIn`, that frame's serial; another: none yet), for a draw repeating them.
   mutable u32 recordedIn = 0;
@@ -49,9 +54,12 @@ TevLayout tev_layout() noexcept;
 const TevProgram* tev_program(const TevLayout& layout) noexcept;
 // The fragment constants `program` declares, packed, from the current GX state.
 void tev_constants(const TevProgram& program, float out[vita_gl::kProgramConstants][4]) noexcept;
-// A coordinate generator's matrix rows for GX's (s, t, 1, 1) input: three for a projective
-// generator, else two. Returns the rows written.
-int tev_texgen_rows(const TcgConfig& tcg, float (*out)[4]) noexcept;
+// The vertex rows `program` declares after the 4 of the projection times the position matrix,
+// written from out[4] on (vita_gl::kProgramVertexConstants' layout), from the current GX state:
+// the coordinate sets' generators `coords`, GX's current position and normal matrices and lights.
+// Returns the rows in all.
+int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], int coordCount,
+                    float (*out)[4]) noexcept;
 // Programs generated so far.
 size_t tev_program_count() noexcept;
 // False with MP_VITA_TEV=0: every draw fixed-function.

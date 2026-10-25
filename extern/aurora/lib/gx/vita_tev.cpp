@@ -65,24 +65,35 @@ std::string swizzle(const TevSwap& swap) {
   return {component(swap.red), component(swap.green), component(swap.blue), component(swap.alpha)};
 }
 
-// A channel's raster colour (n 0 or 1): the material colour (the vertex colour or the register),
-// times its lighting, which without normals is the ambient colour plus the face's shading.
+// The lights a channel part (GX_COLOR0, GX_COLOR1, GX_ALPHA0, GX_ALPHA1) sums: those of its mask
+// when it is lit, else none.
+int light_count(int part) noexcept {
+  return g_gxState.colorChannelConfig[part].lightingEnabled
+             ? static_cast<int>(g_gxState.colorChannelState[part].lightMask.count())
+             : 0;
+}
+
+// A channel's raster colour (n 0 or 1), as GX lights it: the material colour (the vertex colour
+// or the register), times the ambient colour plus the channel's lights, clamped. The vertex
+// program sums the lights (vLit, rgb the colour part's, a the alpha part's: lighting_code).
 std::string raster(int n) {
   const GXState& s = g_gxState;
-  const ColorChannelConfig& colorCfg = s.colorChannelConfig[GX_COLOR0 + n];
-  const ColorChannelConfig& alphaCfg = s.colorChannelConfig[GX_ALPHA0 + n];
   const std::string vertex = n == 0 ? "vRaw" : "float4(1.0)";
   const std::string mat = fmt::format("uConst[{}]", kConstMat0 + 2 * n);
   const std::string amb = fmt::format("uConst[{}]", kConstMat0 + 2 * n + 1);
-  const auto part = [&](const ColorChannelConfig& cfg, const char* sw, const char* shade) {
+  const auto part = [&](int chan, const char* sw) {
+    const ColorChannelConfig& cfg = s.colorChannelConfig[chan];
     std::string m = fmt::format("{}.{}", cfg.matSrc == GX_SRC_VTX ? vertex : mat, sw);
     if (!cfg.lightingEnabled) {
       return m;
     }
     std::string a = fmt::format("{}.{}", cfg.ambSrc == GX_SRC_VTX ? vertex : amb, sw);
-    return fmt::format("({} * saturate({} + {}))", m, a, shade);
+    if (light_count(chan) == 0) {
+      return fmt::format("({} * saturate({}))", m, a);
+    }
+    return fmt::format("({} * saturate({} + vLit{}.{}))", m, a, n, sw);
   };
-  return fmt::format("float4({}, {})", part(colorCfg, "rgb", "float3(vShade)"), part(alphaCfg, "a", "vShade"));
+  return fmt::format("float4({}, {})", part(GX_COLOR0 + n, "rgb"), part(GX_ALPHA0 + n, "a"));
 }
 
 std::string konst_color(GXTevKColorSel sel) {
@@ -251,7 +262,14 @@ std::string alpha_compare(GXCompare compare, const std::string& ref) {
   }
 }
 
-const char* coord_type(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4 ? "float3" : "float2"; }
+// A generator with a post-transform matrix (GX's dual texture matrices).
+bool has_post(const TcgConfig& tcg) noexcept { return tcg.postMtx != GX_PTIDENTITY; }
+
+// A generator whose coordinates are projective (sampled with tex2Dproj): a 3x4 matrix's, or after a
+// post-transform matrix, whose third row makes the divisor.
+bool projective(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4 || has_post(tcg); }
+
+const char* coord_type(const TcgConfig& tcg) noexcept { return projective(tcg) ? "float3" : "float2"; }
 
 // The fragment program's body: the stages, then the alpha compare.
 std::string fragment_body(const TevLayout& layout) {
@@ -277,8 +295,8 @@ std::string fragment_body(const TevLayout& layout) {
     body += fmt::format("  {{ // stage {}\n", i);
     if (layout.stageMap[i] >= 0) {
       const int coord = layout.stageCoord[i];
-      const bool projective = s.tcgs[layout.coords[coord]].type == GX_TG_MTX3x4;
-      body += fmt::format("    float4 tex = {}(uTex{}, vUv{}).{};\n", projective ? "tex2Dproj" : "tex2D",
+      const bool proj = projective(s.tcgs[layout.coords[coord]]);
+      body += fmt::format("    float4 tex = {}(uTex{}, vUv{}).{};\n", proj ? "tex2Dproj" : "tex2D",
                           layout.stageMap[i], coord, swizzle(s.tevSwapTable[stage.tevSwapTex]));
     } else if (reads_texture(stage)) {
       body += "    float4 tex = float4(0.0);\n";
@@ -389,6 +407,69 @@ std::string pack_constants(const std::string& source, TevProgram& program) {
   out.append(source, last, std::string::npos);
   return out;
 }
+
+// The vertex program's sum of channel part `chan`'s `count` lights (rows from `row`, five a
+// light: position, direction, colour, angle and distance attenuation) into `target`, as GX lights
+// a vertex and Aurora's shaders do (shader.cpp, lighting_func): `mv` is the view-space position,
+// `n` the view-space normal. GX's lights are given in view space.
+std::string lighting_code(int chan, int count, int row, const std::string& target) {
+  const ColorChannelConfig& cfg = g_gxState.colorChannelConfig[chan];
+  const char* sw = chan >= GX_ALPHA0 ? "a" : "rgb";
+  std::string code;
+  for (int l = 0; l < count; ++l) {
+    const int r = row + 5 * l;
+    code += fmt::format("  {{ // light {}\n"
+                        "    float3 ldir = uVert[{}].xyz - mv;\n"
+                        "    float dist2 = dot(ldir, ldir);\n"
+                        "    float dist = sqrt(dist2);\n"
+                        "    ldir = ldir / dist;\n",
+                        l, r);
+    switch (cfg.attnFn) {
+    case GX_AF_SPOT:
+      code += fmt::format("    float cosine = max(0.0, dot(ldir, uVert[{0}].xyz));\n"
+                          "    float attn = max(0.0, dot(uVert[{1}].xyz, float3(1.0, cosine, cosine * cosine)) /\n"
+                          "                          dot(uVert[{2}].xyz, float3(1.0, dist, dist2)));\n",
+                          r + 1, r + 3, r + 4);
+      break;
+    case GX_AF_SPEC:
+      code += fmt::format("    float attn = dot(n, ldir) >= 0.0 ? max(0.0, dot(n, uVert[{0}].xyz)) : 0.0;\n"
+                          "    float cosAttn = dot(uVert[{1}].xyz, float3(1.0, attn, attn * attn));\n"
+                          "    float distAttn = max(0.0, dot({2}, float3(1.0, attn, attn * attn)));\n"
+                          "    attn = max(0.0, cosAttn / distAttn);\n",
+                          r + 1, r + 3,
+                          cfg.diffFn != GX_DF_NONE ? fmt::format("normalize(uVert[{}].xyz)", r + 4)
+                                                   : fmt::format("uVert[{}].xyz", r + 4));
+      break;
+    default:
+      code += "    float attn = 1.0;\n";
+      break;
+    }
+    switch (cfg.diffFn) {
+    case GX_DF_SIGN:
+      code += "    float diff = dot(ldir, n);\n";
+      break;
+    case GX_DF_CLAMP:
+      code += "    float diff = max(0.0, dot(ldir, n));\n";
+      break;
+    default:
+      code += "    float diff = 1.0;\n";
+      break;
+    }
+    code += fmt::format("    {} += attn * diff * uVert[{}].{};\n  }}\n", target, r + 2, sw);
+  }
+  return code;
+}
+
+// A coordinate generator's source as the vertex program has it, (x, y, z, 1) as GX takes it.
+std::string texgen_input(const TcgConfig& tcg, int c) {
+  if (tcg.src == GX_TG_POS) {
+    return "float4(aPos, 1.0)";
+  }
+  if (tcg.src == GX_TG_NRM) {
+    return "float4(aNrm, 1.0)";
+  }
+  return fmt::format("float4(aUv{}, 1.0, 1.0)", c);
+}
 } // namespace
 
 bool tev_enabled() noexcept {
@@ -418,9 +499,12 @@ TevLayout tev_layout() noexcept {
       continue;
     }
     const TcgConfig& tcg = s.tcgs[stage.texCoordId];
-    if ((tcg.type != GX_TG_MTX2x4 && tcg.type != GX_TG_MTX3x4) || tcg.src < GX_TG_TEX0 || tcg.src > GX_TG_TEX7 ||
-        s.vtxDesc[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)] == GX_NONE) {
-      return layout; // positions, normals, colours or another generator as the source: not yet
+    const bool fromTex = tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7;
+    if ((tcg.type != GX_TG_MTX2x4 && tcg.type != GX_TG_MTX3x4) ||
+        (!fromTex && tcg.src != GX_TG_POS && tcg.src != GX_TG_NRM) ||
+        (fromTex && s.vtxDesc[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)] == GX_NONE) ||
+        (has_post(tcg) && (tcg.postMtx - GX_PTTEXMTX0) / 3 >= MaxPTTexMtx)) {
+      return layout; // colours, binormals, another generator or a bump map as the source: not yet
     }
     int coord = -1;
     for (int c = 0; c < layout.coordCount; ++c) {
@@ -457,10 +541,19 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   // share a program with another.
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   const AlphaCompare& compare = s.alphaCompare;
+  // A coordinate set by its generator's type, source (a texture coordinate, the position or the
+  // normal), normalisation and whether it has a post-transform matrix; the lights each channel
+  // part sums.
   u32 fixed[] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
-                 static_cast<u32>(compare.op), 0, 0, 0, 0};
+                 static_cast<u32>(compare.op), 0, 0, 0, 0, 0, 0, 0, 0};
   for (int c = 0; c < layout.coordCount; ++c) {
-    fixed[4 + c] = static_cast<u32>(s.tcgs[layout.coords[c]].type) + 1;
+    const TcgConfig& tcg = s.tcgs[layout.coords[c]];
+    const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
+    fixed[4 + c] = (static_cast<u32>(tcg.type) + 1) | source << 8 | (tcg.normalize ? 1u : 0u) << 12 |
+                   (has_post(tcg) ? 1u : 0u) << 13;
+  }
+  for (int part = 0; part < 4; ++part) {
+    fixed[8 + part] = static_cast<u32>(light_count(part));
   }
   u64 stateKey = XXH3_64bits(fixed, sizeof(fixed));
   stateKey = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), stateKey);
@@ -478,10 +571,23 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   TevProgram info;
   const std::string body = pack_constants(fragment_body(layout), info);
   const bool raw = body.find("vRaw") != std::string::npos;
-  const bool shade = body.find("vShade") != std::string::npos;
+  // The channels whose lights the raster colours take (raster), and so the lights summed.
+  bool litChannel[2] = {body.find("vLit0") != std::string::npos, body.find("vLit1") != std::string::npos};
+  bool lit = false;
+  for (int n = 0; n < 2; ++n) {
+    for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
+      info.lightCounts[part] = static_cast<u8>(litChannel[n] ? light_count(part) : 0);
+      lit = lit || info.lightCounts[part] != 0;
+    }
+  }
+  bool normals = lit;
+  for (int c = 0; c < layout.coordCount; ++c) {
+    normals = normals || s.tcgs[layout.coords[c]].src == GX_TG_NRM;
+  }
 
-  // uVert (vita_gl::kProgramVertexConstants): the projection times the position matrix, then the
-  // coordinate sets' matrix rows.
+  // uVert (vita_gl::kProgramVertexConstants, tev_vertex_rows): the projection times the position
+  // matrix; the coordinate sets' matrix rows (and post-transform rows); for lighting the position
+  // and normal matrices and the lights.
   std::string fragmentParams;
   std::string vertexParams = "float3 aPos";
   std::string vertexOuts = "float4 out vPos : POSITION";
@@ -497,27 +603,62 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
     vertexBody += "  vRaw = aRaw;\n";
     add(fragmentParams, "float4 vRaw : COLOR");
   }
-  if (shade) {
-    add(vertexParams, "float aShade");
-    add(vertexOuts, "float out vShade : TEXCOORD4");
-    vertexBody += "  vShade = aShade;\n";
-    add(fragmentParams, "float vShade : TEXCOORD4");
+  if (normals) {
+    add(vertexParams, "float3 aNrm");
   }
   for (int c = 0; c < layout.coordCount; ++c) {
+    // As GX generates a coordinate: the source times the matrix (z 1 after a 2x4 one), normalised
+    // when asked, then the post-transform matrix (Aurora's shader.cpp does the same).
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const char* type = coord_type(tcg);
-    add(vertexParams, fmt::format("float2 aUv{}", c));
+    if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
+      add(vertexParams, fmt::format("float2 aUv{}", c));
+    }
     add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
-    vertexBody += fmt::format("  float4 t{0} = float4(aUv{0}, 1.0, 1.0);\n", c);
+    vertexBody += fmt::format("  float4 t{} = {};\n", c, texgen_input(tcg, c));
     if (tcg.type == GX_TG_MTX3x4) {
-      vertexBody += fmt::format("  vUv{0} = float3(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}), dot(uVert[{3}], t{0}));\n",
+      vertexBody += fmt::format("  float3 tc{0} = float3(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}), dot(uVert[{3}], t{0}));\n",
                                 c, row, row + 1, row + 2);
       row += 3;
     } else {
-      vertexBody += fmt::format("  vUv{0} = float2(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}));\n", c, row, row + 1);
+      vertexBody += fmt::format("  float3 tc{0} = float3(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}), 1.0);\n", c,
+                                row, row + 1);
       row += 2;
     }
+    if (tcg.normalize) {
+      vertexBody += fmt::format("  tc{0} = normalize(tc{0});\n", c);
+    }
+    if (has_post(tcg)) {
+      info.post[c] = true;
+      vertexBody += fmt::format("  tc{0} = float3(dot(uVert[{1}], float4(tc{0}, 1.0)), dot(uVert[{2}], float4(tc{0}, 1.0)),\n"
+                                "               dot(uVert[{3}], float4(tc{0}, 1.0)));\n",
+                                c, row, row + 1, row + 2);
+      row += 3;
+    }
+    vertexBody += fmt::format("  vUv{0} = tc{0}{1};\n", c, projective(tcg) ? "" : ".xy");
     add(fragmentParams, fmt::format("{} vUv{} : TEXCOORD{}", type, c, c));
+  }
+  if (lit) {
+    // The view-space position and normal (a zero normal stays zero), then each lit channel's lights.
+    vertexBody += fmt::format("  float3 mv = float3(dot(uVert[{0}], p), dot(uVert[{1}], p), dot(uVert[{2}], p));\n"
+                              "  float4 nn = float4(aNrm, 0.0);\n"
+                              "  float3 n = float3(dot(uVert[{3}], nn), dot(uVert[{4}], nn), dot(uVert[{5}], nn));\n"
+                              "  n = dot(n, n) > 1e-10 ? normalize(n) : n;\n",
+                              row, row + 1, row + 2, row + 3, row + 4, row + 5);
+    row += 6;
+    for (int n = 0; n < 2; ++n) {
+      if (!litChannel[n]) {
+        continue;
+      }
+      add(vertexOuts, fmt::format("float4 out vLit{0} : TEXCOORD{1}", n, 5 + n));
+      add(fragmentParams, fmt::format("float4 vLit{0} : TEXCOORD{1}", n, 5 + n));
+      vertexBody += fmt::format("  vLit{} = float4(0.0);\n", n);
+      for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
+        const int count = info.lightCounts[part];
+        vertexBody += lighting_code(part, count, row, fmt::format("vLit{}.{}", n, part >= GX_ALPHA0 ? "a" : "rgb"));
+        row += 5 * count;
+      }
+    }
   }
   info.vertexCount = row;
   for (int m = 0; m < layout.samplerCount; ++m) {
@@ -533,7 +674,7 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
 
   // The key also names the program's binary on the memory card (vita_gl.cpp); the seed changes
   // when what a source compiles to could (the compiler's options, the attribute layout).
-  constexpr u64 kBinaryVersion = 2;
+  constexpr u64 kBinaryVersion = 3;
   u64 key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
   TevProgram& program = sPrograms[key];
@@ -573,21 +714,65 @@ void tev_constants(const TevProgram& program, float out[vita_gl::kProgramConstan
   }
 }
 
-int tev_texgen_rows(const TcgConfig& tcg, float (*out)[4]) noexcept {
+int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], int coordCount,
+                    float (*out)[4]) noexcept {
   static constexpr float kIdentity[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
-  const float* rows = kIdentity;
-  if (tcg.mtx != GX_IDENTITY) {
-    // GX numbers the position matrices first, then the texture matrices, three rows apiece.
-    const u32 index = static_cast<u32>(tcg.mtx) / 3;
-    if (index < MaxPnMtx) {
-      rows = reinterpret_cast<const float*>(&g_gxState.pnMtx[index].pos);
-    } else if (index - MaxPnMtx < MaxTexMtx) {
-      rows = reinterpret_cast<const float*>(&g_gxState.texMtxs[index - MaxPnMtx]);
+  const GXState& s = g_gxState;
+  int row = 4;
+  for (int c = 0; c < coordCount; ++c) {
+    const TcgConfig& tcg = *coords[c];
+    const float* rows = kIdentity;
+    if (tcg.mtx != GX_IDENTITY) {
+      // GX numbers the position matrices first, then the texture matrices, three rows apiece.
+      const u32 index = static_cast<u32>(tcg.mtx) / 3;
+      if (index < MaxPnMtx) {
+        rows = reinterpret_cast<const float*>(&s.pnMtx[index].pos);
+      } else if (index - MaxPnMtx < MaxTexMtx) {
+        rows = reinterpret_cast<const float*>(&s.texMtxs[index - MaxPnMtx]);
+      }
+    }
+    const int count = tcg.type == GX_TG_MTX3x4 ? 3 : 2;
+    std::memcpy(out[row], rows, sizeof(float[4]) * count);
+    row += count;
+    if (program.post[c]) {
+      const u32 post = (static_cast<u32>(tcg.postMtx) - GX_PTTEXMTX0) / 3;
+      std::memcpy(out[row], post < MaxPTTexMtx ? reinterpret_cast<const float*>(&s.ptTexMtxs[post]) : kIdentity,
+                  sizeof(float[12]));
+      row += 3;
     }
   }
-  const int count = tcg.type == GX_TG_MTX3x4 ? 3 : 2;
-  std::memcpy(out, rows, sizeof(float[4]) * count);
-  return count;
+  bool lit = false;
+  for (const u8 count : program.lightCounts) {
+    lit = lit || count != 0;
+  }
+  if (!lit) {
+    return row;
+  }
+  const PnMtx& matrices = s.pnMtx[s.currentPnMtx];
+  std::memcpy(out[row], &matrices.pos, sizeof(float[12]));
+  std::memcpy(out[row + 3], &matrices.nrm, sizeof(float[12]));
+  row += 6;
+  // Each lit channel part's lights, in tev_program's order: its mask's first ones (a light short of
+  // the count, which the mask changing without the program would make, is dark).
+  for (int n = 0; n < 2; ++n) {
+    for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
+      const GX::LightMask& mask = s.colorChannelState[part].lightMask;
+      int written = 0;
+      for (u32 i = 0; i < GX::MaxLights && written < program.lightCounts[part]; ++i) {
+        if (mask.test(i)) {
+          static_assert(sizeof(Light) == sizeof(float[20]));
+          std::memcpy(out[row], &s.lights[i], sizeof(Light));
+          row += 5;
+          ++written;
+        }
+      }
+      for (; written < program.lightCounts[part]; ++written) {
+        std::memset(out[row], 0, sizeof(float[20]));
+        row += 5;
+      }
+    }
+  }
+  return row;
 }
 
 size_t tev_program_count() noexcept { return sPrograms.size(); }

@@ -791,8 +791,7 @@ in menus at all, while gameplay (`__PADSetDefaultMapping`) has the Vita layout. 
 Select). Under twin stick the left shoulder is also the beam shift with the D-pad
 (port_input_devices.cpp); that chord is bound in menus too, which needs checking on the device.
 
-**Viewports, scissors and EFB copies' clears (built, not yet run on the Vita; a first piece of
-milestone 5).** Photos of the depth range build: an upside-down Samus over the view in the
+**Viewports, scissors and EFB copies' clears (a first piece of milestone 5).** Photos of the depth range build: an upside-down Samus over the view in the
 intro and in play, and a white background (gone in the scan visor). The upside-down Samus is
 `CCubeRenderer::CacheReflection`: the reflected view drawn into a 256x256 corner (viewport and
 scissor set to it), copied into the reflection texture and cleared (`GXCopyTex(..., clear)`). The
@@ -808,3 +807,32 @@ the whole screen and stayed; the white is most likely a shadow pass's (none in t
   updates as masks (as Dolphin clears). The copy itself is still not made, so reflections and
   shadows sample nothing yet; their passes no longer show.
 - The textures line counts draws with a smaller viewport and the copies' clears.
+
+Its run (aa68617; stamp 434fe33-dirty): 13 minutes, no crash; the upside-down Samus not seen
+again. Thousands of draws a window with a smaller viewport and some hundreds of copies' clears.
+14.3 FPS in the heavy seconds. Reported: Samus's high-detail model and the gunship's colours are
+off (bright, flat orange; asked for before), and the morph ball's light seems to turn the
+surfaces round it grey.
+
+**GX lighting in the generated programs (built, not yet run on the Vita; the rest of milestone
+4's lighting).** A lit channel was the material colour times the ambient colour plus a shading
+made up from the face's normal: none of the game's lights, their colours or the vertex normals,
+so lit models (Samus, the gunship, the creatures) came out flat, and a light like the morph
+ball's did nothing. Now, as Aurora's shaders do (shader.cpp, lighting_func):
+- A vertex carries its normal (the first three components of a normal, or of NBT; unit length,
+  as three signed bytes in the bytes the padding held: still 56 bytes). A skinned template reads
+  the normals again with the positions at each call, CPU skinning writing both.
+- The vertex program has the view-space position and normal (GX's current position and normal
+  matrices; a zero normal stays zero) and sums each lit channel part's lights: GX's diffuse
+  functions (none, sign, clamp) and attenuations (none, spot: angle and distance, specular), GX's
+  lights being in view space. The sums go to the fragment program (vLit0, vLit1: rgb the colour
+  part's, a the alpha part's), whose raster colour is material times clamp(ambient + lights).
+- The lights are rows of the draw's vertex constants after the coordinate rows: the position and
+  normal matrices, then for each lit part its mask's lights (five rows each). The program has the
+  count of each part's lights (in its key, and in the material's pipeline key), the rows the
+  lights the mask names at the draw.
+- Texture coordinates from the position or the normal (GX_TG_POS, GX_TG_NRM: environment
+  mapping), normalisation, and post-transform matrices (dual texture matrices: three more rows,
+  projective sampling after one), so such materials have a program instead of the fixed-function
+  draw. kProgramVertexConstants is 194 rows now.
+- The sources changed (kBinaryVersion 3): the first session compiles every program again.
