@@ -1284,6 +1284,29 @@ images were the warp's copy read back through its own framebuffer: no evidence e
   the GameCube's pixel count; `640x368`; `480x272`) starts vitaGL at that size, which the display
   scales up (`read_resolution`).
 
+Its run (93518bf; the Landing Site, the Phazon Suit's effect not seen this time): the pause
+screen's frames on the card. The backdrop is black from the blur on (`pause_0_after`), and so is
+the blur's copy drawn as it holds it (`pause_8_texture`); the pause screen's own drawing is right
+(`pause_9_frame`: the bottom bar). The probe of the tenth paused frame finds the blur exact (no
+fog, the taps' offsets right, opaque, its program, the copy's 480x272 target bound), the quarters
+drawn with culling off, the multiply and the scan lines as GX has them, and no copies in a paused
+frame. No copy was left over; the most scenes in a frame were the display's 6, a framebuffer's 3.
+- 452b99f's grey turned black. The one change able to do that: the framebuffers' render targets
+  made for 8 scenes a frame, not 2. vitaGL lets GXM allocate each target's memory
+  (`driverMemBlock` -1) from the system's, which the game's heap leaves little of, and reports no
+  failure; GXM sizes it by the scenes. The pause screen's copy was the first into its 480x272
+  target, made at the pause, likely not made at 8: nothing drawn into it. (The first-copies list
+  lacks that copy: the log's lines from the two threads interleave, and one can be lost.)
+- Now 3 scenes a frame (the most a frame needed: the pause's first, with the suit's effect), with
+  `copy_on_gpu` leaving a fourth for the next frame. The log has the memory GXM takes for a target
+  of the screen's size and half of it by its scenes, and the system's free memory with vitaGL's.
+- And the blur's first frame, where its one copy is made just before it, three times a session:
+  the frame's copies logged by the FIFO thread (destination, GX's rectangle and sizes, the Vita
+  texture) and by the render worker (each texture's targets, how many presents ago and in how many
+  scenes each was drawn into, which is bound, and what became of the copy), the blur's texture
+  likewise, then `blur<n>_texture.ppm` (the blur's copy as it holds it) and `blur<n>_after.ppm`.
+  The render worker's probe lines name each texture by its address.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

@@ -8,6 +8,7 @@
 #include <vitashark.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 
 // vitaGL's display depth surface (its gxm.c), which its API does not give: keep_display_depth.
@@ -47,11 +48,14 @@ int g_height = 544;
 constexpr int kRamThreshold = 32 * 1024 * 1024;
 // For glBegin/glEnd; nothing here uses them.
 constexpr int kLegacyPool = 256 * 1024;
-// The scenes a frame vitaGL makes the display's render target and each framebuffer's for, GXM's
-// most (each EFB copy ends the display's scene and draws two of a framebuffer's: initialize).
-// draw_world and copy_on_gpu keep each frame within them.
+// The scenes a frame vitaGL makes the display's render target and each framebuffer's for (each EFB
+// copy ends the display's scene and draws two of a framebuffer's: initialize); draw_world and
+// copy_on_gpu keep each frame within them. The display's, GXM's most. A framebuffer's, the most a
+// frame was seen to need (the copies' 480x272 scratch on the pause screen's first frame): GXM
+// sizes the memory of each target it makes by them, from the system's (initialize logs how
+// much), and at 8 the pause screen's copy came back black (93518bf), its target likely not made.
 constexpr uint8_t kDisplayScenesPerFrame = 8;
-constexpr uint8_t kFramebufferScenesPerFrame = 8;
+constexpr uint8_t kFramebufferScenesPerFrame = 3;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
@@ -131,11 +135,17 @@ void log_memory(const char* when) {
   const auto pool = [](vglMemType type) {
     return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
   };
-  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
-           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB); not yet uploaded: {} ({:.1f} MiB)",
+  // The system's own, outside vitaGL's pools: GXM makes the framebuffers' render targets from it.
+  SceKernelFreeMemorySizeInfo system{};
+  system.size = sizeof(system);
+  sceKernelGetFreeMemorySize(&system);
+  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; the system's free: "
+           "user {:.1f}, CDRAM {:.1f}, phycont {:.1f}; textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} "
+           "MiB); not yet uploaded: {} ({:.1f} MiB)",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
-           g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
-           g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB);
+           system.size_user / kMiB, system.size_cdram / kMiB, system.size_phycont / kMiB, g_textureCount[0].load(),
+           g_textureBytes[0].load() / kMiB, g_textureCount[1].load(), g_textureBytes[1].load() / kMiB,
+           g_pendingCount.load(), g_pendingBytes.load() / kMiB);
 }
 
 // A frame's draws and their programs' constant rows (ProgramInputs), and its serial, a new one
@@ -388,6 +398,16 @@ public:
   uint32_t width() const noexcept { return m_width; }
   uint32_t height() const noexcept { return m_height; }
   size_t targets() const noexcept { return m_targets.size(); }
+  // For the log: its size, then each render target's, how many presents ago a copy drew into it and
+  // in how many scenes then, and which is bound.
+  std::string describe() const {
+    std::string text = fmt::format("{} {}x{}", static_cast<const void*>(this), m_width, m_height);
+    for (const Target& t : m_targets) {
+      text += fmt::format("; target {}x{} copied {} presents ago in {} scenes{}", t.width, t.height,
+                          g_presentSerial - t.lastUsed, t.scenes, t.texture == m_id ? " (bound)" : "");
+    }
+    return text;
+  }
 
 private:
   void settle_pending() noexcept {
@@ -1867,12 +1887,19 @@ void draw_world(const Frame& frame) {
   // The pause screen's steps for the card (gx/vita_draw.cpp's PauseDump), each a readback: it ends
   // the display's scene, so only with two of its scenes to spare (its own draw's, the next draw's).
   const auto can_save = [&displayScenes]() { return displayScenes + 2 <= kDisplayScenesPerFrame; };
-  const auto save_screen = [&](int step, const char* what) {
-    dump_screen(fmt::format("pause_{}_{}.ppm", step, what));
+  const auto save_screen = [&](const std::string& name) {
+    dump_screen(name);
     displayOpen = false;
     return_to_draws();
   };
+  // The name a dump's step saves under after its draw (vita_gl.hpp, Draw::dump).
+  const auto after_name = [](int8_t dump) {
+    return dump >= kDumpBlurBegin ? fmt::format("blur{}_after.ppm", dump - kDumpBlurBegin + 1)
+                                  : fmt::format("pause_{}_after.ppm", dump);
+  };
   bool saveAtEnd = false;
+  // This frame's copies so far, for the camera blur's first frame (kDumpBlurBegin).
+  std::vector<std::string> frameCopies;
   uint32_t sceneDraws = 0;
   for (const Draw& draw : draws) {
     if (draw.clear) {
@@ -1899,6 +1926,8 @@ void draw_world(const Frame& frame) {
       // An EFB copy (copy_on_gpu): scenes of its own, its blit ending the display's.
       if (displayOpen && displayScenes >= kDisplayScenesPerFrame) {
         ++g_presentStats.copiesOverDisplayScenes;
+        frameCopies.push_back(fmt::format("{}: left for the next frame (the display's last scene)",
+                                          draw.copyTo->describe()));
         if (draw.probe >= 0) {
           Log.info("[probe] render {}: copy left for the next frame (the display's last scene)", draw.probe);
         }
@@ -1907,9 +1936,10 @@ void draw_world(const Frame& frame) {
       const uint64_t start = sceKernelGetProcessTimeWide();
       leave_draws();
       const CopyResult result = copy_on_gpu(draw);
+      static constexpr const char* kResults[] = {"made", "of an empty rectangle", "waiting for its program",
+                                                 "left for the next frame (a framebuffer's scenes)"};
+      frameCopies.push_back(fmt::format("{}: {}", draw.copyTo->describe(), kResults[static_cast<int>(result)]));
       if (draw.probe >= 0) {
-        static constexpr const char* kResults[] = {"made", "of an empty rectangle", "waiting for its program",
-                                                   "left for the next frame (a framebuffer's scenes)"};
         Log.info("[probe] render {}: copy {} into {}x{} ({} targets)", draw.probe, kResults[static_cast<int>(result)],
                  draw.copyTo->width(), draw.copyTo->height(), draw.copyTo->targets());
       }
@@ -1931,17 +1961,29 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
-    if (draw.dump == kDumpTexture && can_save()) {
-      // The draw's first texture (the pause screen's blur's copy) on the screen, saved; the draw (the
-      // blur, opaque over the whole screen) then covers it.
+    if (draw.dump == kDumpTexture || draw.dump >= kDumpBlurBegin) {
+      // The draw's first texture (the camera blur's copy) on the screen, saved; the draw (the blur,
+      // opaque over the whole screen) then covers it. At the blur's first frame, the texture and
+      // the frame's copies to the log as well.
       const Texture* texture =
           draw.program.textures[0] != nullptr ? draw.program.textures[0].get() : draw.units[0].texture.get();
-      if (texture != nullptr) {
+      if (draw.dump >= kDumpBlurBegin) {
+        std::string copies;
+        for (const std::string& c : frameCopies) {
+          copies += fmt::format("\n  {}", c);
+        }
+        Log.info("[probe] the camera blur begins ({}): its texture {}; the display's scenes so far {}; the frame's "
+                 "copies:{}",
+                 draw.dump - kDumpBlurBegin + 1, texture != nullptr ? texture->describe() : "none", displayScenes,
+                 copies.empty() ? " none" : copies);
+      }
+      if (texture != nullptr && can_save()) {
         begin_display();
         leave_draws();
         show_texture(*texture);
         return_to_draws();
-        save_screen(draw.dump, "texture");
+        save_screen(draw.dump >= kDumpBlurBegin ? fmt::format("blur{}_texture.ppm", draw.dump - kDumpBlurBegin + 1)
+                                                : fmt::format("pause_{}_texture.ppm", draw.dump));
         set_rects(draw.viewport, draw.scissor);
       }
     }
@@ -1970,11 +2012,15 @@ void draw_world(const Frame& frame) {
       std::string textures;
       for (int i = 0; i < kSamplers && program != nullptr; ++i) {
         const Texture* texture = draw.program.textures[i].get();
-        textures += texture != nullptr ? fmt::format(" t{} {}x{}", i, texture->width(), texture->height()) : "";
+        textures += texture != nullptr ? fmt::format(" t{} {} {}x{}", i, static_cast<const void*>(texture),
+                                                     texture->width(), texture->height())
+                                       : "";
       }
       for (int unit = 0; unit < kTexUnits && program == nullptr; ++unit) {
         const Texture* texture = draw.units[unit].texture.get();
-        textures += texture != nullptr ? fmt::format(" u{} {}x{}", unit, texture->width(), texture->height()) : "";
+        textures += texture != nullptr ? fmt::format(" u{} {} {}x{}", unit, static_cast<const void*>(texture),
+                                                     texture->width(), texture->height())
+                                       : "";
       }
       Log.info("[probe] render {}: {}, {} vertices;{}", draw.probe,
                program != nullptr                ? "program"
@@ -1986,8 +2032,8 @@ void draw_world(const Frame& frame) {
       ++g_presentStats.programDraws;
       g_clock.programDraws += g_clock.on ? 1 : 0;
       draw_with_program(draw, frame, *program, usedProgram, attribsOn, current, bound);
-      if (draw.dump >= 0 && draw.dump < kDumpTexture && can_save()) {
-        save_screen(draw.dump, "after");
+      if (((draw.dump >= 0 && draw.dump < kDumpTexture) || draw.dump >= kDumpBlurBegin) && can_save()) {
+        save_screen(after_name(draw.dump));
       }
       continue;
     }
@@ -2058,8 +2104,8 @@ void draw_world(const Frame& frame) {
     g_presentCosts.fixedMaxUs = std::max(g_presentCosts.fixedMaxUs, fixedUs);
     ++g_presentCosts.fixedDraws;
     g_clock.mark(kFixedDraw);
-    if (draw.dump >= 0 && draw.dump < kDumpTexture && can_save()) {
-      save_screen(draw.dump, "after");
+    if (((draw.dump >= 0 && draw.dump < kDumpTexture) || draw.dump >= kDumpBlurBegin) && can_save()) {
+      save_screen(after_name(draw.dump));
     }
   }
   if (saveAtEnd) {
@@ -2193,6 +2239,23 @@ bool initialize() noexcept {
   }
   if (!clamped) {
     keep_display_depth();
+  }
+  // For the log: the memory GXM takes from the system for a render target of the screen's size
+  // and of half of it, by its scenes a frame (vitaGL makes one for each framebuffer).
+  for (const auto& [width, height] : {std::pair{g_width, g_height}, std::pair{g_width / 2, g_height / 2}}) {
+    std::string sizes;
+    for (const unsigned scenes : {1u, 2u, 3u, 4u, 8u}) {
+      SceGxmRenderTargetParams params{};
+      params.width = static_cast<uint16_t>(width);
+      params.height = static_cast<uint16_t>(height);
+      params.scenesPerFrame = static_cast<uint16_t>(scenes);
+      params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+      params.driverMemBlock = -1;
+      unsigned int bytes = 0;
+      sceGxmGetRenderTargetMemSize(&params, &bytes);
+      sizes += fmt::format("{}{} scenes {} KiB", sizes.empty() ? "" : ", ", scenes, bytes / 1024);
+    }
+    Log.info("a {}x{} render target's memory: {}", width, height, sizes);
   }
   start_compiler();
   log_memory("started");

@@ -1476,19 +1476,43 @@ s16 frame_probe_index() noexcept {
 // a frame's first), saved a step a frame (vita_gl::Draw::dump; a readback ends the display's scene,
 // so one a frame): the screen after the blur and after each of its next seven draws (the quarters'
 // light, the scan lines, the pause screen's first), the blur's copy as it holds it, and the whole
-// frame. The frame probe logs the first of those frames.
+// frame. The frame probe logs the first of those frames. And the blur's first frame, where its one
+// copy is made just before it (93518bf's frames showed it black): the frame's copies logged, the
+// blur's texture as it holds it and the screen after the blur saved (vita_gl::kDumpBlurBegin).
 struct PauseDump {
-  u32 serial = 0;      // the frame being recorded
-  int frameDraws = 0;  // its draws so far
-  int pauseFrames = 0; // the frames the blur began
-  int step = -1;       // this frame's step, or -1
-  int sinceBlur = 0;   // this frame's draws from the blur's
+  u32 serial = 0;             // the frame being recorded
+  int frameDraws = 0;         // its draws so far
+  int pauseFrames = 0;        // the frames the blur began
+  int step = -1;              // this frame's step, or -1
+  int sinceBlur = 0;          // this frame's draws from the blur's
+  bool blurThisFrame = false; // the blur drawn in the frame being recorded
+  bool blurLastFrame = false; // and in the one before
+  int blurBegins = 0;         // the blur's first frames saved (vita_gl::kDumpBlurBegin)
 };
 PauseDump sPauseDump;
 // The blur-begun frame the steps start at (the world no longer drawn by then), and the steps: after
 // the blur and each of its next seven draws (0 to 7), the copy (kDumpTexture) and the frame's end.
 constexpr int kPauseDumpFrom = 10;
 constexpr int kPauseDumpSteps = vita_gl::kDumpFrameEnd + 1;
+// The blur's first frames saved (its copy made just before it there: the pause screen's one copy;
+// a cinematic's blur may take the first).
+constexpr int kBlurBeginsSaved = 3;
+
+// The frame being recorded's EFB copies so far, for the log (pause_dump_mark).
+struct FrameCopies {
+  u32 serial = 0;
+  std::vector<std::string> copies;
+};
+FrameCopies sFrameCopies;
+
+std::vector<std::string>& frame_copies() noexcept {
+  const u32 serial = vita_gl::recording_serial();
+  if (serial != sFrameCopies.serial) {
+    sFrameCopies.serial = serial;
+    sFrameCopies.copies.clear();
+  }
+  return sFrameCopies.copies;
+}
 
 // FIFO thread, for each draw recorded: its vita_gl::Draw::dump.
 s8 pause_dump_mark() noexcept {
@@ -1498,13 +1522,36 @@ s8 pause_dump_mark() noexcept {
     dump.serial = serial;
     dump.frameDraws = 0;
     dump.step = -1;
+    dump.blurLastFrame = dump.blurThisFrame;
+    dump.blurThisFrame = false;
   }
   const GXState& s = g_gxState;
   const GXTexMapID map = s.tevStages[0].texMapId;
-  const bool blur = dump.frameDraws++ < 4 && dump.step < 0 && s.numTevStages == 7 && s.numTexGens == 7 &&
-                    map < GX_MAX_TEXMAP && s.copyTextures.contains(s.loadedTextures[map].data);
+  const bool amongFirst = dump.frameDraws++ < 4;
+  const bool blur = !dump.blurThisFrame && s.numTevStages == 7 && s.numTexGens == 7 && map < GX_MAX_TEXMAP &&
+                    s.copyTextures.contains(s.loadedTextures[map].data);
   if (blur) {
-    const int step = dump.pauseFrames++ - kPauseDumpFrom;
+    dump.blurThisFrame = true;
+    if (!dump.blurLastFrame && dump.blurBegins < kBlurBeginsSaved) {
+      // The blur's first frame: its texture, as GX and Aurora have it, and the frame's copies.
+      ++dump.blurBegins;
+      const GXTexObj_& obj = s.loadedTextures[map];
+      const auto copy = s.copyTextures.find(obj.data);
+      const auto vita = sCopyTextures.find(obj.data);
+      std::string copies;
+      for (const std::string& c : frame_copies()) {
+        copies += fmt::format("\n  {}", c);
+      }
+      Log.info("[probe] frame {}: the camera blur begins; map {} data {} {}x{} fmt {}; Aurora's copy there {}x{}; the "
+               "Vita's copy texture {}; the frame's copies:{}",
+               serial, static_cast<int>(map), obj.data, obj.width(), obj.height(), obj.format(), copy->second.width,
+               copy->second.height,
+               vita != sCopyTextures.end() ? static_cast<const void*>(vita->second.get()) : nullptr,
+               copies.empty() ? " none" : copies);
+      sFrameProbe = FrameProbe{.framesLeft = 1, .serial = serial};
+      return static_cast<s8>(vita_gl::kDumpBlurBegin + dump.blurBegins - 1);
+    }
+    const int step = amongFirst ? dump.pauseFrames++ - kPauseDumpFrom : -1;
     if (step >= 0 && step < kPauseDumpSteps) {
       dump.step = step;
       dump.sinceBlur = 0;
@@ -2044,6 +2091,10 @@ void record_copy() noexcept {
   draw.copyHalf = static_cast<s64>(g_gxState.texCopyDstWidth) * 3 < static_cast<s64>(src.width) * 2;
   draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
                              static_cast<float>(src.height), true);
+  frame_copies().push_back(fmt::format("dest {} GX ({}, {}) {}x{} to {}x{} fmt {} half {}, its Vita texture {}",
+                                       g_gxState.texCopyDest, src.x, src.y, src.width, src.height,
+                                       g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<u32>(fmt),
+                                       draw.copyHalf, static_cast<const void*>(texture.get())));
   // Each destination and size's first copy, for the log (log_probe's companion): GX's rectangle,
   // the destination's size and format, and the screen rectangle read.
   static absl::flat_hash_set<std::tuple<const void*, u32, u32, u32>> sSeen;
