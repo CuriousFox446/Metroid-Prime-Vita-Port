@@ -692,7 +692,7 @@ crash.
 - Skinned: some 0.7 ms a call (template copied, positions read again), worth a look of its own.
 - 11.7 FPS in the heavy seconds; the game thread still waits 22 ms a frame for the FIFO thread.
 
-**Cheap list lookups (built, not yet run on the Vita).**
+**Cheap list lookups.**
 - `DecodeState` holds a hash of the vertex descriptor and the formats the list names
   (`layout_hash`), the format mask, the texture coordinates and three fields of each array: about
   90 bytes (2.6 KiB before; a list's four variants some 420 bytes, 10 KiB before).
@@ -705,3 +705,19 @@ crash.
 - A new FIFO section, dispatch, ends at the Vita path's entry (`draw_resident`, `draw_immediate`,
   `draw_indexed`): a draw command's reading and a list call's own `resident::find` of its list,
   which the material section held before.
+
+Its run (57083c0; stamp 53787cc-dirty): 11 minutes, to Biohazard Containment, no crash, nothing
+reported wrong. No list was decoded again for a changed layout (some for changed textures in new
+rooms, as before); skinned templates made only in new rooms.
+- 13.1 FPS in the heavy seconds (11.7), the game thread's wait for the FIFO thread 16.0 ms a
+  frame (22.4), tick 29.8, draw 30.8 ms; the render worker 22.8 ms.
+- The FIFO thread's heavy frames (40 timed): 97 ms busy, 24 of it the timer's, about 73 ms of
+  work (77). With each section's calls taken off: material 14, record 13.4, skinned 9.6, state
+  9.5, immediate 6.9, aurora 6.6, lookup 5.5 (13.3), dispatch 4.5, other draws 3.2, mesh 1 ms.
+- The extension commands ([ops], a heavy frame): about 11,000 besides the frame end: 1540
+  resident list calls, 1520 draw tags (`GX_AURORA_SET_DRAW_TAG`, for the PC port's draw-id and
+  PBR features, nothing the Vita path reads), 1420 texture object loads, and about 6000 array base
+  loads (the game sets most attribute arrays for each model, those the descriptor does not index
+  too). The game thread writes each and the FIFO thread reads each.
+- Left in lookup: the `sCache` map's find of the list (the list's own entry was found already in
+  `call_resident_dl`, and could hold it) and the variants' first read.
