@@ -1,4 +1,5 @@
 #include "vita_gl.hpp"
+#include "vita_fifo_clock.hpp"
 
 #include "gfx/render_worker.hpp"
 #include "internal.hpp"
@@ -1244,4 +1245,60 @@ void remove_texture(ImTextureID id) noexcept {
   const auto texture = static_cast<GLuint>(static_cast<intptr_t>(id));
   gfx::render_worker::enqueue_work([texture] { glDeleteTextures(1, &texture); });
 }
+
+namespace fifo_clock {
+namespace {
+constexpr const char* kNames[kSectionCount] = {"idle",     "state",  "copies", "material",
+                                               "decode",   "record", "other draws", "aurora",
+                                               "vita",     "textures", "finish", "frame"};
+constexpr uint32_t kTimedEvery = 8;
+
+uint64_t g_last = 0;
+uint64_t g_us[kSectionCount] = {};
+uint64_t g_calls = 0;
+uint32_t g_timedFrames = 0;
+uint32_t g_frames = 0;
+uint64_t g_reportStart = 0;
+} // namespace
+
+bool g_on = false;
+
+void mark_timed(Section section) noexcept {
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  g_us[section] += now - g_last;
+  g_last = now;
+  ++g_calls;
+}
+
+void frame_end() noexcept {
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  if (g_on) {
+    g_us[kEndFrame] += now - g_last;
+    ++g_calls;
+    ++g_timedFrames;
+  }
+  if (g_reportStart == 0) {
+    g_reportStart = now;
+  } else if (now - g_reportStart >= 1000000 && g_timedFrames != 0) {
+    const double frames = g_timedFrames;
+    const auto ms = [frames](uint64_t us) { return static_cast<double>(us) / 1000.0 / frames; };
+    uint64_t total = 0;
+    std::string sections;
+    for (int s = 0; s < kSectionCount; ++s) {
+      total += g_us[s];
+      sections += fmt::format("{}{} {:.2f}", s == 0 ? "" : ", ", kNames[s], ms(g_us[s]));
+    }
+    Log.info("[fifo path] ms/frame over {} timed: {:.2f} in all, {:.2f} busy | {} | {:.0f} timer calls a frame",
+             g_timedFrames, ms(total), ms(total - g_us[kIdle]), sections, g_calls / frames);
+    for (uint64_t& us : g_us) {
+      us = 0;
+    }
+    g_calls = 0;
+    g_timedFrames = 0;
+    g_reportStart = now;
+  }
+  g_on = ++g_frames % kTimedEvery == 0;
+  g_last = sceKernelGetProcessTimeWide();
+}
+} // namespace fifo_clock
 } // namespace aurora::vita_gl

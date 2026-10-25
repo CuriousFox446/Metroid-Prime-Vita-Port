@@ -255,7 +255,13 @@ ProcessResult process(const u8* data, u32 size) noexcept {
 
     case CP_CMD_LOAD_BP_REG: {
       const u32 value = reader.read<u32>();
-      handle_bp(value);
+      if (reg_get(value, 8, 24) == 0x52) { // an EFB copy or clear
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
+        handle_bp(value);
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kCopies);
+      } else {
+        handle_bp(value);
+      }
       if (reg_get(value, 8, 24) == GX_BP_REG_DRAWDONE) {
         return {static_cast<u32>(reader.offset()), true};
       }
@@ -319,7 +325,10 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     }
 
     case GX_AURORA: {
+      // Its draws mark their own sections (handle_aurora).
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
       handle_aurora(reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kAurora);
       break;
     }
 
@@ -331,14 +340,18 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     case GX_DRAW_LINES:
     case GX_DRAW_LINE_STRIP:
     case GX_DRAW_POINTS: {
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
       handle_draw(cmd, reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
       break;
     }
 
     default:
       // Check if it's a draw command (0x80-0xBF range)
       if (cmd >= 0x80) {
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
         handle_draw(cmd, reader);
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
       } else {
         // Hex dump surrounding bytes for debugging
         {
@@ -1102,6 +1115,7 @@ void handle_aurora(ByteReader& reader) noexcept {
       u32 vtxCount = byteLen / vtxSize;
       AURORA_ASSERT(vtxCount <= 0xFFFF, "GX_AURORA_DRAW_SIZED: too many vertices ({})", vtxCount);
       draw_prim(prim, fmt, static_cast<u16>(vtxCount), reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
     }
   } else if (subCmd == GX_AURORA_RESIDENT_RETAIN) {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
@@ -1121,6 +1135,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     const u32 size = reader.read<u32>();
     call_resident_dl(key, size);
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
   } else if (subCmd == GX_AURORA_DRAW_INDEXED) {
     ZoneScopedN("DRAW_INDEXED");
     const u8 cmd = reader.read<u8>();
@@ -1142,6 +1157,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     const u32 totalVtxBytes = vtxCount * vtxSize;
     const auto vertexData = reader.take(totalVtxBytes);
     if (vita_gl::active() && vita::draw_indexed(fmt, vtxCount, vertexData, indexData)) {
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
       return; // drawn by the Vita path
     }
     const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
@@ -1149,6 +1165,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     if (indexCount != 0) {
       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
     }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
     gfx::push_debug_group(std::move(label));

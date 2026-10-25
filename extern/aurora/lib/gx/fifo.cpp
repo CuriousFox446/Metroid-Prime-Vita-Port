@@ -1,6 +1,7 @@
 #include "fifo.hpp"
 
 #include "../thread.hpp"
+#include "../vita_fifo_clock.hpp"
 #include "command_processor.hpp"
 
 #include <aurora/gfx.h>
@@ -121,7 +122,9 @@ void worker_main(std::stop_token token) noexcept {
     if (token.stop_requested()) {
       break;
     }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
     sWorkerWake.wait(event, std::memory_order_acquire);
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kIdle);
   }
 }
 

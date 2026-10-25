@@ -603,3 +603,19 @@ nothing reported wrong on screen.
   for its WebGPU frame) is not measured yet. Without its wait the game thread would be at about
   67 ms, some 15 FPS.
 - VRAM 33 MiB free at the end (735 BC1 textures, 10 MiB, in the reactor rooms).
+
+**The FIFO thread's frame, timed (built, not yet run on the Vita).** As the render worker's
+present: one frame in eight, marks ending sections where the last ended
+(`lib/vita_fifo_clock.hpp`), from the end of the last frame's end task to the end of this one's;
+a `[fifo path]` line once a second gives them per timed frame, with the timer calls a frame:
+- idle: the worker waiting for the game to publish commands (`fifo::worker_main`);
+- state: register writes and the stream's reading, everything not below;
+- copies: BP 0x52 (EFB copies and clears);
+- material, decode, record: the Vita path's draws, marked after `current_material`, at
+  `record_draw`'s start (the triangles and the mesh made before it) and at its end;
+- other draws: what is left of a draw command (draws the Vita path did not take, to Aurora's
+  WebGPU path);
+- aurora: Aurora's other extension commands (texture object and array loads, retains...);
+- the frame end task (`submit_frame`): vita (end_frame_draws, the stats logs), textures
+  (`texture::end_frame`), finish (`gfx::finish`), frame (`gfx::end_frame` and the rest).
+Busy is everything but idle.

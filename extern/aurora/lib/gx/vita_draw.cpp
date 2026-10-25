@@ -1162,6 +1162,12 @@ const Material& current_material() noexcept {
 // Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
 // alpha folded in where it is a constant (its inputs are constants that change between draws).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
+  // For the FIFO thread's timing: since the material, the draw's triangles (its mesh made too);
+  // from here to the return, its recording.
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDecode);
+  struct Recorded {
+    ~Recorded() { vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord); }
+  } recorded;
   vita_gl::RenderState state = material.state;
   if (material.alphaMatters) {
     const TevAlpha alpha = tev_alpha();
@@ -1320,6 +1326,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   ZoneScoped;
   ++sStats.calls;
   const Material& material = current_material();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
     return false;
   }
@@ -1362,6 +1369,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   const Material& material = current_material();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
     return false;
   }
@@ -1388,6 +1396,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
 bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept {
   ZoneScoped;
   const Material& material = current_material();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
     return false;
   }

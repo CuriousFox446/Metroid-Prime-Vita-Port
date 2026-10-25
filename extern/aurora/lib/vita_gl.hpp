@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vita_fifo_clock.hpp"
+
 // The PS Vita's screen through vitaGL (a GL layer over GXM), in place of SDL's GXM renderer:
 // Phase 2 of the Vita port (docs/VITA_PHASE2.md). The retained display lists are drawn here
 // (gx/vita_draw.cpp) with vitaGL's fixed-function pipeline, up to two textures each, then the

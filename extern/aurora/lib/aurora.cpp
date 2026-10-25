@@ -487,8 +487,11 @@ static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
       gx::vita::log_stats();
     }
   }
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndVita);
   gx::texture::end_frame();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndTextures);
   gfx::finish();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndFinish);
 
   const auto& presentSource = webgpu::present_source();
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
@@ -674,6 +677,7 @@ static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
   });
+  vita_gl::fifo_clock::frame_end();
 }
 #endif
 
