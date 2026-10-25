@@ -604,7 +604,7 @@ nothing reported wrong on screen.
   67 ms, some 15 FPS.
 - VRAM 33 MiB free at the end (735 BC1 textures, 10 MiB, in the reactor rooms).
 
-**The FIFO thread's frame, timed (built, not yet run on the Vita).** As the render worker's
+**The FIFO thread's frame, timed.** As the render worker's
 present: one frame in eight, marks ending sections where the last ended
 (`lib/vita_fifo_clock.hpp`), from the end of the last frame's end task to the end of this one's;
 a `[fifo path]` line once a second gives them per timed frame, with the timer calls a frame:
@@ -619,3 +619,32 @@ a `[fifo path]` line once a second gives them per timed frame, with the timer ca
 - the frame end task (`submit_frame`): vita (end_frame_draws, the stats logs), textures
   (`texture::end_frame`), finish (`gfx::finish`), frame (`gfx::end_frame` and the rest).
 Busy is everything but idle.
+
+Its run (ca83dc5; stamp 60164c5-dirty): no crash. The 34 timed frames in seconds of 1500 list
+calls a frame or more: 107 ms busy, of it about 21 ms the timer's own (31,500 calls a frame at
+0.68 us), so some 86 ms of work, as the game thread's wait had it. With each section's calls
+taken off (one a draw for the Vita sections; about 12,000 a frame for state and aurora, two for
+each extension command that is not a draw):
+
+| Section | ms a heavy frame |
+|---|---|
+| decode (from the material to `record_draw`) | 32.5 |
+| material (`current_material`) | 23 |
+| record (`record_draw`) | 13 |
+| state (register writes, the stream) | 8.5 |
+| aurora (some 10,000 extension commands a frame besides the draws) | 5.5 |
+| other draws | 2.8 |
+| copies, the frame end task | 0.4 |
+
+- Material: the stats (per 300 frames) in a heavy stretch give about 210 materials worked out a
+  frame and 910 found by hash, of 1400 list calls; 991 cached of the cache's 1024 direct-mapped
+  slots. With about as many materials alive as slots, they evict each other: the cache is too
+  small for these rooms.
+- Decode: no list was decoded again (0 redecodes), so for most calls it is the lookups alone
+  (`resident::find` of the position array, the list's variants in `sCache`, `matches_current`:
+  the descriptor and each used vertex format, a `VtxFmt` of some hundreds of bytes, in cold
+  memory), plus some 15 skinned calls from their templates (a copy of each template's vertices,
+  450 KiB in all a frame, and the positions read again) and the immediate draws' decodes. Which
+  of these the 32 ms is needs the section split.
+- Record, 7.5 us a draw: the matrices, the texgen rows and constants worked out and compared, and
+  the 410-byte draw with its `shared_ptr` copies pushed into the frame.
