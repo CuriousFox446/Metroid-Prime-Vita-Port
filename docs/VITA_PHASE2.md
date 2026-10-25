@@ -1052,6 +1052,38 @@ worker: a copy pass still queued drew into memory already given to another alloc
   waits `kRetiredPresents` (8) presents before its delete (`retire_target`, `delete_retired_targets`
   at each present).
 
+Its run (881998d; 134 s): no crash; the pause screen's and the map's blur, reflections and the
+morph ball's shadow look right (the user). 900 copies in 300 presents, 0.4 to 0.6 ms each on the
+render worker, 87 render targets made in all. The user saw a hitch at an enemy's death: the stalls
+were the render worker's, 1.5 to 3.8 s a frame, the game waiting on it (`begin-wait`), with the
+game's own update 74 ms. The one generated program compiled in the logged part took 3492 ms, and
+the stall after it spanned two seconds' lines (2059 ms and some 1400); the run's last three
+(1.6, 3.8, 3.5 s) came after the last stats line. A first-seen effect (the explosion, the death's
+fade) needs new programs, and a compile ran on the render worker, the frame frozen for it; the fog
+and the rounded light counts made new keys, so programs compiled before were made again.
+
+**Programs compile in the background.** A program not on the card goes to a compiler thread of its
+own (`BackgroundCompiler`, 2 MiB stack, priority 16 below its start's), which makes the two GXP
+binaries with vitashark; the render worker registers them (`vglShaderGxpBinary`) and links
+(`Program::link_gxp`), on the load budget, and its draws go fixed-function meanwhile. A compile that
+fails there, or binaries that do not link, are compiled on the render worker after all (the
+fallback: the frame waits, as before).
+- Calling vitashark directly failed in 685daf0 and a48830e with "fatal internal error" every time:
+  `shark_compile_shader_extended` takes the source's length in `size` (vitaGL's compile passes
+  `glShaderSource`'s), and those calls passed 0. Now the length.
+- vitashark keeps a compile's state in globals, and vitaGL compiles through it too (its
+  fixed-function shaders, at a draw needing one its cache lacks). The linker wraps
+  `shark_compile_shader_extended` and `shark_clear_output` (CMakeLists), so every compile, vitaGL's
+  and ours, holds one lock from the one to the other (`compiler_lock`; a thread already holding it
+  does not lock again). A vitaGL compile on the render worker during a background one waits it out.
+- vitaGL starts the compiler with its own pools' allocator (`shark_set_allocators(vglMalloc,
+  vglFree)`), not for another thread, and vitashark keeps the allocator it started with. It is
+  started at initialize (`start_compiler`) with the C library's, an instance vitaGL started first
+  ended; vitaGL's own start later finds it running.
+- The options are vitaGL's (`SHARK_OPT_FAST`, fast math and integers). A line after the presents
+  line: programs compiled in the background, their time there and the links' here, those compiled
+  on the render worker after all, and the compiles waiting.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

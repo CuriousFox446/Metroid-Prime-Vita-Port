@@ -5,8 +5,10 @@
 #include "internal.hpp"
 
 #include <vitaGL.h>
+#include <vitashark.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 
 // vitaGL's display depth surface (its gxm.c), which its API does not give: keep_display_depth.
 extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
@@ -378,13 +380,20 @@ std::shared_ptr<Texture> make_copy_texture() noexcept {
 uint64_t texture_bytes(const Texture& texture) noexcept { return texture.bytes(); }
 
 namespace {
-// For the log: generated programs compiled, failed, and the time spent compiling (render worker).
+// For the log: generated programs built, failed, and the time spent compiling on the render worker
+// (a compile there blocks the frame: the synchronous fallback); of them those loaded from the
+// card, and those compiled on the background compiler (its time, and the render worker's to link
+// them).
 struct ProgramStats {
   uint32_t compiled = 0; // built, from the compiler or the card
   uint32_t failed = 0;
   double compileMs = 0.0;
   uint32_t loaded = 0; // of them, loaded from the card
   double loadMs = 0.0;
+  uint32_t background = 0; // of them, compiled in the background
+  double backgroundMs = 0.0;
+  double linkMs = 0.0;
+  uint32_t fallbacks = 0; // background compiles that failed or did not link, compiled again here
   uint32_t failuresLogged = 0;
 };
 ProgramStats g_programStats;
@@ -585,6 +594,157 @@ void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, G
     std::filesystem::remove(temp, ec);
   }
 }
+
+// The Cg compiler on a thread of its own. A compile took the render worker 1 to 3.8 s, the frame
+// frozen that long (an enemy's death, an effect seen for the first time: 2635657's run), so a
+// program not on the card is compiled in the background to its GXP binaries, and the render worker
+// only registers and links them (vglShaderGxpBinary, a few milliseconds, as a card load); its
+// draws go on fixed-function meanwhile.
+//
+// vitashark keeps a compile's state in globals (its input, options and output), and vitaGL compiles
+// through it too: its fixed-function shaders, at a draw needing one its cache does not hold. So
+// every compile holds g_compilerMutex from shark_compile_shader_extended to shark_clear_output; the
+// linker wraps both (CMakeLists: --wrap), vitaGL's calls as well as ours (the wrappers at the end
+// of this file). A thread holding it already (a vitaGL compile not cleared) does not lock again.
+std::mutex g_compilerMutex;
+std::atomic<std::thread::id> g_compilerOwner;
+
+void compiler_lock() noexcept {
+  if (g_compilerOwner.load(std::memory_order_acquire) == std::this_thread::get_id()) {
+    return;
+  }
+  g_compilerMutex.lock();
+  g_compilerOwner.store(std::this_thread::get_id(), std::memory_order_release);
+}
+
+void compiler_unlock() noexcept {
+  if (g_compilerOwner.load(std::memory_order_acquire) != std::this_thread::get_id()) {
+    return;
+  }
+  g_compilerOwner.store(std::thread::id{}, std::memory_order_release);
+  g_compilerMutex.unlock();
+}
+
+// Started here (initialize), not by vitaGL: vitaGL starts it with its own pools' allocator
+// (shark_set_allocators(vglMalloc, vglFree)), which another thread must not use, and vitashark
+// keeps the allocator it started with. With the C library's (thread-safe), an instance vitaGL
+// started first ended. vitaGL's own start later finds it running (shark_init does nothing then).
+bool g_compilerReady = false;
+
+void start_compiler() noexcept {
+  shark_end();
+  shark_set_allocators(malloc, free);
+  g_compilerReady = shark_init(nullptr) >= 0 || shark_init("ur0:data/external/libshacccg.suprx") >= 0;
+  if (g_compilerReady) {
+    Log.info("the Cg compiler is started: programs compile in the background");
+  } else {
+    Log.warn("the Cg compiler did not start: programs compile on the render worker");
+  }
+}
+
+// One program's compile: its sources in, its GXP binaries (or the compiler's messages) out.
+struct CompileJob {
+  std::string vertexSource;
+  std::string fragmentSource;
+  std::vector<uint8_t> vertexGxp;
+  std::vector<uint8_t> fragmentGxp;
+  std::string error;
+  double ms = 0.0;
+  std::atomic<bool> done{false};
+};
+
+// A Cg source to its GXP binary. vitashark takes the source's length in `size` (and gives the
+// binary's back in it): passed 0, the compiler failed every time with "fatal internal error"
+// (685daf0, a48830e). The options are vitaGL's (SHARK_OPT_FAST, fast math and integers).
+bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t>& gxp, std::string& error) noexcept {
+  uint32_t size = static_cast<uint32_t>(source.size());
+  const SceGxmProgram* program =
+      shark_compile_shader_extended(source.c_str(), &size, type, SHARK_OPT_FAST, SHARK_ENABLE, SHARK_DISABLE, SHARK_ENABLE);
+  if (program != nullptr && size != 0) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(program);
+    gxp.assign(bytes, bytes + size);
+  } else {
+    error = type == SHARK_VERTEX_SHADER ? "the vertex program did not compile" : "the fragment program did not compile";
+    if (const SceShaccCgCompileOutput* output = shark_get_internal_compile_output(); output != nullptr) {
+      for (int32_t i = 0; i < output->diagnosticCount && i < 4; ++i) {
+        const SceShaccCgDiagnosticMessage& message = output->diagnostics[i];
+        error += fmt::format("; line {}: {}", message.location != nullptr ? message.location->lineNumber : 0u,
+                             message.message != nullptr ? message.message : "");
+      }
+    }
+  }
+  shark_clear_output();
+  return !gxp.empty();
+}
+
+// The background compiler: one thread, its jobs in order. Its stack is the compiler's (it runs
+// deep: 32 KiB overflowed), its priority below the game's threads, so it takes the time they leave.
+class BackgroundCompiler {
+public:
+  void submit(std::shared_ptr<CompileJob> job) noexcept {
+    {
+      std::lock_guard lock{m_mutex};
+      if (!m_started) {
+        m_started = start();
+      }
+      if (!m_started) {
+        job->error = "no thread for the compiler";
+        job->done.store(true, std::memory_order_release);
+        return;
+      }
+      m_jobs.push_back(std::move(job));
+    }
+    m_ready.notify_one();
+  }
+
+  size_t waiting() noexcept {
+    std::lock_guard lock{m_mutex};
+    return m_jobs.size();
+  }
+
+private:
+  bool start() noexcept {
+    constexpr size_t kCompilerStack = 2 * 1024 * 1024;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kCompilerStack);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    const auto run = [](void* self) -> void* {
+      static_cast<BackgroundCompiler*>(self)->run();
+      return nullptr;
+    };
+    const bool ok = pthread_create(&thread, &attr, run, this) == 0;
+    pthread_attr_destroy(&attr);
+    return ok;
+  }
+
+  void run() noexcept {
+    const SceUID self = sceKernelGetThreadId();
+    sceKernelChangeThreadPriority(self, std::min(sceKernelGetThreadCurrentPriority() + 16, 191));
+    for (;;) {
+      std::shared_ptr<CompileJob> job;
+      {
+        std::unique_lock lock{m_mutex};
+        m_ready.wait(lock, [this] { return !m_jobs.empty(); });
+        job = std::move(m_jobs.front());
+        m_jobs.pop_front();
+      }
+      const auto start = std::chrono::steady_clock::now();
+      if (compile_gxp(job->vertexSource, SHARK_VERTEX_SHADER, job->vertexGxp, job->error)) {
+        compile_gxp(job->fragmentSource, SHARK_FRAGMENT_SHADER, job->fragmentGxp, job->error);
+      }
+      job->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      job->done.store(true, std::memory_order_release);
+    }
+  }
+
+  std::mutex m_mutex;
+  std::condition_variable m_ready;
+  std::deque<std::shared_ptr<CompileJob>> m_jobs;
+  bool m_started = false;
+};
+BackgroundCompiler g_compiler;
 } // namespace
 
 class Program {
@@ -598,8 +758,11 @@ public:
     }
   }
 
-  // Render worker: true once linked. A program not tried yet is built while the frame's budget
-  // allows: compiles (hundreds of milliseconds) and loads from the card (a few) count apart.
+  // Render worker: true once linked. A program on the card is loaded while the frame's budget
+  // allows (a few milliseconds each). One that is not goes to the background compiler, and is
+  // linked here once its binaries are made, on the same budget (it costs about as much); its draws
+  // go fixed-function meanwhile. Without the background compiler (it did not start), it is compiled
+  // here, one a frame, the frame waiting the compile out (a second or more).
   bool ready(int& compileBudget, int& loadBudget) noexcept {
     if (m_state == State::Pending) {
       if (!m_cacheChecked) {
@@ -607,11 +770,24 @@ public:
         m_inCache = std::filesystem::exists(cache_path(m_key), ec);
         m_cacheChecked = true;
       }
-      int& budget = m_inCache ? loadBudget : compileBudget;
-      if (budget > 0) {
-        --budget;
+      if (m_inCache) {
+        if (loadBudget > 0) {
+          --loadBudget;
+          build_on_compile_stack();
+        }
+      } else if (g_compilerReady) {
+        m_job = std::make_shared<CompileJob>();
+        m_job->vertexSource = m_vertexSource;
+        m_job->fragmentSource = m_fragmentSource;
+        g_compiler.submit(m_job);
+        m_state = State::Compiling;
+      } else if (compileBudget > 0) {
+        --compileBudget;
         build_on_compile_stack();
       }
+    } else if (m_state == State::Compiling && loadBudget > 0 && m_job->done.load(std::memory_order_acquire)) {
+      --loadBudget;
+      build_on_compile_stack();
     }
     return m_state == State::Ready;
   }
@@ -642,7 +818,7 @@ public:
   }
 
 private:
-  enum class State : uint8_t { Pending, Ready, Failed };
+  enum class State : uint8_t { Pending, Compiling, Ready, Failed };
 
   // Rows sent to a uniform array last: their frame's serial (0: none yet) and where they start.
   struct Sent {
@@ -691,50 +867,95 @@ private:
     pthread_attr_destroy(&attr);
   }
 
-  void build() noexcept {
-    const auto start = std::chrono::steady_clock::now();
-    std::string error;
-    const auto vertexLength = static_cast<uint32_t>(m_vertexSource.size());
-    const auto fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
-    GLenum format = 0;
-    std::vector<uint8_t> binary;
-    const bool cached = load_cached(m_key, vertexLength, fragmentLength, format, binary);
-    if (cached) {
-      // glProgramBinary rebuilds both shaders from their GXPs and links them.
-      const GLuint program = glCreateProgram();
-      glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
-      GLint ok = GL_FALSE;
-      glGetProgramiv(program, GL_LINK_STATUS, &ok);
-      if (ok == GL_TRUE) {
-        m_id = program;
-      } else {
-        glDeleteProgram(program);
-      }
+  // A linked program from its two shaders (deleted after: the program keeps them).
+  void link(GLuint vs, GLuint fs, std::string& error) noexcept {
+    // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
+    // and passes the result on unchecked, so a name the compiler dropped would crash it. The
+    // locations are asked for after the link instead.
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok == GL_TRUE) {
+      m_id = program;
+    } else {
+      error = "the link failed";
+      glDeleteProgram(program);
     }
-    const GLuint vs = cached ? 0 : compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
+  }
+
+  // The sources compiled here, through vitaGL's glCompileShader with the Cg types, and linked.
+  void compile_here(std::string& error) noexcept {
+    const GLuint vs = compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
     const GLuint fs = vs != 0 ? compile_cg(GL_CG_FRAGMENT_SHADER_EXT, m_fragmentSource, error) : 0;
     if (vs != 0 && fs != 0) {
-      // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
-      // and passes the result on unchecked, so a name the compiler dropped would crash it. The
-      // locations are asked for after the link instead.
-      const GLuint program = glCreateProgram();
-      glAttachShader(program, vs);
-      glAttachShader(program, fs);
-      glLinkProgram(program);
-      GLint ok = GL_FALSE;
-      glGetProgramiv(program, GL_LINK_STATUS, &ok);
-      if (ok == GL_TRUE) {
-        m_id = program;
-      } else {
-        error = "the link failed";
-        glDeleteProgram(program);
-      }
+      link(vs, fs, error);
     }
     if (vs != 0) {
       glDeleteShader(vs);
     }
     if (fs != 0) {
       glDeleteShader(fs);
+    }
+  }
+
+  // The background compiler's GXP binaries, registered with vitaGL's shader patcher
+  // (vglShaderGxpBinary, as its compile does) and linked.
+  bool link_gxp(const CompileJob& job) noexcept {
+    const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    vglShaderGxpBinary(1, &vs, job.vertexGxp.data(), static_cast<GLsizei>(job.vertexGxp.size()));
+    const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    vglShaderGxpBinary(1, &fs, job.fragmentGxp.data(), static_cast<GLsizei>(job.fragmentGxp.size()));
+    std::string error;
+    link(vs, fs, error);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return m_id != 0;
+  }
+
+  void build() noexcept {
+    const auto start = std::chrono::steady_clock::now();
+    std::string error;
+    const auto vertexLength = static_cast<uint32_t>(m_vertexSource.size());
+    const auto fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
+    bool cached = false;
+    bool background = false;
+    if (m_job) {
+      // Compiled in the background. A compile that failed there, or binaries that do not link, are
+      // compiled here after all (the frame waits, as before the background compiler).
+      if (m_job->error.empty() && !m_job->vertexGxp.empty() && !m_job->fragmentGxp.empty() && link_gxp(*m_job)) {
+        background = true;
+        ++g_programStats.background;
+        g_programStats.backgroundMs += m_job->ms;
+      } else {
+        ++g_programStats.fallbacks;
+        if (g_programStats.failuresLogged++ < 3) {
+          Log.warn("a program compiled in the background did not link ({}): compiled on the render worker",
+                   m_job->error.empty() ? "its binaries" : m_job->error);
+        }
+        compile_here(error);
+      }
+      m_job.reset();
+    } else {
+      GLenum format = 0;
+      std::vector<uint8_t> binary;
+      cached = load_cached(m_key, vertexLength, fragmentLength, format, binary);
+      if (cached) {
+        // glProgramBinary rebuilds both shaders from their GXPs and links them.
+        const GLuint program = glCreateProgram();
+        glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
+        GLint ok = GL_FALSE;
+        glGetProgramiv(program, GL_LINK_STATUS, &ok);
+        if (ok == GL_TRUE) {
+          m_id = program;
+        } else {
+          glDeleteProgram(program);
+        }
+      } else {
+        compile_here(error);
+      }
     }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (cached) {
@@ -750,7 +971,8 @@ private:
       if (m_id != 0) {
         save_cached(m_key, vertexLength, fragmentLength, m_id);
       }
-      g_programStats.compileMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      (background ? g_programStats.linkMs : g_programStats.compileMs) +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
     if (m_id == 0) {
       m_state = State::Failed;
@@ -785,6 +1007,7 @@ private:
   uint64_t m_key;
   bool m_cacheChecked = false;
   bool m_inCache = false;
+  std::shared_ptr<CompileJob> m_job; // its background compile, while State::Compiling
   GLuint m_id = 0;
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
   GLint m_vertexLocation = kNoUniform;
@@ -1532,6 +1755,7 @@ bool initialize() noexcept {
   if (!clamped) {
     keep_display_depth();
   }
+  start_compiler();
   log_memory("started");
   return true;
 }
@@ -1660,6 +1884,10 @@ void present(ImDrawData* overlay) noexcept {
              g_presentStats.copyUs / 1000.0,
              g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
              g_renderTargets.load(std::memory_order_relaxed));
+    Log.info("background compiler: {} programs compiled ({:.0f} ms there; linked here in {:.0f} ms), {} compiled on "
+             "the render worker after all, {} waiting",
+             g_programStats.background, g_programStats.backgroundMs, g_programStats.linkMs, g_programStats.fallbacks,
+             g_compiler.waiting());
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");
@@ -1753,3 +1981,23 @@ void frame_end() noexcept {
 }
 } // namespace fifo_clock
 } // namespace aurora::vita_gl
+
+// vitashark's compile and its output's release, for every caller (vitaGL's and ours: the linker
+// wraps both, CMakeLists): a compile holds the compiler from the one to the other
+// (aurora::vita_gl::compiler_lock), as vitashark keeps a compile's state in globals.
+extern "C" {
+SceGxmProgram* __real_shark_compile_shader_extended(const char* src, uint32_t* size, shark_type type, shark_opt opt,
+                                                    int32_t useFastmath, int32_t useFastprecision, int32_t useFastint);
+void __real_shark_clear_output();
+
+SceGxmProgram* __wrap_shark_compile_shader_extended(const char* src, uint32_t* size, shark_type type, shark_opt opt,
+                                                    int32_t useFastmath, int32_t useFastprecision, int32_t useFastint) {
+  aurora::vita_gl::compiler_lock();
+  return __real_shark_compile_shader_extended(src, size, type, opt, useFastmath, useFastprecision, useFastint);
+}
+
+void __wrap_shark_clear_output() {
+  __real_shark_clear_output();
+  aurora::vita_gl::compiler_unlock();
+}
+}
