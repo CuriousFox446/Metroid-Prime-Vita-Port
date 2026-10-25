@@ -919,6 +919,19 @@ after its last use, and that screen inits new texture objects with a new palette
 frame (some 1 MiB a frame of Vita copies). Now on the Vita an object whose texture nothing else
 holds (the content cache let it go, no slot binds it) goes after four idle frames
 (`sweep_object_caches`).
+
+Its run (62f77ec): the crash again on the continue screen ("An error has occurred", C2-12828-1):
+a data abort in `convert_texture` (an allocation that failed), 146 RGBA8 textures on the GPU
+(84 MiB) against 22.7 MiB before the death, 12 MiB of VRAM free and the heap filling after it. The
+material sweep freed 111 materials. Not found by reading: what holds them.
+- One holder fixed blind: the four-idle-frames rule asked that nothing but the object hold the
+  texture, but objects inited with the same content share one, each counting against the others.
+  Now only references from outside the object cache keep it (every fourth frame).
+- For the next run: a `caches:` line (each 300 frames, with the materials line) gives the content
+  cache's and the object cache's entries, distinct textures and their Vita copies' MiB, and the
+  palette caches; the vitaGL memory line adds the textures made and not yet uploaded (pixels on
+  the heap).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
