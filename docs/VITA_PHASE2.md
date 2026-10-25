@@ -1084,6 +1084,21 @@ fallback: the frame waits, as before).
   line: programs compiled in the background, their time there and the links' here, those compiled
   on the render worker after all, and the compiles waiting.
 
+Its run (4abc21d; 173 s): no crash; the user: the death's hitch is small now, though still felt.
+The compiler started; 3 programs compiled in the background, 13.1 s of compiling the frames no
+longer waited out (4.4 s each), none fell back. What the render worker still did: their links,
+426 ms for the first (the card write with its rename in it), and loads from the card (49 in a
+stretch, 17 ms each, up to eight a frame). One present took 1.37 s as a room arrived (592 lists
+retained, 1471 resident calls a frame): untimed (one present in eight is), so not broken down.
+- The card's reads and writes of program binaries are on a thread of their own (`CardIo`). A
+  program's read starts when the FIFO thread makes it (its constructor), so the bytes are in memory
+  by its first draws; the render worker only gives them to vitaGL (glProgramBinary). A compile's
+  binary (glGetProgramBinary, a GL call) goes to the card thread to write; a binary that no longer
+  links is removed there. While its read is under way, a program's draws go fixed-function.
+- A present of 120 ms or more logs `[slow present]`: its program builds (loads, links, compiles
+  here), textures' and meshes' first uploads, fixed-function draws (vitaGL compiles a shader for a
+  combination its cache lacks inside one; the slowest is given), EFB copies, the swap, and the rest.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

@@ -60,6 +60,32 @@ std::atomic<int64_t> g_pendingBytes;
 // Copy textures' render targets made (Texture::render_target, one a size), for the log.
 std::atomic<uint32_t> g_renderTargets;
 
+// A present's costs that are not every draw's (render worker), for the line a slow present logs
+// (present): program builds (loads from the card, links of background compiles, compiles here),
+// textures' and meshes' first uploads, fixed-function draws (vitaGL compiles a shader for a
+// combination its cache lacks inside one), EFB copies and the swap. The timed presents' sections
+// (one in kTimedEvery) missed the 1.4 s presents of a room's arrival.
+struct PresentCosts {
+  uint64_t start = 0;
+  uint64_t buildUs = 0;
+  uint32_t loads = 0;
+  uint32_t links = 0;
+  uint32_t compiles = 0;
+  uint64_t textureUs = 0;
+  uint32_t textures = 0;
+  uint64_t textureBytes = 0;
+  uint64_t meshUs = 0;
+  uint32_t meshes = 0;
+  uint64_t fixedUs = 0;
+  uint64_t fixedMaxUs = 0;
+  uint32_t fixedDraws = 0;
+  uint64_t copyUs = 0;
+  uint32_t copies = 0;
+  uint64_t swapUs = 0;
+};
+PresentCosts g_presentCosts;
+constexpr uint64_t kSlowPresentUs = 120000;
+
 // Presents so far (render worker), and render targets let go waiting for their delete. vitaGL
 // frees a texture's memory at once once nothing references it, and the GPU runs a frame's scenes
 // behind the render worker: deleted as soon as its size changed, a copy's target was drawn into by
@@ -238,6 +264,7 @@ public:
   // sets its sampler state where it changed.
   void bind(const Sampler& sampler) noexcept {
     if (m_id == 0) {
+      const uint64_t start = sceKernelGetProcessTimeWide();
       if (m_width == 0) {
         // A copy texture no copy has filled (its rectangle was empty): transparent black.
         m_width = m_height = 1;
@@ -259,6 +286,9 @@ public:
       g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
       std::vector<uint8_t>().swap(m_cpu);
       settle_pending();
+      g_presentCosts.textureUs += sceKernelGetProcessTimeWide() - start;
+      ++g_presentCosts.textures;
+      g_presentCosts.textureBytes += static_cast<uint64_t>(m_bytes);
     } else {
       glBindTexture(GL_TEXTURE_2D, m_id);
     }
@@ -561,31 +591,38 @@ bool load_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, G
   return ok;
 }
 
-void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLuint program) {
-  // vitaGL's glGetProgramBinary writes the whole binary whatever the buffer's size, so the buffer
-  // is the length vitaGL gives first, with room to spare.
+// A linked program's binary (render worker: GL calls). vitaGL's glGetProgramBinary writes the
+// whole binary whatever the buffer's size, so the buffer is the length vitaGL gives first, with
+// room to spare.
+bool program_binary(GLuint program, GLenum& format, std::vector<uint8_t>& binary) {
   GLint length = 0;
   glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
   if (length <= 0 || static_cast<uint32_t>(length) >= kMaxBinary) {
-    return;
+    return false;
   }
-  std::vector<uint8_t> binary(static_cast<size_t>(length) + 4096);
+  binary.resize(static_cast<size_t>(length) + 4096);
   GLsizei written = 0;
-  GLenum format = 0;
   glGetProgramBinary(program, static_cast<GLsizei>(binary.size()), &written, &format, binary.data());
   if (written <= 0 || static_cast<size_t>(written) > binary.size()) {
-    return;
+    return false;
   }
-  // Written aside and renamed, so a file cut short (the power, a crash) is never read.
+  binary.resize(static_cast<size_t>(written));
+  return true;
+}
+
+// A binary to the card (the card thread), written aside and renamed, so a file cut short (the
+// power, a crash) is never read.
+void write_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum format,
+                  const std::vector<uint8_t>& binary) {
   const std::string path = cache_path(key);
   const std::string temp = path + ".tmp";
   std::FILE* file = std::fopen(temp.c_str(), "wb");
   if (file == nullptr) {
     return;
   }
-  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(written)};
+  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(binary.size())};
   const bool ok = std::fwrite(header, sizeof(header), 1, file) == 1 &&
-                  std::fwrite(binary.data(), static_cast<size_t>(written), 1, file) == 1;
+                  std::fwrite(binary.data(), binary.size(), 1, file) == 1;
   std::fclose(file);
   std::error_code ec;
   if (ok) {
@@ -594,6 +631,135 @@ void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, G
     std::filesystem::remove(temp, ec);
   }
 }
+
+// The card's reads and writes of program binaries, on a thread of their own. On the render worker
+// a load's read, and a compile's write with its rename, held the frame: a compiled program's link
+// took 426 ms with its write (4abc21d's run), and a room bringing dozens of programs read them
+// there. A program's binary is read as soon as the FIFO thread makes the program (Program's
+// constructor), so it is in memory by its first draws; the render worker only gives it to vitaGL.
+enum CardReadState : int { kCardReading, kCardRead, kCardAbsent };
+
+struct CardRead {
+  uint64_t key = 0;
+  uint32_t vertexLength = 0;
+  uint32_t fragmentLength = 0;
+  GLenum format = 0;
+  std::vector<uint8_t> binary;
+  std::atomic<int> state{kCardReading};
+};
+
+class CardIo {
+public:
+  void read(std::shared_ptr<CardRead> request) noexcept {
+    Job job;
+    job.kind = Job::Read;
+    job.read = std::move(request);
+    push(std::move(job));
+  }
+
+  void write(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum format,
+             std::vector<uint8_t> binary) noexcept {
+    Job job;
+    job.kind = Job::Write;
+    job.key = key;
+    job.vertexLength = vertexLength;
+    job.fragmentLength = fragmentLength;
+    job.format = format;
+    job.binary = std::move(binary);
+    push(std::move(job));
+  }
+
+  // A binary that no longer links (another vitaGL, a damaged card): a compile next time.
+  void remove(uint64_t key) noexcept {
+    Job job;
+    job.kind = Job::Remove;
+    job.key = key;
+    push(std::move(job));
+  }
+
+private:
+  struct Job {
+    enum Kind : uint8_t { Read, Write, Remove } kind = Read;
+    std::shared_ptr<CardRead> read;
+    uint64_t key = 0;
+    uint32_t vertexLength = 0;
+    uint32_t fragmentLength = 0;
+    GLenum format = 0;
+    std::vector<uint8_t> binary;
+  };
+
+  void push(Job job) noexcept {
+    {
+      std::lock_guard lock{m_mutex};
+      if (!m_started) {
+        m_started = start();
+      }
+      if (!m_started) {
+        // No thread: done here, as before the card thread.
+        run_job(job);
+        return;
+      }
+      m_jobs.push_back(std::move(job));
+    }
+    m_ready.notify_one();
+  }
+
+  bool start() noexcept {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 128 * 1024);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    const auto run = [](void* self) -> void* {
+      static_cast<CardIo*>(self)->run();
+      return nullptr;
+    };
+    const bool ok = pthread_create(&thread, &attr, run, this) == 0;
+    pthread_attr_destroy(&attr);
+    return ok;
+  }
+
+  static void run_job(Job& job) noexcept {
+    switch (job.kind) {
+    case Job::Read: {
+      CardRead& read = *job.read;
+      const bool ok = load_cached(read.key, read.vertexLength, read.fragmentLength, read.format, read.binary);
+      if (!ok) {
+        std::vector<uint8_t>().swap(read.binary);
+      }
+      read.state.store(ok ? kCardRead : kCardAbsent, std::memory_order_release);
+      break;
+    }
+    case Job::Write:
+      write_cached(job.key, job.vertexLength, job.fragmentLength, job.format, job.binary);
+      break;
+    case Job::Remove: {
+      std::error_code ec;
+      std::filesystem::remove(cache_path(job.key), ec);
+      break;
+    }
+    }
+  }
+
+  void run() noexcept {
+    for (;;) {
+      Job job;
+      {
+        std::unique_lock lock{m_mutex};
+        m_ready.wait(lock, [this] { return !m_jobs.empty(); });
+        job = std::move(m_jobs.front());
+        m_jobs.pop_front();
+      }
+      run_job(job);
+    }
+  }
+
+  std::mutex m_mutex;
+  std::condition_variable m_ready;
+  std::deque<Job> m_jobs;
+  bool m_started = false;
+};
+CardIo g_cardIo;
 
 // The Cg compiler on a thread of its own. A compile took the render worker 1 to 3.8 s, the frame
 // frozen that long (an enemy's death, an effect seen for the first time: 2635657's run), so a
@@ -750,7 +916,14 @@ BackgroundCompiler g_compiler;
 class Program {
 public:
   Program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept
-  : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)), m_key(key) {}
+  : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)), m_key(key) {
+    // Its binary from the card, read on the card thread from now on (CardIo).
+    m_read = std::make_shared<CardRead>();
+    m_read->key = key;
+    m_read->vertexLength = static_cast<uint32_t>(m_vertexSource.size());
+    m_read->fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
+    g_cardIo.read(m_read);
+  }
   ~Program() {
     if (m_id != 0) {
       const GLuint id = m_id;
@@ -758,19 +931,19 @@ public:
     }
   }
 
-  // Render worker: true once linked. A program on the card is loaded while the frame's budget
-  // allows (a few milliseconds each). One that is not goes to the background compiler, and is
-  // linked here once its binaries are made, on the same budget (it costs about as much); its draws
-  // go fixed-function meanwhile. Without the background compiler (it did not start), it is compiled
-  // here, one a frame, the frame waiting the compile out (a second or more).
+  // Render worker: true once linked. A program on the card is loaded, once the card thread has read
+  // it, while the frame's budget allows (a few milliseconds each). One that is not goes to the
+  // background compiler, and is linked here once its binaries are made, on the same budget (it
+  // costs about as much); its draws go fixed-function meanwhile, as they do while its read is under
+  // way. Without the background compiler (it did not start), it is compiled here, one a frame, the
+  // frame waiting the compile out (a second or more).
   bool ready(int& compileBudget, int& loadBudget) noexcept {
     if (m_state == State::Pending) {
-      if (!m_cacheChecked) {
-        std::error_code ec;
-        m_inCache = std::filesystem::exists(cache_path(m_key), ec);
-        m_cacheChecked = true;
+      const int read = m_read->state.load(std::memory_order_acquire);
+      if (read == kCardReading) {
+        return false;
       }
-      if (m_inCache) {
+      if (read == kCardRead) {
         if (loadBudget > 0) {
           --loadBudget;
           build_on_compile_stack();
@@ -848,6 +1021,11 @@ private:
   // of its own with a stack it fits in, while the render worker waits for it: the GL calls stay one
   // at a time, and vitaGL keeps no per-thread context.
   void build_on_compile_stack() noexcept {
+    const uint64_t start = sceKernelGetProcessTimeWide();
+    struct Timed {
+      uint64_t start;
+      ~Timed() { g_presentCosts.buildUs += sceKernelGetProcessTimeWide() - start; }
+    } timed{start};
     constexpr size_t kCompileStack = 2 * 1024 * 1024;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -938,41 +1116,41 @@ private:
         compile_here(error);
       }
       m_job.reset();
-    } else {
-      GLenum format = 0;
-      std::vector<uint8_t> binary;
-      cached = load_cached(m_key, vertexLength, fragmentLength, format, binary);
-      if (cached) {
-        // glProgramBinary rebuilds both shaders from their GXPs and links them.
-        const GLuint program = glCreateProgram();
-        glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
-        GLint ok = GL_FALSE;
-        glGetProgramiv(program, GL_LINK_STATUS, &ok);
-        if (ok == GL_TRUE) {
-          m_id = program;
-        } else {
-          glDeleteProgram(program);
-        }
+    } else if (m_read->state.load(std::memory_order_acquire) == kCardRead) {
+      // The card thread's read: glProgramBinary rebuilds both shaders from their GXPs and links them.
+      cached = true;
+      const GLuint program = glCreateProgram();
+      glProgramBinary(program, m_read->format, m_read->binary.data(), static_cast<GLsizei>(m_read->binary.size()));
+      GLint ok = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (ok == GL_TRUE) {
+        m_id = program;
       } else {
-        compile_here(error);
+        glDeleteProgram(program);
       }
+    } else {
+      compile_here(error);
     }
+    m_read.reset();
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (cached) {
       g_programStats.loadMs += ms;
       ++g_programStats.loaded;
+      ++g_presentCosts.loads;
       if (m_id == 0) {
-        // A binary that no longer links (another vitaGL, a damaged card) goes, for a compile next time.
-        std::error_code ec;
-        std::filesystem::remove(cache_path(m_key), ec);
+        g_cardIo.remove(m_key);
         error = "its binary from the card did not link (removed)";
       }
     } else {
-      if (m_id != 0) {
-        save_cached(m_key, vertexLength, fragmentLength, m_id);
+      // Its binary to the card, written on the card thread.
+      GLenum format = 0;
+      std::vector<uint8_t> binary;
+      if (m_id != 0 && program_binary(m_id, format, binary)) {
+        g_cardIo.write(m_key, vertexLength, fragmentLength, format, std::move(binary));
       }
       (background ? g_programStats.linkMs : g_programStats.compileMs) +=
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      ++(background ? g_presentCosts.links : g_presentCosts.compiles);
     }
     if (m_id == 0) {
       m_state = State::Failed;
@@ -1005,8 +1183,7 @@ private:
   std::string m_vertexSource;
   std::string m_fragmentSource;
   uint64_t m_key;
-  bool m_cacheChecked = false;
-  bool m_inCache = false;
+  std::shared_ptr<CardRead> m_read;   // its binary's read from the card, till built
   std::shared_ptr<CompileJob> m_job; // its background compile, while State::Compiling
   GLuint m_id = 0;
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -1354,7 +1531,12 @@ bool copy_on_gpu(const Draw& draw) noexcept {
 // Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
 GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
   const bool fresh = !mesh.uploaded();
+  const uint64_t start = fresh ? sceKernelGetProcessTimeWide() : 0;
   const GLsizei count = mesh.bind();
+  if (fresh) {
+    g_presentCosts.meshUs += sceKernelGetProcessTimeWide() - start;
+    ++g_presentCosts.meshes;
+  }
   const uint64_t us = g_clock.mark(section);
   if (g_clock.on) {
     SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind())];
@@ -1583,7 +1765,10 @@ void draw_world(const Frame& frame) {
       width = 0;
       ++(made ? g_presentStats.copies : g_presentStats.copiesWaiting);
       g_presentStats.copyPixels += made ? static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height : 0;
-      g_presentStats.copyUs += sceKernelGetProcessTimeWide() - start;
+      const uint64_t copyUs = sceKernelGetProcessTimeWide() - start;
+      g_presentStats.copyUs += copyUs;
+      g_presentCosts.copyUs += copyUs;
+      ++g_presentCosts.copies;
       g_clock.mark(kCopy);
       continue;
     }
@@ -1672,7 +1857,12 @@ void draw_world(const Frame& frame) {
     g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
     g_clock.mark(kFixedState);
+    const uint64_t fixedStart = sceKernelGetProcessTimeWide();
     glDrawArrays(draw.mesh->mode(), 0, count);
+    const uint64_t fixedUs = sceKernelGetProcessTimeWide() - fixedStart;
+    g_presentCosts.fixedUs += fixedUs;
+    g_presentCosts.fixedMaxUs = std::max(g_presentCosts.fixedMaxUs, fixedUs);
+    ++g_presentCosts.fixedDraws;
     g_clock.mark(kFixedDraw);
   }
   enter_fixed_function();
@@ -1847,6 +2037,8 @@ void present(ImDrawData* overlay) noexcept {
   }
   g_clock.on = ++g_clock.presents % kTimedEvery == 0;
   g_clock.start();
+  g_presentCosts = {};
+  g_presentCosts.start = sceKernelGetProcessTimeWide();
   ++g_presentSerial;
   delete_retired_targets();
   // The font texture is made here, on the render worker, from the atlas the game thread built;
@@ -1897,12 +2089,26 @@ void present(ImDrawData* overlay) noexcept {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }
   g_clock.mark(kOverlay);
+  const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(GL_FALSE);
+  const uint64_t end = sceKernelGetProcessTimeWide();
+  g_presentCosts.swapUs = end - swapStart;
   g_clock.mark(kSwap);
   if (g_clock.on) {
     ++g_clock.frames;
   }
   g_clock.on = false;
+  const PresentCosts& c = g_presentCosts;
+  if (const uint64_t total = end - c.start; total >= kSlowPresentUs) {
+    const uint64_t named = c.buildUs + c.textureUs + c.meshUs + c.fixedUs + c.copyUs + c.swapUs;
+    const auto ms = [](uint64_t us) { return static_cast<double>(us) / 1000.0; };
+    Log.info("[slow present] {:.0f} ms: program builds {:.0f} ms ({} loaded, {} linked, {} compiled here); first "
+             "uploads: textures {:.0f} ms ({}, {} KiB), meshes {:.0f} ms ({}); fixed-function draws {:.0f} ms ({}, "
+             "the slowest {:.0f} ms); EFB copies {:.0f} ms ({}); swap {:.0f} ms; the rest {:.0f} ms",
+             ms(total), ms(c.buildUs), c.loads, c.links, c.compiles, ms(c.textureUs), c.textures,
+             c.textureBytes / 1024, ms(c.meshUs), c.meshes, ms(c.fixedUs), c.fixedDraws, ms(c.fixedMaxUs),
+             ms(c.copyUs), c.copies, ms(c.swapUs), ms(total > named ? total - named : 0));
+  }
   report_sections();
 }
 
