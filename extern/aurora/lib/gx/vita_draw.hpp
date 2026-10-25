@@ -23,8 +23,10 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 void release(const void* key) noexcept;
 // A list was retained (GX_AURORA_RESIDENT_RETAIN): which arrays are resident may have changed.
 void retained() noexcept;
-// An EFB copy into a texture that clears (BP 0x52): the clear of its source, in the frame's draws
-// at this point. (The copy itself is not made on the Vita yet: milestone 5.)
+// An EFB copy into a texture (BP 0x52): the copy of its source from the screen, in the frame's
+// draws at this point, into the destination's Vita texture (a depth copy is not made: transparent
+// black stands in for it); then, when it clears, the clear of its source.
+void record_copy() noexcept;
 void record_copy_clear() noexcept;
 // Logs what became of the calls since the last call (FIFO thread, at a frame end).
 void log_stats() noexcept;
@@ -34,6 +36,7 @@ inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noex
 inline bool draw_indexed(GXVtxFmt, u16, std::span<const u8>, std::span<const u8>) noexcept { return false; }
 inline void release(const void*) noexcept {}
 inline void retained() noexcept {}
+inline void record_copy() noexcept {}
 inline void record_copy_clear() noexcept {}
 inline void log_stats() noexcept {}
 #endif

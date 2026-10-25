@@ -166,6 +166,11 @@ public:
   // sets its sampler state where it changed.
   void bind(const Sampler& sampler) noexcept {
     if (m_id == 0) {
+      if (m_width == 0) {
+        // A copy texture no copy has filled (its rectangle was empty): transparent black.
+        m_width = m_height = 1;
+        m_cpu.assign(4, 0);
+      }
       glGenTextures(1, &m_id);
       glBindTexture(GL_TEXTURE_2D, m_id);
       const auto width = static_cast<GLsizei>(m_width);
@@ -194,6 +199,95 @@ public:
     }
   }
 
+  // Render worker: fills it from the screen's `src` as the draws so far left it, on the active
+  // unit (an EFB copy's texture). vitaGL's glReadPixels ends the scene and waits for the GPU, and
+  // gives the rows bottom first; the texture's first row is the rectangle's top, as GX copies it.
+  void copy_screen(const ScreenRect& src, CopyKind kind, bool half, std::vector<uint8_t>& readback) noexcept {
+    const int width = src.width;
+    const int height = src.height;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    readback.resize(static_cast<size_t>(width) * height * 4);
+    glReadPixels(src.x, src.y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+    const int step = half && width > 1 && height > 1 ? 2 : 1;
+    const int outWidth = width / step;
+    const int outHeight = height / step;
+    m_cpu.resize(static_cast<size_t>(outWidth) * outHeight * 4);
+    const size_t stride = static_cast<size_t>(width) * 4;
+    for (int y = 0; y < outHeight; ++y) {
+      const uint8_t* row = readback.data() + static_cast<size_t>(height - 1 - y * step) * stride;
+      uint8_t* out = m_cpu.data() + static_cast<size_t>(y) * outWidth * 4;
+      for (int x = 0; x < outWidth; ++x, out += 4) {
+        int rgba[4];
+        const uint8_t* p = row + static_cast<size_t>(x) * step * 4;
+        if (step == 1) {
+          for (int c = 0; c < 4; ++c) {
+            rgba[c] = p[c];
+          }
+        } else {
+          // GX's box filter: the 2x2 block's mean (the row before in memory is the next one down the screen).
+          const uint8_t* q = p - stride;
+          for (int c = 0; c < 4; ++c) {
+            rgba[c] = (p[c] + p[c + 4] + q[c] + q[c + 4] + 2) >> 2;
+          }
+        }
+        const auto luma = [&rgba] {
+          return static_cast<uint8_t>(std::min(255, (66 * rgba[0] + 129 * rgba[1] + 25 * rgba[2] + 128) / 256 + 16));
+        };
+        uint8_t value;
+        switch (kind) {
+        case CopyKind::Rgba:
+          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = rgba[3];
+          continue;
+        case CopyKind::IntensityAlpha:
+          value = luma();
+          out[0] = out[1] = out[2] = value, out[3] = rgba[3];
+          continue;
+        case CopyKind::RedAlpha:
+          out[0] = out[1] = out[2] = rgba[0], out[3] = rgba[3];
+          continue;
+        case CopyKind::Intensity:
+          value = luma();
+          break;
+        case CopyKind::Red:
+          value = rgba[0];
+          break;
+        case CopyKind::Green:
+          value = rgba[1];
+          break;
+        case CopyKind::Blue:
+          value = rgba[2];
+          break;
+        case CopyKind::Alpha:
+          value = rgba[3];
+          break;
+        default:
+          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = 255;
+          continue;
+        }
+        out[0] = out[1] = out[2] = out[3] = value;
+      }
+    }
+    const bool fresh = m_id == 0;
+    if (fresh) {
+      glGenTextures(1, &m_id);
+      g_textureCount[static_cast<int>(m_format)].fetch_add(1, std::memory_order_relaxed);
+    }
+    glBindTexture(GL_TEXTURE_2D, m_id);
+    if (fresh || static_cast<uint32_t>(outWidth) != m_width || static_cast<uint32_t>(outHeight) != m_height) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, outWidth, outHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
+      m_width = static_cast<uint32_t>(outWidth);
+      m_height = static_cast<uint32_t>(outHeight);
+      const auto bytes = static_cast<int64_t>(m_cpu.size());
+      g_textureBytes[static_cast<int>(m_format)].fetch_add(bytes - m_bytes, std::memory_order_relaxed);
+      m_bytes = bytes;
+      m_samplerSet = false;
+    } else {
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, outWidth, outHeight, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
+    }
+  }
+
 private:
   std::vector<uint8_t> m_cpu;
   uint32_t m_width;
@@ -208,6 +302,10 @@ private:
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
                                       std::vector<uint8_t> level0) noexcept {
   return std::make_shared<Texture>(width, height, format, std::move(level0));
+}
+
+std::shared_ptr<Texture> make_copy_texture() noexcept {
+  return std::make_shared<Texture>(0, 0, TexelFormat::RGBA8, std::vector<uint8_t>());
 }
 
 namespace {
@@ -258,6 +356,7 @@ enum Section {
   kFixedMatrices,
   kFixedState,
   kFixedDraw,
+  kCopy,    // EFB copies: the screen read back (the GPU waited for), converted and uploaded
   kFinish,  // draw_world's state reset for the overlay, the frame handed to the reaper
   kOther,   // the stats log
   kOverlay, // ImGui
@@ -266,7 +365,7 @@ enum Section {
 };
 constexpr const char* kSectionNames[kSectionCount] = {
     "setup",  "build",  "switch",   "upload",   "pointers", "compare", "send",  "textures", "state",   "draw", "switch",
-    "upload", "pointers", "units", "matrices", "state",    "draw",    "finish", "other",   "overlay", "swap"};
+    "upload", "pointers", "units", "matrices", "state",    "draw",    "copies", "finish", "other",   "overlay", "swap"};
 constexpr uint32_t kTimedEvery = 8;
 
 // What made a draw's mesh (make_mesh), and the two draw paths, for the uploads' line.
@@ -712,6 +811,10 @@ struct PresentStats {
   // Draws with their generated program, and draws whose program was not ready (fixed-function).
   uint64_t programDraws = 0;
   uint64_t programPending = 0;
+  // EFB copies made from the screen, the screen pixels they read, and their time (the GPU's wait in it).
+  uint32_t copies = 0;
+  uint64_t copyPixels = 0;
+  uint64_t copyUs = 0;
 };
 PresentStats g_presentStats;
 
@@ -984,6 +1087,25 @@ void draw_world(const Frame& frame) {
       glDepthMask(current.depthWrite ? GL_TRUE : GL_FALSE);
       continue;
     }
+    if (draw.copyTo != nullptr) {
+      // An EFB copy: the read ends vitaGL's scene, so the program in use, its uniforms and the
+      // matrices are all set again at the next draw. The copy's texture is left on unit 0.
+      static std::vector<uint8_t> sReadback;
+      const uint64_t start = sceKernelGetProcessTimeWide();
+      enter_fixed_function();
+      glActiveTexture(GL_TEXTURE0);
+      draw.copyTo->copy_screen(draw.scissor, draw.copyKind, draw.copyHalf, sReadback);
+      bound.units[0] = nullptr;
+      haveProjection = false;
+      for (bool& have : haveTexMatrix) {
+        have = false;
+      }
+      ++g_presentStats.copies;
+      g_presentStats.copyPixels += static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height;
+      g_presentStats.copyUs += sceKernelGetProcessTimeWide() - start;
+      g_clock.mark(kCopy);
+      continue;
+    }
     set_rects(draw.viewport, draw.scissor);
     Program* program = draw.program.program.get();
     if (program != nullptr) {
@@ -1213,8 +1335,8 @@ void present(ImDrawData* overlay) noexcept {
   ImGui_ImplOpenGL2_NewFrame();
   glViewport(0, 0, kWidth, kHeight);
   glDisable(GL_SCISSOR_TEST);
-  // Dark blue, so a screen drawn by this path is told apart from a black one at a glance.
-  glClearColor(0.05f, 0.08f, 0.16f, 1.f);
+  // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first).
+  glClearColor(0.f, 0.f, 0.f, 1.f);
   glClearDepth(1.0);
   // The clear follows the masks; a draw's state may have left them off.
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1227,13 +1349,16 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
-             "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}",
+             "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; "
+             "EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
-             g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept);
+             g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
+             g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
+             g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0);
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");

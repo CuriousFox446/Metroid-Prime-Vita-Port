@@ -875,3 +875,22 @@ some ten seconds. 211 programs, 180 loaded from the card.
   textures line counts such materials.
 - The content cache's budget is 32 MiB on the Vita (`texture::ContentCacheBudgetBytes`).
 - The orange test triangle is gone.
+
+Its run (1022711; 437 s): no crash, the heap steady at about 141 MiB in use (158 taken), the
+death screen survived. 172 programs, 146 loaded from the card. Reports: the borders round the
+picture (the boot logos' sides, the morph ball's strips) dark blue, not black; the pause screen's
+and the map's blurred backdrop missing.
+- The dark blue was present's clear colour, chosen at bring-up to tell this path's screen from a
+  black one; where nothing draws, it showed. Black now, as the GameCube's frame starts.
+- EFB copies are made (the start of milestone 5): an EFB copy into a texture is a draw among the
+  frame's draws (`record_copy`, before its clear), and the render worker reads that rectangle of
+  the screen back there (vitaGL's `glReadPixels`, which ends the scene and waits for the GPU) into
+  the destination's own Vita texture, flipped to GX's top-first rows, halved where the destination
+  is half the source (the blur's copies), and converted as the copy format reads (opaque colour,
+  intensity in all four channels, one channel, alpha only with an alpha pixel format). A material
+  sampling the destination takes that texture; a depth copy is not made and keeps the transparent
+  black stand-in. The copy's order among the draws keeps each draw sampling the copy made before it,
+  the same texture filled again at each copy. This should give the pause screen's and the map's
+  blur, the reflections (`CacheReflection`), the morph ball's shadow and the other copies their
+  pictures. Each copy costs a scene break and a GPU wait: the presents line gives the copies, their
+  pixels and their time, and the draw path line a `copies` section.

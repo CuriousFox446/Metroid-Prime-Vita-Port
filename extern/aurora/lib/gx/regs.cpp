@@ -282,9 +282,13 @@ void bp_efb_copy(u8, u32 value) noexcept {
   if (reg_get(value, 1, 14) != 0) {
     Log.warn("STUB: display copy is not implemented");
   } else {
-    if (clear && vita_gl::active()) {
-      // The Vita path draws to the screen: the copied area's clear, at this point among its draws.
-      vita::record_copy_clear();
+    if (vita_gl::active()) {
+      // The Vita path draws to the screen: the copy from it and the copied area's clear, at this
+      // point among its draws.
+      vita::record_copy();
+      if (clear) {
+        vita::record_copy_clear();
+      }
     }
     copy_tex(g_gxState.texCopyDest, clear);
   }

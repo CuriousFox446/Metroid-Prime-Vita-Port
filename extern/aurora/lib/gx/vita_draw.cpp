@@ -211,7 +211,10 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
-  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy
+  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (a depth copy)
+  u32 copyTextures = 0; // materials given an EFB copy's Vita texture
+  u32 copies = 0;       // EFB copies recorded, and depth copies not made
+  u32 depthCopies = 0;
   // Recorded draws by their state (after the constant alpha is folded in).
   u32 blended = 0;
   u32 alphaTested = 0;
@@ -969,6 +972,21 @@ const std::shared_ptr<vita_gl::Texture>& copy_stand_in() noexcept {
   return sTexture;
 }
 
+// Each EFB copy destination's Vita texture (record_copy), filled on the render worker at every
+// copy to it; the copies' order among the draws keeps each draw sampling the copy made before it.
+// Destinations no longer copies (evicted, cleared) go at log_stats.
+absl::flat_hash_map<const void*, std::shared_ptr<vita_gl::Texture>> sCopyTextures;
+
+const std::shared_ptr<vita_gl::Texture>& copy_texture(const void* dest) noexcept {
+  const auto it = sCopyTextures.find(dest);
+  if (it == sCopyTextures.end()) {
+    ++sStats.copyStandIns;
+    return copy_stand_in();
+  }
+  ++sStats.copyTextures;
+  return it->second;
+}
+
 vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
   const auto wrap = [](GXTexWrapMode mode) -> u16 {
     switch (mode) {
@@ -1305,14 +1323,11 @@ const Material& current_material() noexcept {
         add_missing_copy(*bind.ref, g_gxState.loadedTextures[layout.maps[m]]);
       }
       if (!bind.ref || !bind.ref->vitaTexture) {
-        // An EFB copy's texture (a reflection, the morph ball's shadow) has none until milestone 5
-        // makes the copies: transparent black stands in. A reflection then adds nothing, and the
-        // shadow's alpha test fails. (Drawn fixed-function without it, the shadow washed out
-        // everything round the morph ball; left out, so were the shell and the reflective
-        // surfaces, and the menus' other textures' copies were never uploaded: the heap ran out.)
+        // An EFB copy's texture (a reflection, the morph ball's shadow, the pause screen's blurred
+        // backdrop) has no Vita copy of Aurora's: its own, filled from the screen (record_copy),
+        // or for a depth copy transparent black, which adds nothing and fails an alpha test.
         if (g_gxState.copyTextures.contains(g_gxState.loadedTextures[layout.maps[m]].data)) {
-          ++sStats.copyStandIns;
-          material.programTextures[m] = copy_stand_in();
+          material.programTextures[m] = copy_texture(g_gxState.loadedTextures[layout.maps[m]].data);
           material.programSamplers[m] = sampler_for(bind.texObj);
           continue;
         }
@@ -1690,6 +1705,67 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 
 void retained() noexcept { sPosAnswerKnown = false; }
 
+void record_copy() noexcept {
+  ++sStats.copies;
+  const GXTexFmt fmt = g_gxState.texCopyFmt;
+  if ((fmt & _GX_TF_ZTF) != 0) {
+    ++sStats.depthCopies;
+    return;
+  }
+  // The EFB's alpha is GX's only with an alpha pixel format (the game's has none: opaque).
+  const bool alpha = g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
+  vita_gl::CopyKind kind;
+  switch (fmt) {
+  case GX_TF_I4:
+  case GX_TF_I8:
+    kind = vita_gl::CopyKind::Intensity;
+    break;
+  case GX_TF_IA4:
+  case GX_TF_IA8:
+    kind = alpha ? vita_gl::CopyKind::IntensityAlpha : vita_gl::CopyKind::Intensity;
+    break;
+  case GX_CTF_R4:
+  case GX_CTF_R8:
+    kind = vita_gl::CopyKind::Red;
+    break;
+  case GX_CTF_RA4:
+  case GX_CTF_RA8:
+    kind = alpha ? vita_gl::CopyKind::RedAlpha : vita_gl::CopyKind::Red;
+    break;
+  case GX_CTF_G8:
+    kind = vita_gl::CopyKind::Green;
+    break;
+  case GX_CTF_B8:
+    kind = vita_gl::CopyKind::Blue;
+    break;
+  case GX_CTF_A8:
+    kind = vita_gl::CopyKind::Alpha;
+    break;
+  case GX_TF_RGB5A3:
+  case GX_TF_RGBA8:
+  case GX_CTF_YUVA8:
+    kind = alpha ? vita_gl::CopyKind::Rgba : vita_gl::CopyKind::Rgb;
+    break;
+  default:
+    kind = vita_gl::CopyKind::Rgb;
+    break;
+  }
+  std::shared_ptr<vita_gl::Texture>& texture = sCopyTextures[g_gxState.texCopyDest];
+  if (texture == nullptr) {
+    texture = vita_gl::make_copy_texture();
+  }
+  const gfx::ClipRect& src = g_gxState.texCopySrc;
+  vita_gl::Draw draw;
+  draw.copyTo = texture;
+  draw.copyKind = kind;
+  // Halved where the destination is (GX's box filter: the blur's half-size copy); else the
+  // screen's pixels, sampled at the same coordinates whatever its size.
+  draw.copyHalf = static_cast<s64>(g_gxState.texCopyDstWidth) * 3 < static_cast<s64>(src.width) * 2;
+  draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
+                             static_cast<float>(src.height), true);
+  vita_gl::record(std::move(draw));
+}
+
 void record_copy_clear() noexcept {
   const gfx::ClipRect& src = g_gxState.texCopySrc;
   vita_gl::Draw draw;
@@ -1725,6 +1801,9 @@ void log_stats() noexcept {
   }
   ++sWindow;
   sLastMaterial = nullptr;
+  // Copy destinations Aurora no longer has as copies (a texture loaded there since) go; a material
+  // still holding one keeps its texture till the material goes.
+  absl::erase_if(sCopyTextures, [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first); });
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
            "copy, {} replacing another); key parts worked out: pipeline {}, textures {}; {} cached of {} ({} KiB); "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
@@ -1743,11 +1822,13 @@ void log_stats() noexcept {
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
-           "materials with black for an EFB copy, {} copies made late; "
+           "materials with an EFB copy's texture ({} with black for a depth copy), {} copies made late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
-           "smaller viewport; {} EFB copies' clears; TEV alpha: {} constant ({} rejected), {} from a texture",
-           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyStandIns, s.lateCopies,
-           s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged, s.cornered, s.copyClears, s.alphaConstant,
+           "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears; TEV alpha: {} "
+           "constant ({} rejected), {} from a texture",
+           s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyTextures,
+           s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
+           s.cornered, s.copies, s.depthCopies, sCopyTextures.size(), s.copyClears, s.alphaConstant,
            s.alphaRejected, s.alphaTexture);
   sStats = {};
 }
