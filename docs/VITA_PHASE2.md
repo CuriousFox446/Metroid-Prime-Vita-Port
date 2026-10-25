@@ -1099,6 +1099,31 @@ retained, 1471 resident calls a frame): untimed (one present in eight is), so no
   here), textures' and meshes' first uploads, fixed-function draws (vitaGL compiles a shader for a
   combination its cache lacks inside one; the slowest is given), EFB copies, the swap, and the rest.
 
+Its run (67703de; 163 s): no crash; the user: good, the game's own hitches left for milestone 6.
+195 programs loaded from the card in 26 ms in all (were 2.4 s: the reads were the cost). Four
+presents of 120 ms or more:
+- The first present, 1020 ms, all of it outside the named costs (vitaGL's own first frame).
+- Three as rooms arrived, 123 to 130 ms: about 1200 meshes' first uploads 37 to 49 ms, about 100
+  textures' 19 to 22 ms (1.3 to 2.4 MiB), program builds 26 to 30 ms for 5 or 6 loads (5 ms each,
+  where the loads themselves are a few tenths of a millisecond: a 2 MiB-stack thread made and
+  joined for each build), fixed-function draws 3 to 23 ms (the slowest 18 ms: a vitaGL shader for
+  a new combination, likely), and 21 to 29 ms of the rest.
+- At the end 9 background compiles were waiting (some 4.4 s each, one at a time): their draws stay
+  fixed-function that long.
+
+For milestone 6, then: loads and links without a thread made each time (on the render worker, or
+a build thread kept); meshes uploaded ahead of their first draw, or spread over frames; the
+compiler's throughput (an optimisation level that compiles faster, `SHARK_OPT_SAFE`, or programs
+that need less compiling); and the game's own hitches (its loads, ticks of a second at an area's
+start).
+
+Milestone 5's other items: the game copies no depth (the GX_TF_Z copies are not made, and none is
+asked for) and never calls GXPeekZ, so there are no depth reads to make. Left: indirect textures
+(TEV's indirect stages: particle distortion and heat haze in CElementGen, water surfaces in
+CFluidPlaneCPU, materials in CCubeMaterial and CCubeRenderer), which the generated programs do not
+do (`tev_layout` gives such a material no program: fixed-function, without the distortion); then
+a look at the visors (thermal, X-ray, scan).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
