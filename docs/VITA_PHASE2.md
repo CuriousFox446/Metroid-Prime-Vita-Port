@@ -450,7 +450,7 @@ Map Facility, no crash:
 
 The card cache is done. What a program draw costs the render worker is next.
 
-**Cheaper program draws (built, not yet run on the Vita).** vitaGL keeps each program's
+**Cheaper program draws.** vitaGL keeps each program's
 uniforms and, at a draw, reserves and fills a side's uniform buffer only when a `glUniform` call
 or `glUseProgram` has marked that side since (`dirty` flags in `_glDrawArrays_CustomShadersIMPL`).
 Every program draw sent four arrays, so both sides were filled every draw. Now:
@@ -468,3 +468,18 @@ Every program draw sent four arrays, so both sides were filled every draw. Now:
 The sources change, so the first session compiles every program again (about 22 s of hitches in
 all), saved for later. The log's present line gives uniform arrays sent and kept a side, and
 textures bound and kept.
+
+Its run (f25cc22; stamp 9c985e4-dirty): one session of 12.7 minutes, a first one for these
+sources (54 programs compiled, none failed, 25 s in all), to the Map Facility, no crash. Photos:
+the HUD, scan icons and the map draw right, so the packing holds.
+- The skips work: of program draws' arrays, 84% of the vertex ones and 87% of the fragment ones
+  were left alone, and half the texture binds.
+- They were not the cost: the render worker went from about 34.7 to 32.7 ms a frame in the heavy
+  seconds, 11.5 FPS there (11.3); the game thread still waits on it (begin-wait 24 ms). With about
+  2000 draws in such a frame that is some 16 microseconds a draw, mostly inside vitaGL's draw
+  (`_glDrawArrays_CustomShadersIMPL` patches and sets the vertex program, sets the fragment
+  program, the textures and the streams every draw). Where those microseconds go needs measuring
+  before more is cut.
+- In the morph ball something covers the view until Samus unmorphs (not new). The ball's shadow
+  is drawn into a texture by an EFB copy and projected onto the ground, so this is most likely
+  milestone 5's copies.
