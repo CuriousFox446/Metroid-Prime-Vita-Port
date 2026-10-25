@@ -18,12 +18,15 @@ using vita_gl::kSamplers;
 using vita_gl::kTexCoords;
 
 // The constants' slots (vita_gl::kProgramConstants): konst colours, TEV registers, the channels'
-// material and ambient colours, the alpha compare's references. Sources name them so,
-// uConst[slot], until pack_constants renumbers them to the ones the source reads.
+// material and ambient colours, the alpha compare's references, the fog colour and parameters.
+// Sources name them so, uConst[slot], until pack_constants renumbers them to the ones the source
+// reads.
 constexpr int kConstKonst = 0;
 constexpr int kConstReg = 4;
 constexpr int kConstMat0 = 8;
 constexpr int kConstAlphaRef = 12;
+constexpr int kConstFogColor = 13;
+constexpr int kConstFogParams = 14;
 
 // Programs by the hash of their source (an unordered_map's elements stay where they are), and by
 // the hash of the GX state they were made from.
@@ -364,6 +367,37 @@ std::string fragment_body(const TevLayout& layout) {
     }
     body += fmt::format("  if (!{}) {{\n    discard;\n  }}\n", pass);
   }
+  const GXFogType fogType = s.fog.type;
+  if (fogType != GX_FOG_NONE) {
+    // GX's fog, as Aurora's shaders have it (shader.cpp): from the depth the EFB keeps (the
+    // vertex program's clip z and w; the viewport's depth range is in the projection, so GL's
+    // window depth is GX's), perspective A / (B - z) or orthographic A * z, less C, then the
+    // type's curve, the colour mixed toward the fog's. The range adjustment is not applied.
+    body += "  float fogZ = vFog.x / vFog.y * 0.5 + 0.5;\n";
+    body += (fogType & 0x08) != 0 ? fmt::format("  float fogF = uConst[{0}].x * fogZ;\n", kConstFogParams)
+                                  : fmt::format("  float fogF = uConst[{0}].x / (uConst[{0}].y - fogZ);\n",
+                                                kConstFogParams);
+    body += fmt::format("  fogF = saturate(fogF - uConst[{}].z);\n", kConstFogParams);
+    switch (fogType & 0x07) {
+    case GX_FOG_PERSP_EXP:
+      body += "  float fog = 1.0 - exp2(-8.0 * fogF);\n";
+      break;
+    case GX_FOG_PERSP_EXP2:
+      body += "  float fog = 1.0 - exp2(-8.0 * fogF * fogF);\n";
+      break;
+    case GX_FOG_PERSP_REVEXP:
+      body += "  float fog = exp2(-8.0 * (1.0 - fogF));\n";
+      break;
+    case GX_FOG_PERSP_REVEXP2:
+      body += "  fogF = 1.0 - fogF;\n  float fog = exp2(-8.0 * fogF * fogF);\n";
+      break;
+    default:
+      body += "  float fog = fogF;\n";
+      break;
+    }
+    body += fmt::format("  R{0}.rgb = lerp(saturate(R{0}.rgb), uConst[{1}].rgb, saturate(fog));\n", lastOut,
+                        kConstFogColor);
+  }
   body += fmt::format("  return R{};\n", lastOut);
   // The result's register is read at the end (its alpha may be from before the last stage).
   registerRead[lastOut] = true;
@@ -546,7 +580,7 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   // normal), normalisation and whether it has a post-transform matrix; the lights each channel
   // part sums.
   u32 fixed[] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
-                 static_cast<u32>(compare.op), 0, 0, 0, 0, 0, 0, 0, 0};
+                 static_cast<u32>(compare.op), 0, 0, 0, 0, 0, 0, 0, 0, static_cast<u32>(s.fog.type)};
   for (int c = 0; c < layout.coordCount; ++c) {
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
@@ -606,6 +640,12 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   }
   if (normals) {
     add(vertexParams, "float3 aNrm");
+  }
+  if (body.find("vFog") != std::string::npos) {
+    // The fog's depth: clip z and w, divided per fragment (GL's window depth).
+    add(vertexOuts, "float2 out vFog : TEXCOORD4");
+    vertexBody += "  vFog = float2(dot(uVert[2], p), dot(uVert[3], p));\n";
+    add(fragmentParams, "float2 vFog : TEXCOORD4");
   }
   for (int c = 0; c < layout.coordCount; ++c) {
     // As GX generates a coordinate: the source times the matrix (z 1 after a 2x4 one), normalised
@@ -706,10 +746,17 @@ void tev_constants(const TevProgram& program, float out[vita_gl::kProgramConstan
       value[1] = rgb[1];
       value[2] = rgb[2];
       value[3] = (ambient ? alpha.ambColor : alpha.matColor)[3];
-    } else {
+    } else if (slot == kConstAlphaRef) {
       value[0] = static_cast<float>(s.alphaCompare.ref0 & 0xFF);
       value[1] = static_cast<float>(s.alphaCompare.ref1 & 0xFF);
       value[2] = 0.f;
+      value[3] = 0.f;
+    } else if (slot == kConstFogColor) {
+      std::memcpy(value, &s.fog.color, sizeof(float[4]));
+    } else {
+      value[0] = s.fog.a;
+      value[1] = s.fog.b;
+      value[2] = s.fog.c;
       value[3] = 0.f;
     }
   }

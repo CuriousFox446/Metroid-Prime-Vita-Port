@@ -1141,7 +1141,7 @@ PipelineKey pipeline_key() noexcept {
       static_cast<u32>(s.blendFacDst),  static_cast<u32>(s.blendOp), static_cast<u32>(s.depthFunc),
       s.depthCompare,  s.depthUpdate,   s.colorUpdate,  s.alphaUpdate, static_cast<u32>(s.cullMode),
       static_cast<u32>(alpha.comp0),    alpha.ref0,     static_cast<u32>(alpha.op),
-      static_cast<u32>(alpha.comp1),    alpha.ref1,
+      static_cast<u32>(alpha.comp1),    alpha.ref1,     static_cast<u32>(s.fog.type),
   };
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);

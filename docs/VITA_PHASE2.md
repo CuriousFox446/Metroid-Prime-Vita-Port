@@ -945,6 +945,17 @@ the content cache's budget), the materials 3 (none held by them alone), the heap
 Once its palette textures were cached the continue screen ran at about 50 FPS; the slowness the
 user saw was the death itself and play before it (10 to 20 FPS, a second at 3), the general speed.
 
+Milestone 4, fog. The generated programs fog as GX does and Aurora's shaders have it (shader.cpp):
+the vertex program passes clip z and w (`vFog`), the fragment program takes GL's window depth from
+them (the viewport's depth range is folded into the projection, so it is the EFB's z), then
+perspective A / (B - z) or orthographic A * z, less C, clamped, through the type's curve (linear,
+exp, exp2 and their reverses), the TEV result mixed toward the fog colour. Two more constants (the
+fog colour; A, B, C), read per draw; the fog type is in the program's key and the material's
+pipeline key (its register sets DirtyPipeline). Not done: GX's range adjustment (the game never
+sets it), and fog for the fixed-function path (draws waiting for their program, or without one).
+Every world material whose area fogs needs a new program: some hundreds of compiles, one a frame
+at about a second each, unfogged until then and kept on the card after.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
