@@ -919,7 +919,7 @@ after its last use, and that screen inits new texture objects with a new palette
 frame (some 1 MiB a frame of Vita copies). Now on the Vita an object whose texture nothing else
 holds (the content cache let it go, no slot binds it) goes after four idle frames
 (`sweep_object_caches`).
-- The VPK has a LiveArea: the emblem for the icon, Samus with the logo in the bottom left for the
-  background (the logo's WebP decodes without alpha on Windows: its alpha was rebuilt from its
-  brightness, over black), and the emblem for the gate (the start button's picture, which the
-  system places and frames itself). 8-bit indexed PNGs, in `platform/vita/sce_sys`.
+- The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
+  `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
+  for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
+  the bubble is deleted and the VPK installed again; the saves are in `ux0:data/MetroidPrime`.)
