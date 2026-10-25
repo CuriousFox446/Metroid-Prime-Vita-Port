@@ -1009,6 +1009,33 @@ offsets and fog range adjustment (unused by the game), the skinned templates' pe
 (kept per vertex, so their corners hardly dedupe). Milestone 5 (EFB copies and effects) is next;
 the screen copies are made but off (`kScreenCopies`), at 7 to 22 ms each through glReadPixels.
 
+## Milestone 5: copies and effects
+
+EFB copies on the GPU (`copy_on_gpu`, vita_gl.cpp). vitaGL's `glBlitNamedFramebuffer` from the
+display (framebuffer 0) samples the display's own colour surface (each has a `backgroundTex`) and
+draws into a framebuffer: the copy's rectangle goes into a scratch texture of the copy's size
+(bilinear for a halved copy: at exactly half, GX's 2x2 box filter). The blit leaves blending, the
+scissor and the colour mask as they are: all three are turned off around it. Then a pass of our
+own (a small Cg program, `kCopyProgramKey`, built and kept on the card like a generated one)
+draws the scratch into the copy's texture through a colour matrix and offset, the copy format's
+(opaque colour: alpha 1; colour and alpha; intensity, GX's luma with its 16 offset, in all four
+channels; intensity and alpha; one channel), the rows flipped to GX's (`kFlipCopies`: a copy's
+first row is its rectangle's top). A copy texture is a render target (`Texture::render_target`), a
+new texture and framebuffer, so a GXM render target of vitaGL's, at each new size. Depth copies
+are still not made (the black stand-in).
+- Each copy is two scenes of its own: the display's scene ends at it and begins again at the next
+  draw. Nothing waits for the GPU. But GXM keeps a depth surface across scenes only with forced
+  load and store, and this vitaGL's build has neither (its `STORE_DEPTH_STENCIL` off; the library
+  imports no `sceGxmDepthStencilSurfaceSetForceLoadMode`): the draws after a copy would have tested
+  against a cleared depth. `keep_display_depth` (initialize) does what that option does, on
+  vitaGL's `gxm_depth_stencil_surface` (a global of its gxm.c): the buffer filled with 0x80 (the
+  mask update bits), load and store forced. `kKeepDisplayDepth` turns it off.
+- After a copy the render worker sets everything again: the fixed-function arrays (off during the
+  pass, which draws with a program), the scissor test, the rectangles, the state, unit 0's
+  texture, the matrices and the line width.
+- The presents line: copies made, those waiting for the pass's program (its first build), the
+  pixels, the render worker's time, and render targets made.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

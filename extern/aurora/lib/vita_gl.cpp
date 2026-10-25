@@ -5,7 +5,11 @@
 #include "internal.hpp"
 
 #include <vitaGL.h>
+#include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
+
+// vitaGL's display depth surface (its gxm.c), which its API does not give: keep_display_depth.
+extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 
 #include "backends/imgui_impl_opengl2.h"
 
@@ -50,6 +54,8 @@ std::atomic<int64_t> g_textureBytes[2];
 // Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
 std::atomic<int64_t> g_pendingCount;
 std::atomic<int64_t> g_pendingBytes;
+// Copy textures made render targets (a new size each time: Texture::render_target), for the log.
+std::atomic<uint32_t> g_renderTargets;
 
 // vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
 void log_memory(const char* when) {
@@ -162,6 +168,10 @@ public:
   }
   ~Texture() {
     settle_pending();
+    if (m_framebuffer != 0) {
+      const GLuint framebuffer = m_framebuffer;
+      gfx::render_worker::enqueue_work([framebuffer] { glDeleteFramebuffers(1, &framebuffer); });
+    }
     if (m_id != 0) {
       const GLuint id = m_id;
       gfx::render_worker::enqueue_work([id] { glDeleteTextures(1, &id); });
@@ -218,94 +228,44 @@ public:
     }
   }
 
-  // Render worker: fills it from the screen's `src` as the draws so far left it, on the active
-  // unit (an EFB copy's texture). vitaGL's glReadPixels ends the scene and waits for the GPU, and
-  // gives the rows bottom first; the texture's first row is the rectangle's top, as GX copies it.
-  void copy_screen(const ScreenRect& src, CopyKind kind, bool half, std::vector<uint8_t>& readback) noexcept {
-    const int width = src.width;
-    const int height = src.height;
-    if (width <= 0 || height <= 0) {
-      return;
+  // Render worker: makes it a `width` x `height` RGBA8 texture with a framebuffer to draw into (an
+  // EFB copy's texture, or a copy's scratch), anew when the size changes; returns the framebuffer.
+  // The texture is left bound to the active unit. (Each size is a GXM render target of vitaGL's.)
+  GLuint render_target(int width, int height) noexcept {
+    if (m_framebuffer != 0 && m_width == static_cast<uint32_t>(width) && m_height == static_cast<uint32_t>(height)) {
+      return m_framebuffer;
     }
-    readback.resize(static_cast<size_t>(width) * height * 4);
-    glReadPixels(src.x, src.y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
-    const int step = half && width > 1 && height > 1 ? 2 : 1;
-    const int outWidth = width / step;
-    const int outHeight = height / step;
-    m_cpu.resize(static_cast<size_t>(outWidth) * outHeight * 4);
-    const size_t stride = static_cast<size_t>(width) * 4;
-    for (int y = 0; y < outHeight; ++y) {
-      const uint8_t* row = readback.data() + static_cast<size_t>(height - 1 - y * step) * stride;
-      uint8_t* out = m_cpu.data() + static_cast<size_t>(y) * outWidth * 4;
-      for (int x = 0; x < outWidth; ++x, out += 4) {
-        int rgba[4];
-        const uint8_t* p = row + static_cast<size_t>(x) * step * 4;
-        if (step == 1) {
-          for (int c = 0; c < 4; ++c) {
-            rgba[c] = p[c];
-          }
-        } else {
-          // GX's box filter: the 2x2 block's mean (the row before in memory is the next one down the screen).
-          const uint8_t* q = p - stride;
-          for (int c = 0; c < 4; ++c) {
-            rgba[c] = (p[c] + p[c + 4] + q[c] + q[c + 4] + 2) >> 2;
-          }
-        }
-        const auto luma = [&rgba] {
-          return static_cast<uint8_t>(std::min(255, (66 * rgba[0] + 129 * rgba[1] + 25 * rgba[2] + 128) / 256 + 16));
-        };
-        uint8_t value;
-        switch (kind) {
-        case CopyKind::Rgba:
-          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = rgba[3];
-          continue;
-        case CopyKind::IntensityAlpha:
-          value = luma();
-          out[0] = out[1] = out[2] = value, out[3] = rgba[3];
-          continue;
-        case CopyKind::RedAlpha:
-          out[0] = out[1] = out[2] = rgba[0], out[3] = rgba[3];
-          continue;
-        case CopyKind::Intensity:
-          value = luma();
-          break;
-        case CopyKind::Red:
-          value = rgba[0];
-          break;
-        case CopyKind::Green:
-          value = rgba[1];
-          break;
-        case CopyKind::Blue:
-          value = rgba[2];
-          break;
-        case CopyKind::Alpha:
-          value = rgba[3];
-          break;
-        default:
-          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = 255;
-          continue;
-        }
-        out[0] = out[1] = out[2] = out[3] = value;
-      }
+    const int kind = static_cast<int>(m_format);
+    if (m_framebuffer != 0) {
+      glDeleteFramebuffers(1, &m_framebuffer);
+      m_framebuffer = 0;
     }
-    const bool fresh = m_id == 0;
-    if (fresh) {
-      glGenTextures(1, &m_id);
-      g_textureCount[static_cast<int>(m_format)].fetch_add(1, std::memory_order_relaxed);
+    if (m_id != 0) {
+      glDeleteTextures(1, &m_id);
+      m_id = 0;
+      g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
+      g_textureBytes[kind].fetch_sub(m_bytes, std::memory_order_relaxed);
     }
+    std::vector<uint8_t>().swap(m_cpu);
+    settle_pending();
+    glGenTextures(1, &m_id);
     glBindTexture(GL_TEXTURE_2D, m_id);
-    if (fresh || static_cast<uint32_t>(outWidth) != m_width || static_cast<uint32_t>(outHeight) != m_height) {
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, outWidth, outHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
-      m_width = static_cast<uint32_t>(outWidth);
-      m_height = static_cast<uint32_t>(outHeight);
-      const auto bytes = static_cast<int64_t>(m_cpu.size());
-      g_textureBytes[static_cast<int>(m_format)].fetch_add(bytes - m_bytes, std::memory_order_relaxed);
-      m_bytes = bytes;
-      m_samplerSet = false;
-    } else {
-      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, outWidth, outHeight, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
-    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    m_width = static_cast<uint32_t>(width);
+    m_height = static_cast<uint32_t>(height);
+    m_bytes = static_cast<int64_t>(width) * height * 4;
+    g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
+    g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
+    m_samplerSet = false;
+    glGenFramebuffers(1, &m_framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_id, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g_renderTargets.fetch_add(1, std::memory_order_relaxed);
+    return m_framebuffer;
   }
+
+  GLuint id() const noexcept { return m_id; }
 
 private:
   void settle_pending() noexcept {
@@ -322,6 +282,7 @@ private:
   uint32_t m_height;
   TexelFormat m_format;
   GLuint m_id = 0;
+  GLuint m_framebuffer = 0; // render_target's
   int64_t m_bytes = 0;
   Sampler m_sampler{};
   bool m_samplerSet = false;
@@ -593,6 +554,15 @@ public:
            g_uniformStats.fragment);
   }
 
+  // Render worker, this program in use: its constants from `rows` (a pass of this file's own, not
+  // a frame's draw), which a frame's draw sends over again after.
+  void send_constants(const float (*rows)[4], int count) noexcept {
+    if (m_constantsLocation != kNoUniform) {
+      glUniform4fv(m_constantsLocation, count, rows[0]);
+    }
+    m_constantsSent = {};
+  }
+
 private:
   enum class State : uint8_t { Pending, Ready, Failed };
 
@@ -841,8 +811,10 @@ struct PresentStats {
   // Draws with their generated program, and draws whose program was not ready (fixed-function).
   uint64_t programDraws = 0;
   uint64_t programPending = 0;
-  // EFB copies made from the screen, the screen pixels they read, and their time (the GPU's wait in it).
+  // EFB copies made on the GPU, those left for the pass's program to be built, the screen pixels
+  // copied, and the render worker's time for them (the GPU's is not in it).
   uint32_t copies = 0;
+  uint32_t copiesWaiting = 0;
   uint64_t copyPixels = 0;
   uint64_t copyUs = 0;
 };
@@ -918,6 +890,165 @@ struct BoundTextures {
     ++g_uniformStats.textureBinds;
   }
 };
+
+// EFB copies on the GPU (milestone 5). The display's rectangle is blitted into a scratch texture
+// of the copy's size (vitaGL's blit samples the display surface itself; bilinear for a halved copy,
+// which at exactly half is GX's 2x2 box filter), then a pass of this file's draws the scratch into
+// the copy's texture through a colour matrix, the copy format's (opaque colour, intensity, one
+// channel...), with the rows flipped to GX's (a copy's first row is its rectangle's top). Each is a
+// scene of its own: the display's scene ends at the copy (its depth kept: initialize) and the next
+// draw begins it again. Nothing waits: the GPU runs the scenes in order. (The CPU readback this
+// replaces, glReadPixels, waited for the GPU: 7 to 22 ms a copy.)
+constexpr bool kFlipCopies = true;
+
+constexpr const char* kCopyVertex = "void main(float3 aPos, float2 aUv0, float4 out vPos : POSITION,\n"
+                                    "          float2 out vUv0 : TEXCOORD0) {\n"
+                                    "  vPos = float4(aPos, 1.0);\n"
+                                    "  vUv0 = aUv0;\n"
+                                    "}\n";
+constexpr const char* kCopyFragment =
+    "float4 main(float2 vUv0 : TEXCOORD0, uniform sampler2D uTex0 : TEXUNIT0, uniform float4 uConst[5]) : COLOR {\n"
+    "  float4 t = tex2D(uTex0, vUv0);\n"
+    "  return float4(dot(uConst[0], t), dot(uConst[1], t), dot(uConst[2], t), dot(uConst[3], t)) + uConst[4];\n"
+    "}\n";
+// The pass's program by a key of its own (its binary goes on the card like a generated one's).
+constexpr uint64_t kCopyProgramKey = 0x7669746163707931ull; // "vitacpy1"
+std::shared_ptr<Program> g_copyProgram;
+std::shared_ptr<Texture> g_copyScratch;
+
+// A copy format's colour matrix (four rows, each dotted with the source's RGBA) and offset, as
+// GX's copy converts: intensity is its YUV luma (with 16's offset), in all four channels as Aurora
+// samples an I8 texture; the opaque formats' alpha is 1 (the game's EFB has none).
+void copy_matrix(CopyKind kind, float rows[5][4]) noexcept {
+  std::memset(rows, 0, sizeof(float[5][4]));
+  constexpr float kLuma[4] = {66.f / 256.f, 129.f / 256.f, 25.f / 256.f, 0.f};
+  constexpr float kLumaOffset = 16.f / 255.f;
+  const auto set_row = [&rows](int r, const float (&v)[4]) { std::memcpy(rows[r], v, sizeof(v)); };
+  const auto channel = [](int c) {
+    std::array<float, 4> v{};
+    v[c] = 1.f;
+    return v;
+  };
+  switch (kind) {
+  case CopyKind::Rgba:
+    for (int r = 0; r < 4; ++r) {
+      rows[r][r] = 1.f;
+    }
+    break;
+  case CopyKind::Intensity:
+  case CopyKind::IntensityAlpha:
+    for (int r = 0; r < 4; ++r) {
+      set_row(r, kLuma);
+      rows[4][r] = kLumaOffset;
+    }
+    if (kind == CopyKind::IntensityAlpha) {
+      std::memset(rows[3], 0, sizeof(rows[3]));
+      rows[3][3] = 1.f;
+      rows[4][3] = 0.f;
+    }
+    break;
+  case CopyKind::Red:
+  case CopyKind::RedAlpha:
+  case CopyKind::Green:
+  case CopyKind::Blue:
+  case CopyKind::Alpha: {
+    const int c = kind == CopyKind::Green ? 1 : kind == CopyKind::Blue ? 2 : kind == CopyKind::Alpha ? 3 : 0;
+    const auto v = channel(c);
+    for (int r = 0; r < 4; ++r) {
+      std::memcpy(rows[r], v.data(), sizeof(float[4]));
+    }
+    if (kind == CopyKind::RedAlpha) {
+      std::memset(rows[3], 0, sizeof(rows[3]));
+      rows[3][3] = 1.f;
+    }
+    break;
+  }
+  default: // Rgb
+    for (int r = 0; r < 3; ++r) {
+      rows[r][r] = 1.f;
+    }
+    rows[4][3] = 1.f;
+    break;
+  }
+}
+
+// Render worker, in the fixed-function arrays' absence (draw_world turns them off around it):
+// makes `draw`'s copy. False when the pass's program is not built yet (the copy's texture keeps
+// what it had). Leaves the display's framebuffer bound, no program in use, and the scissor test,
+// blending, depth, culling and the colour mask as the pass left them (draw_world sets its own
+// again).
+bool copy_on_gpu(const Draw& draw) noexcept {
+  const ScreenRect& src = draw.scissor;
+  if (src.width <= 0 || src.height <= 0) {
+    return true;
+  }
+  if (!g_copyProgram) {
+    g_copyProgram = make_program(kCopyVertex, kCopyFragment, kCopyProgramKey);
+  }
+  int compiles = 1;
+  int loads = 1;
+  if (!g_copyProgram->ready(compiles, loads)) {
+    return false;
+  }
+  const bool half = draw.copyHalf && src.width > 1 && src.height > 1;
+  const int width = half ? src.width / 2 : src.width;
+  const int height = half ? src.height / 2 : src.height;
+  if (!g_copyScratch) {
+    g_copyScratch = make_copy_texture();
+  }
+  glActiveTexture(GL_TEXTURE0);
+  const GLuint scratch = g_copyScratch->render_target(width, height);
+  const GLuint target = draw.copyTo->render_target(width, height);
+
+  // The blit: a draw of vitaGL's, which leaves blending, the scissor and the colour mask as they are.
+  glDisable(GL_SCISSOR_TEST);
+  glDisable(GL_BLEND);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glBlitNamedFramebuffer(0, scratch, src.x, src.y, src.x + src.width, src.y + src.height, 0, 0, width, height,
+                         GL_COLOR_BUFFER_BIT, half ? GL_LINEAR : GL_NEAREST);
+
+  // The conversion, into the copy's texture.
+  glBindFramebuffer(GL_FRAMEBUFFER, target);
+  glViewport(0, 0, width, height);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  glDisable(GL_CULL_FACE);
+  Program& program = *g_copyProgram;
+  glUseProgram(program.id());
+  float rows[5][4];
+  copy_matrix(draw.copyKind, rows);
+  program.send_constants(rows, 5);
+  glBindTexture(GL_TEXTURE_2D, g_copyScratch->id());
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  struct CopyVertex {
+    float pos[3];
+    float uv[2];
+  };
+  // The output's bottom row (GL's first) takes the scratch's top: GX's first row.
+  const float bottom = kFlipCopies ? 1.f : 0.f;
+  const float top = 1.f - bottom;
+  const CopyVertex quad[6] = {
+      {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, -1.f, 0.f}, {1.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},
+      {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},     {{-1.f, 1.f, 0.f}, {0.f, top}},
+  };
+  const GLint pos = program.attr(kAttrPos);
+  const GLint uv = program.attr(kAttrUv0);
+  if (pos >= 0 && uv >= 0) {
+    glEnableVertexAttribArray(pos);
+    glEnableVertexAttribArray(uv);
+    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].pos);
+    glVertexAttribPointer(uv, 2, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].uv);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisableVertexAttribArray(pos);
+    glDisableVertexAttribArray(uv);
+  }
+  glUseProgram(0);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  return true;
+}
 
 // Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
 GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
@@ -1122,20 +1253,35 @@ void draw_world(const Frame& frame) {
       continue;
     }
     if (draw.copyTo != nullptr) {
-      // An EFB copy: the read ends vitaGL's scene, so the program in use, its uniforms and the
-      // matrices are all set again at the next draw. The copy's texture is left on unit 0.
-      static std::vector<uint8_t> sReadback;
+      // An EFB copy (copy_on_gpu): scenes of its own, so the program in use, its uniforms, the
+      // matrices, the rectangles, the line width and the state are all set again at the next draw.
+      // Its pass draws with a program, without the fixed-function arrays.
       const uint64_t start = sceKernelGetProcessTimeWide();
       enter_fixed_function();
-      glActiveTexture(GL_TEXTURE0);
-      draw.copyTo->copy_screen(draw.scissor, draw.copyKind, draw.copyHalf, sReadback);
+      glDisableClientState(GL_VERTEX_ARRAY);
+      glDisableClientState(GL_COLOR_ARRAY);
+      for (int unit = 0; unit < kTexUnits; ++unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+      }
+      const bool made = copy_on_gpu(draw);
+      glEnableClientState(GL_VERTEX_ARRAY);
+      glEnableClientState(GL_COLOR_ARRAY);
+      for (int unit = 0; unit < kTexUnits; ++unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+      }
+      glEnable(GL_SCISSOR_TEST);
+      viewport = scissor = ScreenRect{0, 0, 0, 0};
+      apply_state(current, current, true);
       bound.units[0] = nullptr;
       haveProjection = false;
       for (bool& have : haveTexMatrix) {
         have = false;
       }
-      ++g_presentStats.copies;
-      g_presentStats.copyPixels += static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height;
+      width = 0;
+      ++(made ? g_presentStats.copies : g_presentStats.copiesWaiting);
+      g_presentStats.copyPixels += made ? static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height : 0;
       g_presentStats.copyUs += sceKernelGetProcessTimeWide() - start;
       g_clock.mark(kCopy);
       continue;
@@ -1257,6 +1403,32 @@ void draw_world(const Frame& frame) {
   glLoadIdentity();
 }
 
+// GXM keeps a depth surface's contents from one scene to the next only when told to (forced load
+// and store), and this vitaGL's build does not (its STORE_DEPTH_STENCIL is off): each of the
+// display's scenes began with its depth cleared. An EFB copy ends the display's scene within a
+// frame (copy_on_gpu), and the draws after it would have tested against nothing. As vitaGL's own
+// STORE_DEPTH_STENCIL does: the buffer's mask update bits set, then load and store forced, for a
+// few MiB of the GPU's bandwidth at each scene's start and end. Off: kKeepDisplayDepth.
+constexpr bool kKeepDisplayDepth = true;
+
+void keep_display_depth() {
+  SceGxmDepthStencilSurface& surface = gxm_depth_stencil_surface;
+  if (!kKeepDisplayDepth) {
+    return;
+  }
+  if (surface.depthData == nullptr) {
+    Log.warn("vitaGL's display has no depth buffer of its own: its depth is not kept across scenes");
+    return;
+  }
+  // As vitaGL allocates it: the size aligned to GXM's tiles, a word a sample (no multisampling).
+  const auto align = [](size_t value, size_t to) { return (value + to - 1) / to * to; };
+  const size_t bytes = align(kWidth, SCE_GXM_TILE_SIZEX) * align(kHeight, SCE_GXM_TILE_SIZEY) * 4;
+  std::memset(surface.depthData, 0x80, bytes);
+  sceGxmDepthStencilSurfaceSetForceLoadMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+  sceGxmDepthStencilSurfaceSetForceStoreMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+  Log.info("the display's depth is kept across scenes ({} KiB)", bytes / 1024);
+}
+
 } // namespace
 
 bool initialize() noexcept {
@@ -1278,6 +1450,9 @@ bool initialize() noexcept {
     Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
   } else {
     Log.info("vitaGL started at {}x{}", kWidth, kHeight);
+  }
+  if (!clamped) {
+    keep_display_depth();
   }
   log_memory("started");
   return true;
@@ -1393,15 +1568,18 @@ void present(ImDrawData* overlay) noexcept {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
              "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; "
-             "EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
+             "EFB copies on the GPU: {} ({} waiting for their pass's program; {:.0f} kpixels; render worker "
+             "{:.1f} ms, {:.2f} ms each; {} render targets made in all)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
-             g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
-             g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0);
+             g_presentStats.copies, g_presentStats.copiesWaiting, g_presentStats.copyPixels / 1000.0,
+             g_presentStats.copyUs / 1000.0,
+             g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
+             g_renderTargets.load(std::memory_order_relaxed));
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");

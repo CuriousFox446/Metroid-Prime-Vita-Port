@@ -1796,10 +1796,9 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 
 void retained() noexcept { sPosAnswerKnown = false; }
 
-// EFB copies read back from the screen: off till milestone 5. Each took 7 to 22 ms (glReadPixels
-// ends vitaGL's scene and waits for the GPU), about one a frame in play, and the pause screen's
-// backdrop came out flat grey; materials sampling a copy take the black stand-in meanwhile.
-constexpr bool kScreenCopies = false;
+// EFB copies, made on the GPU (vita_gl.cpp, copy_on_gpu). Off, materials sampling a copy take the
+// black stand-in. (Read back with glReadPixels, which waits for the GPU, each took 7 to 22 ms.)
+constexpr bool kScreenCopies = true;
 
 void record_copy() noexcept {
   ++sStats.copies;
