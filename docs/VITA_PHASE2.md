@@ -1124,6 +1124,47 @@ CFluidPlaneCPU, materials in CCubeMaterial and CCubeRenderer), which the generat
 do (`tev_layout` gives such a material no program: fixed-function, without the distortion); then
 a look at the visors (thermal, X-ray, scan).
 
+**Indirect textures.** The generated programs do TEV's indirect stages as Aurora's shaders do
+(shader.cpp, shader_info.cpp):
+- `tev_layout` lays out each indirect stage a TEV stage reads (its offset matrix, or the bump alpha
+  as its raster colour; one past `numIndStages` is not read), its coordinates and texture taking
+  slots as a stage's do. A program reading any samples each once: its coordinates in texels (GX's
+  SU scale, `texCoordScales`: the size less one), scaled by the stage's `GX_ITS_n`, back over the
+  texture's size; the texel's a, b and g as S, T and U, 0 to 255.
+- A stage's TEV coordinate (`tev_coord_code`): S, T and U to the format's bits (the floor of /8,
+  /16, /32 for `GX_ITF_5`, 4, 3), biased (-128 for `GX_ITF_8`, else +1, by the bias's S, T and U),
+  through the matrix (a static one's two rows, scaled by 2^scaleExp; a dynamic S or T one, the
+  stage's coordinate in texels times S or T over 256): an offset in texels, added to the stage's
+  own coordinate in texels, wrapped (fmod 256 to 16, or 0); or that added to the last stage's
+  (add-previous). The stage samples there over its texture's size. With no matrix and nothing
+  added, the coordinate stays as it is (Aurora's simple coordinates).
+- `GX_ALPHA_BUMP(N)`: the raster colour is the stage's S, T or U, its low bits masked off by the
+  format (`bump_alpha`).
+- The constants (`tev_constants`, read for each draw): a texel scale for each coordinate slot, a
+  size for each texture slot, the three matrices (two rows each). The material keeps GX's
+  coordinate generators and textures by slot (`coordIds`, `mapIds`); its key takes the indirect
+  stages on and their textures.
+
+The water takes up to seven textures and coordinate sets (both lightmaps, two patterns, the colour
+layer, the environment map and its bump map; every coordinate made from the position or normal), so
+a program now has 8 textures (vitaGL has 16 units: 172-byte records in its 2752-byte table) and 7
+coordinate slots (`kProgramCoords`). The first four may read the mesh's four sets: a set from a
+vertex attribute laid out past them trades places with one made from the position or normal. The
+fog's depth and the lit sums go in the TEXCOORD varyings past the slots (GXM has ten), where they
+were with four slots or fewer, so the programs made before keep their sources and card binaries.
+The material records grew by 384 KiB in all (`sMaterials`, 1.5 MiB).
+
+A fixed-function unit sampling an EFB copy now takes the Vita's copy (`resolve_units`), as a
+program does: before, the material was left out altogether, with no draw and no program (the 108
+draws "left out for a texture without a Vita copy" in 67703de's log: the death's collapse to a dot,
+and the space warp's pass, which would have stayed so). The log adds a line: the materials worked
+out that read an indirect stage, those left fixed-function (a layout a program cannot draw, or a
+texture without a Vita copy), the indirect programs; and the first two indirect programs' sources.
+What should change: the space warp at an item pickup and the Phazon suit's warp (CCubeRenderer),
+the thermal visor's cold noise, particles with an indirect texture (CElementGen: heat haze,
+distortion), the water's colour layer and environment map offset by its bump map
+(CFluidPlaneCPU), and the reflections that warp (CCubeMaterial).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

@@ -24,6 +24,7 @@
 namespace aurora::gx::vita {
 namespace {
 constexpr Module Log{"aurora::gx::vita"};
+using vita_gl::kProgramCoords;
 using vita_gl::kSamplers;
 using vita_gl::kTexCoords;
 using vita_gl::kTexUnits;
@@ -215,8 +216,10 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
-  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (a depth copy)
-  u32 copyTextures = 0; // materials given an EFB copy's Vita texture
+  // EFB copy textures given to materials (a unit's or a program's), and of them the transparent
+  // black stand-in (a depth copy).
+  u32 copyStandIns = 0;
+  u32 copyTextures = 0;
   u32 loneTextures = 0; // materials freed for holding a texture nothing else held (drop_lone_textures)
   u32 copies = 0;       // EFB copies recorded, and depth copies not made
   u32 depthCopies = 0;
@@ -264,6 +267,12 @@ struct Stats {
   // The material key's parts worked out again (material_hash).
   u32 keyPipelines = 0;
   u32 keyTextures = 0;
+  // Materials worked out whose stages read an indirect stage (water, heat haze, distortion), and
+  // of those the ones left without a program: a layout a program cannot draw, or a texture
+  // without a Vita copy.
+  u32 indirectMaterials = 0;
+  u32 indirectUnsupported = 0;
+  u32 indirectWithoutCopy = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -1037,7 +1046,8 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
   const int chosen = choose_units(choices);
   texAttrs = kNoTexAttrs;
   if (layout.supported) {
-    for (int c = 0; c < layout.coordCount; ++c) {
+    // The slots past the mesh's sets are made from the position or the normal (tev_layout).
+    for (int c = 0; c < std::min(layout.coordCount, kTexCoords); ++c) {
       // A set made from the position or the normal has no coordinates of its own in the mesh.
       const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
       texAttrs[c] = tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 ? static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))
@@ -1065,12 +1075,17 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
       if (bind.ref && !bind.ref->vitaTexture) {
         add_missing_copy(*bind.ref, g_gxState.loadedTextures[choices[i].map]);
       }
-      if (!bind.ref || !bind.ref->vitaTexture) {
+      // An EFB copy's texture has no Vita copy of Aurora's: the Vita's own (record_copy), as a
+      // program takes it (current_material). Without it the space warp's and the death effect's
+      // passes over a copy of the screen were left out.
+      const void* data = g_gxState.loadedTextures[choices[i].map].data;
+      const bool copy = (!bind.ref || !bind.ref->vitaTexture) && g_gxState.copyTextures.contains(data);
+      if (!copy && (!bind.ref || !bind.ref->vitaTexture)) {
         ++sStats.unitsWithoutCopy;
         return -1;
       }
       vita_gl::TexUnit& unit = units[unitCount];
-      unit.texture = bind.ref->vitaTexture;
+      unit.texture = copy ? copy_texture(data) : bind.ref->vitaTexture;
       unit.sampler = sampler_for(bind.texObj);
       // The first unit takes the vertex colour, so it always modulates; a later one adds when its
       // stage does.
@@ -1113,7 +1128,10 @@ struct Material {
   std::shared_ptr<vita_gl::Texture> programTextures[kSamplers];
   vita_gl::Sampler programSamplers[kSamplers] = {};
   int coordCount = 0;
-  const TcgConfig* coordTcgs[kTexCoords] = {};
+  const TcgConfig* coordTcgs[kProgramCoords] = {};
+  // GX's coordinate generators and textures by the program's slots (its indirect constants).
+  u8 coordIds[kProgramCoords] = {};
+  u8 mapIds[kSamplers] = {};
   vita_gl::RenderState programState;
   u32 used = 0; // sMaterialClock at its last use, for the set's replacement
 };
@@ -1162,16 +1180,23 @@ PipelineKey pipeline_key() noexcept {
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   h = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), h);
   // What a generated program reads besides the stages: the swap tables, the channels' setup and
-  // whether indirect stages are on.
+  // the indirect stages on (their coordinates, textures and scales).
   h = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), h);
   h = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), h);
   h = XXH3_64bits_withSeed(&s.numIndStages, sizeof(s.numIndStages), h);
+  const u32 indStages = std::min<u32>(s.numIndStages, MaxIndStages);
+  h = XXH3_64bits_withSeed(s.indStages.data(), indStages * sizeof(IndStage), h);
   u32 usedMaps = 0;
   u32 usedCoords = 0;
   for (u32 i = 0; i < stages; ++i) {
     const TevStage& stage = s.tevStages[i];
     usedMaps |= stage.texMapId < MaxTextures ? 1u << stage.texMapId : 0;
     usedCoords |= stage.texCoordId < MaxTexCoord ? 1u << stage.texCoordId : 0;
+  }
+  for (u32 i = 0; i < indStages; ++i) {
+    const IndStage& ind = s.indStages[i];
+    usedMaps |= ind.texMapId < MaxTextures ? 1u << ind.texMapId : 0;
+    usedCoords |= ind.texCoordId < MaxTexCoord ? 1u << ind.texCoordId : 0;
   }
   PipelineKey key;
   key.usedMaps = usedMaps;
@@ -1320,8 +1345,11 @@ const Material& current_material() noexcept {
   material.window = sWindow;
   material.used = sMaterialClock;
   const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
+  sStats.indirectMaterials += layout.indirect ? 1 : 0;
+  sStats.indirectUnsupported += layout.indirect && !layout.supported ? 1 : 0;
   material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs, layout);
   if (material.unitCount < 0) {
+    sStats.indirectWithoutCopy += layout.indirect && layout.supported ? 1 : 0;
     return material;
   }
   material.state = render_state();
@@ -1358,6 +1386,10 @@ const Material& current_material() noexcept {
       material.coordCount = layout.coordCount;
       for (int c = 0; c < layout.coordCount; ++c) {
         material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
+        material.coordIds[c] = static_cast<u8>(layout.coords[c]);
+      }
+      for (int m = 0; m < layout.samplerCount; ++m) {
+        material.mapIds[m] = static_cast<u8>(layout.maps[m]);
       }
       material.programState = material.state;
       material.programState.alphaFunc = kGlAlways;
@@ -1366,6 +1398,7 @@ const Material& current_material() noexcept {
         state.blend = false;
       }
     } else {
+      sStats.indirectWithoutCopy += layout.indirect ? 1 : 0;
       for (auto& texture : material.programTextures) {
         texture.reset();
       }
@@ -1483,7 +1516,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
     const TevProgram& program = *material.program;
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
-    tev_constants(program, constants);
+    tev_constants(program, material.coordIds, material.mapIds, constants);
     // Never more than the program declares (the generators' types made both counts).
     inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
     inputs.constantCount = static_cast<u8>(program.constantCount);
@@ -2001,6 +2034,10 @@ void log_stats() noexcept {
              s.litDraws != 0 ? double(s.litRows) / s.litDraws : 0.0,
              unlitDraws != 0 ? double(s.unlitRows) / unlitDraws : 0.0, programs.lit, programs.all,
              programs.lightCombinations, s.skinnedCorners, s.skinnedDistinct);
+    Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
+             "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}",
+             s.indirectMaterials, s.indirectUnsupported + s.indirectWithoutCopy, s.indirectUnsupported,
+             s.indirectWithoutCopy, programs.indirect, programs.all);
   }
   Log.info("immediate draws: {} drawn, {} lines, {} points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
@@ -2012,7 +2049,7 @@ void log_stats() noexcept {
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
-           "materials with an EFB copy's texture ({} with black: a depth copy, or screen copies off), {} copies made "
+           "EFB copy textures given to materials ({} black: a depth copy, or screen copies off), {} copies made "
            "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
            "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears; TEV alpha: {} "

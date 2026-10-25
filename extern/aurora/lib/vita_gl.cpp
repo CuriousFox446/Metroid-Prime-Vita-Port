@@ -967,7 +967,7 @@ public:
 
   GLuint id() const noexcept { return m_id; }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
-  GLint samplers[kSamplers] = {-1, -1, -1, -1};
+  GLint samplers[kSamplers] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
   // Render worker, this program in use: sets its constants unless they are the rows it was sent
   // last. vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only
@@ -1165,7 +1165,8 @@ private:
       }
       m_vertexLocation = glGetUniformLocation(m_id, "uVert");
       m_constantsLocation = glGetUniformLocation(m_id, "uConst");
-      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3"};
+      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3",
+                                                               "uTex4", "uTex5", "uTex6", "uTex7"};
       glUseProgram(m_id);
       for (int i = 0; i < kSamplers; ++i) {
         samplers[i] = glGetUniformLocation(m_id, kSamplerNames[i]);

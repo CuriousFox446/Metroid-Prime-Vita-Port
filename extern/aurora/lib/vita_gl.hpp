@@ -34,9 +34,13 @@ struct ScreenRect {
 // The texture units a fixed-function draw can use: vitaGL's fixed-function pipeline has two
 // texture coordinate sets, each with its own texture matrix.
 constexpr int kTexUnits = 2;
-// The texture coordinate sets a mesh carries, and the textures a generated program samples.
+// The texture coordinate sets a mesh carries, a generated program's coordinate slots (the first
+// kTexCoords may read the mesh's sets; the rest are made from the position or the normal) and the
+// textures it samples. Seven slots, with the fog's depth and two lit channels, are GXM's ten
+// TEXCOORD varyings; the water's surfaces take seven textures and coordinates.
 constexpr int kTexCoords = 4;
-constexpr int kSamplers = 4;
+constexpr int kProgramCoords = 7;
+constexpr int kSamplers = 8;
 
 // A vertex of the Vita path's meshes: position, its texture coordinate sets, the colour the
 // fixed-function draw uses (the face's shading in it), the vertex colour as GX has it (white
@@ -134,15 +138,17 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
 
 // The constants a generated program may read, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
-// the alpha compare's references (x, y), the fog colour and the fog's A, B and C. A program
-// declares only those its source reads, packed in this order (gx/vita_tev.cpp).
-constexpr int kProgramConstants = 15;
+// the alpha compare's references (x, y), the fog colour and the fog's A, B and C; for indirect
+// texturing, each coordinate slot's texel scale (GX's SU scale), each texture slot's size and the
+// three indirect matrices (two rows each). A program declares only those its source reads, packed
+// in this order (gx/vita_tev.cpp).
+constexpr int kProgramConstants = 15 + kProgramCoords + kSamplers + 6;
 // The vertex program's (gx/vita_tev.cpp, tev_vertex_rows): the projection times the position
 // matrix (4 rows); each texture coordinate set's matrix (3 rows of 4 for a projective set, else 2)
 // and its post-transform matrix (3 more, when it has one); for a lit program the position and
 // normal matrices (3 rows each); and each lit channel's lights, five rows apiece (position,
 // direction, colour, angle and distance attenuation), up to GX's eight for each of four channels.
-constexpr int kProgramVertexConstants = 4 + 6 * kTexCoords + 6 + 4 * 8 * 5;
+constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5;
 
 // A draw's generated program and what it reads: its textures (sampler slot order), where its
 // vertex and fragment constants are among its frame's constant rows (record_constants; as many as
