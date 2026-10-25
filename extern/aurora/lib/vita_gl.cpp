@@ -1296,6 +1296,9 @@ struct PresentStats {
   uint32_t copiesWaiting = 0;
   uint64_t copyPixels = 0;
   uint64_t copyUs = 0;
+  // The most draws in one of the display's scenes (an EFB copy ends one): what GXM's ring buffers
+  // hold until the scene is drawn (initialize).
+  uint32_t maxSceneDraws = 0;
 };
 PresentStats g_presentStats;
 
@@ -1716,6 +1719,7 @@ void draw_world(const Frame& frame) {
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
+  uint32_t sceneDraws = 0;
   for (const Draw& draw : draws) {
     if (draw.clear) {
       // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
@@ -1764,6 +1768,7 @@ void draw_world(const Frame& frame) {
         have = false;
       }
       width = 0;
+      sceneDraws = 0;
       ++(made ? g_presentStats.copies : g_presentStats.copiesWaiting);
       g_presentStats.copyPixels += made ? static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height : 0;
       const uint64_t copyUs = sceKernelGetProcessTimeWide() - start;
@@ -1774,6 +1779,7 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
+    g_presentStats.maxSceneDraws = std::max(g_presentStats.maxSceneDraws, ++sceneDraws);
     if (draw.width != width && draw.mesh->mode() != GL_TRIANGLES) {
       glLineWidth(static_cast<GLfloat>(draw.width));
       glPointSize(static_cast<GLfloat>(draw.width));
@@ -1933,6 +1939,16 @@ bool initialize() noexcept {
   // The generated programs' own cache (Program, load_cached).
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
+  // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
+  // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
+  // KiB) were made for scenes of a few hundred plain draws; the water's generated programs (four
+  // to seven textures each) put 1100 to 4300 draws in one scene, and a run in Tallon Overworld
+  // ended in a GPU hang with the water black at some angles (VITA_PHASE2.md). Four times each; the
+  // vertex ring (2 MiB) twice.
+  vglSetFragmentBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_RING_BUFFER_SIZE);
+  vglSetVDMBufferSize(4 * SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE);
+  vglSetVertexBufferSize(2 * SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE);
+  vglSetUSSEBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
@@ -2066,7 +2082,7 @@ void present(ImDrawData* overlay) noexcept {
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
              "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; "
              "EFB copies on the GPU: {} ({} waiting for their pass's program; {:.0f} kpixels; render worker "
-             "{:.1f} ms, {:.2f} ms each; {} render targets made in all)",
+             "{:.1f} ms, {:.2f} ms each; {} render targets made in all); most draws in a scene: {}",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
@@ -2076,7 +2092,7 @@ void present(ImDrawData* overlay) noexcept {
              g_presentStats.copies, g_presentStats.copiesWaiting, g_presentStats.copyPixels / 1000.0,
              g_presentStats.copyUs / 1000.0,
              g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
-             g_renderTargets.load(std::memory_order_relaxed));
+             g_renderTargets.load(std::memory_order_relaxed), g_presentStats.maxSceneDraws);
     Log.info("background compiler: {} programs compiled ({:.0f} ms there; linked here in {:.0f} ms), {} compiled on "
              "the render worker after all, {} waiting",
              g_programStats.background, g_programStats.backgroundMs, g_programStats.linkMs, g_programStats.fallbacks,

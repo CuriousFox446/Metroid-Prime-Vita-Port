@@ -1174,6 +1174,23 @@ the linker wraps `invoke_splashscreen` (CMakeLists) with an empty function, its 
 off and the first scene and the swaps take their usual paths, as in vitaGL's system app mode, which
 skips it too.
 
+Its run (05d9f7c; about 10 minutes from a save in Tallon Overworld): the front end, file select and
+the save worked; the title screen ran at 7 to 10 FPS, its movie's decoding on the CPU (the front
+end's tick 85 to 100 ms a frame). Indirect textures: 33 indirect programs built, none failed, no
+material left fixed-function; the water drew with its program (the environment bump map offsetting
+the colour layer). The user saw the water black at some angles, and the run ended walking around
+there in a GPU crash (`GPUCRASH` dump): no CPU thread faulted (the render worker waiting in GXM), the
+GPU's MMU reported no fault (`BIF_FAULT` 0) and its event status the timer: a hang, not a bad
+address. Memory was steady (heap 143 MiB, 34 MiB of textures, render targets barely growing).
+- What changed there: the water, drawn fixed-function before (one or two textures), is now a
+  program draw with four to seven textures, 1100 draws a frame (one window's scene reached 4310).
+  GXM keeps a scene's draws (the fragment ring: each draw's textures and fragment state; the VDM
+  ring: its commands) until the GPU draws the scene, and the default rings (fragment 512 KiB, VDM
+  128 KiB) were made for scenes of a few hundred plain draws. vitaGL takes their sizes before
+  `vglInit`: now fragment 2 MiB, VDM 512 KiB, vertex 4 MiB, fragment USSE 64 KiB (`initialize`).
+  The presents line adds the most draws in one display scene (an EFB copy ends one).
+- Not yet known whether that is the cause; the black water is the other half of the test.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
