@@ -478,6 +478,11 @@ void GXSetDrawTag(u32 asset, u32 model, u32 material) {
 extern "C++" {
 namespace aurora::gx::draw_tag {
 void flush() noexcept {
+#ifdef AURORA_VITA_GL
+  // The Vita path reads no tag, and Aurora's warnings that would name a draw with it come from
+  // its WebGPU draws: some 1500 tags a heavy frame, each written here and read on the FIFO thread.
+  return;
+#endif
   if (sWantedDrawTag == sSentDrawTag || fifo::in_display_list()) {
     return;
   }

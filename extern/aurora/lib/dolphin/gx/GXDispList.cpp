@@ -108,6 +108,11 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   // Write display list contents to the FIFO
   aurora::gx::fifo::write_data(data, nbytes);
   aurora::gx::fifo::publish();
+#ifdef AURORA_VITA_GL
+  // Its bytes may set arrays (a list recorded with GXSetArray or GDSetArray): the processor's
+  // arrays are no longer known to be what was sent last. (A retained list's are draws alone.)
+  aurora::gx::sent_arrays::forget();
+#endif
   if (!aurora::gx::fifo::in_display_list()) {
     ++sSourceCounts[sSource].lists;
     sSourceCounts[sSource].listBytes += nbytes;

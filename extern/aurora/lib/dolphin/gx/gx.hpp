@@ -18,6 +18,13 @@ namespace aurora::gx::draw_tag {
 void flush() noexcept;
 } // namespace aurora::gx::draw_tag
 
+namespace aurora::gx::sent_arrays {
+// The PS Vita: GXSetArray leaves out an array the FIFO thread already has as it was sent last
+// (GXGeometry.cpp). Forgets what was sent, for a display list sent as its bytes, which may set
+// arrays itself (GXCallDisplayList).
+void forget() noexcept;
+} // namespace aurora::gx::sent_arrays
+
 static inline aurora::Vec4<float> from_gx_color(GXColor color) {
   return {
       static_cast<float>(color.r) / 255.f,

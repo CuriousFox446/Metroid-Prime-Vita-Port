@@ -748,3 +748,15 @@ reported wrong.
   material, the pipeline part was worked out 30,000 to 43,000 times, the texture part about once
   each (every texture object load sets DirtyTextures). The texture part still hashes all eight
   slots' 48 bytes, those no stage names included.
+
+**Fewer extension commands at the source (built, not yet run on the Vita).**
+- Draw tags: `draw_tag::flush` sends nothing on the Vita. Only Aurora's WebGPU draws read a tag
+  (to name a draw in a warning); some 1500 a heavy frame were written by the game thread and
+  read by the FIFO thread. A tag set inside a display list is still recorded into it.
+- Array loads: `GXSetArray` remembers, by CP index, the array last sent outside display lists
+  (pointer, size, stride, byte order) and leaves out a set that repeats it: the processor treats
+  such a set as no change anyway (it keeps its cached range). A display list records every set.
+  A display list sent as its bytes (`GXCallDisplayList` of one not retained) may set arrays itself,
+  so what was sent is forgotten after one; a retained list's bytes are draws alone (the Vita
+  decode fails on anything else, and none has).
+- The [ops] line shows what is left.

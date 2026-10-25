@@ -1,6 +1,9 @@
 #include "gx.hpp"
 #include "__gx.h"
+#include "../../gx/fifo.hpp"
 #include "dolphin/gd/GDGeometry.h"
+
+#include <array>
 
 static inline void SETVCDATTR(GXAttr attr, GXAttrType type) {
   switch (attr) {
@@ -219,6 +222,29 @@ void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
   __gx->dirtyVAT |= static_cast<u8>(1 << vtxfmt);
 }
 
+#ifdef AURORA_VITA_GL
+// The arrays as last sent to the FIFO thread (outside display lists), by CP index. The game sets
+// most attribute arrays for each model, those its descriptor does not index too: some 6000 loads
+// a heavy frame, each written here and read there. Setting an array to what it is changes nothing
+// in the processor (command_processor.cpp keeps its cached range then), so the repeat is left out.
+extern "C++" {
+namespace {
+struct SentArray {
+  bool known = false;
+  const void* data = nullptr;
+  u32 size = 0;
+  u8 stride = 0;
+  bool le = false;
+};
+std::array<SentArray, 16> sSentArrays;
+} // namespace
+
+namespace aurora::gx::sent_arrays {
+void forget() noexcept { sSentArrays = {}; }
+} // namespace aurora::gx::sent_arrays
+}
+#endif
+
 void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le) {
   GXAttr cpAttr = static_cast<GXAttr>(attr);
   if (attr == GX_VA_NBT) {
@@ -227,6 +253,17 @@ void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le) {
   u32 cpIdx = cpAttr - GX_VA_POS;
 
   assert((cpIdx & ~0xF) == 0);
+
+#ifdef AURORA_VITA_GL
+  // A display list records every set: it may be called with other arrays in place.
+  if (!aurora::gx::fifo::in_display_list()) {
+    SentArray& sent = sSentArrays[cpIdx];
+    if (sent.known && sent.data == data && sent.size == size && sent.stride == stride && sent.le == le) {
+      return;
+    }
+    sent = {true, data, size, stride, le};
+  }
+#endif
 
   // Write array base
   GX_WRITE_AURORA(GX_AURORA_LOAD_ARRAYBASE | cpIdx);
