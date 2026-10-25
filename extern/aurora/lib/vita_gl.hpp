@@ -77,6 +77,8 @@ std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelForm
                                       std::vector<uint8_t> level0) noexcept;
 // An EFB copy's texture: filled from the screen on the render worker, at each copy draw to it.
 std::shared_ptr<Texture> make_copy_texture() noexcept;
+// The memory a texture's level holds (on the GPU once uploaded), for Aurora's cache budgets.
+uint64_t texture_bytes(const Texture& texture) noexcept;
 
 // How an EFB copy reads the screen into its RGBA texture, from GX's copy format: the colour
 // (alpha opaque, as the game's EFB has none), the colour and alpha, intensity (GX's YUV luma,

@@ -894,3 +894,19 @@ and the map's blurred backdrop missing.
   blur, the reflections (`CacheReflection`), the morph ball's shadow and the other copies their
   pictures. Each copy costs a scene break and a GPU wait: the presents line gives the copies, their
   pixels and their time, and the draw path line a `copies` section.
+
+Its run (a303747): the borders black; the pause screen's and the map's backdrop flat grey, not the
+blurred scene; and a crash, `std::bad_alloc` after the heap went from 129 to 178 MiB in use in four
+seconds, on a screen of 27 immediate draws making 1.7 new palette textures a frame (as the death
+screen two builds before).
+- The copies: about one a frame in play, 7 to 22 ms each (a few thousand pixels: the cost is the
+  scene's end and the wait for the GPU, not the read). Off till milestone 5 (`kScreenCopies` in
+  vita_draw.cpp): the black stand-in again. A copy made on the GPU (a blit into a texture's
+  framebuffer, no wait) is the next try, and the grey backdrop to look into.
+- The leak: Aurora's content cache counted a texture by the null device's texture (a palette
+  texture: a byte a texel), while the Vita's copy is RGBA8, four times that: the 32 MiB budget held
+  over 100 MiB of the Vita's. And a cached material keeps its textures until its window ends (300
+  frames) or its set replaces it: about 20 s of a new texture each frame. The GPU's memory full,
+  vitaGL took the heap's. Now the content cache counts the Vita copy's bytes
+  (`texture_handle_size`), and every 16 frames the materials holding a texture nothing else holds
+  (no cache, no frame in flight) are freed (`drop_lone_textures`; the materials line counts them).

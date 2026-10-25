@@ -213,6 +213,7 @@ struct Stats {
   u32 unitsWithoutCopy = 0;
   u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (a depth copy)
   u32 copyTextures = 0; // materials given an EFB copy's Vita texture
+  u32 loneTextures = 0; // materials freed for holding a texture nothing else held (drop_lone_textures)
   u32 copies = 0;       // EFB copies recorded, and depth copies not made
   u32 depthCopies = 0;
   // Recorded draws by their state (after the constant alpha is folded in).
@@ -1705,9 +1706,17 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 
 void retained() noexcept { sPosAnswerKnown = false; }
 
+// EFB copies read back from the screen: off till milestone 5. Each took 7 to 22 ms (glReadPixels
+// ends vitaGL's scene and waits for the GPU), about one a frame in play, and the pause screen's
+// backdrop came out flat grey; materials sampling a copy take the black stand-in meanwhile.
+constexpr bool kScreenCopies = false;
+
 void record_copy() noexcept {
   ++sStats.copies;
   const GXTexFmt fmt = g_gxState.texCopyFmt;
+  if (!kScreenCopies) {
+    return;
+  }
   if ((fmt & _GX_TF_ZTF) != 0) {
     ++sStats.depthCopies;
     return;
@@ -1789,6 +1798,62 @@ void release(const void* key) noexcept {
   sSkinned.erase(key);
 }
 
+// A material keeps its textures alive, and one unused lasts till its window ends (log_stats) or its
+// set replaces it: on a screen making a new palette texture each frame (the death screen) the
+// materials kept some 20 s of them, past the GPU's memory and then the heap's. A material holding a
+// texture that Aurora's caches let go and no frame in flight draws (only this material holds it)
+// goes now. Only this thread hands out a material's textures, so a count of its own is final.
+void drop_lone_textures() noexcept {
+  for (Material& material : sMaterials) {
+    if (!material.valid) {
+      continue;
+    }
+    const vita_gl::Texture* held[kTexUnits + kSamplers];
+    long counts[kTexUnits + kSamplers];
+    int distinct = 0;
+    const auto note = [&](const std::shared_ptr<vita_gl::Texture>& texture) {
+      if (texture == nullptr) {
+        return;
+      }
+      for (int i = 0; i < distinct; ++i) {
+        if (held[i] == texture.get()) {
+          ++counts[i];
+          return;
+        }
+      }
+      held[distinct] = texture.get();
+      counts[distinct++] = 1;
+    };
+    for (const vita_gl::TexUnit& unit : material.units) {
+      note(unit.texture);
+    }
+    for (const auto& texture : material.programTextures) {
+      note(texture);
+    }
+    bool lone = false;
+    const auto alone = [&](const std::shared_ptr<vita_gl::Texture>& texture) {
+      for (int i = 0; texture != nullptr && i < distinct; ++i) {
+        if (held[i] == texture.get()) {
+          lone |= texture.use_count() <= counts[i];
+        }
+      }
+    };
+    for (const vita_gl::TexUnit& unit : material.units) {
+      alone(unit.texture);
+    }
+    for (const auto& texture : material.programTextures) {
+      alone(texture);
+    }
+    if (lone) {
+      if (sLastMaterial == &material) {
+        sLastMaterial = nullptr;
+      }
+      material = {};
+      ++sStats.loneTextures;
+    }
+  }
+}
+
 void log_stats() noexcept {
   const Stats& s = sStats;
   // Materials no draw used this window go, with the textures they hold.
@@ -1805,10 +1870,11 @@ void log_stats() noexcept {
   // still holding one keeps its texture till the material goes.
   absl::erase_if(sCopyTextures, [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first); });
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
-           "copy, {} replacing another); key parts worked out: pipeline {}, textures {}; {} cached of {} ({} KiB); "
+           "copy, {} replacing another, {} freed holding a texture nothing else held); key parts worked out: "
+           "pipeline {}, textures {}; {} cached of {} ({} KiB); "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
            "program ({} generated), their constant arrays {} recorded, {} repeating the last",
-           s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions,
+           s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
            tev_program_count(), s.constantsRecorded, s.constantsShared);
@@ -1822,7 +1888,8 @@ void log_stats() noexcept {
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
-           "materials with an EFB copy's texture ({} with black for a depth copy), {} copies made late; "
+           "materials with an EFB copy's texture ({} with black: a depth copy, or screen copies off), {} copies made "
+           "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
            "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears; TEV alpha: {} "
            "constant ({} rejected), {} from a texture",

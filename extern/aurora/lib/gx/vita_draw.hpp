@@ -30,6 +30,8 @@ void record_copy() noexcept;
 void record_copy_clear() noexcept;
 // Logs what became of the calls since the last call (FIFO thread, at a frame end).
 void log_stats() noexcept;
+// Frees the cached materials holding a texture nothing else holds (FIFO thread, at a frame end).
+void drop_lone_textures() noexcept;
 #else
 inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
@@ -39,5 +41,6 @@ inline void retained() noexcept {}
 inline void record_copy() noexcept {}
 inline void record_copy_clear() noexcept {}
 inline void log_stats() noexcept {}
+inline void drop_lone_textures() noexcept {}
 #endif
 } // namespace aurora::gx::vita

@@ -159,6 +159,12 @@ public:
     }
   }
 
+  uint64_t bytes() const noexcept {
+    const uint64_t width = m_width;
+    const uint64_t height = m_height;
+    return m_format == TexelFormat::BC1 ? ((width + 3) / 4) * ((height + 3) / 4) * 8 : width * height * 4;
+  }
+
   // Render worker: true when binding it again with `sampler` would change nothing.
   bool holds(const Sampler& sampler) const noexcept { return m_id != 0 && m_samplerSet && sampler == m_sampler; }
 
@@ -307,6 +313,8 @@ std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelForm
 std::shared_ptr<Texture> make_copy_texture() noexcept {
   return std::make_shared<Texture>(0, 0, TexelFormat::RGBA8, std::vector<uint8_t>());
 }
+
+uint64_t texture_bytes(const Texture& texture) noexcept { return texture.bytes(); }
 
 namespace {
 // For the log: generated programs compiled, failed, and the time spent compiling (render worker).

@@ -486,6 +486,9 @@ static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
     if (++sFrames % 300 == 0) {
       gx::vita::log_stats();
     }
+    if (sFrames % 16 == 0) {
+      gx::vita::drop_lone_textures();
+    }
   }
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndVita);
   gx::texture::end_frame();

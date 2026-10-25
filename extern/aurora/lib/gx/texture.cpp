@@ -5,6 +5,9 @@
 #include "../gfx/texture_convert.hpp"
 #include "../gfx/texture_replacement.hpp"
 #include "shader_info.hpp"
+#ifdef AURORA_VITA_GL
+#include "../vita_gl.hpp"
+#endif
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -362,6 +365,14 @@ uint64_t texture_handle_size(const gfx::TextureHandle& handle) noexcept {
   if (!handle) {
     return 0;
   }
+#ifdef AURORA_VITA_GL
+  // The Vita holds its own copy (RGBA8 for most formats: a palette texture's is four times its
+  // source), not the null device's texture: the budget counted that, and a screen making a new
+  // palette texture a frame (the death screen) kept four times the budget, past the GPU's memory.
+  if (handle->vitaTexture) {
+    return vita_gl::texture_bytes(*handle->vitaTexture);
+  }
+#endif
   return gfx::calc_texture_size(handle->format, handle->size.width, handle->size.height, handle->mipCount);
 }
 
