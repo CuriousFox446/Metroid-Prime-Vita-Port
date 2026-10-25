@@ -1036,6 +1036,22 @@ are still not made (the black stand-in).
 - The presents line: copies made, those waiting for the pass's program (its first build), the
   pixels, the render worker's time, and render targets made.
 
+Its run (2635657): two crashes within a minute of play, both data aborts on the render worker in
+SceLibKernel, at vitaGL's GPU pool's base (`r0`/`r4` 0x62000000/0x62000010), reading what were
+pixels (0xff272d2e, 0xff080b0a: opaque dark greys) where the pool's records should be. The log:
+429 copies in 300 presents to 3 destinations, and 211 render targets made: a destination copied at
+another size than the last took a new texture and framebuffer, the old ones deleted at once. vitaGL
+frees a texture's memory as soon as nothing references it (glDeleteTextures with its count at zero;
+deleting the framebuffer drops the count), and the GPU runs a frame's scenes behind the render
+worker: a copy pass still queued drew into memory already given to another allocation.
+- Now a copy texture keeps a render target for each size it is copied at (`Texture::Target`, up to
+  four; the least recently used retired when the pool is full and it is two presents idle), the
+  texture the latest copy's. A draw after a copy binds that one, a draw before keeps the one it
+  bound (a switch clears the texture's sampler state, so `BoundTextures` binds again).
+- A target let go (retired, or its texture destroyed, or the stand-in texel bound before any copy)
+  waits `kRetiredPresents` (8) presents before its delete (`retire_target`, `delete_retired_targets`
+  at each present).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

@@ -19,6 +19,7 @@ extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 
 #include <pthread.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -54,8 +55,41 @@ std::atomic<int64_t> g_textureBytes[2];
 // Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
 std::atomic<int64_t> g_pendingCount;
 std::atomic<int64_t> g_pendingBytes;
-// Copy textures made render targets (a new size each time: Texture::render_target), for the log.
+// Copy textures' render targets made (Texture::render_target, one a size), for the log.
 std::atomic<uint32_t> g_renderTargets;
+
+// Presents so far (render worker), and render targets let go waiting for their delete. vitaGL
+// frees a texture's memory at once once nothing references it, and the GPU runs a frame's scenes
+// behind the render worker: deleted as soon as its size changed, a copy's target was drawn into by
+// a copy pass still queued after its memory went to another allocation, screen pixels over vitaGL's
+// pool's own records (two crashes in its allocator: 2635657). So a target waits kRetiredPresents
+// presents first.
+uint32_t g_presentSerial = 0;
+constexpr uint32_t kRetiredPresents = 8;
+struct RetiredTarget {
+  GLuint texture;
+  GLuint framebuffer;
+  uint32_t retiredAt;
+};
+std::deque<RetiredTarget> g_retiredTargets;
+
+// Render worker.
+void retire_target(GLuint texture, GLuint framebuffer) noexcept {
+  g_retiredTargets.push_back({texture, framebuffer, g_presentSerial});
+}
+
+void delete_retired_targets() noexcept {
+  while (!g_retiredTargets.empty() && g_presentSerial - g_retiredTargets.front().retiredAt >= kRetiredPresents) {
+    const RetiredTarget& target = g_retiredTargets.front();
+    if (target.framebuffer != 0) {
+      glDeleteFramebuffers(1, &target.framebuffer);
+    }
+    if (target.texture != 0) {
+      glDeleteTextures(1, &target.texture);
+    }
+    g_retiredTargets.pop_front();
+  }
+}
 
 // vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
 void log_memory(const char* when) {
@@ -168,9 +202,17 @@ public:
   }
   ~Texture() {
     settle_pending();
-    if (m_framebuffer != 0) {
-      const GLuint framebuffer = m_framebuffer;
-      gfx::render_worker::enqueue_work([framebuffer] { glDeleteFramebuffers(1, &framebuffer); });
+    if (!m_targets.empty()) {
+      // A copy texture's targets: retired, the GPU perhaps still drawing into one.
+      const int kind = static_cast<int>(m_format);
+      for (const Target& target : m_targets) {
+        const GLuint texture = target.texture;
+        const GLuint framebuffer = target.framebuffer;
+        gfx::render_worker::enqueue_work([texture, framebuffer] { retire_target(texture, framebuffer); });
+        g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
+        g_textureBytes[kind].fetch_sub(target.bytes(), std::memory_order_relaxed);
+      }
+      return;
     }
     if (m_id != 0) {
       const GLuint id = m_id;
@@ -229,40 +271,65 @@ public:
   }
 
   // Render worker: makes it a `width` x `height` RGBA8 texture with a framebuffer to draw into (an
-  // EFB copy's texture, or a copy's scratch), anew when the size changes; returns the framebuffer.
-  // The texture is left bound to the active unit. (Each size is a GXM render target of vitaGL's.)
+  // EFB copy's texture, or a copy's scratch) and returns the framebuffer. A destination copied at
+  // several sizes (the game's spare buffer serves several effects) keeps a target for each, its
+  // texture the latest copy's: draws after a copy bind it, those before keep the one they bound.
+  // A size unused a while is retired (retire_target) when the pool is full.
   GLuint render_target(int width, int height) noexcept {
-    if (m_framebuffer != 0 && m_width == static_cast<uint32_t>(width) && m_height == static_cast<uint32_t>(height)) {
-      return m_framebuffer;
-    }
     const int kind = static_cast<int>(m_format);
-    if (m_framebuffer != 0) {
-      glDeleteFramebuffers(1, &m_framebuffer);
-      m_framebuffer = 0;
-    }
-    if (m_id != 0) {
-      glDeleteTextures(1, &m_id);
-      m_id = 0;
+    if (m_id != 0 && m_targets.empty()) {
+      // The stand-in bind made before any copy (a transparent black texel): let go.
+      retire_target(m_id, 0);
       g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
       g_textureBytes[kind].fetch_sub(m_bytes, std::memory_order_relaxed);
+      m_bytes = 0;
+      m_id = 0;
     }
     std::vector<uint8_t>().swap(m_cpu);
     settle_pending();
-    glGenTextures(1, &m_id);
-    glBindTexture(GL_TEXTURE_2D, m_id);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    Target* target = nullptr;
+    for (Target& t : m_targets) {
+      if (t.width == width && t.height == height) {
+        target = &t;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      if (m_targets.size() >= kTargetsPerTexture) {
+        // The least recently used size, if no copy of the last presents used it (whatever is
+        // younger may be in a queued scene; it is retired anyway, its delete waits).
+        auto oldest = std::min_element(m_targets.begin(), m_targets.end(),
+                                       [](const Target& a, const Target& b) { return a.lastUsed < b.lastUsed; });
+        if (g_presentSerial - oldest->lastUsed >= 2) {
+          retire_target(oldest->texture, oldest->framebuffer);
+          g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
+          g_textureBytes[kind].fetch_sub(oldest->bytes(), std::memory_order_relaxed);
+          m_targets.erase(oldest);
+        }
+      }
+      Target made{.width = width, .height = height};
+      glGenTextures(1, &made.texture);
+      glBindTexture(GL_TEXTURE_2D, made.texture);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+      glGenFramebuffers(1, &made.framebuffer);
+      glBindFramebuffer(GL_FRAMEBUFFER, made.framebuffer);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, made.texture, 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
+      g_textureBytes[kind].fetch_add(made.bytes(), std::memory_order_relaxed);
+      g_renderTargets.fetch_add(1, std::memory_order_relaxed);
+      m_targets.push_back(made);
+      target = &m_targets.back();
+    }
+    target->lastUsed = g_presentSerial;
+    if (m_id != target->texture) {
+      // Another GL texture: its sampler state is its own.
+      m_id = target->texture;
+      m_samplerSet = false;
+    }
     m_width = static_cast<uint32_t>(width);
     m_height = static_cast<uint32_t>(height);
-    m_bytes = static_cast<int64_t>(width) * height * 4;
-    g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
-    g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
-    m_samplerSet = false;
-    glGenFramebuffers(1, &m_framebuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_framebuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_id, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    g_renderTargets.fetch_add(1, std::memory_order_relaxed);
-    return m_framebuffer;
+    return target->framebuffer;
   }
 
   GLuint id() const noexcept { return m_id; }
@@ -281,11 +348,22 @@ private:
   uint32_t m_width;
   uint32_t m_height;
   TexelFormat m_format;
+  // A copy texture's render targets, one a size (render_target).
+  struct Target {
+    int width = 0;
+    int height = 0;
+    GLuint texture = 0;
+    GLuint framebuffer = 0;
+    uint32_t lastUsed = 0; // g_presentSerial at its last copy
+    int64_t bytes() const noexcept { return static_cast<int64_t>(width) * height * 4; }
+  };
+  static constexpr size_t kTargetsPerTexture = 4;
+
   GLuint m_id = 0;
-  GLuint m_framebuffer = 0; // render_target's
   int64_t m_bytes = 0;
   Sampler m_sampler{};
   bool m_samplerSet = false;
+  std::vector<Target> m_targets;
 };
 
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
@@ -1545,6 +1623,8 @@ void present(ImDrawData* overlay) noexcept {
   }
   g_clock.on = ++g_clock.presents % kTimedEvery == 0;
   g_clock.start();
+  ++g_presentSerial;
+  delete_retired_targets();
   // The font texture is made here, on the render worker, from the atlas the game thread built;
   // the atlas only changes when the fonts do (fonts_changed).
   if (g_fontsChanged.exchange(false, std::memory_order_acq_rel)) {
