@@ -649,7 +649,7 @@ each extension command that is not a draw):
 - Record, 7.5 us a draw: the matrices, the texgen rows and constants worked out and compared, and
   the 410-byte draw with its `shared_ptr` copies pushed into the frame.
 
-**The material cache set-associative, decode split (built, not yet run on the Vita).**
+**The material cache set-associative, decode split.**
 - 4096 materials in 1024 sets of four (1.1 MiB, 288 bytes each), the least recently used of a
   set replaced (a use stamp on each, set at every use, the last draw's kept one included), an
   empty entry first. The materials line now gives, of those worked out, how many sample an EFB
@@ -659,3 +659,35 @@ each extension command that is not a draw):
   first when no variant matches), skinned (a skinned call's triangles from its template, or
   decoded whole), immediate (an immediate or indexed draw's vertices decoded and triangulated),
   mesh (the mesh made of the triangles, or a cached list's taken, up to `record_draw`).
+
+Its run (a935426; stamp bdd2dcf-dirty): 8 minutes, to the Cargo Freight Lift to Deck Gamma, no
+crash.
+- Materials worked out: about 2000 per 300 frames (64,000 before in the heavy stretch), most of
+  them sampling an EFB copy (whose hash moves with every copy); 1100 to 2800 cached of 4096.
+- The FIFO thread's heavy frames (36 timed): 98 ms busy, 21 of it the timer's, so about 77 ms of
+  work (86 before). With each section's calls taken off:
+
+| Section | ms a heavy frame |
+|---|---|
+| material | 17 |
+| lookup | 13.3 |
+| record | 11.6 |
+| skinned (some 15 calls) | 10.6 |
+| state | 8 |
+| immediate (immediate and indexed decodes) | 7 |
+| aurora | 5 |
+| other draws | 2.7 |
+| mesh | 0.8 |
+
+- Material is still 10 us a draw with few worked out: the hash (XXH3 over some 1.2 KiB built from
+  the stages, generators and textures) for each draw whose registers were written, and, as no
+  mark comes between, the list call's own `resident::find` of its key in `call_resident_dl` and
+  the command's dispatch before `current_material`.
+- Lookup, 8 us a list call: `resident::find` of the position array (is it skinned?), the list's
+  entry in `sCache`, and `matches_current` against variants whose `DecodeState` holds all eight
+  vertex formats (312 bytes each, some 2.6 KiB a variant, 10 KiB a list's entry): cold memory,
+  read for every call. Comparing a small hash of the current descriptor and used formats (hot,
+  the FIFO thread just wrote them) and remembering the last position array's answer would leave
+  little of it.
+- Skinned: some 0.7 ms a call (template copied, positions read again), worth a look of its own.
+- 11.7 FPS in the heavy seconds; the game thread still waits 22 ms a frame for the FIFO thread.
