@@ -932,6 +932,14 @@ material sweep freed 111 materials. Not found by reading: what holds them.
   palette caches; the vitaGL memory line adds the textures made and not yet uploaded (pixels on
   the heap).
 
+Its run (349fe7e): the same crash. The caches line found it: on the continue screen Aurora's
+caches held 55 textures (32 MiB, the budget), the object cache none, while the GPU held 214 RGBA8
+(125 MiB). The rest were the materials': the sweep freed a material only when it alone held its
+texture, but one palette texture is in several materials (one picture with several blends and
+fades), each counting against the others. Now the count is over all the materials (a freed
+material's references leave it). The materials line gives the textures the materials hold, and
+of them those only materials hold.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
