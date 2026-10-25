@@ -824,4 +824,22 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
 }
 
 size_t tev_program_count() noexcept { return sPrograms.size(); }
+
+TevProgramCounts tev_program_counts() noexcept {
+  TevProgramCounts counts;
+  counts.all = sPrograms.size();
+  std::unordered_map<u32, bool> combinations;
+  for (const auto& [_, program] : sPrograms) {
+    u32 packed = 0;
+    for (int part = 0; part < 4; ++part) {
+      packed |= static_cast<u32>(program.lightCounts[part]) << (8 * part);
+    }
+    if (packed != 0) {
+      ++counts.lit;
+      combinations[packed] = true;
+    }
+  }
+  counts.lightCombinations = combinations.size();
+  return counts;
+}
 } // namespace aurora::gx::vita

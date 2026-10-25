@@ -971,6 +971,16 @@ Its run (4126db4; 233 s): no crash, the heap 138 to 143 MiB; up to 29656 lines d
 window (the map), no points. 135 programs, 6 compiled. A present that builds programs spends
 30 to 65 ms in `build` (one compile); the others about 15.
 
+Milestone 4, lighting's cost. In that run's play the render worker took about 11 ms a present
+(485 draws; half of it vitaGL's draw call, copying each draw's uniforms), but the FIFO thread was
+busy 57 ms a frame, 49 of them `skinned`: 12 skinned calls made 2188 KiB of vertices a present,
+some 40000, at about 1.2 us each (the positions and, since lighting, the normals read and packed for
+every triangle corner). Now a skinned template keeps its distinct vertices and the triangles' order
+of them: each call poses the distinct ones (native floats copied as they are, the normal packed
+without `lround`), then lays the corners out. A `lighting:` line (each 300 frames) gives the lit
+program draws, their lights and vertex rows against the unlit ones', the lit programs and their
+light-count combinations, and the skinned templates' corners against their distinct vertices.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

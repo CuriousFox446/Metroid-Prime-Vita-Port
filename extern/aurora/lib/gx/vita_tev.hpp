@@ -62,6 +62,14 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
                     float (*out)[4]) noexcept;
 // Programs generated so far.
 size_t tev_program_count() noexcept;
+// Of them those that light (a channel part sums lights), and the distinct combinations of the four
+// parts' light counts among those.
+struct TevProgramCounts {
+  size_t all = 0;
+  size_t lit = 0;
+  size_t lightCombinations = 0;
+};
+TevProgramCounts tev_program_counts() noexcept;
 // False with MP_VITA_TEV=0: every draw fixed-function.
 bool tev_enabled() noexcept;
 } // namespace aurora::gx::vita

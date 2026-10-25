@@ -174,15 +174,18 @@ struct VertexIndices {
 };
 
 // A list called with positions the CPU makes each frame (skinned models): decoded once into its
-// triangles with, for each vertex, the array indices its position and normal come from; each call
-// copies them and reads the positions and normals again from the arrays as they are now (CPU
-// skinning writes both). The faces keep the fixed-function shading of the pose the template was
-// made in.
+// distinct vertices, each with the array indices its position and normal come from, and the
+// triangles' order of them; each call reads the positions and normals again from the arrays as
+// they are now (CPU skinning writes both) for the distinct vertices only, then lays the triangles
+// out. (Read for every triangle corner, some six times the distinct vertices, the frigate's Space
+// Pirates took the FIFO thread 49 ms a frame.) The faces keep the fixed-function shading of the
+// pose the template was made in.
 struct SkinnedTemplate {
   DecodeState state; // compared without the position array (matches_current's skipPositions)
   GXVtxFmt fmt = GX_VTXFMT0; // the one vertex format the list's primitives name
-  std::vector<vita_gl::Vertex> vertices;
-  std::vector<VertexIndices> indices;
+  std::vector<vita_gl::Vertex> vertices; // distinct
+  std::vector<VertexIndices> indices;    // theirs
+  std::vector<u32> order;                // the triangles' corners, as vertices' indices
 };
 std::unordered_map<const void*, SkinnedTemplate> sSkinned;
 
@@ -239,6 +242,15 @@ struct Stats {
   u32 materialMisses = 0;
   // Skinned list calls drawn from their template, and templates made.
   u32 skinnedFromTemplate = 0;
+  // Templates made: their triangle corners, and the distinct vertices among them.
+  u32 skinnedCorners = 0;
+  u32 skinnedDistinct = 0;
+  // Program draws that light (a channel part sums lights), the lights they sum, and the vertex
+  // rows program draws declare, lit and not.
+  u32 litDraws = 0;
+  u64 litLights = 0;
+  u64 litRows = 0;
+  u64 unlitRows = 0;
   u32 skinnedTemplates = 0;
   // Draws recorded with a generated program (vita_tev.hpp), and their constant arrays (vertex and
   // fragment) put in the frame's rows, and pointed at the last ones as they repeated them.
@@ -328,11 +340,13 @@ void read_color(const u8* p, GXCompType type, u8 out[4]) noexcept {
 }
 
 // A normal as a vertex holds it: unit length, times 127 (zero stays zero).
+// Rounded to nearest by hand: std::lround is a library call, three a vertex of every skinned model.
 void pack_normal(const float n[3], int8_t out[3]) noexcept {
-  const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-  const float scale = len > 1e-8f ? 127.f / len : 0.f;
+  const float len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+  const float scale = len2 > 1e-16f ? 127.f / std::sqrt(len2) : 0.f;
   for (int c = 0; c < 3; ++c) {
-    out[c] = static_cast<int8_t>(std::lround(std::clamp(n[c] * scale, -127.f, 127.f)));
+    const float v = std::clamp(n[c] * scale, -127.f, 127.f);
+    out[c] = static_cast<int8_t>(static_cast<int>(v + (v >= 0.f ? 0.5f : -0.5f)));
   }
 }
 
@@ -1473,6 +1487,17 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
     // Never more than the program declares (the generators' types made both counts).
     inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
     inputs.constantCount = static_cast<u8>(program.constantCount);
+    u32 lights = 0;
+    for (const u8 count : program.lightCounts) {
+      lights += count;
+    }
+    if (lights != 0) {
+      ++sStats.litDraws;
+      sStats.litLights += lights;
+      sStats.litRows += inputs.vertexCount;
+    } else {
+      sStats.unlitRows += inputs.vertexCount;
+    }
     // Into the frame's rows, unless they repeat this program's last ones there: the draw then points
     // at those, and the render worker sends nothing.
     const u32 serial = vita_gl::recording_serial();
@@ -1522,11 +1547,14 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     state.fmtMask = 0;
     sLastFail = Fail::None;
     t.indices.clear();
-    t.vertices = decode_list(*entry.bytes, size, texAttrs, state.fmtMask, &t.indices);
+    t.order.clear();
+    std::vector<VertexIndices> cornerIndices;
+    std::vector<vita_gl::Vertex> corners = decode_list(*entry.bytes, size, texAttrs, state.fmtMask, &cornerIndices);
     state.capture(texAttrs);
     const bool usable =
-        !t.vertices.empty() && std::has_single_bit(state.fmtMask) && t.indices.size() == t.vertices.size() &&
-        std::none_of(t.indices.begin(), t.indices.end(), [](const VertexIndices& v) { return v.pos == UINT32_MAX; });
+        !corners.empty() && std::has_single_bit(state.fmtMask) && cornerIndices.size() == corners.size() &&
+        std::none_of(cornerIndices.begin(), cornerIndices.end(),
+                     [](const VertexIndices& v) { return v.pos == UINT32_MAX; });
     if (!usable) {
       // Kept as not usable (fmtMask set, no vertices), so the next calls decode whole at once.
       state.fmtMask = state.fmtMask != 0 ? state.fmtMask : 1;
@@ -1535,6 +1563,29 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       t.indices.clear();
       return false;
     }
+    // The distinct corners: the same array indices and the same everything else (texture
+    // coordinates, colour, the face's shading). A hash's second corner that differs is kept apart.
+    t.vertices.clear();
+    t.order.reserve(corners.size());
+    absl::flat_hash_map<u64, u32> distinct;
+    distinct.reserve(corners.size());
+    for (size_t i = 0; i < corners.size(); ++i) {
+      u64 hash = XXH3_64bits(&corners[i], sizeof(vita_gl::Vertex));
+      hash = XXH3_64bits_withSeed(&cornerIndices[i], sizeof(VertexIndices), hash);
+      const auto [it, inserted] = distinct.try_emplace(hash, static_cast<u32>(t.vertices.size()));
+      const bool same = !inserted && std::memcmp(&t.vertices[it->second], &corners[i], sizeof(vita_gl::Vertex)) == 0 &&
+                        t.indices[it->second].pos == cornerIndices[i].pos &&
+                        t.indices[it->second].nrm == cornerIndices[i].nrm;
+      if (same) {
+        t.order.push_back(it->second);
+        continue;
+      }
+      t.order.push_back(static_cast<u32>(t.vertices.size()));
+      t.vertices.push_back(corners[i]);
+      t.indices.push_back(cornerIndices[i]);
+    }
+    sStats.skinnedCorners += static_cast<u32>(corners.size());
+    sStats.skinnedDistinct += static_cast<u32>(t.vertices.size());
     t.fmt = static_cast<GXVtxFmt>(std::countr_zero(state.fmtMask));
   }
   if (t.vertices.empty()) {
@@ -1555,25 +1606,41 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   const bool normals = (nrmType == GX_INDEX8 || nrmType == GX_INDEX16) && nrmArray.data != nullptr;
   const u32 nrmStep = comp_type_size(GX_VA_NRM, nrmFmt.type);
   const auto* nrmBase = static_cast<const u8*>(nrmArray.data);
-  out = t.vertices;
-  for (size_t i = 0; i < out.size(); ++i) {
+  // CPU skinning writes native floats: copied as they are, not read component by component.
+  const bool posNative = posFmt.type == GX_F32 && cnt == 3 && array.le;
+  const bool nrmNative = nrmFmt.type == GX_F32 && nrmArray.le;
+  // The distinct vertices, posed now (the template's own, rewritten each call), then the corners.
+  std::vector<vita_gl::Vertex>& posed = t.vertices;
+  for (size_t i = 0; i < posed.size(); ++i) {
     const u64 offset = u64(t.indices[i].pos + array.baseIndex) * array.stride;
     if (offset + cnt * step > array.size) {
       return false;
     }
-    for (u32 c = 0; c < cnt; ++c) {
-      out[i].pos[c] = read_component(base + offset + c * step, posFmt.type, posFmt.frac, array.le);
+    if (posNative) {
+      std::memcpy(posed[i].pos, base + offset, sizeof(float[3]));
+    } else {
+      for (u32 c = 0; c < cnt; ++c) {
+        posed[i].pos[c] = read_component(base + offset + c * step, posFmt.type, posFmt.frac, array.le);
+      }
     }
     if (normals && t.indices[i].nrm != UINT32_MAX) {
       const u64 nrmOffset = u64(t.indices[i].nrm + nrmArray.baseIndex) * nrmArray.stride;
       if (nrmOffset + 3 * nrmStep <= nrmArray.size) {
         float n[3];
-        for (u32 c = 0; c < 3; ++c) {
-          n[c] = read_component(nrmBase + nrmOffset + c * nrmStep, nrmFmt.type, nrmFmt.frac, nrmArray.le);
+        if (nrmNative) {
+          std::memcpy(n, nrmBase + nrmOffset, sizeof(n));
+        } else {
+          for (u32 c = 0; c < 3; ++c) {
+            n[c] = read_component(nrmBase + nrmOffset + c * nrmStep, nrmFmt.type, nrmFmt.frac, nrmArray.le);
+          }
         }
-        pack_normal(n, out[i].normal);
+        pack_normal(n, posed[i].normal);
       }
     }
+  }
+  out.resize(t.order.size());
+  for (size_t i = 0; i < out.size(); ++i) {
+    out[i] = posed[t.order[i]];
   }
   return true;
 }
@@ -1925,6 +1992,17 @@ void log_stats() noexcept {
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
            tev_program_count(), s.constantsRecorded, s.constantsShared);
+  {
+    const u32 unlitDraws = s.withProgram - s.litDraws;
+    const TevProgramCounts programs = tev_program_counts();
+    Log.info("lighting: {} of {} program draws lit, {:.1f} lights a lit draw; vertex rows a draw: lit {:.1f}, unlit "
+             "{:.1f}; programs: {} lit of {}, {} light-count combinations; skinned templates made: {} corners, {} "
+             "distinct vertices",
+             s.litDraws, s.withProgram, s.litDraws != 0 ? double(s.litLights) / s.litDraws : 0.0,
+             s.litDraws != 0 ? double(s.litRows) / s.litDraws : 0.0,
+             unlitDraws != 0 ? double(s.unlitRows) / unlitDraws : 0.0, programs.lit, programs.all,
+             programs.lightCombinations, s.skinnedCorners, s.skinnedDistinct);
+  }
   Log.info("immediate draws: {} drawn, {} lines, {} points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediatePoints, s.immediateFailed, s.perCall, s.perCallFailed);
