@@ -749,7 +749,7 @@ reported wrong.
   each (every texture object load sets DirtyTextures). The texture part still hashes all eight
   slots' 48 bytes, those no stage names included.
 
-**Fewer extension commands at the source (built, not yet run on the Vita).**
+**Fewer extension commands at the source.**
 - Draw tags: `draw_tag::flush` sends nothing on the Vita. Only Aurora's WebGPU draws read a tag
   (to name a draw in a warning); some 1500 a heavy frame were written by the game thread and
   read by the FIFO thread. A tag set inside a display list is still recorded into it.
@@ -760,3 +760,26 @@ reported wrong.
   so what was sent is forgotten after one; a retained list's bytes are draws alone (the Vita
   decode fails on anything else, and none has).
 - The [ops] line shows what is left.
+
+Its run (3255423; stamp 43538b2-dirty): no crash. No draw tags; about 9,500 extension commands
+a heavy frame (11,000), the array base loads hardly fewer: they name another model's arrays,
+not the same again. 14.1 FPS in the heavy seconds (13.5), the game thread's wait 10.9 ms, tick
+27.1, draw 30.6 ms; the FIFO thread about 64 ms of work.
+
+Reported on screen (not new): 3D models show through the HUD; the planet outside covers most
+models; the frigate seems cut off at a distance. The Vita path ignored the viewport's depth range
+(GXSetViewport's near and far: `GXState::renderViewport` znear, zfar), with which the game layers
+its passes: the HUD drawn into the nearest depths, the sky and the planet into the farthest. All
+depth went to [0, 1], so the HUD and the planet were sorted with the world (the planet covering
+the far frigate too, the "render distance").
+
+**The viewport's depth range (built, not yet run on the Vita).** record_draw folds it into the
+projection, as glDepthRange would apply it to GL's depth d: n + (f - n) d. Clip z, already
+2 z + w for GX's -w..0, becomes (f - n) z' + (f + n - 1) w, so [0, 1] lands in [n, f]; the clip
+volume stays inside the GL one, so nothing visible is clipped. The program draws' MVP and the
+fixed-function projection both take it. The textures line counts draws with a range other than
+[0, 1].
+
+Also reported: with Twin Stick Aim on, L and R stop working in the pause menu, so it cannot be
+turned off there (`twin_stick=0` in `port_settings.ini` turns it off). Under twin stick the input
+layer makes the left shoulder the beam shift (port_input_devices.cpp), which the Vita's L is.

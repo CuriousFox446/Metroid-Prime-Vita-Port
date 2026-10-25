@@ -208,6 +208,7 @@ struct Stats {
   u32 blended = 0;
   u32 alphaTested = 0;
   u32 culled = 0;
+  u32 depthRanged = 0; // drawn with a viewport depth range other than [0, 1]
   // TEV's final alpha: a constant worked out, of those the draws its alpha test rejects outright,
   // and the draws whose alpha reads a texture; the rest depend on a lit or vertex alpha.
   u32 alphaConstant = 0;
@@ -1317,13 +1318,20 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
+  // Then the viewport's depth range (GXSetViewport's near and far, the window depth at the near
+  // and far planes), folded in as glDepthRange would apply it: depth n + (f - n) * d for the
+  // [0, 1] depth d, so clip z becomes (f - n) * z + (f + n - 1) * w. The game layers with it: the
+  // HUD into the nearest depths, the sky and the planet into the farthest.
   const Mat4x4<float>& proj = g_gxState.proj;
+  const float n = g_gxState.renderViewport.znear;
+  const float f = g_gxState.renderViewport.zfar;
   for (int c = 0; c < 4; ++c) {
     draw.projection[c] = proj.m0[c];
     draw.projection[4 + c] = proj.m1[c];
-    draw.projection[8 + c] = 2.f * proj.m2[c] + proj.m3[c];
+    draw.projection[8 + c] = (f - n) * (2.f * proj.m2[c] + proj.m3[c]) + (f + n - 1.f) * proj.m3[c];
     draw.projection[12 + c] = proj.m3[c];
   }
+  sStats.depthRanged += n != 0.f || f != 1.f ? 1 : 0;
   for (int unit = 0; unit < material.unitCount; ++unit) {
     draw.units[unit] = material.units[unit];
     // Texture matrices animate (scrolling, pulsing): read for every draw.
@@ -1602,10 +1610,10 @@ void log_stats() noexcept {
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
            "copies made late; "
-           "{} second units added; state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} "
-           "rejected), {} from a texture",
+           "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range; TEV alpha: "
+           "{} constant ({} rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.lateCopies, s.additiveUnits,
-           s.blended, s.alphaTested, s.culled, s.alphaConstant, s.alphaRejected, s.alphaTexture);
+           s.blended, s.alphaTested, s.culled, s.depthRanged, s.alphaConstant, s.alphaRejected, s.alphaTexture);
   sStats = {};
 }
 } // namespace aurora::gx::vita
