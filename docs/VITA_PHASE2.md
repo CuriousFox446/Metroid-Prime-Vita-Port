@@ -910,3 +910,16 @@ screen two builds before).
   vitaGL took the heap's. Now the content cache counts the Vita copy's bytes
   (`texture_handle_size`), and every 16 frames the materials holding a texture nothing else holds
   (no cache, no frame in flight) are freed (`drop_lone_textures`; the materials line counts them).
+
+Its run (fd79801): the crash again on the continue screen (after "Game Over", the screen black till
+yes or no): `std::bad_alloc` in `make_vita_texture`, the GPU holding 157 RGBA8 textures (93 MiB)
+with 11 MiB of VRAM free, the heap 131 to 181 MiB in use. The sweep freed 90 materials, so the
+textures were held elsewhere: Aurora's texture object cache keeps each object's texture 600 frames
+after its last use, and that screen inits new texture objects with a new palette texture each
+frame (some 1 MiB a frame of Vita copies). Now on the Vita an object whose texture nothing else
+holds (the content cache let it go, no slot binds it) goes after four idle frames
+(`sweep_object_caches`).
+- The VPK has a LiveArea: the emblem for the icon, Samus with the logo in the bottom left for the
+  background (the logo's WebP decodes without alpha on Windows: its alpha was rebuilt from its
+  brightness, over black), and the emblem for the gate (the start button's picture, which the
+  system places and frames itself). 8-bit indexed PNGs, in `platform/vita/sce_sys`.

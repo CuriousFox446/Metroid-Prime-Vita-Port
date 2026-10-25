@@ -652,9 +652,22 @@ void sweep_object_caches() {
   const auto expired = [](uint64_t lastUsedFrame) {
     return s_frameCount > lastUsedFrame && s_frameCount - lastUsedFrame > texture::ObjectCacheIdleFrames;
   };
+#ifdef AURORA_VITA_GL
+  // On the Vita an object's texture that nothing else holds (the content cache let it go, no slot
+  // binds it) goes after a few idle frames, not 600: the continue screen inits new texture objects
+  // with a new palette texture each frame, some 1 MiB a frame of the Vita's RGBA8 copies, and their
+  // objects kept them past the GPU's memory and then the heap's.
+  const bool vita = vita_gl::active();
+  const auto lone = [vita](const CachedTextureEntry& entry) {
+    return vita && entry.handle.use_count() == 1 && s_frameCount > entry.lastUsedFrame &&
+           s_frameCount - entry.lastUsedFrame > 4;
+  };
+#else
+  const auto lone = [](const CachedTextureEntry&) { return false; };
+#endif
 
   for (auto it = s_textureObjectCaches.begin(); it != s_textureObjectCaches.end();) {
-    if (expired(it->second.lastUsedFrame)) {
+    if (expired(it->second.lastUsedFrame) || lone(it->second)) {
       const u32 texObjId = it->first;
       const CachedTextureEntry entry = it->second;
       s_textureObjectCaches.erase(it++);

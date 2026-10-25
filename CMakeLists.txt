@@ -673,7 +673,10 @@ if(VITA)
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
         VERSION "00.32"
         NAME "Metroid Prime Port (headless)"
-        FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png)
+        FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
+        FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+        FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
 endif()
 
 # Source-derived Remastered box/triangle contact geometry (0xc0a180) and its
