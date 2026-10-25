@@ -967,6 +967,10 @@ size reaches only its own programs, and a generated one would have to write the 
 draws none. Not done: GX's line and point texture offsets (a texture across a wide line's width).
 The VPK's name is "Metroid Prime".
 
+Its run (4126db4; 233 s): no crash, the heap 138 to 143 MiB; up to 29656 lines drawn in a log
+window (the map), no points. 135 programs, 6 compiled. A present that builds programs spends
+30 to 65 ms in `build` (one compile); the others about 15.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
