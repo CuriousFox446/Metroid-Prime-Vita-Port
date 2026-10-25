@@ -1307,6 +1307,31 @@ frame. No copy was left over; the most scenes in a frame were the display's 6, a
   likewise, then `blur<n>_texture.ppm` (the blur's copy as it holds it) and `blur<n>_after.ppm`.
   The render worker's probe lines name each texture by its address.
 
+Its run (6eeff2c; three pauses): a render target costs GXM 180 KiB at 960x544 for a scene a frame,
+944 KiB for 8 (84 and 400 KiB at 480x272), with 29 to 31 MiB of the system's free: memory was not
+it. Each pause's one copy is made, in its frame, into the texture the blur samples (480x272, one
+scene). Three faults show:
+- The copy (`blur<n>_texture`) is the room, but for its bottom left quarter, black: exactly 240x136
+  of its 480x272 in all three, not on GXM's 32-pixel tiles. At the screen, the bottom left 480x272:
+  the framebuffer's origin (GL's), a quarter of the display.
+- The blur drawn over that copy (`blur1_after`) is flat areas with straight slanted edges: its top
+  left quarter the copy's top row's colour, a band the colour of texels far below, the rest black.
+  The taps sample the copy, but at coordinates far outside it, clamped to its edge texels. Its
+  program reads aright (seven slots, one attribute, the texture matrices' offsets in uVert); it is
+  the only program with seven coordinate varyings, and the copy pass's, with one, samples the same
+  texture right.
+- Ten frames on, the copy (`pause_8_texture`) holds the blur's first picture, the whole screen
+  halved: a copy of the screen made after the blur, though none is logged there (the paused
+  frames probed have no copies).
+- Now a program with more coordinate slots than the mesh's sets makes each slot whose generator is
+  a 2x4 matrix on a mesh set (not normalised, no post-transform) in the fragment program, from one
+  varying a set: the same coordinates (an affine map commutes with the interpolation), the matrix
+  rows fragment constants (`TevLayout::fragmentMtx`, `kConstTexMtx`). The blur: one varying, not
+  seven.
+- And for the other two: at the blur's first frame the copies' scratch is saved too
+  (`blur<n>_scratch.ppm`, upside down: the blit's picture before the pass, to tell the blit's quarter
+  from the pass's), and for 40 frames after the blur begins every copy into its texture is logged.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

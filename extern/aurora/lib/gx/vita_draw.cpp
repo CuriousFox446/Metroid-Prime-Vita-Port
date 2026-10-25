@@ -1514,6 +1514,16 @@ std::vector<std::string>& frame_copies() noexcept {
   return sFrameCopies.copies;
 }
 
+// After the camera blur begins, the copies into its texture for a while, to the log (record_copy):
+// the pause screen's copy, made once, held the blur's own picture ten frames on (6eeff2c's run).
+struct BlurCopyWatch {
+  const void* dest = nullptr;
+  u32 from = 0;
+  int logged = 0;
+};
+BlurCopyWatch sBlurCopyWatch;
+constexpr u32 kBlurCopyWatchFrames = 40;
+
 // FIFO thread, for each draw recorded: its vita_gl::Draw::dump.
 s8 pause_dump_mark() noexcept {
   PauseDump& dump = sPauseDump;
@@ -1548,6 +1558,7 @@ s8 pause_dump_mark() noexcept {
                copy->second.height,
                vita != sCopyTextures.end() ? static_cast<const void*>(vita->second.get()) : nullptr,
                copies.empty() ? " none" : copies);
+      sBlurCopyWatch = BlurCopyWatch{.dest = obj.data, .from = serial};
       sFrameProbe = FrameProbe{.framesLeft = 1, .serial = serial};
       return static_cast<s8>(vita_gl::kDumpBlurBegin + dump.blurBegins - 1);
     }
@@ -2095,6 +2106,14 @@ void record_copy() noexcept {
                                        g_gxState.texCopyDest, src.x, src.y, src.width, src.height,
                                        g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<u32>(fmt),
                                        draw.copyHalf, static_cast<const void*>(texture.get())));
+  if (BlurCopyWatch& watch = sBlurCopyWatch; watch.dest != nullptr && watch.dest == g_gxState.texCopyDest) {
+    const u32 serial = vita_gl::recording_serial();
+    if (serial - watch.from <= kBlurCopyWatchFrames && watch.logged < 20) {
+      ++watch.logged;
+      Log.info("[probe] frame {}: a copy into the camera blur's texture, {} frames after it began: {}", serial,
+               serial - watch.from, frame_copies().back());
+    }
+  }
   // Each destination and size's first copy, for the log (log_probe's companion): GX's rectangle,
   // the destination's size and format, and the screen rectangle read.
   static absl::flat_hash_set<std::tuple<const void*, u32, u32, u32>> sSeen;

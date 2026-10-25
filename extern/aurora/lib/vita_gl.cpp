@@ -1986,6 +1986,16 @@ void draw_world(const Frame& frame) {
                                                 : fmt::format("pause_{}_texture.ppm", draw.dump));
         set_rects(draw.viewport, draw.scissor);
       }
+      // And the copies' scratch, the blit's picture before the pass (upside down: GL's rows), to
+      // tell which of the two left a quarter of the copy black (6eeff2c's run).
+      if (draw.dump >= kDumpBlurBegin && g_copyScratch != nullptr && can_save()) {
+        begin_display();
+        leave_draws();
+        show_texture(*g_copyScratch);
+        return_to_draws();
+        save_screen(fmt::format("blur{}_scratch.ppm", draw.dump - kDumpBlurBegin + 1));
+        set_rects(draw.viewport, draw.scissor);
+      }
     }
     saveAtEnd = saveAtEnd || draw.dump == kDumpFrameEnd;
     begin_display();

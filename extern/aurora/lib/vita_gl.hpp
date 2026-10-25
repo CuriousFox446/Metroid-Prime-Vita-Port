@@ -147,9 +147,10 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
 // the alpha compare's references (x, y), the fog colour and the fog's A, B and C; for indirect
 // texturing, each coordinate slot's texel scale (GX's SU scale), each texture slot's size and the
-// three indirect matrices (two rows each). A program declares only those its source reads, packed
-// in this order (gx/vita_tev.cpp).
-constexpr int kProgramConstants = 15 + kProgramCoords + kSamplers + 6;
+// three indirect matrices (two rows each); and the 2x4 matrix of each coordinate slot the fragment
+// program makes (two rows each: gx/vita_tev.hpp, TevLayout::fragmentMtx). A program declares only
+// those its source reads, packed in this order (gx/vita_tev.cpp).
+constexpr int kProgramConstants = 15 + kProgramCoords + kSamplers + 6 + 2 * kProgramCoords;
 // The vertex program's (gx/vita_tev.cpp, tev_vertex_rows): the projection times the position
 // matrix (4 rows); each texture coordinate set's matrix (3 rows of 4 for a projective set, else 2)
 // and its post-transform matrix (3 more, when it has one); for a lit program the position and

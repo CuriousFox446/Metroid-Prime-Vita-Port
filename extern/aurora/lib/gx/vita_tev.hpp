@@ -26,6 +26,11 @@ struct TevLayout {
   // whose generators read the same attribute share its set (the blur's seven taps, all TEX0).
   std::array<s8, vita_gl::kProgramCoords> meshSet{};
   std::array<s8, vita_gl::kTexCoords> meshSetSource{};
+  // With more slots than the mesh's sets, the slots whose generator is a 2x4 matrix on a mesh set
+  // (not normalised, no post-transform): the fragment program applies the matrix to the set's
+  // coordinates, one varying a set instead of one a slot. The same coordinates (an affine map
+  // commutes with the interpolation); the camera blur's seven varyings, one a tap, came out wrong.
+  std::array<bool, vita_gl::kProgramCoords> fragmentMtx{};
   int samplerCount = 0;
   std::array<GXTexMapID, vita_gl::kSamplers> maps{};
   // Each stage's coordinate slot (-1: none: it neither samples nor offsets a coordinate of its own)
@@ -48,9 +53,11 @@ struct TevProgram {
   int constantCount = 0;
   std::array<u8, vita_gl::kProgramConstants> constantSlots{};
   // Its vertex rows' layout (tev_vertex_rows): which coordinate sets have a post-transform matrix,
-  // and the lights each channel (GX_COLOR0, GX_COLOR1, GX_ALPHA0, GX_ALPHA1) sums, its mask's
-  // first ones in order (none: the position and normal matrices are left out too).
+  // which the fragment program makes (no rows: TevLayout::fragmentMtx), and the lights each channel
+  // (GX_COLOR0, GX_COLOR1, GX_ALPHA0, GX_ALPHA1) sums, its mask's first ones in order (none: the
+  // position and normal matrices are left out too).
   std::array<bool, vita_gl::kProgramCoords> post{};
+  std::array<bool, vita_gl::kProgramCoords> fragmentMtx{};
   std::array<u8, 4> lightCounts{};
   // It reads an indirect stage (for the log).
   bool indirect = false;

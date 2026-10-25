@@ -36,7 +36,9 @@ constexpr int kConstFogParams = 14;
 constexpr int kConstTexCoordScale = 15;
 constexpr int kConstTexSize = kConstTexCoordScale + vita_gl::kProgramCoords;
 constexpr int kConstIndMtx = kConstTexSize + vita_gl::kSamplers;
-static_assert(kConstIndMtx + 2 * MaxIndTexMtxs == vita_gl::kProgramConstants);
+// A coordinate slot's 2x4 matrix rows, where the fragment program applies it (TevLayout::fragmentMtx).
+constexpr int kConstTexMtx = kConstIndMtx + 2 * MaxIndTexMtxs;
+static_assert(kConstTexMtx + 2 * vita_gl::kProgramCoords == vita_gl::kProgramConstants);
 
 // Programs by the hash of their source (an unordered_map's elements stay where they are), and by
 // the hash of the GX state they were made from.
@@ -312,8 +314,12 @@ bool projective(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4
 
 const char* coord_type(const TcgConfig& tcg) noexcept { return projective(tcg) ? "float3" : "float2"; }
 
-// A coordinate slot's coordinates in the fragment program (a projective set's divided).
+// A coordinate slot's coordinates in the fragment program (a projective set's divided; one the
+// fragment program makes, its own: fragment_body).
 std::string fragment_uv(const TevLayout& layout, int coord) {
+  if (layout.fragmentMtx[coord]) {
+    return fmt::format("uv{}", coord);
+  }
   return projective(g_gxState.tcgs[layout.coords[coord]]) ? fmt::format("(vUv{0}.xy / vUv{0}.z)", coord)
                                                           : fmt::format("vUv{}", coord);
 }
@@ -412,6 +418,14 @@ std::string tev_coord_code(const TevLayout& layout, u32 i, std::string& body) {
 std::string fragment_body(const TevLayout& layout) {
   const GXState& s = g_gxState;
   std::string body;
+  // The slots the fragment program makes: their 2x4 matrix on their mesh set's coordinates.
+  for (int c = 0; c < layout.coordCount; ++c) {
+    if (layout.fragmentMtx[c]) {
+      body += fmt::format("  float2 uv{0} = float2(dot(uConst[{1}], float4(vSet{2}, 1.0, 1.0)), "
+                          "dot(uConst[{3}], float4(vSet{2}, 1.0, 1.0)));\n",
+                          c, kConstTexMtx + 2 * c, layout.meshSet[c], kConstTexMtx + 2 * c + 1);
+    }
+  }
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
   u32 lastOut = 0;
   // A register starts at its value from GX only where something reads it (its constant is then
@@ -661,6 +675,24 @@ std::string texgen_input(const TcgConfig& tcg, int set) {
   }
   return fmt::format("float4(aUv{}, 1.0, 1.0)", set);
 }
+
+const float kIdentityRows[12] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f};
+
+// A coordinate generator's matrix, three rows of four: GX numbers the position matrices first,
+// then the texture matrices, three rows apiece; the identity's for GX_IDENTITY.
+const float* generator_rows(const TcgConfig& tcg) noexcept {
+  const GXState& s = g_gxState;
+  if (tcg.mtx != GX_IDENTITY) {
+    const u32 index = static_cast<u32>(tcg.mtx) / 3;
+    if (index < MaxPnMtx) {
+      return reinterpret_cast<const float*>(&s.pnMtx[index].pos);
+    }
+    if (index - MaxPnMtx < MaxTexMtx) {
+      return reinterpret_cast<const float*>(&s.texMtxs[index - MaxPnMtx]);
+    }
+  }
+  return kIdentityRows;
+}
 } // namespace
 
 bool tev_enabled() noexcept {
@@ -780,6 +812,12 @@ TevLayout tev_layout() noexcept {
       layout.stageMap[i] = static_cast<s8>(map);
     }
   }
+  if (layout.coordCount > kTexCoords) {
+    for (int c = 0; c < layout.coordCount; ++c) {
+      const TcgConfig& tcg = s.tcgs[layout.coords[c]];
+      layout.fragmentMtx[c] = layout.meshSet[c] >= 0 && tcg.type == GX_TG_MTX2x4 && !tcg.normalize && !has_post(tcg);
+    }
+  }
   layout.supported = true;
   return layout;
 }
@@ -816,8 +854,10 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   stateKey = XXH3_64bits_withSeed(layout.stageMap.data(), sizeof(layout.stageMap), stateKey);
   const int counts[2] = {layout.coordCount, layout.samplerCount};
   stateKey = XXH3_64bits_withSeed(counts, sizeof(counts), stateKey);
-  // The mesh set each slot reads (the vertex program's attributes).
+  // The mesh set each slot reads (the vertex program's attributes), and the slots the fragment
+  // program makes.
   stateKey = XXH3_64bits_withSeed(layout.meshSet.data(), sizeof(layout.meshSet), stateKey);
+  stateKey = XXH3_64bits_withSeed(layout.fragmentMtx.data(), sizeof(layout.fragmentMtx), stateKey);
   // The indirect stages read: their slots and scales (the stages' indirect setup is in theirs).
   stateKey = XXH3_64bits_withSeed(layout.indCoord.data(), sizeof(layout.indCoord), stateKey);
   stateKey = XXH3_64bits_withSeed(layout.indMap.data(), sizeof(layout.indMap), stateKey);
@@ -892,6 +932,21 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
     }
     if (set >= 0 && !declared) {
       add(vertexParams, fmt::format("float2 aUv{}", set));
+    }
+    if (layout.fragmentMtx[c]) {
+      // Made by the fragment program (fragment_body): its set's coordinates as they are, passed once
+      // a set, in the TEXCOORD of the set's first such slot.
+      info.fragmentMtx[c] = true;
+      bool passed = false;
+      for (int earlier = 0; earlier < c; ++earlier) {
+        passed = passed || (layout.fragmentMtx[earlier] && layout.meshSet[earlier] == set);
+      }
+      if (!passed) {
+        add(vertexOuts, fmt::format("float2 out vSet{} : TEXCOORD{}", set, c));
+        vertexBody += fmt::format("  vSet{0} = aUv{0};\n", set);
+        add(fragmentParams, fmt::format("float2 vSet{} : TEXCOORD{}", set, c));
+      }
+      continue;
     }
     add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
     vertexBody += fmt::format("  float4 t{} = {};\n", c, texgen_input(tcg, set));
@@ -1022,7 +1077,7 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
       value[1] = static_cast<float>(texture.height());
       value[2] = 0.f;
       value[3] = 0.f;
-    } else {
+    } else if (slot < kConstTexMtx) {
       const IndTexMtxInfo& matrix = s.indTexMtxs[(slot - kConstIndMtx) / 2];
       const auto& m = matrix.mtx;
       if (((slot - kConstIndMtx) & 1) == 0) {
@@ -1036,6 +1091,10 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
         value[2] = std::exp2(static_cast<float>(matrix.scaleExp));
         value[3] = 0.f;
       }
+    } else {
+      // A slot the fragment program makes: its generator's row.
+      const TcgConfig& tcg = s.tcgs[coordIds[(slot - kConstTexMtx) / 2]];
+      std::memcpy(value, generator_rows(tcg) + 4 * ((slot - kConstTexMtx) & 1), sizeof(float[4]));
     }
   }
 }
@@ -1046,17 +1105,11 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
   const GXState& s = g_gxState;
   int row = 4;
   for (int c = 0; c < coordCount; ++c) {
-    const TcgConfig& tcg = *coords[c];
-    const float* rows = kIdentity;
-    if (tcg.mtx != GX_IDENTITY) {
-      // GX numbers the position matrices first, then the texture matrices, three rows apiece.
-      const u32 index = static_cast<u32>(tcg.mtx) / 3;
-      if (index < MaxPnMtx) {
-        rows = reinterpret_cast<const float*>(&s.pnMtx[index].pos);
-      } else if (index - MaxPnMtx < MaxTexMtx) {
-        rows = reinterpret_cast<const float*>(&s.texMtxs[index - MaxPnMtx]);
-      }
+    if (program.fragmentMtx[c]) {
+      continue; // its matrix is the fragment program's (tev_constants)
     }
+    const TcgConfig& tcg = *coords[c];
+    const float* rows = generator_rows(tcg);
     const int count = tcg.type == GX_TG_MTX3x4 ? 3 : 2;
     std::memcpy(out[row], rows, sizeof(float[4]) * count);
     row += count;
