@@ -47,6 +47,9 @@ std::atomic_bool g_fontsChanged{false};
 // freed wherever their last holder lets go).
 std::atomic<int64_t> g_textureCount[2];
 std::atomic<int64_t> g_textureBytes[2];
+// Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
+std::atomic<int64_t> g_pendingCount;
+std::atomic<int64_t> g_pendingBytes;
 
 // vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
 void log_memory(const char* when) {
@@ -55,10 +58,10 @@ void log_memory(const char* when) {
     return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
   };
   Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
-           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB)",
+           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB); not yet uploaded: {} ({:.1f} MiB)",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
            g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
-           g_textureBytes[1].load() / kMiB);
+           g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB);
 }
 
 // A frame's draws and their programs' constant rows (ProgramInputs), and its serial, a new one
@@ -148,8 +151,15 @@ std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bo
 class Texture {
 public:
   Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> level0) noexcept
-  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {}
+  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {
+    m_pending = static_cast<int64_t>(m_cpu.size());
+    if (m_pending != 0) {
+      g_pendingCount.fetch_add(1, std::memory_order_relaxed);
+      g_pendingBytes.fetch_add(m_pending, std::memory_order_relaxed);
+    }
+  }
   ~Texture() {
+    settle_pending();
     if (m_id != 0) {
       const GLuint id = m_id;
       gfx::render_worker::enqueue_work([id] { glDeleteTextures(1, &id); });
@@ -192,6 +202,7 @@ public:
       g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
       g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
       std::vector<uint8_t>().swap(m_cpu);
+      settle_pending();
     } else {
       glBindTexture(GL_TEXTURE_2D, m_id);
     }
@@ -295,7 +306,16 @@ public:
   }
 
 private:
+  void settle_pending() noexcept {
+    if (m_pending != 0) {
+      g_pendingCount.fetch_sub(1, std::memory_order_relaxed);
+      g_pendingBytes.fetch_sub(m_pending, std::memory_order_relaxed);
+      m_pending = 0;
+    }
+  }
+
   std::vector<uint8_t> m_cpu;
+  int64_t m_pending = 0; // bytes counted in g_pendingBytes, until the upload
   uint32_t m_width;
   uint32_t m_height;
   TexelFormat m_format;
