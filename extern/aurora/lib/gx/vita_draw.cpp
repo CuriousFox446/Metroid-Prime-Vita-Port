@@ -1416,39 +1416,40 @@ const Material& current_material() noexcept {
 // the screen (a scissor's or a clear's; a viewport may reach past it).
 vita_gl::ScreenRect screen_rect(float left, float top, float width, float height, bool clamp) noexcept {
   const auto [fbWidth, fbHeight] = logical_fb_size();
-  const float sx = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
-  const float sy = fbHeight != 0 ? static_cast<float>(vita_gl::kScreenHeight) / static_cast<float>(fbHeight) : 1.f;
+  const int screenWidth = vita_gl::screen_width();
+  const int screenHeight = vita_gl::screen_height();
+  const float sx = fbWidth != 0 ? static_cast<float>(screenWidth) / static_cast<float>(fbWidth) : 1.f;
+  const float sy = fbHeight != 0 ? static_cast<float>(screenHeight) / static_cast<float>(fbHeight) : 1.f;
   long x0 = std::lround(left * sx);
   long x1 = std::lround((left + width) * sx);
   long y0 = std::lround(top * sy);
   long y1 = std::lround((top + height) * sy);
   if (clamp) {
-    x0 = std::clamp<long>(x0, 0, vita_gl::kScreenWidth);
-    x1 = std::clamp<long>(x1, x0, vita_gl::kScreenWidth);
-    y0 = std::clamp<long>(y0, 0, vita_gl::kScreenHeight);
-    y1 = std::clamp<long>(y1, y0, vita_gl::kScreenHeight);
+    x0 = std::clamp<long>(x0, 0, screenWidth);
+    x1 = std::clamp<long>(x1, x0, screenWidth);
+    y0 = std::clamp<long>(y0, 0, screenHeight);
+    y1 = std::clamp<long>(y1, y0, screenHeight);
   }
-  return {static_cast<int16_t>(x0), static_cast<int16_t>(vita_gl::kScreenHeight - y1),
-          static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+  return {static_cast<int16_t>(x0), static_cast<int16_t>(screenHeight - y1), static_cast<int16_t>(x1 - x0),
+          static_cast<int16_t>(y1 - y0)};
 }
 
 // GX's line width or point size (sixths of a pixel of its framebuffer) in the screen's whole pixels,
 // as GXM takes them (1 to 16).
 u8 screen_width(u8 sixths) noexcept {
   const auto [fbWidth, fbHeight] = logical_fb_size();
-  const float scale = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
+  const float scale = fbWidth != 0 ? static_cast<float>(vita_gl::screen_width()) / static_cast<float>(fbWidth) : 1.f;
   return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
 }
 
-// The frame probe, for the log (VITA_PHASE2.md: the pause screen drew its backdrop dark): from the
-// camera blur's copy (the whole screen into a half-size RGB565 texture: CCameraBlurPass, the pause
-// screen's and the cinematics'), that frame's draws, copies and clears and the next two frames',
-// each under its index in the frame (the render worker logs how it drew it). Twice a session.
+// The frame probe, for the log (VITA_PHASE2.md: the pause screen's backdrop): a frame's draws,
+// copies and clears, each under its index in the frame (the render worker logs how it drew it),
+// from PauseDump's first frame. (It began at the camera blur's copy once, and caught the Phazon
+// Suit's effect, which copies the screen the same way every frame.)
 struct FrameProbe {
   int framesLeft = 0;
   u32 serial = 0;
   int index = 0;
-  int triggers = 2;
 };
 FrameProbe sFrameProbe;
 
@@ -1470,6 +1471,57 @@ s16 frame_probe_index() noexcept {
   return static_cast<s16>(probe.index++);
 }
 
+// For the card (VITA_PHASE2.md: the pause screen's backdrop): the pause screen's frames once the
+// world is no longer drawn (the camera blur's draw, seven stages each a tap of its copy, then among
+// a frame's first), saved a step a frame (vita_gl::Draw::dump; a readback ends the display's scene,
+// so one a frame): the screen after the blur and after each of its next seven draws (the quarters'
+// light, the scan lines, the pause screen's first), the blur's copy as it holds it, and the whole
+// frame. The frame probe logs the first of those frames.
+struct PauseDump {
+  u32 serial = 0;      // the frame being recorded
+  int frameDraws = 0;  // its draws so far
+  int pauseFrames = 0; // the frames the blur began
+  int step = -1;       // this frame's step, or -1
+  int sinceBlur = 0;   // this frame's draws from the blur's
+};
+PauseDump sPauseDump;
+// The blur-begun frame the steps start at (the world no longer drawn by then), and the steps: after
+// the blur and each of its next seven draws (0 to 7), the copy (kDumpTexture) and the frame's end.
+constexpr int kPauseDumpFrom = 10;
+constexpr int kPauseDumpSteps = vita_gl::kDumpFrameEnd + 1;
+
+// FIFO thread, for each draw recorded: its vita_gl::Draw::dump.
+s8 pause_dump_mark() noexcept {
+  PauseDump& dump = sPauseDump;
+  const u32 serial = vita_gl::recording_serial();
+  if (serial != dump.serial) {
+    dump.serial = serial;
+    dump.frameDraws = 0;
+    dump.step = -1;
+  }
+  const GXState& s = g_gxState;
+  const GXTexMapID map = s.tevStages[0].texMapId;
+  const bool blur = dump.frameDraws++ < 4 && dump.step < 0 && s.numTevStages == 7 && s.numTexGens == 7 &&
+                    map < GX_MAX_TEXMAP && s.copyTextures.contains(s.loadedTextures[map].data);
+  if (blur) {
+    const int step = dump.pauseFrames++ - kPauseDumpFrom;
+    if (step >= 0 && step < kPauseDumpSteps) {
+      dump.step = step;
+      dump.sinceBlur = 0;
+      if (step == 0) {
+        sFrameProbe = FrameProbe{.framesLeft = 1, .serial = serial};
+        Log.info("[probe] frame {}, the pause screen's", serial);
+      }
+    }
+  }
+  if (dump.step < 0) {
+    return -1;
+  }
+  // The copy and the frame's end are the blur's own steps.
+  const int at = dump.sinceBlur++;
+  return at == (dump.step >= vita_gl::kDumpTexture ? 0 : dump.step) ? static_cast<s8>(dump.step) : -1;
+}
+
 // For the log (log_probe's callers): a draw, its matrix, state, textures (GX's size and format, EFB
 // copy or not), coordinate generators with their SU scales, and its program's constants by slot.
 void log_probe(const std::string& what, const Material& material, const vita_gl::Draw& draw,
@@ -1487,6 +1539,8 @@ void log_probe(const std::string& what, const Material& material, const vita_gl:
                       st.blendEquation, st.blendSrc, st.blendDst, st.depthTest, st.depthFunc, st.depthWrite,
                       st.colorWrite, st.alphaWrite, st.alphaFunc, st.alphaRef, material.unitCount,
                       material.program != nullptr);
+  text += fmt::format("; stages {} texgens {} fog {} depth range {:.4g}-{:.4g}", s.numTevStages, s.numTexGens,
+                      static_cast<int>(s.fog.type), s.renderViewport.znear, s.renderViewport.zfar);
   for (int unit = 0; unit < material.unitCount; ++unit) {
     text += fmt::format("; unit{} env {:x} coord {}", unit, draw.units[unit].envMode, draw.units[unit].coord);
   }
@@ -1501,6 +1555,16 @@ void log_probe(const std::string& what, const Material& material, const vita_gl:
     text += fmt::format("; uv{} coord {} type {} src {} mtx {} su {}x{}", c, material.coordIds[c],
                         static_cast<int>(tcg.type), static_cast<int>(tcg.src), static_cast<int>(tcg.mtx),
                         su.scaleS + 1, su.scaleT + 1);
+    // Its matrix's first two rows (as tev_vertex_rows reads them): the blur's taps' offsets.
+    const u32 index = static_cast<u32>(tcg.mtx) / 3;
+    const float* rows = tcg.mtx == GX_IDENTITY        ? nullptr
+                        : index < MaxPnMtx             ? reinterpret_cast<const float*>(&s.pnMtx[index].pos)
+                        : index - MaxPnMtx < MaxTexMtx ? reinterpret_cast<const float*>(&s.texMtxs[index - MaxPnMtx])
+                                                       : nullptr;
+    if (rows != nullptr) {
+      text += fmt::format(" ({:.3g} {:.3g} {:.3g} {:.3g} / {:.3g} {:.3g} {:.3g} {:.3g})", rows[0], rows[1], rows[2],
+                          rows[3], rows[4], rows[5], rows[6], rows[7]);
+    }
   }
   if (material.program != nullptr && constants != nullptr) {
     for (int i = 0; i < material.program->constantCount; ++i) {
@@ -1542,6 +1606,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
   }
   vita_gl::Draw draw{.mesh = std::move(mesh)};
   draw.width = width;
+  draw.dump = pause_dump_mark();
   draw.probe = frame_probe_index();
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
@@ -1989,17 +2054,6 @@ void record_copy() noexcept {
              g_gxState.texCopyDest, src.x, src.y, src.width, src.height, fbWidth, fbHeight,
              g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<u32>(fmt), draw.copyHalf,
              draw.scissor.x, draw.scissor.y, draw.scissor.width, draw.scissor.height);
-  }
-  // The camera blur's copy starts the frame probe (FrameProbe).
-  const auto [fbWidth, fbHeight] = logical_fb_size();
-  FrameProbe& probe = sFrameProbe;
-  if (fmt == GX_TF_RGB565 && draw.copyHalf && src.x == 0 && src.y == 0 && src.width == fbWidth &&
-      probe.framesLeft == 0 && probe.triggers > 0) {
-    --probe.triggers;
-    probe.framesLeft = 3;
-    probe.serial = vita_gl::recording_serial();
-    probe.index = 0;
-    Log.info("[probe] frame {}, from the camera blur's copy", probe.serial);
   }
   draw.probe = frame_probe_index();
   if (draw.probe >= 0) {

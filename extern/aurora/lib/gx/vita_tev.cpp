@@ -958,12 +958,17 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
   TevProgram& program = sPrograms[key];
   if (!program.program) {
-    // The first indirect programs' sources, for the log (they compile on the Vita alone).
+    // The first indirect programs' sources, for the log (they compile on the Vita alone), and the
+    // first with more coordinate slots than a mesh's sets (the camera blur's seven taps).
     static int sIndirectLogged = 0;
-    if (info.indirect && sIndirectLogged < 2) {
-      ++sIndirectLogged;
-      Log.info("an indirect program ({} textures, {} coordinate sets):\n-- vertex --\n{}-- fragment --\n{}",
-               layout.samplerCount, layout.coordCount, vertexSource, fragmentSource);
+    static bool sManyCoordsLogged = false;
+    const bool manyCoords = !sManyCoordsLogged && layout.coordCount > kTexCoords;
+    sManyCoordsLogged = sManyCoordsLogged || manyCoords;
+    if ((info.indirect && sIndirectLogged < 2) || manyCoords) {
+      sIndirectLogged += info.indirect ? 1 : 0;
+      Log.info("a{} program ({} textures, {} coordinate sets):\n-- vertex --\n{}-- fragment --\n{}",
+               info.indirect ? "n indirect" : "", layout.samplerCount, layout.coordCount, vertexSource,
+               fragmentSource);
     }
     info.program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
     program = std::move(info);

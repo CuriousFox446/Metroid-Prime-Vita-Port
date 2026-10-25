@@ -99,6 +99,11 @@ On a Vita with HENkaku/Ensō:
    Before the log starts, early output goes to `stdout.txt` and `stderr.txt` in the
    same folder. A crash leaves a core dump in `ux0:data/` (`psp2core-*.psp2dmp`).
 
+The game draws at the Vita's 960x544. For a smaller picture that the display scales up,
+with fewer pixels for the GPU to fill, put a `resolution.txt` in `ux0:data/MetroidPrime/`
+holding one line, `720x408` (about the GameCube's pixel count), `640x368` or `480x272`.
+The log says which size vitaGL started at. Delete the file to go back to 960x544.
+
 The numbers that matter are the once-a-second lines
 `[timing] presented=… FPS throughput=… FPS simulation=… ticks/s`. **Throughput**
 is frames per second of the main loop's own time: game logic, GX translation and

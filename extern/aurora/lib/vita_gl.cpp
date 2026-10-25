@@ -39,17 +39,19 @@ extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 namespace aurora::vita_gl {
 namespace {
 constexpr Module Log{"aurora::vita_gl"};
-constexpr int kWidth = kScreenWidth;
-constexpr int kHeight = kScreenHeight;
+// The screen's size (screen_width): the Vita's, or resolution.txt's (read_resolution).
+int g_width = 960;
+int g_height = 544;
 // vitaGL takes the RAM the game's heap leaves; this much of it stays free for the system's
 // own allocations (thread stacks, audio, file I/O).
 constexpr int kRamThreshold = 32 * 1024 * 1024;
 // For glBegin/glEnd; nothing here uses them.
 constexpr int kLegacyPool = 256 * 1024;
-// The scenes a frame vitaGL makes the display's render target and each framebuffer's for (each EFB
-// copy ends the display's scene: initialize).
+// The scenes a frame vitaGL makes the display's render target and each framebuffer's for, GXM's
+// most (each EFB copy ends the display's scene and draws two of a framebuffer's: initialize).
+// draw_world and copy_on_gpu keep each frame within them.
 constexpr uint8_t kDisplayScenesPerFrame = 8;
-constexpr uint8_t kFramebufferScenesPerFrame = 2;
+constexpr uint8_t kFramebufferScenesPerFrame = 8;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
@@ -357,6 +359,7 @@ public:
       m_targets.push_back(made);
       target = &m_targets.back();
     }
+    target->scenes = target->lastUsed == g_presentSerial ? target->scenes + 1 : 1;
     target->lastUsed = g_presentSerial;
     if (m_id != target->texture) {
       // Another GL texture: its sampler state is its own.
@@ -366,6 +369,17 @@ public:
     m_width = static_cast<uint32_t>(width);
     m_height = static_cast<uint32_t>(height);
     return target->framebuffer;
+  }
+
+  // Render worker: the scenes its `width` x `height` target has been drawn in this present (a copy
+  // texture's or the copies' scratch: copy_on_gpu keeps them within kFramebufferScenesPerFrame).
+  int scenes(int width, int height) const noexcept {
+    for (const Target& t : m_targets) {
+      if (t.width == width && t.height == height) {
+        return t.lastUsed == g_presentSerial ? t.scenes : 0;
+      }
+    }
+    return 0;
   }
 
   GLuint id() const noexcept { return m_id; }
@@ -396,6 +410,7 @@ private:
     GLuint texture = 0;
     GLuint framebuffer = 0;
     uint32_t lastUsed = 0; // g_presentSerial at its last copy
+    int scenes = 0;        // the scenes drawn into it in that present
     int64_t bytes() const noexcept { return static_cast<int64_t>(width) * height * 4; }
   };
   static constexpr size_t kTargetsPerTexture = 4;
@@ -1308,6 +1323,12 @@ struct PresentStats {
   // The most draws in one of the display's scenes (an EFB copy ends one): what GXM's ring buffers
   // hold until the scene is drawn (initialize).
   uint32_t maxSceneDraws = 0;
+  // The most scenes a frame drew into the display and into one framebuffer (a copy's scratch or
+  // texture), and the copies left for the next frame to keep within them (draw_world, copy_on_gpu).
+  uint32_t maxDisplayScenes = 0;
+  uint32_t maxFramebufferScenes = 0;
+  uint32_t copiesOverDisplayScenes = 0;
+  uint32_t copiesOverFramebufferScenes = 0;
 };
 PresentStats g_presentStats;
 
@@ -1463,38 +1484,96 @@ void copy_matrix(CopyKind kind, float rows[5][4]) noexcept {
   }
 }
 
-// For the log (VITA_PHASE2.md: the charged shot's warp showed another part of the screen): the
-// first copies of a rectangle away from the screen's corner, as images on the card, the screen's
-// rectangle before the blit and the copy's texture after it (glReadPixels waits for the GPU).
-int g_copyDumps = 2;
-
-void dump_pixels(const std::string& name, int x, int y, int width, int height) noexcept {
-  std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
-  glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+// For the card (VITA_PHASE2.md: the pause screen's backdrop): the screen at half its size, as a PPM
+// in the game's folder. glReadPixels ends the display's scene and waits for the GPU (a framebuffer's
+// own texture came back black that way: show_texture draws it on the screen first).
+void dump_screen(const std::string& name) noexcept {
+  std::vector<uint8_t> rgba(static_cast<size_t>(g_width) * g_height * 4);
+  glReadPixels(0, 0, g_width, g_height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+  const int width = g_width / 2;
+  const int height = g_height / 2;
   const std::string path = std::string{g_config.userPath} + "/" + name;
   if (FILE* file = std::fopen(path.c_str(), "wb")) {
     std::fprintf(file, "P6\n%d %d\n255\n", width, height);
     std::vector<uint8_t> rgb(static_cast<size_t>(width) * 3);
     for (int row = height - 1; row >= 0; --row) { // GL's rows run bottom up
+      const uint8_t* line = &rgba[static_cast<size_t>(row) * 2 * g_width * 4];
       for (int col = 0; col < width; ++col) {
-        std::memcpy(&rgb[static_cast<size_t>(col) * 3], &rgba[(static_cast<size_t>(row) * width + col) * 4], 3);
+        std::memcpy(&rgb[static_cast<size_t>(col) * 3], line + static_cast<size_t>(col) * 2 * 4, 3);
       }
       std::fwrite(rgb.data(), 1, rgb.size(), file);
     }
     std::fclose(file);
   }
-  Log.info("[probe] {}: {}x{} at ({}, {})", path, width, height, x, y);
+  Log.info("[probe] {}: the screen at {}x{}", path, width, height);
 }
 
+// The copy pass's quad: a position in clip space and a texture coordinate.
+struct CopyVertex {
+  float pos[3];
+  float uv[2];
+};
+
+void draw_copy_quad(Program& program, const CopyVertex (&quad)[6]) noexcept {
+  const GLint pos = program.attr(kAttrPos);
+  const GLint uv = program.attr(kAttrUv0);
+  if (pos >= 0 && uv >= 0) {
+    glEnableVertexAttribArray(pos);
+    glEnableVertexAttribArray(uv);
+    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].pos);
+    glVertexAttribPointer(uv, 2, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].uv);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisableVertexAttribArray(pos);
+    glDisableVertexAttribArray(uv);
+  }
+}
+
+// For the card (dump_screen): `texture` drawn over the whole screen as it holds it (a copy's first
+// row, GX's, at the top), with the copy pass's program. Leaves what copy_on_gpu leaves.
+void show_texture(const Texture& texture) noexcept {
+  int compiles = 1;
+  int loads = 1;
+  if (!g_copyProgram || !g_copyProgram->ready(compiles, loads)) {
+    return;
+  }
+  glActiveTexture(GL_TEXTURE0);
+  glViewport(0, 0, g_width, g_height);
+  glDisable(GL_SCISSOR_TEST);
+  glDisable(GL_BLEND);
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+  glDisable(GL_CULL_FACE);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  Program& program = *g_copyProgram;
+  glUseProgram(program.id());
+  float rows[5][4];
+  copy_matrix(CopyKind::Rgba, rows);
+  program.send_constants(rows, 5);
+  glBindTexture(GL_TEXTURE_2D, texture.id());
+  const CopyVertex quad[6] = {
+      {{-1.f, -1.f, 0.f}, {0.f, 1.f}}, {{1.f, -1.f, 0.f}, {1.f, 1.f}}, {{1.f, 1.f, 0.f}, {1.f, 0.f}},
+      {{-1.f, -1.f, 0.f}, {0.f, 1.f}}, {{1.f, 1.f, 0.f}, {1.f, 0.f}},  {{-1.f, 1.f, 0.f}, {0.f, 0.f}},
+  };
+  draw_copy_quad(program, quad);
+  glUseProgram(0);
+}
+
+// What copy_on_gpu did with a copy: made it, found its rectangle empty, left it for the pass's
+// program to be built, or left it for the next frame (Over: copy_on_gpu).
+enum class CopyResult : uint8_t { Made, Empty, Waiting, Over };
+
 // Render worker, in the fixed-function arrays' absence (draw_world turns them off around it):
-// makes `draw`'s copy. False when the pass's program is not built yet (the copy's texture keeps
-// what it had). Leaves the display's framebuffer bound, no program in use, and the scissor test,
-// blending, depth, culling and the colour mask as the pass left them (draw_world sets its own
-// again).
-bool copy_on_gpu(const Draw& draw) noexcept {
+// makes `draw`'s copy. Its blit draws a scene into the copies' scratch and its pass one into the
+// copy's texture; a framebuffer drawn in more scenes in a frame than vitaGL made its render target
+// for came back with stale and foreign tiles (VITA_PHASE2.md: the pause screen's backdrop, its one
+// copy the third into the scratch that frame), so a copy that would is left for the next frame.
+// Unless Made, the copy's texture keeps what it had. Leaves the display's framebuffer bound, no
+// program in use, and the scissor test, blending, depth, culling and the colour mask as the pass
+// left them (draw_world sets its own again).
+CopyResult copy_on_gpu(const Draw& draw) noexcept {
   const ScreenRect& src = draw.scissor;
   if (src.width <= 0 || src.height <= 0) {
-    return true;
+    return CopyResult::Empty;
   }
   if (!g_copyProgram) {
     g_copyProgram = make_program(kCopyVertex, kCopyFragment, kCopyProgramKey);
@@ -1502,7 +1581,7 @@ bool copy_on_gpu(const Draw& draw) noexcept {
   int compiles = 1;
   int loads = 1;
   if (!g_copyProgram->ready(compiles, loads)) {
-    return false;
+    return CopyResult::Waiting;
   }
   const bool half = draw.copyHalf && src.width > 1 && src.height > 1;
   const int width = half ? src.width / 2 : src.width;
@@ -1510,11 +1589,13 @@ bool copy_on_gpu(const Draw& draw) noexcept {
   if (!g_copyScratch) {
     g_copyScratch = make_copy_texture();
   }
-  glActiveTexture(GL_TEXTURE0);
-  const bool dump = g_copyDumps > 0 && (src.x != 0 || src.y != 0);
-  if (dump) {
-    dump_pixels(fmt::format("probe_copy{}_screen.ppm", g_copyDumps), src.x, src.y, src.width, src.height);
+  const int scenes = std::max(g_copyScratch->scenes(width, height), draw.copyTo->scenes(width, height));
+  if (scenes >= kFramebufferScenesPerFrame) {
+    return CopyResult::Over;
   }
+  g_presentStats.maxFramebufferScenes =
+      std::max(g_presentStats.maxFramebufferScenes, static_cast<uint32_t>(scenes + 1));
+  glActiveTexture(GL_TEXTURE0);
   const GLuint scratch = g_copyScratch->render_target(width, height);
   const GLuint target = draw.copyTo->render_target(width, height);
 
@@ -1541,10 +1622,6 @@ bool copy_on_gpu(const Draw& draw) noexcept {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  struct CopyVertex {
-    float pos[3];
-    float uv[2];
-  };
   // The output's bottom row (GL's first) takes the scratch's top: GX's first row.
   const float bottom = kFlipCopies ? 1.f : 0.f;
   const float top = 1.f - bottom;
@@ -1552,24 +1629,10 @@ bool copy_on_gpu(const Draw& draw) noexcept {
       {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, -1.f, 0.f}, {1.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},
       {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},     {{-1.f, 1.f, 0.f}, {0.f, top}},
   };
-  const GLint pos = program.attr(kAttrPos);
-  const GLint uv = program.attr(kAttrUv0);
-  if (pos >= 0 && uv >= 0) {
-    glEnableVertexAttribArray(pos);
-    glEnableVertexAttribArray(uv);
-    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].pos);
-    glVertexAttribPointer(uv, 2, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].uv);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisableVertexAttribArray(pos);
-    glDisableVertexAttribArray(uv);
-  }
-  if (dump) {
-    dump_pixels(fmt::format("probe_copy{}_texture.ppm", g_copyDumps), 0, 0, width, height);
-    --g_copyDumps;
-  }
+  draw_copy_quad(program, quad);
   glUseProgram(0);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  return true;
+  return CopyResult::Made;
 }
 
 // Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
@@ -1759,11 +1822,63 @@ void draw_world(const Frame& frame) {
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
+  // Around a pass of this file's own (an EFB copy, a texture shown for the card), which draws with
+  // a program and without the fixed-function arrays: the program in use, its uniforms, the
+  // matrices, the rectangles, the line width and the state are all set again at the next draw.
+  const auto leave_draws = [&]() {
+    enter_fixed_function();
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    for (int unit = 0; unit < kTexUnits; ++unit) {
+      glClientActiveTexture(GL_TEXTURE0 + unit);
+      glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+  };
+  const auto return_to_draws = [&]() {
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    for (int unit = 0; unit < kTexUnits; ++unit) {
+      glClientActiveTexture(GL_TEXTURE0 + unit);
+      glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    glEnable(GL_SCISSOR_TEST);
+    viewport = scissor = ScreenRect{0, 0, 0, 0};
+    apply_state(current, current, true);
+    bound.units[0] = nullptr;
+    haveProjection = false;
+    for (bool& have : haveTexMatrix) {
+      have = false;
+    }
+    width = 0;
+  };
+  // The display's scenes this frame: present's clear begins the first, and the first draw or clear
+  // after a copy's blit (or a readback) ended one begins the next. Its render target is made for
+  // kDisplayScenesPerFrame, GXM's most, and a frame drawn in more came back with stale tiles (the
+  // Phazon Suit's effect alone begins four; the cinematics with Samus in hers, more): a copy that
+  // would end the last is left for the next frame, its texture keeping the last frame's.
+  int displayScenes = 1;
+  bool displayOpen = true;
+  const auto begin_display = [&displayScenes, &displayOpen]() {
+    if (!displayOpen) {
+      ++displayScenes;
+      displayOpen = true;
+    }
+  };
+  // The pause screen's steps for the card (gx/vita_draw.cpp's PauseDump), each a readback: it ends
+  // the display's scene, so only with two of its scenes to spare (its own draw's, the next draw's).
+  const auto can_save = [&displayScenes]() { return displayScenes + 2 <= kDisplayScenesPerFrame; };
+  const auto save_screen = [&](int step, const char* what) {
+    dump_screen(fmt::format("pause_{}_{}.ppm", step, what));
+    displayOpen = false;
+    return_to_draws();
+  };
+  bool saveAtEnd = false;
   uint32_t sceneDraws = 0;
   for (const Draw& draw : draws) {
     if (draw.clear) {
       // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
       // the scissor's alone), with the masks GX's updates give, then the draws' masks again.
+      begin_display();
       set_rects(ScreenRect{}, draw.scissor);
       const GLboolean color = draw.clearColor ? GL_TRUE : GL_FALSE;
       glColorMask(color, color, color, draw.clearAlpha ? GL_TRUE : GL_FALSE);
@@ -1781,39 +1896,32 @@ void draw_world(const Frame& frame) {
       continue;
     }
     if (draw.copyTo != nullptr) {
-      // An EFB copy (copy_on_gpu): scenes of its own, so the program in use, its uniforms, the
-      // matrices, the rectangles, the line width and the state are all set again at the next draw.
-      // Its pass draws with a program, without the fixed-function arrays.
-      const uint64_t start = sceKernelGetProcessTimeWide();
-      enter_fixed_function();
-      glDisableClientState(GL_VERTEX_ARRAY);
-      glDisableClientState(GL_COLOR_ARRAY);
-      for (int unit = 0; unit < kTexUnits; ++unit) {
-        glClientActiveTexture(GL_TEXTURE0 + unit);
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+      // An EFB copy (copy_on_gpu): scenes of its own, its blit ending the display's.
+      if (displayOpen && displayScenes >= kDisplayScenesPerFrame) {
+        ++g_presentStats.copiesOverDisplayScenes;
+        if (draw.probe >= 0) {
+          Log.info("[probe] render {}: copy left for the next frame (the display's last scene)", draw.probe);
+        }
+        continue;
       }
-      const bool made = copy_on_gpu(draw);
+      const uint64_t start = sceKernelGetProcessTimeWide();
+      leave_draws();
+      const CopyResult result = copy_on_gpu(draw);
       if (draw.probe >= 0) {
-        Log.info("[probe] render {}: copy {} into {}x{} ({} targets)", draw.probe, made ? "made" : "waiting",
+        static constexpr const char* kResults[] = {"made", "of an empty rectangle", "waiting for its program",
+                                                   "left for the next frame (a framebuffer's scenes)"};
+        Log.info("[probe] render {}: copy {} into {}x{} ({} targets)", draw.probe, kResults[static_cast<int>(result)],
                  draw.copyTo->width(), draw.copyTo->height(), draw.copyTo->targets());
       }
-      glEnableClientState(GL_VERTEX_ARRAY);
-      glEnableClientState(GL_COLOR_ARRAY);
-      for (int unit = 0; unit < kTexUnits; ++unit) {
-        glClientActiveTexture(GL_TEXTURE0 + unit);
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+      return_to_draws();
+      const bool made = result == CopyResult::Made;
+      if (made) {
+        displayOpen = false;
+        sceneDraws = 0;
       }
-      glEnable(GL_SCISSOR_TEST);
-      viewport = scissor = ScreenRect{0, 0, 0, 0};
-      apply_state(current, current, true);
-      bound.units[0] = nullptr;
-      haveProjection = false;
-      for (bool& have : haveTexMatrix) {
-        have = false;
-      }
-      width = 0;
-      sceneDraws = 0;
-      ++(made ? g_presentStats.copies : g_presentStats.copiesWaiting);
+      ++(result == CopyResult::Waiting ? g_presentStats.copiesWaiting
+         : result == CopyResult::Over  ? g_presentStats.copiesOverFramebufferScenes
+                                       : g_presentStats.copies);
       g_presentStats.copyPixels += made ? static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height : 0;
       const uint64_t copyUs = sceKernelGetProcessTimeWide() - start;
       g_presentStats.copyUs += copyUs;
@@ -1823,6 +1931,22 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
+    if (draw.dump == kDumpTexture && can_save()) {
+      // The draw's first texture (the pause screen's blur's copy) on the screen, saved; the draw (the
+      // blur, opaque over the whole screen) then covers it.
+      const Texture* texture =
+          draw.program.textures[0] != nullptr ? draw.program.textures[0].get() : draw.units[0].texture.get();
+      if (texture != nullptr) {
+        begin_display();
+        leave_draws();
+        show_texture(*texture);
+        return_to_draws();
+        save_screen(draw.dump, "texture");
+        set_rects(draw.viewport, draw.scissor);
+      }
+    }
+    saveAtEnd = saveAtEnd || draw.dump == kDumpFrameEnd;
+    begin_display();
     g_presentStats.maxSceneDraws = std::max(g_presentStats.maxSceneDraws, ++sceneDraws);
     if (draw.width != width && draw.mesh->mode() != GL_TRIANGLES) {
       glLineWidth(static_cast<GLfloat>(draw.width));
@@ -1862,6 +1986,9 @@ void draw_world(const Frame& frame) {
       ++g_presentStats.programDraws;
       g_clock.programDraws += g_clock.on ? 1 : 0;
       draw_with_program(draw, frame, *program, usedProgram, attribsOn, current, bound);
+      if (draw.dump >= 0 && draw.dump < kDumpTexture && can_save()) {
+        save_screen(draw.dump, "after");
+      }
       continue;
     }
     if (draw.program.program != nullptr) {
@@ -1931,7 +2058,14 @@ void draw_world(const Frame& frame) {
     g_presentCosts.fixedMaxUs = std::max(g_presentCosts.fixedMaxUs, fixedUs);
     ++g_presentCosts.fixedDraws;
     g_clock.mark(kFixedDraw);
+    if (draw.dump >= 0 && draw.dump < kDumpTexture && can_save()) {
+      save_screen(draw.dump, "after");
+    }
   }
+  if (saveAtEnd) {
+    dump_screen(fmt::format("pause_{}_frame.ppm", kDumpFrameEnd));
+  }
+  g_presentStats.maxDisplayScenes = std::max(g_presentStats.maxDisplayScenes, static_cast<uint32_t>(displayScenes));
   enter_fixed_function();
   // Back to GL's defaults for the overlay (ImGui's backend sets blending, depth and culling
   // itself, but not the alpha test, the masks or the winding).
@@ -1942,7 +2076,7 @@ void draw_world(const Frame& frame) {
     glLineWidth(1.f);
     glPointSize(1.f);
   }
-  glViewport(0, 0, kWidth, kHeight);
+  glViewport(0, 0, g_width, g_height);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glClientActiveTexture(GL_TEXTURE0 + unit);
@@ -1980,14 +2114,43 @@ void keep_display_depth() {
   }
   // As vitaGL allocates it: the size aligned to GXM's tiles, a word a sample (no multisampling).
   const auto align = [](size_t value, size_t to) { return (value + to - 1) / to * to; };
-  const size_t bytes = align(kWidth, SCE_GXM_TILE_SIZEX) * align(kHeight, SCE_GXM_TILE_SIZEY) * 4;
+  const size_t bytes = align(g_width, SCE_GXM_TILE_SIZEX) * align(g_height, SCE_GXM_TILE_SIZEY) * 4;
   std::memset(surface.depthData, 0x80, bytes);
   sceGxmDepthStencilSurfaceSetForceLoadMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
   sceGxmDepthStencilSurfaceSetForceStoreMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
   Log.info("the display's depth is kept across scenes ({} KiB)", bytes / 1024);
 }
 
+// A smaller screen than the Vita's, which its display scales up (fewer pixels for the GPU to fill:
+// its share of a frame, the EFB copies' most), where resolution.txt in the game's folder names one
+// of the sizes the display takes ("720x408", the GameCube's pixels about; "640x368").
+void read_resolution() noexcept {
+  const std::string path = std::string{g_config.userPath} + "/resolution.txt";
+  FILE* file = std::fopen(path.c_str(), "r");
+  if (file == nullptr) {
+    return;
+  }
+  int width = 0;
+  int height = 0;
+  const int read = std::fscanf(file, "%dx%d", &width, &height);
+  std::fclose(file);
+  constexpr int kSizes[][2] = {{960, 544}, {720, 408}, {640, 368}, {480, 272}};
+  for (const auto& size : kSizes) {
+    if (read == 2 && width == size[0] && height == size[1]) {
+      g_width = width;
+      g_height = height;
+      Log.info("{}: the screen at {}x{}", path, width, height);
+      return;
+    }
+  }
+  Log.warn("{}: not one of the display's sizes (960x544, 720x408, 640x368, 480x272); the screen stays {}x{}", path,
+           g_width, g_height);
+}
+
 } // namespace
+
+int screen_width() noexcept { return g_width; }
+int screen_height() noexcept { return g_height; }
 
 bool initialize() noexcept {
   // vitaGL compiles the shaders behind its fixed-function calls (the overlay's) with the Vita's
@@ -2018,12 +2181,15 @@ bool initialize() noexcept {
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
-  const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
+  read_resolution();
+  const bool clamped = vglInitExtended(kLegacyPool, g_width, g_height, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
   g_active = true;
   if (clamped) {
-    Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
+    Log.warn("vitaGL started at the display's maximum size, not {}x{}", g_width, g_height);
+    g_width = 960;
+    g_height = 544;
   } else {
-    Log.info("vitaGL started at {}x{}", kWidth, kHeight);
+    Log.info("vitaGL started at {}x{}", g_width, g_height);
   }
   if (!clamped) {
     keep_display_depth();
@@ -2130,7 +2296,7 @@ void present(ImDrawData* overlay) noexcept {
     ImGui_ImplOpenGL2_DestroyFontsTexture();
   }
   ImGui_ImplOpenGL2_NewFrame();
-  glViewport(0, 0, kWidth, kHeight);
+  glViewport(0, 0, g_width, g_height);
   glDisable(GL_SCISSOR_TEST);
   // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first).
   glClearColor(0.f, 0.f, 0.f, 1.f);
@@ -2147,18 +2313,22 @@ void present(ImDrawData* overlay) noexcept {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
              "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; "
-             "EFB copies on the GPU: {} ({} waiting for their pass's program; {:.0f} kpixels; render worker "
-             "{:.1f} ms, {:.2f} ms each; {} render targets made in all); most draws in a scene: {}",
+             "EFB copies on the GPU: {} ({} waiting for their pass's program, {} and {} left for the next frame by "
+             "the display's scenes and a framebuffer's; {:.0f} kpixels; render worker {:.1f} ms, {:.2f} ms each; {} "
+             "render targets made in all); most draws in a scene: {}; most scenes in a frame: the display's {}, a "
+             "framebuffer's {}",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
-             g_presentStats.copies, g_presentStats.copiesWaiting, g_presentStats.copyPixels / 1000.0,
+             g_presentStats.copies, g_presentStats.copiesWaiting, g_presentStats.copiesOverDisplayScenes,
+             g_presentStats.copiesOverFramebufferScenes, g_presentStats.copyPixels / 1000.0,
              g_presentStats.copyUs / 1000.0,
              g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
-             g_renderTargets.load(std::memory_order_relaxed), g_presentStats.maxSceneDraws);
+             g_renderTargets.load(std::memory_order_relaxed), g_presentStats.maxSceneDraws,
+             g_presentStats.maxDisplayScenes, g_presentStats.maxFramebufferScenes);
     Log.info("background compiler: {} programs compiled ({:.0f} ms there; linked here in {:.0f} ms), {} compiled on "
              "the render worker after all, {} waiting",
              g_programStats.background, g_programStats.backgroundMs, g_programStats.linkMs, g_programStats.fallbacks,

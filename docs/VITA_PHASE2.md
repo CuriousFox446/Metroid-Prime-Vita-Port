@@ -1243,6 +1243,47 @@ earlier probes were spent before the pause: the y-flattening matrices were the w
   and `[probe] render <n>:` for how the render worker drew it (program, or fixed-function and why;
   the textures' sizes as bound). Twice a session. The earlier probes are gone.
 
+Its run (452b99f): nothing changed (the user); the backdrop now a flat grey with a darker shape in
+it. Both of the probe's triggers went to gameplay frames: the Phazon Suit's effect
+(`DrawPhazonSuitIndirectEffect`, every frame in the suit) copies the screen into the spare buffer
+just as the camera blur does (half size, RGB565), then blurs the screen's alpha through four A8
+copies into a mask and draws the copy back through an indirect offset over the arm. The pause
+screen's frames (62 draws, every one with its program) went unprobed. The black `probe_copy*_texture`
+images were the warp's copy read back through its own framebuffer: no evidence either way.
+- The likeliest cause, the framebuffers' scenes. A copy's blit draws a scene into the copies'
+  scratch framebuffer (one a size, shared by every copy of that size) and its pass one into the
+  copy's own. The Phazon Suit's effect blits into the 480x272 scratch twice a frame (the screen and
+  its alpha), and the pause screen's one copy is the third that frame, with the framebuffers'
+  render targets made for 2 scenes a frame (f8c98b8). A target drawn in more scenes than it was
+  made for comes back with stale and foreign tiles: 2x2 macrotiles at 480x272 (the quarters of
+  cd75c62's run), the alpha copies' grey. The pause screen shows that one copy while it is paused.
+  The display likewise: GXM's most is 8 scenes a frame, the Phazon Suit's effect begins four (each
+  copy followed by draws), the world's shadow one, the charged shot's warp one, and a cinematic with
+  Samus in the suit (`CScriptPlayerActor`, its own copy and the same effect) more. Hence, likely,
+  the gunship's black cinematics and the GPU hangs.
+- Now the framebuffers' targets are made for 8 scenes a frame too, GXM's most, and each frame kept
+  within them: `copy_on_gpu` leaves a copy for the next frame when its scratch or texture has had 8
+  scenes that frame, `draw_world` when its blit would end the display's 8th; the copy's texture
+  keeps the last frame's either way. The presents line has the most scenes in a frame (the
+  display's, a framebuffer's) and the copies left over.
+- If the pause screen is still wrong, the card has its frames: from its tenth frame (the world no
+  longer drawn), one step a frame, as a readback ends the display's scene. `pause_<n>_after.ppm` is
+  the screen after the blur (n 0) and after each of its next seven draws (the quarters, the scan
+  lines, the pause screen's first); `pause_8_texture.ppm` is the blur's copy drawn on the screen as
+  it holds it; `pause_9_frame.ppm` is the frame's end; all at half size. The frame probe starts at
+  the first of those frames, its draws' lines with each generator's matrix rows, the TEV stages, the
+  fog and the depth range. The log has the first program with more than four coordinate slots (the
+  blur's seven taps). The copy images of 452b99f are gone.
+- The frame time (the user asked about a lower resolution), from the log: in Tallon Overworld 9 to
+  18 frames a second, the game ticking 26 to 30 times a second of its 60. A frame's main thread:
+  the ticks 21 to 24 ms, the draw calls 14 to 24 ms, then 30 to 50 ms waiting at BeginScene for the
+  FIFO thread (Aurora's GX processing: immediate draws, resident lists, skinned lists). The render
+  worker was busy a quarter of the time and its swap took 0.2 ms; the GPU showed only in frames with
+  copies (their draws stalling some 20 ms). A smaller screen spares the GPU's fill and the copies,
+  not that CPU work. So, as an experiment, `resolution.txt` in the game's folder (`720x408`, about
+  the GameCube's pixel count; `640x368`; `480x272`) starts vitaGL at that size, which the display
+  scales up (`read_resolution`).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

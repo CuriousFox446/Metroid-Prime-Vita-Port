@@ -18,16 +18,23 @@
 #include <imgui.h>
 
 namespace aurora::vita_gl {
-// The screen vitaGL draws to, in pixels.
-constexpr int kScreenWidth = 960;
-constexpr int kScreenHeight = 544;
+// The screen vitaGL draws to, in pixels: the Vita's 960x544, or a smaller size the display scales
+// up to it (720x408, 640x368 or 480x272: fewer pixels for the GPU to fill) where resolution.txt in
+// the game's folder asks for one (initialize).
+#ifdef AURORA_VITA_GL
+int screen_width() noexcept;
+int screen_height() noexcept;
+#else
+inline int screen_width() noexcept { return 960; }
+inline int screen_height() noexcept { return 544; }
+#endif
 
 // A rectangle of the screen as GL takes it (glViewport, glScissor): pixels, origin at the bottom left.
 struct ScreenRect {
   int16_t x = 0;
   int16_t y = 0;
-  int16_t width = kScreenWidth;
-  int16_t height = kScreenHeight;
+  int16_t width = static_cast<int16_t>(screen_width());
+  int16_t height = static_cast<int16_t>(screen_height());
   bool operator==(const ScreenRect&) const = default;
 };
 
@@ -197,10 +204,16 @@ struct Draw {
   // For the log (gx/vita_draw.cpp's frame probe): its index in the frame, the render worker logs
   // how it drew it (-1: not logged).
   int16_t probe = -1;
+  // For the card (gx/vita_draw.cpp's PauseDump): the screen saved after it (0 to 7), its first
+  // texture shown and saved before it (kDumpTexture), or the screen saved at its frame's end
+  // (kDumpFrameEnd); -1: none.
+  int8_t dump = -1;
 };
+constexpr int8_t kDumpTexture = 8;
+constexpr int8_t kDumpFrameEnd = 9;
 
 #ifdef AURORA_VITA_GL
-// Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
+// Starts vitaGL at the screen's size (true). After it GXM is vitaGL's: SDL's renderer, GXM
 // too, must never be created.
 bool initialize() noexcept;
 bool active() noexcept;
