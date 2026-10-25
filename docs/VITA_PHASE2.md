@@ -1212,6 +1212,24 @@ screen shifted and tinted, a solid band at one side.
   textures with GX's size and format, generators with their SU scales, constants by slot), and each
   copy destination and size's first copy (GX's rectangle, the destination, the screen's).
 
+Its run (4b8b1f6): the pause screen's quarters are gone but its backdrop is dark, not the blurred
+room; the gunship still turns mostly black; the charged shot's square still shows another part of
+the screen, with a black triangle in it; a second GPU crash (the user: the whole Vita went down).
+The probes rule out the warp's own arithmetic: its matrix (0.29 by 2^-1: 18 texels at most, none at
+the square's edge), sizes and SU scales are GX's (a 32x32 IA8 offset map over a 192x192 copy), and
+the copy's rectangle maps onto the screen where the square is drawn (GX (332, 152) of an 846x480
+frame to (377, 154) 218x218). vitaGL's blit reads the display's back buffer (`display_read_mode`
+starts at GL_BACK) with GL's coordinates. Left: what the copies hold.
+- Every copy ends the display's scene and begins another, and draws two scenes of framebuffers of
+  its own: four copies a frame on the pause screen, five display scenes and more. vitaGL makes its
+  render targets for one scene a frame unless told (`vglSetupRenderTargetScenesNum`), and GXM sizes
+  a target's per-scene state by that: stale tiles, black triangles and GPU hangs are what using
+  more would give. Now the display's target is made for 8 scenes a frame, a framebuffer's for 2
+  (`kDisplayScenesPerFrame`, `kFramebufferScenesPerFrame`).
+- If that is not it: the first two copies of a rectangle away from the screen's corner (the warp's)
+  are written to the card, `probe_copy2_*.ppm` and `probe_copy1_*.ppm`, the screen's rectangle before
+  the blit (`_screen`) and the copy's texture after (`_texture`).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

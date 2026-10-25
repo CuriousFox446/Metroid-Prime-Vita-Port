@@ -46,6 +46,10 @@ constexpr int kHeight = kScreenHeight;
 constexpr int kRamThreshold = 32 * 1024 * 1024;
 // For glBegin/glEnd; nothing here uses them.
 constexpr int kLegacyPool = 256 * 1024;
+// The scenes a frame vitaGL makes the display's render target and each framebuffer's for (each EFB
+// copy ends the display's scene: initialize).
+constexpr uint8_t kDisplayScenesPerFrame = 8;
+constexpr uint8_t kFramebufferScenesPerFrame = 2;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
@@ -1454,6 +1458,29 @@ void copy_matrix(CopyKind kind, float rows[5][4]) noexcept {
   }
 }
 
+// For the log (VITA_PHASE2.md: the charged shot's warp showed another part of the screen): the
+// first copies of a rectangle away from the screen's corner, as images on the card, the screen's
+// rectangle before the blit and the copy's texture after it (glReadPixels waits for the GPU).
+int g_copyDumps = 2;
+
+void dump_pixels(const std::string& name, int x, int y, int width, int height) noexcept {
+  std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+  glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+  const std::string path = std::string{g_config.userPath} + "/" + name;
+  if (FILE* file = std::fopen(path.c_str(), "wb")) {
+    std::fprintf(file, "P6\n%d %d\n255\n", width, height);
+    std::vector<uint8_t> rgb(static_cast<size_t>(width) * 3);
+    for (int row = height - 1; row >= 0; --row) { // GL's rows run bottom up
+      for (int col = 0; col < width; ++col) {
+        std::memcpy(&rgb[static_cast<size_t>(col) * 3], &rgba[(static_cast<size_t>(row) * width + col) * 4], 3);
+      }
+      std::fwrite(rgb.data(), 1, rgb.size(), file);
+    }
+    std::fclose(file);
+  }
+  Log.info("[probe] {}: {}x{} at ({}, {})", path, width, height, x, y);
+}
+
 // Render worker, in the fixed-function arrays' absence (draw_world turns them off around it):
 // makes `draw`'s copy. False when the pass's program is not built yet (the copy's texture keeps
 // what it had). Leaves the display's framebuffer bound, no program in use, and the scissor test,
@@ -1479,6 +1506,10 @@ bool copy_on_gpu(const Draw& draw) noexcept {
     g_copyScratch = make_copy_texture();
   }
   glActiveTexture(GL_TEXTURE0);
+  const bool dump = g_copyDumps > 0 && (src.x != 0 || src.y != 0);
+  if (dump) {
+    dump_pixels(fmt::format("probe_copy{}_screen.ppm", g_copyDumps), src.x, src.y, src.width, src.height);
+  }
   const GLuint scratch = g_copyScratch->render_target(width, height);
   const GLuint target = draw.copyTo->render_target(width, height);
 
@@ -1526,6 +1557,10 @@ bool copy_on_gpu(const Draw& draw) noexcept {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glDisableVertexAttribArray(pos);
     glDisableVertexAttribArray(uv);
+  }
+  if (dump) {
+    dump_pixels(fmt::format("probe_copy{}_texture.ppm", g_copyDumps), 0, 0, width, height);
+    --g_copyDumps;
   }
   glUseProgram(0);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1949,6 +1984,12 @@ bool initialize() noexcept {
   vglSetVDMBufferSize(4 * SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE);
   vglSetVertexBufferSize(2 * SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE);
   vglSetUSSEBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE);
+  // Each EFB copy ends the display's scene and begins another (copy_on_gpu), and draws into two
+  // framebuffers of its own: the pause screen's blur makes four a frame, the display five scenes
+  // and more. vitaGL makes its render targets for one scene a frame unless told; GXM sizes a target's
+  // per-scene state by it. The copies came back with stale tiles and black triangles (the charged
+  // shot's warp, the pause screen's backdrop, the cinematics' blur) and the GPU hung twice.
+  vglSetupRenderTargetScenesNum(kDisplayScenesPerFrame, kFramebufferScenesPerFrame);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
