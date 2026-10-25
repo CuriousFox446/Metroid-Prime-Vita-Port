@@ -59,6 +59,10 @@ struct Entry {
   std::vector<Chunk> chunks;
   gfx::Range vert;
   gfx::Range idx;
+
+  // The Vita path's decoded triangles for it (vita_draw.cpp's cache entry, which stays where it is
+  // until the list's release), found once instead of at every call.
+  mutable void* vitaList = nullptr;
 };
 
 void retain(const void* key, std::unique_ptr<std::vector<uint8_t>> bytes);

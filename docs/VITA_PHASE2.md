@@ -721,3 +721,17 @@ rooms, as before); skinned templates made only in new rooms.
   too). The game thread writes each and the FIFO thread reads each.
 - Left in lookup: the `sCache` map's find of the list (the list's own entry was found already in
   `call_resident_dl`, and could hold it) and the variants' first read.
+
+**The material key in parts, the list's cache in its entry (built, not yet run on the Vita).**
+- The key is two hashes kept between draws: the pipeline part (stages, blending, depth, culling,
+  masks, alpha compare, swap tables, channels, the generators the stages name; with the maps and
+  the TEXn sources those name) worked out again only on DirtyPipeline, which every register it
+  reads sets (regs.cpp: gen mode, z mode, blend modes, TEV, ksel, alpha compare, channel control,
+  texgens, post matrices, matrix index B); the texture part (the named maps' texture objects and
+  palettes, and whether one is an EFB copy) only on DirtyTextures, a new pipeline part or a moved
+  bind generation. A draw's key mixes the two with the descriptor's entries for the TEXn sources
+  (four bits each; a descriptor write sets no dirty bit) and, when a copy is sampled, the
+  generation. The materials line counts the parts worked out.
+- `resident::Entry` holds a pointer to the list's `sCache` entry, set at its first call (an
+  unordered_map's elements stay where they are; both go at the list's release), so a call no
+  longer finds its list in `sCache`.

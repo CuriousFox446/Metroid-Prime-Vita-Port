@@ -233,6 +233,9 @@ struct Stats {
   // that replaced another still in use this window.
   u32 materialMissesCopy = 0;
   u32 materialEvictions = 0;
+  // The material key's parts worked out again (material_hash).
+  u32 keyPipelines = 0;
+  u32 keyTextures = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -537,7 +540,14 @@ std::vector<vita_gl::Vertex> decode_list(const std::vector<u8>& bytes, u32 size,
 // The list's entry for the current state and texture coordinates, decoding it into a new or the
 // oldest variant when none matches.
 const Cached& lookup(const void* key, const resident::Entry& entry, u32 size, const TexAttrs& texAttrs) noexcept {
-  CachedList& list = sCache[key];
+  // An unordered_map's elements stay where they are; the entry goes only with the list
+  // (GX_AURORA_RESIDENT_RELEASE releases both).
+  auto* known = static_cast<CachedList*>(entry.vitaList);
+  if (known == nullptr) {
+    known = &sCache[key];
+    entry.vitaList = known;
+  }
+  CachedList& list = *known;
   for (size_t i = 0; i < list.count; ++i) {
     if (list.variants[i].state.matches_current(texAttrs)) {
       return list.variants[i];
@@ -1049,13 +1059,26 @@ u32 sWindow = 0;
 Material* sLastMaterial = nullptr;
 u64 sLastGeneration = 0;
 
-// A hash of the GX state a Material reads: the TEV stages, blending, depth, culling, the colour
-// mask and the alpha compare, and of what the stages name, the
-// texture coordinate generators, the vertex descriptor's entries for their sources, and the loaded
-// textures with their palettes. The game leaves slots and generators no stage reads holding
-// whatever it set last, so they are left out, as are the matrices and the colour constants (read
-// for every draw).
-u64 material_hash(u64 generation, bool& readsCopy) noexcept {
+// A Material's key is a hash of the GX state it reads, in two parts kept between draws and worked
+// out again only when their registers were written (the Vita's dirty bits, DirtyBits): hashing
+// all of it, some 1.2 KiB, for each draw that wrote any took 10 us a draw.
+// - The pipeline part (DirtyPipeline): the TEV stages, blending, depth, culling, the colour mask
+//   and the alpha compare, the swap tables and channels, and the texture coordinate generators the
+//   stages name. Every register it reads sets DirtyPipeline (regs.cpp), as the last-draw shortcut
+//   in current_material already relies on.
+// - The texture part (DirtyTextures, or the pipeline part's maps changed, or the bind generation
+//   moved): the textures the stages name, with their palettes, and whether one is an EFB copy.
+// The game leaves slots and generators no stage reads holding whatever it set last, so they are
+// left out, as are the matrices and the colour constants (read for every draw). The descriptor's
+// entries for the generators' sources (a descriptor write sets no dirty bit) are read for every
+// draw, four bits each.
+struct PipelineKey {
+  u64 hash = 0;
+  u32 usedMaps = 0;
+  u32 texSources = 0; // the TEXn attributes the used generators read, by bit
+};
+
+PipelineKey pipeline_key() noexcept {
   const GXState& s = g_gxState;
   const AlphaCompare& alpha = s.alphaCompare;
   const u32 fixed[] = {
@@ -1080,22 +1103,26 @@ u64 material_hash(u64 generation, bool& readsCopy) noexcept {
     usedMaps |= stage.texMapId < MaxTextures ? 1u << stage.texMapId : 0;
     usedCoords |= stage.texCoordId < MaxTexCoord ? 1u << stage.texCoordId : 0;
   }
-  // A generator, and the descriptor's entry for its source attribute.
-  struct {
-    TcgConfig tcg;
-    u32 sourceType;
-  } coords[MaxTexCoord]{};
+  PipelineKey key;
+  key.usedMaps = usedMaps;
+  TcgConfig coords[MaxTexCoord]{};
   for (u32 i = 0; i < MaxTexCoord; ++i) {
     if ((usedCoords & (1u << i)) == 0) {
       continue;
     }
-    coords[i].tcg = s.tcgs[i];
+    coords[i] = s.tcgs[i];
     const GXTexGenSrc src = s.tcgs[i].src;
-    coords[i].sourceType = src >= GX_TG_TEX0 && src <= GX_TG_TEX7
-                               ? static_cast<u32>(s.vtxDesc[GX_VA_TEX0 + (src - GX_TG_TEX0)]) + 1
-                               : 0;
+    if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7) {
+      key.texSources |= 1u << (src - GX_TG_TEX0);
+    }
   }
-  h = XXH3_64bits_withSeed(coords, sizeof(coords), h);
+  key.hash = XXH3_64bits_withSeed(coords, sizeof(coords), h);
+  return key;
+}
+
+// The texture part of the key (PipelineKey's comment), for the maps the stages name.
+u64 texture_key(u32 usedMaps, bool& readsCopy) noexcept {
+  const GXState& s = g_gxState;
   // A texture by what identifies its contents and sampling, and a palette texture's palette.
   u32 textures[MaxTextures][12]{};
   for (u32 i = 0; i < MaxTextures; ++i) {
@@ -1120,19 +1147,52 @@ u64 material_hash(u64 generation, bool& readsCopy) noexcept {
     textures[i][10] = tlut != nullptr ? tlut->tlutObjId : 0;
     textures[i][11] = tlut != nullptr ? tlut->tlutDataVersion : 0;
   }
-  h = XXH3_64bits_withSeed(textures, sizeof(textures), h);
   // Aurora's bind generation moves at every EFB copy (several a frame), and a static texture is
   // already named by its identity above; only a slot holding a copy's destination resolves to
-  // something new when it moves.
+  // something new when it moves (the key takes the generation in then: material_hash).
   readsCopy = false;
   for (u32 i = 0; i < MaxTextures; ++i) {
     if ((usedMaps & (1u << i)) != 0 && s.copyTextures.contains(s.loadedTextures[i].data)) {
-      h = XXH3_64bits_withSeed(&generation, sizeof(generation), h);
       readsCopy = true;
       break;
     }
   }
-  return h;
+  return XXH3_64bits(textures, sizeof(textures));
+}
+
+// The key's parts as the last draw that worked them out left them.
+struct KeyParts {
+  bool valid = false;
+  PipelineKey pipeline;
+  u64 textures = 0;
+  bool readsCopy = false;
+  u64 generation = 0;
+};
+KeyParts sKeyParts;
+
+// The current material's key, its parts worked out again where their registers changed.
+u64 material_hash(u8 changed, u64 generation, bool& readsCopy) noexcept {
+  KeyParts& parts = sKeyParts;
+  const bool pipelineChanged = !parts.valid || (changed & DirtyPipeline) != 0;
+  if (pipelineChanged) {
+    parts.pipeline = pipeline_key();
+    ++sStats.keyPipelines;
+  }
+  if (pipelineChanged || (changed & DirtyTextures) != 0 || generation != parts.generation) {
+    parts.textures = texture_key(parts.pipeline.usedMaps, parts.readsCopy);
+    parts.generation = generation;
+    ++sStats.keyTextures;
+  }
+  parts.valid = true;
+  u32 sources = 0;
+  for (u32 i = 0; i < 8; ++i) {
+    if ((parts.pipeline.texSources & (1u << i)) != 0) {
+      sources |= (static_cast<u32>(g_gxState.vtxDesc[GX_VA_TEX0 + i]) + 1) << (4 * i);
+    }
+  }
+  readsCopy = parts.readsCopy;
+  const u64 words[] = {parts.pipeline.hash, parts.textures, sources, readsCopy ? generation : 0};
+  return XXH3_64bits(words, sizeof(words));
 }
 
 // The Material for the current GX state: the last draw's while none of the registers it reads has
@@ -1149,7 +1209,7 @@ const Material& current_material() noexcept {
   }
   sLastGeneration = generation;
   bool readsCopy = false;
-  const u64 hash = material_hash(generation, readsCopy);
+  const u64 hash = material_hash(changed, generation, readsCopy);
   // Its set: the entry holding it, else an empty one, else the least recently used.
   Material* const set = &sMaterials[(hash % kMaterialSets) * kMaterialWays];
   Material* found = nullptr;
@@ -1524,10 +1584,11 @@ void log_stats() noexcept {
   ++sWindow;
   sLastMaterial = nullptr;
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
-           "copy, {} replacing another); {} cached of {} ({} KiB); "
+           "copy, {} replacing another); key parts worked out: pipeline {}, textures {}; {} cached of {} ({} KiB); "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
            "program ({} generated), their constant arrays {} recorded, {} repeating the last",
-           s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, materials,
+           s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions,
+           s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
            tev_program_count(), s.constantsRecorded, s.constantsShared);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
