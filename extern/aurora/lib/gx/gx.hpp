@@ -539,7 +539,12 @@ struct GXState {
   std::array<u32, XfRegCount> xfRegCache{};
   std::bitset<XfRegCount> xfRegValid;
 
-  void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
+  // Moves at every vertex descriptor or format write (the Vita path's decode cache keys on it).
+  u32 vtxLayoutVersion = 1;
+  void clearVtxSizeCache() {
+    lastVtxFmt = GX_MAX_VTXFMT;
+    ++vtxLayoutVersion;
+  }
 };
 extern GXState g_gxState;
 

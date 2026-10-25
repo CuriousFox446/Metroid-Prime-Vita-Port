@@ -59,43 +59,71 @@ constexpr u16 kGlFront = 0x0404;
 constexpr u16 kGlBack = 0x0405;
 constexpr u16 kGlFrontAndBack = 0x0408;
 
-// The GX state a decode read: the vertex descriptor, the vertex formats the list's primitives
-// name, the attributes the texture units' coordinates come from, and the arrays of the position,
-// colour and those coordinates. The same list called with other state is decoded again; formats
-// the list does not use change all the time (the HUD, particles) and do not count.
+// A hash of the vertex descriptor and the vertex formats in `fmtMask`, worked out once a layout:
+// remembered for each mask until a descriptor or format write moves GXState::vtxLayoutVersion.
+// The current state is hot (the FIFO thread just wrote it), so a list call compares one number.
+u64 layout_hash(u8 fmtMask) noexcept {
+  struct Memo {
+    u32 version = 0;
+    u64 hash = 0;
+  };
+  static std::array<Memo, 256> sMemo;
+  Memo& memo = sMemo[fmtMask];
+  if (memo.version == g_gxState.vtxLayoutVersion) {
+    return memo.hash;
+  }
+  u64 hash = XXH3_64bits_withSeed(g_gxState.vtxDesc.data(), sizeof(g_gxState.vtxDesc), fmtMask);
+  for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
+    if ((fmtMask & (1u << fmt)) != 0) {
+      hash = XXH3_64bits_withSeed(&g_gxState.vtxFmts[fmt], sizeof(VtxFmt), hash);
+    }
+  }
+  memo = {g_gxState.vtxLayoutVersion, hash};
+  return hash;
+}
+
+// The GX state a decode read: the vertex descriptor and the vertex formats the list's primitives
+// name (as layout_hash), the attributes the texture units' coordinates come from, and the arrays
+// of the position, colour and those coordinates. The same list called with other state is decoded
+// again; formats the list does not use change all the time (the HUD, particles) and do not count.
+// Kept small: every list call compares it, from memory gone cold since the last frame (it held
+// all eight formats once, 2.6 KiB, which cost some 8 us a call).
 struct DecodeState {
-  std::array<GXAttrType, MaxVtxAttr> vtxDesc{};
+  struct ArrayRef {
+    const void* data = nullptr;
+    u32 stride = 0;
+    u32 baseIndex = 0;
+  };
+  u64 layout = 0;
   u8 fmtMask = 0;
-  std::array<VtxFmt, MaxVtxFmt> vtxFmts{}; // only those in fmtMask are compared
   TexAttrs texAttrs = kNoTexAttrs;
-  std::array<AttrArray, 2 + kTexCoords> arrays{}; // as array_attrs lists them
+  std::array<ArrayRef, 2 + kTexCoords> arrays{}; // as array_attrs lists them
 
   std::array<u8, 2 + kTexCoords> array_attrs() const noexcept {
     return {GX_VA_POS, GX_VA_CLR0, texAttrs[0], texAttrs[1], texAttrs[2], texAttrs[3]};
   }
 
-  void capture_arrays() noexcept {
+  // After a decode with `wanted` that named the formats in fmtMask: the current state.
+  void capture(const TexAttrs& wanted) noexcept {
+    texAttrs = wanted;
+    layout = layout_hash(fmtMask);
     const auto attrs = array_attrs();
     for (size_t i = 0; i < attrs.size(); ++i) {
-      arrays[i] = attrs[i] == kNoTexAttr ? AttrArray{} : g_gxState.arrays[attrs[i]];
+      const AttrArray* current = attrs[i] == kNoTexAttr ? nullptr : &g_gxState.arrays[attrs[i]];
+      arrays[i] = current == nullptr ? ArrayRef{} : ArrayRef{current->data, current->stride, current->baseIndex};
     }
   }
 
   // skipPositions: the position array does not count (a skinned template reads it as it is).
   bool matches_current(const TexAttrs& wanted, bool skipPositions = false) const noexcept {
-    if (texAttrs != wanted || vtxDesc != g_gxState.vtxDesc) {
+    if (texAttrs != wanted || layout != layout_hash(fmtMask)) {
       return false;
     }
-    for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
-      if ((fmtMask & (1u << fmt)) != 0 &&
-          std::memcmp(&vtxFmts[fmt], &g_gxState.vtxFmts[fmt], sizeof(VtxFmt)) != 0) {
-        return false;
-      }
-    }
-    // An array counts only when the descriptor indexes it.
+    // An array counts only when the descriptor (the same, as the layout is) indexes it.
     const auto attrs = array_attrs();
     for (size_t i = skipPositions ? 1 : 0; i < attrs.size(); ++i) {
-      if (attrs[i] == kNoTexAttr || (vtxDesc[attrs[i]] != GX_INDEX8 && vtxDesc[attrs[i]] != GX_INDEX16)) {
+      if (attrs[i] == kNoTexAttr ||
+          (g_gxState.vtxDesc[attrs[i]] != GX_INDEX8 && g_gxState.vtxDesc[attrs[i]] != GX_INDEX16)) {
         continue;
       }
       const AttrArray& current = g_gxState.arrays[attrs[i]];
@@ -122,6 +150,22 @@ struct CachedList {
   size_t newest = 0;
 };
 std::unordered_map<const void*, CachedList> sCache;
+
+// The last position array a list call was over and whether it is retained (a list call over one
+// that is not is a skinned one): a model's lists follow each other over one array, and the
+// retained arrays' map is large and cold. Forgotten when a list is retained or released.
+const void* sLastPosArray = nullptr;
+bool sLastPosResident = false;
+bool sPosAnswerKnown = false;
+
+bool position_array_resident(const void* data) noexcept {
+  if (!sPosAnswerKnown || data != sLastPosArray) {
+    sLastPosArray = data;
+    sLastPosResident = resident::find(data) != nullptr;
+    sPosAnswerKnown = true;
+  }
+  return sLastPosResident;
+}
 
 // A list called with positions the CPU makes each frame (skinned models): decoded once into its
 // triangles with, for each vertex, the array index its position comes from; each call copies them
@@ -151,8 +195,8 @@ struct Stats {
   u32 failArray = 0;
   u32 failCommand = 0;
   u32 failEmpty = 0;
-  // Decodes of a list already cached, by what differed from its newest variant.
-  u32 redecodeDesc = 0;
+  // Decodes of a list already cached, by what differed from its newest variant (the layout: the
+  // descriptor or a vertex format the list names).
   u32 redecodeTex = 0;
   u32 redecodeFmt = 0;
   u32 redecodeArray = 0;
@@ -501,14 +545,13 @@ const Cached& lookup(const void* key, const resident::Entry& entry, u32 size, co
   }
   ZoneScopedN("vita: decode a display list");
   if (list.count != 0) {
-    DecodeState formatsOnly = list.variants[list.newest].state;
-    if (formatsOnly.vtxDesc != g_gxState.vtxDesc) {
-      ++sStats.redecodeDesc;
-    } else if (formatsOnly.texAttrs != texAttrs) {
+    const DecodeState& last = list.variants[list.newest].state;
+    if (last.texAttrs != texAttrs) {
       ++sStats.redecodeTex;
+    } else if (last.layout != layout_hash(last.fmtMask)) {
+      ++sStats.redecodeFmt; // the descriptor or a format the list names
     } else {
-      formatsOnly.capture_arrays();
-      ++(formatsOnly.matches_current(texAttrs) ? sStats.redecodeArray : sStats.redecodeFmt);
+      ++sStats.redecodeArray;
     }
   }
   list.newest = list.count < kVariantsPerList ? list.count++ : list.nextReplace++ % kVariantsPerList;
@@ -536,12 +579,7 @@ const Cached& lookup(const void* key, const resident::Entry& entry, u32 size, co
     ++sStats.decoded;
   }
   cached.mesh = triangles.empty() ? nullptr : vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::List);
-  state.vtxDesc = g_gxState.vtxDesc;
-  for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
-    state.vtxFmts[fmt] = (state.fmtMask & (1u << fmt)) != 0 ? g_gxState.vtxFmts[fmt] : VtxFmt{};
-  }
-  state.texAttrs = texAttrs;
-  state.capture_arrays();
+  state.capture(texAttrs);
   return cached;
 }
 
@@ -1310,18 +1348,14 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     sLastFail = Fail::None;
     t.posIndices.clear();
     t.vertices = decode_list(*entry.bytes, size, texAttrs, state.fmtMask, &t.posIndices);
-    state.vtxDesc = g_gxState.vtxDesc;
-    for (u32 fmt = 0; fmt < MaxVtxFmt; ++fmt) {
-      state.vtxFmts[fmt] = (state.fmtMask & (1u << fmt)) != 0 ? g_gxState.vtxFmts[fmt] : VtxFmt{};
-    }
-    state.texAttrs = texAttrs;
-    state.capture_arrays();
+    state.capture(texAttrs);
     const bool usable = !t.vertices.empty() && std::has_single_bit(state.fmtMask) &&
                         t.posIndices.size() == t.vertices.size() &&
                         std::find(t.posIndices.begin(), t.posIndices.end(), UINT32_MAX) == t.posIndices.end();
     if (!usable) {
       // Kept as not usable (fmtMask set, no vertices), so the next calls decode whole at once.
       state.fmtMask = state.fmtMask != 0 ? state.fmtMask : 1;
+      state.layout = layout_hash(state.fmtMask);
       t.vertices.clear();
       t.posIndices.clear();
       return false;
@@ -1355,6 +1389,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
 
 bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noexcept {
   ZoneScoped;
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
   ++sStats.calls;
   const Material& material = current_material();
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
@@ -1366,7 +1401,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   // decoded each time, into a mesh for this frame alone. The retail models' own arrays are
   // retained (port_retail_resident), whatever their byte order; a workspace the game rewrites
   // each frame is not.
-  if (resident::find(g_gxState.arrays[GX_VA_POS].data) == nullptr) {
+  if (!position_array_resident(g_gxState.arrays[GX_VA_POS].data)) {
     ZoneScopedN("vita: skinned list call");
     std::vector<vita_gl::Vertex> triangles;
     if (skinned_from_template(key, entry, size, texAttrs, triangles)) {
@@ -1397,6 +1432,7 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
 
 bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept {
   ZoneScoped;
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
   if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
     ++sStats.immediateLines;
     return false;
@@ -1429,6 +1465,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
 
 bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept {
   ZoneScoped;
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
   const Material& material = current_material();
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
@@ -1466,7 +1503,10 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
   return true;
 }
 
+void retained() noexcept { sPosAnswerKnown = false; }
+
 void release(const void* key) noexcept {
+  sPosAnswerKnown = false;
   sCache.erase(key);
   sSkinned.erase(key);
 }
@@ -1494,11 +1534,11 @@ void log_stats() noexcept {
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);
   Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
-           "(matrix index {}, array {}, command {}, empty {}); decoded again for a changed vertex descriptor {}, "
-           "textures {}, vertex format {}, array {}; {} cached",
+           "(matrix index {}, array {}, command {}, empty {}); decoded again for changed textures {}, vertex layout "
+           "{}, array {}; {} cached",
            s.calls, s.recorded, s.decoded,
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
-           s.failCommand, s.failEmpty, s.redecodeDesc, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
+           s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
            "copies made late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled; TEV alpha: {} constant ({} "

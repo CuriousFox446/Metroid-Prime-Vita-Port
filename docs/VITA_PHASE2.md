@@ -691,3 +691,17 @@ crash.
   little of it.
 - Skinned: some 0.7 ms a call (template copied, positions read again), worth a look of its own.
 - 11.7 FPS in the heavy seconds; the game thread still waits 22 ms a frame for the FIFO thread.
+
+**Cheap list lookups (built, not yet run on the Vita).**
+- `DecodeState` holds a hash of the vertex descriptor and the formats the list names
+  (`layout_hash`), the format mask, the texture coordinates and three fields of each array: about
+  90 bytes (2.6 KiB before; a list's four variants some 420 bytes, 10 KiB before).
+  `layout_hash` remembers its hash for each format mask until a descriptor or format write moves
+  `GXState::vtxLayoutVersion` (bumped in `clearVtxSizeCache`, which every VCD and VAT write
+  calls), so a list call compares one number with the current layout's, worked out once a change.
+- Whether the position array is retained (a list over one that is not is a skinned call) is
+  remembered for the last array, and forgotten when a list is retained or released.
+- The list stats count re-decodes for a changed layout (descriptor or a named format) together.
+- A new FIFO section, dispatch, ends at the Vita path's entry (`draw_resident`, `draw_immediate`,
+  `draw_indexed`): a draw command's reading and a list call's own `resident::find` of its list,
+  which the material section held before.

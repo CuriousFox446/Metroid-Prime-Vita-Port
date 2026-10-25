@@ -21,6 +21,8 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
 bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept;
 // The list was released (GX_AURORA_RESIDENT_RELEASE): its decoded triangles go.
 void release(const void* key) noexcept;
+// A list was retained (GX_AURORA_RESIDENT_RETAIN): which arrays are resident may have changed.
+void retained() noexcept;
 // Logs what became of the calls since the last call (FIFO thread, at a frame end).
 void log_stats() noexcept;
 #else
@@ -28,6 +30,7 @@ inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { r
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
 inline bool draw_indexed(GXVtxFmt, u16, std::span<const u8>, std::span<const u8>) noexcept { return false; }
 inline void release(const void*) noexcept {}
+inline void retained() noexcept {}
 inline void log_stats() noexcept {}
 #endif
 } // namespace aurora::gx::vita

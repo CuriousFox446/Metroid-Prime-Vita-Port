@@ -1121,6 +1121,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     std::unique_ptr<std::vector<u8>> bytes{reinterpret_cast<std::vector<u8>*>(reader.read<u64>())};
     resident::retain(key, std::move(bytes));
+    vita::retained();
   } else if (subCmd == GX_AURORA_RESIDENT_RELEASE) {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     resident::release(key);

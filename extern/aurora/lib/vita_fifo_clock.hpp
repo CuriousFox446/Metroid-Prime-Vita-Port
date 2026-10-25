@@ -13,6 +13,7 @@ enum Section : uint8_t {
   kIdle,        // waiting for the game to send commands
   kState,       // register writes (BP, CP, XF, indexed XF loads), the stream's own reading
   kCopies,      // EFB copies and clears (BP 0x52)
+  kDispatch,    // a draw command up to the Vita path: its reading, a list call's find of its list
   kMaterial,    // the Vita path: a draw's material (current_material: texture copies, programs)
   kLookup,      // the Vita path: a list call's cached triangles found (decoded first when none match)
   kSkinned,     // the Vita path: a skinned list call's triangles, from its template or decoded whole

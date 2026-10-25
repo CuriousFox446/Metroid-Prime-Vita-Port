@@ -1249,7 +1249,7 @@ void remove_texture(ImTextureID id) noexcept {
 namespace fifo_clock {
 namespace {
 constexpr const char* kNames[kSectionCount] = {
-    "idle", "state",  "copies",      "material", "lookup", "skinned", "immediate", "mesh",
+    "idle", "state",  "copies",      "dispatch", "material", "lookup", "skinned", "immediate", "mesh",
     "record", "other draws", "aurora", "vita",     "textures", "finish", "frame"};
 constexpr uint32_t kTimedEvery = 8;
 
