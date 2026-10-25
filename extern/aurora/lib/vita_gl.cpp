@@ -14,6 +14,7 @@
 
 #include <pthread.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -59,11 +60,19 @@ void log_memory(const char* when) {
            g_textureBytes[1].load() / kMiB);
 }
 
-// The frames' draws: recorded on the FIFO thread, handed over at each frame's end, drawn by the
-// render worker's present for that frame, in order.
-std::vector<Draw> g_recording;
+// A frame's draws and their programs' constant rows (ProgramInputs), and its serial, a new one
+// each frame (from 1), by which the render worker tells one frame's rows from another's.
+struct Frame {
+  std::vector<Draw> draws;
+  std::vector<std::array<float, 4>> constants;
+  uint32_t serial = 0;
+};
+
+// The frames: recorded on the FIFO thread, handed over at each frame's end, drawn by the render
+// worker's present for that frame, in order.
+Frame g_recording{.serial = 1};
 std::mutex g_framesMutex;
-std::deque<std::vector<Draw>> g_frames;
+std::deque<Frame> g_frames;
 
 // Milestone 2 draws with vitaGL's fixed-function pipeline (the one ImGui's OpenGL 2 backend
 // uses): GX's matrices go in through glLoadMatrixf, and the shading is in the vertex colours
@@ -82,8 +91,8 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
 
 class Mesh {
 public:
-  Mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept
-  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind) {}
+  Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory) noexcept
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -91,9 +100,12 @@ public:
     }
   }
 
-  // Render worker: binds the vertex buffer (made from the CPU copy at the first draw).
+  // Render worker: binds the vertex buffer (made from the CPU copy at the first draw), or for a
+  // mesh in client memory unbinds any, its arrays then pointing at base().
   GLsizei bind() noexcept {
-    if (m_vbo == 0) {
+    if (m_client) {
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+    } else if (m_vbo == 0) {
       glGenBuffers(1, &m_vbo);
       glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
       glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_cpu.size() * sizeof(Vertex)), m_cpu.data(),
@@ -105,20 +117,26 @@ public:
     return m_count;
   }
 
-  // Render worker: whether its buffer is made yet (bind makes it).
+  // Render worker: whether its buffer is made yet (bind makes it; a mesh in client memory is
+  // copied at every draw, so never).
   bool uploaded() const noexcept { return m_vbo != 0; }
   GLsizei count() const noexcept { return m_count; }
   MeshKind kind() const noexcept { return m_kind; }
+  // What its arrays' offsets are from: its vertices in client memory, else the bound buffer's start.
+  const uint8_t* base() const noexcept {
+    return m_client ? reinterpret_cast<const uint8_t*>(m_cpu.data()) : nullptr;
+  }
 
 private:
   std::vector<Vertex> m_cpu;
   GLuint m_vbo = 0;
   GLsizei m_count;
   MeshKind m_kind;
+  bool m_client;
 };
 
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept {
-  return std::make_shared<Mesh>(std::move(triangles), kind);
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory) noexcept {
+  return std::make_shared<Mesh>(std::move(triangles), kind, clientMemory);
 }
 
 class Texture {
@@ -428,34 +446,40 @@ public:
   GLint attr(int index) const noexcept { return m_attrs[index]; }
   GLint samplers[kSamplers] = {-1, -1, -1, -1};
 
-  // Render worker, this program in use: sets its constants where they differ from what it holds.
-  // vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only after a
-  // glUniform call (or glUseProgram) marked that side, so an unchanged side costs nothing.
-  void set_constants(const ProgramInputs& inputs) noexcept {
-    upload(m_vertexLocation, m_vertex, m_vertexCount, inputs.vertex, inputs.vertexCount, g_uniformStats.vertex);
-    upload(m_constantsLocation, m_constants, m_constantCount, inputs.constants, inputs.constantCount,
+  // Render worker, this program in use: sets its constants unless they are the rows it was sent
+  // last. vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only
+  // after a glUniform call (or glUseProgram) marked that side, so an unchanged side costs nothing.
+  // The FIFO thread points a draw that repeats its program's last constants in a frame at the same
+  // rows; and a program ready at a frame's first draw of it stays so all that frame (a build is
+  // tried there, the budget only shrinks), so it is sent every row change in order.
+  void set_constants(const ProgramInputs& inputs, const Frame& frame) noexcept {
+    upload(m_vertexLocation, m_vertexSent, frame, inputs.vertexAt, inputs.vertexCount, g_uniformStats.vertex);
+    upload(m_constantsLocation, m_constantsSent, frame, inputs.constantsAt, inputs.constantCount,
            g_uniformStats.fragment);
   }
 
 private:
   enum class State : uint8_t { Pending, Ready, Failed };
 
-  template <size_t N>
-  static void upload(GLint location, float (&held)[N][4], int& heldCount, const float (*values)[4], int count,
+  // Rows sent to a uniform array last: their frame's serial (0: none yet) and where they start.
+  struct Sent {
+    uint32_t serial = 0;
+    uint32_t at = 0;
+  };
+
+  static void upload(GLint location, Sent& sent, const Frame& frame, uint32_t at, int count,
                      UniformStats::Side& stats) noexcept {
-    if (location == kNoUniform || count == 0) {
+    if (location == kNoUniform || count == 0 || at + count > frame.constants.size()) {
       return;
     }
-    const size_t bytes = sizeof(float[4]) * count;
-    const bool same = count == heldCount && std::memcmp(held, values, bytes) == 0;
+    const bool same = sent.serial == frame.serial && sent.at == at;
     g_clock.mark(kProgramCompare);
     if (same) {
       ++stats.skipped;
       return;
     }
-    std::memcpy(held, values, bytes);
-    heldCount = count;
-    glUniform4fv(location, count, values[0]);
+    sent = {frame.serial, at};
+    glUniform4fv(location, count, frame.constants[at].data());
     g_clock.mark(kProgramSend);
     ++stats.uploaded;
   }
@@ -582,11 +606,8 @@ private:
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1};
   GLint m_vertexLocation = kNoUniform;
   GLint m_constantsLocation = kNoUniform;
-  // What its uniforms hold (count 0: nothing set yet).
-  float m_vertex[kProgramVertexConstants][4];
-  int m_vertexCount = 0;
-  float m_constants[kProgramConstants][4];
-  int m_constantCount = 0;
+  Sent m_vertexSent;
+  Sent m_constantsSent;
   State m_state = State::Pending;
 };
 
@@ -594,10 +615,24 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
   return std::make_shared<Program>(std::move(vertexSource), std::move(fragmentSource), key);
 }
 
-void record(Draw draw) noexcept { g_recording.push_back(std::move(draw)); }
+void record(Draw draw) noexcept { g_recording.draws.push_back(std::move(draw)); }
+
+uint32_t record_constants(const float (*rows)[4], int count) noexcept {
+  const auto at = static_cast<uint32_t>(g_recording.constants.size());
+  for (int i = 0; i < count; ++i) {
+    g_recording.constants.push_back({rows[i][0], rows[i][1], rows[i][2], rows[i][3]});
+  }
+  return at;
+}
+
+const float* recorded_constants(uint32_t at) noexcept { return g_recording.constants[at].data(); }
+
+uint32_t recording_serial() noexcept { return g_recording.serial; }
 
 void end_frame_draws() noexcept {
-  const size_t drawn = g_recording.size();
+  const size_t drawn = g_recording.draws.size();
+  const size_t rows = g_recording.constants.size();
+  const uint32_t serial = g_recording.serial;
   {
     std::lock_guard lock{g_framesMutex};
     g_frames.push_back(std::move(g_recording));
@@ -607,19 +642,21 @@ void end_frame_draws() noexcept {
     }
   }
   g_recording = {};
-  g_recording.reserve(drawn);
+  g_recording.serial = serial + 1 != 0 ? serial + 1 : 1;
+  g_recording.draws.reserve(drawn);
+  g_recording.constants.reserve(rows);
 }
 
 namespace {
 // Render worker: the oldest frame handed over and not yet drawn.
-std::vector<Draw> take_frame() {
+Frame take_frame() {
   std::lock_guard lock{g_framesMutex};
   if (g_frames.empty()) {
     return {};
   }
-  std::vector<Draw> draws = std::move(g_frames.front());
+  Frame frame = std::move(g_frames.front());
   g_frames.pop_front();
-  return draws;
+  return frame;
 }
 
 // Frames drawn, destroyed on a thread of their own: a heavy frame's 1700 draws took the render
@@ -628,7 +665,7 @@ std::vector<Draw> take_frame() {
 // worker, which runs it between presents.
 class FrameReaper {
 public:
-  void reap(std::vector<Draw> frame) noexcept {
+  void reap(Frame frame) noexcept {
     {
       std::lock_guard lock{m_mutex};
       if (!m_started) {
@@ -643,7 +680,7 @@ public:
 private:
   void run() noexcept {
     for (;;) {
-      std::vector<Draw> frame;
+      Frame frame;
       {
         std::unique_lock lock{m_mutex};
         m_ready.wait(lock, [this] { return !m_frames.empty(); });
@@ -656,7 +693,7 @@ private:
 
   std::mutex m_mutex;
   std::condition_variable m_ready;
-  std::deque<std::vector<Draw>> m_frames;
+  std::deque<Frame> m_frames;
   bool m_started = false;
 };
 FrameReaper g_reaper;
@@ -766,8 +803,8 @@ GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
 
 // A draw with its generated program (render worker). Leaving the fixed-function path turns its
 // arrays off; a program switch turns on the generic arrays the new one reads.
-void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn,
-                       RenderState& current, BoundTextures& bound) {
+void draw_with_program(const Draw& draw, const Frame& frame, Program& program, GLuint& usedProgram,
+                       uint32_t& attribsOn, RenderState& current, BoundTextures& bound) {
   if (usedProgram != program.id()) {
     if (usedProgram == 0) {
       glDisableClientState(GL_VERTEX_ARRAY);
@@ -797,7 +834,8 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
   }
   g_clock.mark(kProgramSwitch);
   const GLsizei count = bind_mesh(*draw.mesh, kPathProgram, kProgramUpload);
-  const auto pointer = [](size_t offset) { return reinterpret_cast<const void*>(offset); };
+  const auto base = reinterpret_cast<uintptr_t>(draw.mesh->base());
+  const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
   if (program.attr(kAttrPos) >= 0) {
     glVertexAttribPointer(program.attr(kAttrPos), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
   }
@@ -817,7 +855,7 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
   }
   g_clock.mark(kProgramPointers);
   const ProgramInputs& inputs = draw.program;
-  program.set_constants(inputs);
+  program.set_constants(inputs, frame);
   for (int i = 0; i < kSamplers; ++i) {
     if (inputs.textures[i] != nullptr && program.samplers[i] != kNoUniform) {
       bound.bind(i, *inputs.textures[i], inputs.samplers[i], false);
@@ -830,7 +868,8 @@ void draw_with_program(const Draw& draw, Program& program, GLuint& usedProgram, 
   g_clock.mark(kProgramDraw);
 }
 
-void draw_world(const std::vector<Draw>& draws) {
+void draw_world(const Frame& frame) {
+  const std::vector<Draw>& draws = frame.draws;
   if (draws.empty()) {
     return;
   }
@@ -916,7 +955,7 @@ void draw_world(const std::vector<Draw>& draws) {
     if (program != nullptr) {
       ++g_presentStats.programDraws;
       g_clock.programDraws += g_clock.on ? 1 : 0;
-      draw_with_program(draw, *program, usedProgram, attribsOn, current, bound);
+      draw_with_program(draw, frame, *program, usedProgram, attribsOn, current, bound);
       continue;
     }
     if (draw.program.program != nullptr) {
@@ -928,13 +967,14 @@ void draw_world(const std::vector<Draw>& draws) {
     enter_fixed_function();
     g_clock.mark(kFixedSwitch);
     const GLsizei count = bind_mesh(*draw.mesh, kPathFixed, kFixedUpload);
-    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, pos)));
-    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), reinterpret_cast<const void*>(offsetof(Vertex, color)));
+    const auto base = reinterpret_cast<uintptr_t>(draw.mesh->base());
+    const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
+    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), pointer(offsetof(Vertex, color)));
     // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
     for (int unit = 0; unit < kTexUnits; ++unit) {
       glClientActiveTexture(GL_TEXTURE0 + unit);
-      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
-                        reinterpret_cast<const void*>(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
+      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
     }
     g_clock.mark(kFixedPointers);
     for (int unit = 0; unit < kTexUnits; ++unit) {
@@ -1019,8 +1059,9 @@ void draw_test_triangle() {
   constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   std::memcpy(draw.modelView, kIdentity, sizeof(draw.modelView));
   std::memcpy(draw.projection, kIdentity, sizeof(draw.projection));
-  const std::vector<Draw> draws{draw};
-  draw_world(draws);
+  Frame frame;
+  frame.draws.push_back(draw);
+  draw_world(frame);
   --g_presentStats.framesWithDraws;
   --g_presentStats.draws;
 }
@@ -1152,7 +1193,7 @@ void present(ImDrawData* overlay) noexcept {
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glDepthMask(GL_TRUE);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-  std::vector<Draw> frame = take_frame();
+  Frame frame = take_frame();
   draw_world(frame);
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);

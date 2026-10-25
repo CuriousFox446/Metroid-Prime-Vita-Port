@@ -564,3 +564,21 @@ fill and delete (about 3.5 ms of uploads and 2.5 ms of deletes for some 36 meshe
 program inputs should be smaller and read less: only the rows a program declares, in a per-frame
 arena, with a draw whose values repeat the last ones of its program in that frame pointing at the
 same ones, so that the render worker skips them without reading them.
+
+**Frame-only meshes from client memory, program constants in the frame's rows (built, not yet run
+on the Vita).**
+- A mesh made for one frame (skinned list calls, immediate and indexed draws) whose material has a
+  program has no buffer now: its arrays point at its vertices in client memory, and vitaGL copies
+  them into its per-frame pool at the draw. For a program's attributes that all lie within one
+  vertex of the first (aPos at offset 0, the others after it), vitaGL counts them "packed" and
+  makes one copy of the draw's vertices (`_glDrawArrays_CustomShadersIMPL`). Its fixed-function
+  draw copies each attribute apart (position, colour, both coordinate sets: four copies), so a
+  frame-only mesh without a program keeps its buffer (the big skinned one among them).
+- A draw's constants are rows in its frame now: the frame (draws, rows, a serial) is what the FIFO
+  thread hands over. record_draw works them out on its stack and adds them to the rows unless they
+  repeat its program's last ones in that frame, when the draw points at those. The render worker
+  sends a program's array unless it is the rows it sent last (same frame, same place), reading
+  nothing to tell. This holds because a program ready at its first draw of a frame stays ready the
+  whole frame (a build is tried there and the budget only shrinks), so its draws are sent in order;
+  the first in each frame is always sent. A draw is about 460 bytes smaller (about 410 now).
+- The log's material line gives constant arrays recorded and those repeating the last.

@@ -180,8 +180,11 @@ struct Stats {
   // Skinned list calls drawn from their template, and templates made.
   u32 skinnedFromTemplate = 0;
   u32 skinnedTemplates = 0;
-  // Draws recorded with a generated program (vita_tev.hpp).
+  // Draws recorded with a generated program (vita_tev.hpp), and their constant arrays (vertex and
+  // fragment) put in the frame's rows, and pointed at the last ones as they repeated them.
   u32 withProgram = 0;
+  u32 constantsRecorded = 0;
+  u32 constantsShared = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -1202,21 +1205,44 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     }
     // The projection times the position matrix (a 3x4 with (0, 0, 0, 1) below), here on the FIFO
     // thread: the render worker is the busier one.
+    float vertex[vita_gl::kProgramVertexConstants][4];
     for (int r = 0; r < 4; ++r) {
       const float* p = &draw.projection[4 * r];
       for (int c = 0; c < 4; ++c) {
-        inputs.vertex[r][c] = p[0] * draw.modelView[c] + p[1] * draw.modelView[4 + c] + p[2] * draw.modelView[8 + c] +
-                              (c == 3 ? p[3] : 0.f);
+        vertex[r][c] = p[0] * draw.modelView[c] + p[1] * draw.modelView[4 + c] + p[2] * draw.modelView[8 + c] +
+                       (c == 3 ? p[3] : 0.f);
       }
     }
     int row = 4;
     for (int c = 0; c < material.coordCount; ++c) {
-      row += tev_texgen_rows(*material.coordTcgs[c], &inputs.vertex[row]);
+      row += tev_texgen_rows(*material.coordTcgs[c], &vertex[row]);
     }
+    const TevProgram& program = *material.program;
+    float constants[vita_gl::kProgramConstants][4];
+    tev_constants(program, constants);
     // Never more than the program declares (the generators' types made both counts).
-    inputs.vertexCount = static_cast<u8>(std::min(row, material.program->vertexCount));
-    tev_constants(*material.program, inputs.constants);
-    inputs.constantCount = static_cast<u8>(material.program->constantCount);
+    inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
+    inputs.constantCount = static_cast<u8>(program.constantCount);
+    // Into the frame's rows, unless they repeat this program's last ones there: the draw then points
+    // at those, and the render worker sends nothing.
+    const u32 serial = vita_gl::recording_serial();
+    const bool earlier = program.recordedIn == serial;
+    program.recordedIn = serial;
+    const auto place = [earlier](const float (*rows)[4], int count, u32& at) {
+      if (count == 0) {
+        return;
+      }
+      if (earlier && std::memcmp(vita_gl::recorded_constants(at), rows, sizeof(float[4]) * count) == 0) {
+        ++sStats.constantsShared;
+        return;
+      }
+      at = vita_gl::record_constants(rows, count);
+      ++sStats.constantsRecorded;
+    };
+    place(vertex, inputs.vertexCount, program.vertexAt);
+    place(constants, inputs.constantCount, program.constantsAt);
+    inputs.vertexAt = program.vertexAt;
+    inputs.constantsAt = program.constantsAt;
     inputs.state = material.programState;
     ++sStats.withProgram;
   }
@@ -1317,7 +1343,8 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       ++sStats.perCallFailed;
       return false;
     }
-    record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned), material);
+    record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned, material.program != nullptr),
+                material);
     return true;
   }
   const Cached& cached = lookup(key, entry, size, texAttrs);
@@ -1353,7 +1380,8 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Immediate), material);
+  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Immediate, material.program != nullptr),
+              material);
   return true;
 }
 
@@ -1389,7 +1417,8 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
     return false;
   }
   ++sStats.immediate;
-  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Indexed), material);
+  record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Indexed, material.program != nullptr),
+              material);
   return true;
 }
 
@@ -1412,9 +1441,9 @@ void log_stats() noexcept {
   sLastMaterial = nullptr;
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out; {} cached; "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
-           "program ({} generated)",
+           "program ({} generated), their constant arrays {} recorded, {} repeating the last",
            s.materialReused, s.materialHits, s.materialMisses, materials, s.skinnedFromTemplate, s.perCall,
-           s.skinnedTemplates, s.withProgram, tev_program_count());
+           s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);

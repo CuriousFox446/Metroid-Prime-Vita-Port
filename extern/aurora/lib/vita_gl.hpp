@@ -42,9 +42,12 @@ static_assert(sizeof(Vertex) == 56);
 enum class MeshKind : uint8_t { List, Skinned, Immediate, Indexed, Other, Count };
 
 // Triangles decoded from GX's geometry (gx/vita_draw.cpp). Uploaded to the GPU on the render
-// worker at its first draw; freed once no frame draws it.
+// worker at its first draw; freed once no frame draws it. A mesh made for one frame and drawn with
+// a program (`clientMemory`) has no buffer: vitaGL copies it into its per-frame pool at the draw
+// (one copy for a program's interleaved attributes), with no buffer to make, fill and delete. The
+// fixed-function path copies each attribute apart, so its meshes keep a buffer.
 class Mesh;
-std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind) noexcept;
+std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false) noexcept;
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
 // level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the
@@ -109,15 +112,17 @@ constexpr int kProgramConstants = 13;
 // coordinate set's matrix (3 rows of 4 for a projective set, else 2, for GX's (s, t, 1, 1) input).
 constexpr int kProgramVertexConstants = 4 + 3 * kTexCoords;
 
-// A draw's generated program and what it reads: its textures (sampler slot order), its vertex and
-// fragment constants (the first vertexCount and constantCount of each, as the program declares
-// them), and the fixed-function state it draws with (the program does the alpha test).
+// A draw's generated program and what it reads: its textures (sampler slot order), where its
+// vertex and fragment constants are among its frame's constant rows (record_constants; as many as
+// the program declares), and the fixed-function state it draws with (the program does the alpha
+// test). A draw that repeats its program's last constants in the frame points at the same rows,
+// and the render worker, seeing the rows it sent last, sends nothing.
 struct ProgramInputs {
   std::shared_ptr<Program> program;
   std::shared_ptr<Texture> textures[kSamplers];
   Sampler samplers[kSamplers];
-  float vertex[kProgramVertexConstants][4];
-  float constants[kProgramConstants][4];
+  uint32_t vertexAt = 0;
+  uint32_t constantsAt = 0;
   uint8_t vertexCount = 0;
   uint8_t constantCount = 0;
   RenderState state;
@@ -149,6 +154,12 @@ void fonts_changed() noexcept;
 // render worker's next present).
 void record(Draw draw) noexcept;
 void end_frame_draws() noexcept;
+// FIFO thread: rows of four floats added to the frame being recorded, for its draws' program
+// constants; returns where they start. The rows recorded at `at` in that frame, and the frame's
+// serial (a new one each frame).
+uint32_t record_constants(const float (*rows)[4], int count) noexcept;
+const float* recorded_constants(uint32_t at) noexcept;
+uint32_t recording_serial() noexcept;
 // Render worker: clears the screen, draws the overlay (null: none) and swaps.
 void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
@@ -162,6 +173,9 @@ inline void shutdown_imgui() noexcept {}
 inline void fonts_changed() noexcept {}
 inline void record(Draw) noexcept {}
 inline void end_frame_draws() noexcept {}
+inline uint32_t record_constants(const float (*)[4], int) noexcept { return 0; }
+inline const float* recorded_constants(uint32_t) noexcept { return nullptr; }
+inline uint32_t recording_serial() noexcept { return 0; }
 inline void present(ImDrawData*) noexcept {}
 inline ImTextureID add_texture(uint32_t, uint32_t, const uint8_t*) noexcept { return ImTextureID{}; }
 inline void remove_texture(ImTextureID) noexcept {}

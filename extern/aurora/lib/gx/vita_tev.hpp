@@ -35,6 +35,11 @@ struct TevProgram {
   int vertexCount = 0;
   int constantCount = 0;
   std::array<u8, vita_gl::kProgramConstants> constantSlots{};
+  // FIFO thread (record_draw): where its last draw's constants went among the rows of the frame
+  // being recorded (`recordedIn`, that frame's serial; another: none yet), for a draw repeating them.
+  mutable u32 recordedIn = 0;
+  mutable u32 vertexAt = 0;
+  mutable u32 constantsAt = 0;
 };
 
 // The layout of the current GX state (supported false when a program cannot draw it).
