@@ -484,7 +484,7 @@ the HUD, scan icons and the map draw right, so the packing holds.
   is drawn into a texture by an EFB copy and projected onto the ground, so this is most likely
   milestone 5's copies.
 
-**The render worker's present, timed (built, not yet run on the Vita).** One present in eight is
+**The render worker's present, timed.** One present in eight is
 timed section by section with `sceKernelGetProcessTimeWide` (microseconds); each mark ends a
 section where the last ended, so the sections add up to the present. Once a second the log gives
 a `[draw path]` line, per timed present: the draws (and those with programs); for program draws
@@ -494,3 +494,33 @@ the program switches, the arrays (buffer and attribute pointers), uniforms, text
 triangle and stats, ImGui and `vglSwapBuffers`. The timer's own cost is measured once at the first
 present and given with the number of calls a timed present makes, so it can be taken off: each
 section holds about one call a mark. Timed presents are slower by that much, one in eight.
+
+Its run (1789720; stamp ef886cd-dirty): 8 minutes, no crash, programs all from the card. The timer
+costs 0.68 us a call. The 40 timed presents of 1500 draws or more averaged 1715 draws, 1693 with
+programs, and 31.1 ms once the timer's calls are taken off (one a section a draw, about 1.15 ms
+a program-draw section):
+
+| Section | ms | a draw |
+|---|---|---|
+| program draws' `glDrawArrays` (vitaGL) | 8.4 | 4.9 us |
+| program draws' uniforms (compare, send) | 5.8 | 3.4 us |
+| fixed-function draws' arrays, about 22 draws | 4.4 | about 200 us |
+| finish: the frame's draws destroyed | 4.3 | 2.5 us |
+| program draws' arrays (buffer, made at first use, and pointers) | 4.1 | 2.4 us |
+| textures, state, switches, builds | 1.3, 1.1, 0.4, 0.6 | |
+| setup, swap (the GPU waited on) | 0.2, 0.2 | |
+
+- `vglSwapBuffers` hardly waits: the GPU keeps up, the CPU side is the cost.
+- `draw_world(take_frame())` destroys the frame's vector after `draw_world` returns, so "finish"
+  is mostly the 1715 draws' destructors: some eight `shared_ptr` releases a draw (mesh, textures,
+  program) and the meshes made for that frame alone (skinned and immediate draws), whose
+  destructors queue their buffers' deletes. That work need not be on the render worker.
+- The fixed-function draws' arrays cost about 200 us a draw: their meshes are large and made for
+  the frame (the buffer is made and filled at the first bind), most likely. Which draws these are
+  and how many bytes they upload needs counting.
+- Uniforms cost 3.4 us a draw though most arrays are not sent: what is the compare and what the
+  `glUniform4fv` calls is not split yet.
+- A draw holds about 870 bytes (both paths' inputs), some 1.5 MB a heavy frame written by the FIFO
+  thread and read here, which the caches feel in every section.
+- `glDrawArrays` itself, 4.9 us a draw, is vitaGL's own work (patching and setting the programs,
+  textures, streams, uniform buffers); fewer draws is the only lever on it from here.
