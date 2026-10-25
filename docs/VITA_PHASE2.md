@@ -781,5 +781,12 @@ fixed-function projection both take it. The textures line counts draws with a ra
 [0, 1].
 
 Also reported: with Twin Stick Aim on, L and R stop working in the pause menu, so it cannot be
-turned off there (`twin_stick=0` in `port_settings.ini` turns it off). Under twin stick the input
-layer makes the left shoulder the beam shift (port_input_devices.cpp), which the Vita's L is.
+turned off there (`twin_stick=0` in `port_settings.ini` turns it off). The cause is not twin stick
+itself: "Separate menu buttons" (`menu_standard_buttons`, on by default; touch is never active on
+the Vita) makes menus and the map read their own button rows, whose defaults come from
+`PADGetDefaultMapping` for the pad's type. That had no Vita case, so the Vita's pad (SDL's
+"standard") got the standard layout: L and R on analog triggers it lacks, dropped, so no L or R
+in menus at all, while gameplay (`__PADSetDefaultMapping`) has the Vita layout. Now
+`PADGetDefaultMapping` gives the Vita layout on the Vita too (L and R on the shoulders, Z on
+Select). Under twin stick the left shoulder is also the beam shift with the D-pad
+(port_input_devices.cpp); that chord is bound in menus too, which needs checking on the device.

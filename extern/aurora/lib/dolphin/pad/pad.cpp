@@ -1952,6 +1952,13 @@ void PADGetDefaultMapping(PADDefaultMapping* mapping, const PADControllerType ty
   case PAD_TYPE_NSO_GAMECUBE: buttons = &g_defaultButtonsNSOGamecube; break;
   default: break;
   }
+#ifdef __vita__
+  // As __PADSetDefaultMapping: the Vita's layout whatever SDL calls the pad. The menus' own
+  // button rows take their defaults from here (port_input_devices.cpp), and the standard layout
+  // gave them no L or R (they were on analog triggers the Vita lacks): L and R did nothing in the
+  // pause screen.
+  buttons = &g_defaultButtonsVita;
+#endif
   std::copy(buttons->begin(), buttons->end(), mapping->buttons);
   std::copy(g_defaultAxes.begin(), g_defaultAxes.end(), mapping->axes);
 }
