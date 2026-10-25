@@ -940,6 +940,11 @@ fades), each counting against the others. Now the count is over all the material
 material's references leave it). The materials line gives the textures the materials hold, and
 of them those only materials hold.
 
+Its run (d993a29; 193 s): no crash. On the continue screen the GPU held 57 RGBA8 textures (32 MiB,
+the content cache's budget), the materials 3 (none held by them alone), the heap steady at 126 MiB.
+Once its palette textures were cached the continue screen ran at about 50 FPS; the slowness the
+user saw was the death itself and play before it (10 to 20 FPS, a second at 3), the general speed.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
