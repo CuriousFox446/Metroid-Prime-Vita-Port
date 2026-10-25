@@ -1802,52 +1802,43 @@ void release(const void* key) noexcept {
 // set replaces it: on a screen making a new palette texture each frame (the death screen) the
 // materials kept some 20 s of them, past the GPU's memory and then the heap's. A material holding a
 // texture that Aurora's caches let go and no frame in flight draws (only this material holds it)
-// goes now. Only this thread hands out a material's textures, so a count of its own is final.
+// goes now. Only this thread hands out a material's textures, so a count of the materials' own
+// references is final. Materials share textures (one picture drawn with several blends or fades),
+// each counting against the others: the count is over all of them, or the continue screen's new
+// palette textures, each in several materials, were never let go (some 160 of them, 90 MiB).
 void drop_lone_textures() noexcept {
+  absl::flat_hash_map<const vita_gl::Texture*, long> held;
+  const auto each_texture = [](const Material& material, const auto& visit) {
+    for (const vita_gl::TexUnit& unit : material.units) {
+      if (unit.texture != nullptr) {
+        visit(unit.texture);
+      }
+    }
+    for (const auto& texture : material.programTextures) {
+      if (texture != nullptr) {
+        visit(texture);
+      }
+    }
+  };
+  for (const Material& material : sMaterials) {
+    if (material.valid) {
+      each_texture(material, [&](const std::shared_ptr<vita_gl::Texture>& texture) { ++held[texture.get()]; });
+    }
+  }
   for (Material& material : sMaterials) {
     if (!material.valid) {
       continue;
     }
-    const vita_gl::Texture* held[kTexUnits + kSamplers];
-    long counts[kTexUnits + kSamplers];
-    int distinct = 0;
-    const auto note = [&](const std::shared_ptr<vita_gl::Texture>& texture) {
-      if (texture == nullptr) {
-        return;
-      }
-      for (int i = 0; i < distinct; ++i) {
-        if (held[i] == texture.get()) {
-          ++counts[i];
-          return;
-        }
-      }
-      held[distinct] = texture.get();
-      counts[distinct++] = 1;
-    };
-    for (const vita_gl::TexUnit& unit : material.units) {
-      note(unit.texture);
-    }
-    for (const auto& texture : material.programTextures) {
-      note(texture);
-    }
     bool lone = false;
-    const auto alone = [&](const std::shared_ptr<vita_gl::Texture>& texture) {
-      for (int i = 0; texture != nullptr && i < distinct; ++i) {
-        if (held[i] == texture.get()) {
-          lone |= texture.use_count() <= counts[i];
-        }
-      }
-    };
-    for (const vita_gl::TexUnit& unit : material.units) {
-      alone(unit.texture);
-    }
-    for (const auto& texture : material.programTextures) {
-      alone(texture);
-    }
+    each_texture(material, [&](const std::shared_ptr<vita_gl::Texture>& texture) {
+      lone |= texture.use_count() <= held[texture.get()];
+    });
     if (lone) {
       if (sLastMaterial == &material) {
         sLastMaterial = nullptr;
       }
+      // Its references leave the count with it, so it stays exact for the materials after it.
+      each_texture(material, [&](const std::shared_ptr<vita_gl::Texture>& texture) { --held[texture.get()]; });
       material = {};
       ++sStats.loneTextures;
     }
@@ -1866,17 +1857,50 @@ void log_stats() noexcept {
   }
   ++sWindow;
   sLastMaterial = nullptr;
+  // The textures the materials hold, distinct, and of them those nothing but materials holds.
+  absl::flat_hash_map<const vita_gl::Texture*, std::pair<long, uint64_t>> heldTextures;
+  for (const Material& material : sMaterials) {
+    if (!material.valid) {
+      continue;
+    }
+    const auto note = [&heldTextures](const std::shared_ptr<vita_gl::Texture>& texture) {
+      if (texture != nullptr) {
+        auto& [count, useCount] = heldTextures[texture.get()];
+        ++count;
+        useCount = static_cast<uint64_t>(texture.use_count());
+      }
+    };
+    for (const vita_gl::TexUnit& unit : material.units) {
+      note(unit.texture);
+    }
+    for (const auto& texture : material.programTextures) {
+      note(texture);
+    }
+  }
+  uint64_t heldBytes = 0;
+  uint64_t onlyHeldBytes = 0;
+  u32 onlyHeld = 0;
+  for (const auto& [texture, counts] : heldTextures) {
+    const uint64_t bytes = vita_gl::texture_bytes(*texture);
+    heldBytes += bytes;
+    if (counts.second <= static_cast<uint64_t>(counts.first)) {
+      ++onlyHeld;
+      onlyHeldBytes += bytes;
+    }
+  }
   // Copy destinations Aurora no longer has as copies (a texture loaded there since) go; a material
   // still holding one keeps its texture till the material goes.
   absl::erase_if(sCopyTextures, [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first); });
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
            "copy, {} replacing another, {} freed holding a texture nothing else held); key parts worked out: "
-           "pipeline {}, textures {}; {} cached of {} ({} KiB); "
+           "pipeline {}, textures {}; {} cached of {} ({} KiB), holding {} textures ({:.1f} MiB; held by "
+           "materials alone {}, {:.1f} MiB); "
            "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
            "program ({} generated), their constant arrays {} recorded, {} repeating the last",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
-           sMaterials.size(), sizeof(sMaterials) / 1024, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
+           sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
+           onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
            tev_program_count(), s.constantsRecorded, s.constantsShared);
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
