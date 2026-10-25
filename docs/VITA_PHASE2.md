@@ -997,6 +997,18 @@ black colour does not cancel). Programs for 1, 2, 4 and 8 lights already on the 
 those for 3, 5, 6 and 7 go unused. The material key keeps the exact counts (materials with
 different counts share a program). The lighting line's light-count combinations show the cut.
 
+Its run (ef82f19; 317 s): no crash, the heap 139 MiB; lit models look right. 7 light-count
+combinations (were 17); 85 of 142 programs lit (60 %, were 72 %); the 20 programs compiled (66 s)
+were mostly the rounded variants, made once and kept on the card.
+
+**Milestone 4 is done**: generated programs for the TEV configurations with the card cache,
+lighting (lit channels, texture coordinates from positions and normals), fog, the alpha test,
+blending, depth and culling, lines at GX's width, points. Left for later: indirect textures
+(no program: fixed-function), fog and points' sizes on the fixed-function path, GX's line texture
+offsets and fog range adjustment (unused by the game), the skinned templates' per-face shading
+(kept per vertex, so their corners hardly dedupe). Milestone 5 (EFB copies and effects) is next;
+the screen copies are made but off (`kScreenCopies`), at 7 to 22 ms each through glReadPixels.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
