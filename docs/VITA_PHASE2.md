@@ -722,7 +722,7 @@ rooms, as before); skinned templates made only in new rooms.
 - Left in lookup: the `sCache` map's find of the list (the list's own entry was found already in
   `call_resident_dl`, and could hold it) and the variants' first read.
 
-**The material key in parts, the list's cache in its entry (built, not yet run on the Vita).**
+**The material key in parts, the list's cache in its entry.**
 - The key is two hashes kept between draws: the pipeline part (stages, blending, depth, culling,
   masks, alpha compare, swap tables, channels, the generators the stages name; with the maps and
   the TEXn sources those name) worked out again only on DirtyPipeline, which every register it
@@ -735,3 +735,16 @@ rooms, as before); skinned templates made only in new rooms.
 - `resident::Entry` holds a pointer to the list's `sCache` entry, set at its first call (an
   unordered_map's elements stay where they are; both go at the list's release), so a call no
   longer finds its list in `sCache`.
+
+Its run (32660ef; stamp 000a964-dirty): 6.6 minutes, to Biohazard Containment, no crash, nothing
+reported wrong.
+- 13.5 FPS in the heavy seconds (13.1), the game thread's wait 11.7 ms a frame (16.0); tick 29.5,
+  draw 31.4 ms: the game thread's own work (some 64 ms with input) is now about the FIFO
+  thread's.
+- The FIFO thread's heavy frames (38 timed): 89 ms busy, 23.6 of it the timer's, about 65 ms of
+  work (73). Material about 8 ms (14), lookup 4.4 (5.5); the rest as before: record 13.4, skinned
+  9.6, state about 9, immediate 7.5, aurora about 6.5, dispatch 4, other draws 3, mesh 1.
+- Per 300 frames of the heavier stretches: of some 130,000 draws not keeping the last draw's
+  material, the pipeline part was worked out 30,000 to 43,000 times, the texture part about once
+  each (every texture object load sets DirtyTextures). The texture part still hashes all eight
+  slots' 48 bytes, those no stage names included.
