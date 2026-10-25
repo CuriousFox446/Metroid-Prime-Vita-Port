@@ -196,6 +196,7 @@ struct Stats {
   // Immediate draws (GXBegin, uncalled display lists, GXBeginIndexed).
   u32 immediate = 0;
   u32 immediateLines = 0;
+  u32 immediatePoints = 0;
   u32 immediateFailed = 0;
   u32 recorded = 0;
   u32 failMatrixIndex = 0;
@@ -1380,9 +1381,18 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
           static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
 }
 
+// GX's line width or point size (sixths of a pixel of its framebuffer) in the screen's whole pixels,
+// as GXM takes them (1 to 16).
+u8 screen_width(u8 sixths) noexcept {
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  const float scale = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
+  return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
+}
+
 // Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
-// alpha folded in where it is a constant (its inputs are constants that change between draws).
-void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
+// alpha folded in where it is a constant (its inputs are constants that change between draws). A
+// line or point mesh is drawn `width` pixels wide.
+void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, u8 width = 1) noexcept {
   // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
   // argument); from here to the return, the draw's recording.
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMesh);
@@ -1406,6 +1416,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     state.blend = false;
   }
   vita_gl::Draw draw{.mesh = std::move(mesh)};
+  draw.width = width;
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
@@ -1614,10 +1625,6 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
 bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept {
   ZoneScoped;
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
-  if (prim == GX_POINTS) {
-    ++sStats.immediateLines;
-    return false;
-  }
   const Material& material = current_material();
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
@@ -1631,9 +1638,25 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     ++sStats.immediateFailed;
     return false;
   }
+  if (prim == GX_POINTS) {
+    // As GL's points, GX's point size wide, drawn fixed-function: vitaGL's point size reaches only
+    // its own programs (a generated one would have to write the size). The game draws none.
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
+    if (prims.empty()) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    ++sStats.immediatePoints;
+    Material fixedFunction = material;
+    fixedFunction.program = nullptr;
+    record_draw(vita_gl::make_mesh(std::move(prims), vita_gl::MeshKind::Immediate, false,
+                                   vita_gl::MeshPrimitive::Points),
+                fixedFunction, screen_width(g_gxState.pointSize));
+    return true;
+  }
   if (prim == GX_LINES || prim == GX_LINESTRIP) {
-    // As GL's lines, two vertices each (the map's outlines, among others). One pixel wide: GX's
-    // line width is not applied.
+    // As GL's lines, two vertices each (the map's outlines, among others), GX's line width wide in
+    // whole pixels. GX's line texture offsets are not applied.
     std::vector<vita_gl::Vertex> lines;
     const size_t step = prim == GX_LINES ? 2 : 1;
     for (size_t i = 0; i + 1 < prims.size(); i += step) {
@@ -1648,7 +1671,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     ++sStats.immediateLines;
     record_draw(vita_gl::make_mesh(std::move(lines), vita_gl::MeshKind::Immediate, material.program != nullptr,
                                    vita_gl::MeshPrimitive::Lines),
-                material);
+                material, screen_width(g_gxState.lineWidth));
     return true;
   }
   std::vector<vita_gl::Vertex> triangles;
@@ -1902,9 +1925,9 @@ void log_stats() noexcept {
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
            tev_program_count(), s.constantsRecorded, s.constantsShared);
-  Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
+  Log.info("immediate draws: {} drawn, {} lines, {} points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
-           s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);
+           s.immediate, s.immediateLines, s.immediatePoints, s.immediateFailed, s.perCall, s.perCallFailed);
   Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
            "(matrix index {}, array {}, command {}, empty {}); decoded again for changed textures {}, vertex layout "
            "{}, array {}; {} cached",

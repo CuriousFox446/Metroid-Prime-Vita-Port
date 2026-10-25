@@ -956,6 +956,17 @@ sets it), and fog for the fixed-function path (draws waiting for their program, 
 Every world material whose area fogs needs a new program: some hundreds of compiles, one a frame
 at about a second each, unfogged until then and kept on the card after.
 
+Its run (9ee73b0; 222 s): 38 programs compiled (43.5 s), none failed; the fog looks right.
+
+Milestone 4, lines and points. A line or point draw carries its width (`Draw::width`): GX's line
+width or point size (sixths of a pixel of the logical framebuffer) scaled to the screen and rounded
+to whole pixels, 1 to 16, as GXM takes them (vitaGL's glLineWidth sets the context's width, for
+programs and the fixed-function path alike). The render worker sets it where a line or point draw
+changes it. Points (`MeshPrimitive::Points`, GL_POINTS) are drawn fixed-function: vitaGL's point
+size reaches only its own programs, and a generated one would have to write the size; the game
+draws none. Not done: GX's line and point texture offsets (a texture across a wide line's width).
+The VPK's name is "Metroid Prime".
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

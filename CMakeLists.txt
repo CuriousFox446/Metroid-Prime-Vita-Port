@@ -672,7 +672,7 @@ if(VITA)
     set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
         VERSION "00.32"
-        NAME "Metroid Prime Port (headless)"
+        NAME "Metroid Prime"
         FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png

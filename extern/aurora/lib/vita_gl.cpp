@@ -97,7 +97,9 @@ class Mesh {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
   : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
-    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
+    m_mode(primitive == MeshPrimitive::Lines    ? GL_LINES
+           : primitive == MeshPrimitive::Points ? GL_POINTS
+                                                : GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -1081,6 +1083,10 @@ void draw_world(const Frame& frame) {
   glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
   glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
   glEnable(GL_SCISSOR_TEST);
+  // The line and point width, set where a line or point draw changes it (GXM's context keeps it).
+  uint8_t width = 1;
+  glLineWidth(1.f);
+  glPointSize(1.f);
   const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
     if (!(v == viewport)) {
       glViewport(v.x, v.y, v.width, v.height);
@@ -1135,6 +1141,11 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
+    if (draw.width != width && draw.mesh->mode() != GL_TRIANGLES) {
+      glLineWidth(static_cast<GLfloat>(draw.width));
+      glPointSize(static_cast<GLfloat>(draw.width));
+      width = draw.width;
+    }
     Program* program = draw.program.program.get();
     if (program != nullptr) {
       const int budgetBefore = compileBudget + loadBudget;
@@ -1223,6 +1234,10 @@ void draw_world(const Frame& frame) {
   apply_state(RenderState{.depthTest = false}, current, true);
   glFrontFace(GL_CCW);
   glDisable(GL_SCISSOR_TEST);
+  if (width != 1) {
+    glLineWidth(1.f);
+    glPointSize(1.f);
+  }
   glViewport(0, 0, kWidth, kHeight);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
