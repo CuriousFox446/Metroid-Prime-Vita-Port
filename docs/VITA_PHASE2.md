@@ -1191,6 +1191,27 @@ address. Memory was steady (heap 143 MiB, 34 MiB of textures, render targets bar
   The presents line adds the most draws in one display scene (an EFB copy ends one).
 - Not yet known whether that is the cause; the black water is the other half of the test.
 
+Its run (cd75c62; 671 s in Tallon Overworld, Landing Site to Tallon Canyon): no crash, scenes of up
+to 1596 draws; the water distorts and is rarely black now. Left, from the user's photos: the pause
+screen's backdrop shows a 2x2 pattern of light and dark quarters instead of a blur; entering and
+leaving the gunship turns the screen mostly black; the charged shot's warp shows a square of the
+screen shifted and tinted, a solid band at one side.
+- The blur (`CCameraBlurPass`, `kBT_HiBlur`/`LoBlur`: the pause screen's, the cinematics' blur
+  keyframes, the morph ball's death) is one quad of seven taps: seven TEV stages, each sampling the
+  screen's copy through its own generator, all from TEX0 with their own matrices. A program's slots
+  past the mesh's four sets had to be made from the position or normal, so it had no program and
+  drew fixed-function: two units, one added, not a blur (and left out before 05d9f7c, which gave
+  such units the Vita's copy). Now slots whose generators read the same attribute share its mesh
+  set (`TevLayout::meshSet`, `meshSetSource`; a set's index is still its first slot's where free, so
+  the programs made before keep their sources): the blur's seven taps read one.
+- Not found by reading the code: the light quarters (`DrawFullScreenTexturedQuadQuarters`: one
+  texture drawn into each quarter of the screen, mirrored by the model matrix's signs, culling off)
+  and the warp (`DrawSpaceWarp`: a copy of a square of the screen drawn back through an IA8 offset
+  texture). The log has `[probe]` lines for them: the first draws through a matrix flattening the
+  model's y (the quarters), the first two draws of each indirect program (their matrix, state,
+  textures with GX's size and format, generators with their SU scales, constants by slot), and each
+  copy destination and size's first copy (GX's rectangle, the destination, the screen's).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after

@@ -6,7 +6,7 @@
 // clamp) over the registers, konst colours, textures and raster colours, the swap tables, the
 // indirect stages (offset coordinates, bump alpha), fog and the alpha compare. What it cannot do
 // yet (texture coordinates made from colours, binormals or another generator, more than eight
-// textures or seven coordinate sets, more than four of those from vertex attributes) leaves the
+// textures or seven coordinate sets, more than four distinct vertex attributes for them) leaves the
 // material without one, to the fixed-function draw.
 
 #include "gx.hpp"
@@ -16,13 +16,16 @@
 #include <memory>
 
 namespace aurora::gx::vita {
-// The texture coordinate sets and textures the current TEV stages sample, as a program's slots. A
-// set made from a vertex attribute is always in one of the first vita_gl::kTexCoords slots (the
-// mesh's sets); the slots past them are made from the position or the normal.
+// The texture coordinate sets and textures the current TEV stages sample, as a program's slots.
 struct TevLayout {
   bool supported = false;
   int coordCount = 0;
   std::array<GXTexCoordID, vita_gl::kProgramCoords> coords{};
+  // The mesh's coordinate set each slot's generator reads (-1: made from the position or the
+  // normal), and the vertex attribute each mesh set holds (GX_TG_TEX0 to 7; -1: unused). Slots
+  // whose generators read the same attribute share its set (the blur's seven taps, all TEX0).
+  std::array<s8, vita_gl::kProgramCoords> meshSet{};
+  std::array<s8, vita_gl::kTexCoords> meshSetSource{};
   int samplerCount = 0;
   std::array<GXTexMapID, vita_gl::kSamplers> maps{};
   // Each stage's coordinate slot (-1: none: it neither samples nor offsets a coordinate of its own)

@@ -8,6 +8,7 @@
 #include "texture.hpp"
 #include "vita_tev.hpp"
 
+#include <absl/container/flat_hash_set.h>
 #include <dolphin/gx/GXCommandList.h>
 
 #include <tracy/Tracy.hpp>
@@ -18,6 +19,8 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -1046,12 +1049,11 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
   const int chosen = choose_units(choices);
   texAttrs = kNoTexAttrs;
   if (layout.supported) {
-    // The slots past the mesh's sets are made from the position or the normal (tev_layout).
-    for (int c = 0; c < std::min(layout.coordCount, kTexCoords); ++c) {
-      // A set made from the position or the normal has no coordinates of its own in the mesh.
-      const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
-      texAttrs[c] = tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 ? static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))
-                                                                  : kNoTexAttr;
+    // The mesh's sets hold the attributes the layout's slots read, each once (tev_layout).
+    for (int set = 0; set < kTexCoords; ++set) {
+      const int src = layout.meshSetSource[set];
+      texAttrs[set] = src >= GX_TG_TEX0 && src <= GX_TG_TEX7 ? static_cast<u8>(GX_VA_TEX0 + (src - GX_TG_TEX0))
+                                                             : kNoTexAttr;
     }
   }
   int unitCount = 0;
@@ -1093,10 +1095,12 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
       tcgs[unitCount] = choices[i].tcg;
       int coord = unitCount;
       if (layout.supported) {
-        // The layout holds every coordinate generator a stage samples with, the units' among them.
-        coord = static_cast<int>(std::find(layout.coords.begin(), layout.coords.begin() + layout.coordCount,
-                                           choices[i].coord) -
-                                 layout.coords.begin());
+        // The layout holds every coordinate generator a stage samples with, the units' among them,
+        // and a unit's (from a vertex attribute) reads that slot's mesh set.
+        const auto slot = static_cast<int>(std::find(layout.coords.begin(), layout.coords.begin() + layout.coordCount,
+                                                     choices[i].coord) -
+                                           layout.coords.begin());
+        coord = layout.meshSet[slot];
       } else {
         texAttrs[coord] = static_cast<u8>(GX_VA_TEX0 + (choices[i].tcg->src - GX_TG_TEX0));
       }
@@ -1436,6 +1440,39 @@ u8 screen_width(u8 sixths) noexcept {
   return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
 }
 
+// For the log (VITA_PHASE2.md: the pause screen's light quarters and the charged shot's warp drew
+// wrong): a draw, its matrix, state, textures (GX's size and format, EFB copy or not), coordinate
+// generators with their SU scales, and its program's constants by slot.
+void log_probe(const char* what, const Material& material, const vita_gl::Draw& draw,
+               const float (*constants)[4]) noexcept {
+  const GXState& s = g_gxState;
+  std::string text = fmt::format("[probe] {}: model view", what);
+  for (int i = 0; i < 12; ++i) {
+    text += fmt::format("{}{:.3g}", i % 4 == 0 ? " | " : " ", draw.modelView[i]);
+  }
+  text += fmt::format("; cull {} blend {} {:x}/{:x}; units {}; program {}", draw.state.cullFace, draw.state.blend,
+                      draw.state.blendSrc, draw.state.blendDst, material.unitCount, material.program != nullptr);
+  for (int m = 0; m < kSamplers && material.programTextures[m] != nullptr; ++m) {
+    const GXTexObj_& obj = s.loadedTextures[material.mapIds[m]];
+    text += fmt::format("; tex{} map {} {}x{} fmt {}{}", m, material.mapIds[m], obj.width(), obj.height(),
+                        obj.format(), s.copyTextures.contains(obj.data) ? " (EFB copy)" : "");
+  }
+  for (int c = 0; c < material.coordCount; ++c) {
+    const TcgConfig& tcg = *material.coordTcgs[c];
+    const TexCoordScale& su = s.texCoordScales[material.coordIds[c]];
+    text += fmt::format("; uv{} coord {} type {} src {} mtx {} su {}x{}", c, material.coordIds[c],
+                        static_cast<int>(tcg.type), static_cast<int>(tcg.src), static_cast<int>(tcg.mtx),
+                        su.scaleS + 1, su.scaleT + 1);
+  }
+  if (material.program != nullptr && constants != nullptr) {
+    for (int i = 0; i < material.program->constantCount; ++i) {
+      text += fmt::format("; c{} ({:.4g} {:.4g} {:.4g} {:.4g})", material.program->constantSlots[i], constants[i][0],
+                          constants[i][1], constants[i][2], constants[i][3]);
+    }
+  }
+  Log.info("{}", text);
+}
+
 // Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
 // alpha folded in where it is a constant (its inputs are constants that change between draws). A
 // line or point mesh is drawn `width` pixels wide.
@@ -1517,6 +1554,11 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
     tev_constants(program, material.coordIds, material.mapIds, constants);
+    // The first two draws of each indirect program, for the log (log_probe).
+    static std::unordered_map<const TevProgram*, int> sProbed;
+    if (program.indirect && sProbed.size() < 24 && sProbed[&program]++ < 2) {
+      log_probe("indirect", material, draw, constants);
+    }
     // Never more than the program declares (the generators' types made both counts).
     inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
     inputs.constantCount = static_cast<u8>(program.constantCount);
@@ -1557,6 +1599,13 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material, 
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
+  // Draws through a matrix flattening the model's y (CTransform4f::Scale(x, 0, z): the pause
+  // screen's light quarters, mirrored by the matrix's signs), the first 16, for the log (log_probe).
+  static int sFlatProbes = 0;
+  if (draw.modelView[1] == 0.f && draw.modelView[5] == 0.f && draw.modelView[9] == 0.f && sFlatProbes < 16) {
+    ++sFlatProbes;
+    log_probe("flat y", material, draw, nullptr);
+  }
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[material.unitCount];
@@ -1894,6 +1943,17 @@ void record_copy() noexcept {
   draw.copyHalf = static_cast<s64>(g_gxState.texCopyDstWidth) * 3 < static_cast<s64>(src.width) * 2;
   draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
                              static_cast<float>(src.height), true);
+  // Each destination and size's first copy, for the log (log_probe's companion): GX's rectangle,
+  // the destination's size and format, and the screen rectangle read.
+  static absl::flat_hash_set<std::tuple<const void*, u32, u32, u32>> sSeen;
+  if (sSeen.size() < 40 && sSeen.emplace(g_gxState.texCopyDest, g_gxState.texCopyDstWidth,
+                                         g_gxState.texCopyDstHeight, static_cast<u32>(fmt)).second) {
+    const auto [fbWidth, fbHeight] = logical_fb_size();
+    Log.info("[probe] copy: dest {} from GX ({}, {}) {}x{} of {}x{} to {}x{} fmt {} half {}; screen ({}, {}) {}x{}",
+             g_gxState.texCopyDest, src.x, src.y, src.width, src.height, fbWidth, fbHeight,
+             g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, static_cast<u32>(fmt), draw.copyHalf,
+             draw.scissor.x, draw.scissor.y, draw.scissor.width, draw.scissor.height);
+  }
   vita_gl::record(std::move(draw));
 }
 

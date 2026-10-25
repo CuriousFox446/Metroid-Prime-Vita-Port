@@ -650,15 +650,16 @@ std::string lighting_code(int chan, int count, int row, const std::string& targe
   return code;
 }
 
-// A coordinate generator's source as the vertex program has it, (x, y, z, 1) as GX takes it.
-std::string texgen_input(const TcgConfig& tcg, int c) {
+// A coordinate generator's source as the vertex program has it, (x, y, z, 1) as GX takes it: a
+// vertex attribute's from the mesh set `set` holding it.
+std::string texgen_input(const TcgConfig& tcg, int set) {
   if (tcg.src == GX_TG_POS) {
     return "float4(aPos, 1.0)";
   }
   if (tcg.src == GX_TG_NRM) {
     return "float4(aNrm, 1.0)";
   }
-  return fmt::format("float4(aUv{}, 1.0, 1.0)", c);
+  return fmt::format("float4(aUv{}, 1.0, 1.0)", set);
 }
 } // namespace
 
@@ -677,10 +678,31 @@ TevLayout tev_layout() noexcept {
   layout.stageMap.fill(-1);
   layout.indCoord.fill(-1);
   layout.indMap.fill(-1);
+  layout.meshSet.fill(-1);
+  layout.meshSetSource.fill(-1);
+  // The mesh set holding vertex attribute `src` (GX_TG_TEXn) for slot `slot`: the set already
+  // holding it, else the set of the slot's own index where that is free (as each slot had its own
+  // set before sets were shared: those programs keep their sources), else the first free; -1 when
+  // the mesh's sets are full.
+  const auto mesh_set = [&layout](int slot, int src) -> int {
+    int free = -1;
+    for (int set = 0; set < kTexCoords; ++set) {
+      if (layout.meshSetSource[set] == src) {
+        return set;
+      }
+      if (layout.meshSetSource[set] < 0 && (free < 0 || set == slot)) {
+        free = set;
+      }
+    }
+    if (free >= 0) {
+      layout.meshSetSource[free] = static_cast<s8>(src);
+    }
+    return free;
+  };
   // A coordinate generator's slot (taken at its first use), or -1 where a program cannot make its
   // coordinates (colours, binormals, another generator or a bump map as the source: not yet) or
-  // the slots are full.
-  const auto coord_slot = [&s, &layout](u32 id) -> int {
+  // the slots or the mesh's sets are full.
+  const auto coord_slot = [&s, &layout, &mesh_set](u32 id) -> int {
     if (id >= MaxTexCoord) {
       return -1;
     }
@@ -697,28 +719,16 @@ TevLayout tev_layout() noexcept {
         (has_post(tcg) && (tcg.postMtx - GX_PTTEXMTX0) / 3 >= MaxPTTexMtx) || layout.coordCount == kProgramCoords) {
       return -1;
     }
-    const int slot = layout.coordCount++;
-    layout.coords[slot] = static_cast<GXTexCoordID>(id);
-    if (!fromTex || slot < kTexCoords) {
-      return slot;
-    }
-    // A set from a vertex attribute needs one of the mesh's sets: it takes the first of those slots
-    // made from the position or the normal, which moves to the new slot.
-    for (int c = 0; c < kTexCoords; ++c) {
-      const GXTexGenSrc src = s.tcgs[layout.coords[c]].src;
-      if (src == GX_TG_POS || src == GX_TG_NRM) {
-        std::swap(layout.coords[c], layout.coords[slot]);
-        for (s8& coord : layout.stageCoord) {
-          coord = coord == c ? static_cast<s8>(slot) : coord;
-        }
-        for (s8& coord : layout.indCoord) {
-          coord = coord == c ? static_cast<s8>(slot) : coord;
-        }
-        return c;
+    const int slot = layout.coordCount;
+    if (fromTex) {
+      const int set = mesh_set(slot, static_cast<int>(tcg.src));
+      if (set < 0) {
+        return -1;
       }
+      layout.meshSet[slot] = static_cast<s8>(set);
     }
-    --layout.coordCount;
-    return -1;
+    layout.coords[slot] = static_cast<GXTexCoordID>(id);
+    return layout.coordCount++;
   };
   const auto map_slot = [&layout](u32 id) -> int {
     if (id >= MaxTextures) {
@@ -806,6 +816,8 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   stateKey = XXH3_64bits_withSeed(layout.stageMap.data(), sizeof(layout.stageMap), stateKey);
   const int counts[2] = {layout.coordCount, layout.samplerCount};
   stateKey = XXH3_64bits_withSeed(counts, sizeof(counts), stateKey);
+  // The mesh set each slot reads (the vertex program's attributes).
+  stateKey = XXH3_64bits_withSeed(layout.meshSet.data(), sizeof(layout.meshSet), stateKey);
   // The indirect stages read: their slots and scales (the stages' indirect setup is in theirs).
   stateKey = XXH3_64bits_withSeed(layout.indCoord.data(), sizeof(layout.indCoord), stateKey);
   stateKey = XXH3_64bits_withSeed(layout.indMap.data(), sizeof(layout.indMap), stateKey);
@@ -872,11 +884,17 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
     // when asked, then the post-transform matrix (Aurora's shader.cpp does the same).
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const char* type = coord_type(tcg);
-    if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
-      add(vertexParams, fmt::format("float2 aUv{}", c));
+    // A mesh set's attribute, declared by the first slot reading it.
+    const int set = layout.meshSet[c];
+    bool declared = false;
+    for (int earlier = 0; earlier < c; ++earlier) {
+      declared = declared || (set >= 0 && layout.meshSet[earlier] == set);
+    }
+    if (set >= 0 && !declared) {
+      add(vertexParams, fmt::format("float2 aUv{}", set));
     }
     add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
-    vertexBody += fmt::format("  float4 t{} = {};\n", c, texgen_input(tcg, c));
+    vertexBody += fmt::format("  float4 t{} = {};\n", c, texgen_input(tcg, set));
     if (tcg.type == GX_TG_MTX3x4) {
       vertexBody += fmt::format("  float3 tc{0} = float3(dot(uVert[{1}], t{0}), dot(uVert[{2}], t{0}), dot(uVert[{3}], t{0}));\n",
                                 c, row, row + 1, row + 2);
