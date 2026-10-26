@@ -5,14 +5,7 @@
 #include "internal.hpp"
 
 #include <vitaGL.h>
-#include <vitashark.h>
-#include <psp2/gxm.h>
 #include <psp2/kernel/processmgr.h>
-#include <psp2/kernel/sysmem.h>
-#include <psp2/kernel/threadmgr.h>
-
-// vitaGL's display depth surface (its gxm.c), which its API does not give: keep_display_depth.
-extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 
 #include "backends/imgui_impl_opengl2.h"
 
@@ -22,7 +15,6 @@ extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 
 #include <pthread.h>
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -40,22 +32,13 @@ extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 namespace aurora::vita_gl {
 namespace {
 constexpr Module Log{"aurora::vita_gl"};
-// The screen's size (screen_width): the Vita's, or resolution.txt's (read_resolution).
-int g_width = 960;
-int g_height = 544;
+constexpr int kWidth = kScreenWidth;
+constexpr int kHeight = kScreenHeight;
 // vitaGL takes the RAM the game's heap leaves; this much of it stays free for the system's
 // own allocations (thread stacks, audio, file I/O).
 constexpr int kRamThreshold = 32 * 1024 * 1024;
 // For glBegin/glEnd; nothing here uses them.
 constexpr int kLegacyPool = 256 * 1024;
-// The scenes a frame vitaGL makes the display's render target and each framebuffer's for (each EFB
-// copy ends the display's scene and draws two of a framebuffer's: initialize); draw_world and
-// copy_on_gpu keep each frame within them. The display's, GXM's most. A framebuffer's, the most a
-// frame was seen to need (the copies' 480x272 scratch on the pause screen's first frame): GXM
-// sizes the memory of each target it makes by them, from the system's (initialize logs how
-// much), and at 8 the pause screen's copy came back black (93518bf), its target likely not made.
-constexpr uint8_t kDisplayScenesPerFrame = 8;
-constexpr uint8_t kFramebufferScenesPerFrame = 3;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
@@ -64,70 +47,6 @@ std::atomic_bool g_fontsChanged{false};
 // freed wherever their last holder lets go).
 std::atomic<int64_t> g_textureCount[2];
 std::atomic<int64_t> g_textureBytes[2];
-// Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
-std::atomic<int64_t> g_pendingCount;
-std::atomic<int64_t> g_pendingBytes;
-// Copy textures' render targets made (Texture::render_target, one a size), for the log.
-std::atomic<uint32_t> g_renderTargets;
-
-// A present's costs that are not every draw's (render worker), for the line a slow present logs
-// (present): program builds (loads from the card, links of background compiles, compiles here),
-// textures' and meshes' first uploads, fixed-function draws (vitaGL compiles a shader for a
-// combination its cache lacks inside one), EFB copies and the swap. The timed presents' sections
-// (one in kTimedEvery) missed the 1.4 s presents of a room's arrival.
-struct PresentCosts {
-  uint64_t start = 0;
-  uint64_t buildUs = 0;
-  uint32_t loads = 0;
-  uint32_t links = 0;
-  uint32_t compiles = 0;
-  uint64_t textureUs = 0;
-  uint32_t textures = 0;
-  uint64_t textureBytes = 0;
-  uint64_t meshUs = 0;
-  uint32_t meshes = 0;
-  uint64_t fixedUs = 0;
-  uint64_t fixedMaxUs = 0;
-  uint32_t fixedDraws = 0;
-  uint64_t copyUs = 0;
-  uint32_t copies = 0;
-  uint64_t swapUs = 0;
-};
-PresentCosts g_presentCosts;
-constexpr uint64_t kSlowPresentUs = 120000;
-
-// Presents so far (render worker), and render targets let go waiting for their delete. vitaGL
-// frees a texture's memory at once once nothing references it, and the GPU runs a frame's scenes
-// behind the render worker: deleted as soon as its size changed, a copy's target was drawn into by
-// a copy pass still queued after its memory went to another allocation, screen pixels over vitaGL's
-// pool's own records (two crashes in its allocator: 2635657). So a target waits kRetiredPresents
-// presents first.
-uint32_t g_presentSerial = 0;
-constexpr uint32_t kRetiredPresents = 8;
-struct RetiredTarget {
-  GLuint texture;
-  GLuint framebuffer;
-  uint32_t retiredAt;
-};
-std::deque<RetiredTarget> g_retiredTargets;
-
-// Render worker.
-void retire_target(GLuint texture, GLuint framebuffer) noexcept {
-  g_retiredTargets.push_back({texture, framebuffer, g_presentSerial});
-}
-
-void delete_retired_targets() noexcept {
-  while (!g_retiredTargets.empty() && g_presentSerial - g_retiredTargets.front().retiredAt >= kRetiredPresents) {
-    const RetiredTarget& target = g_retiredTargets.front();
-    if (target.framebuffer != 0) {
-      glDeleteFramebuffers(1, &target.framebuffer);
-    }
-    if (target.texture != 0) {
-      glDeleteTextures(1, &target.texture);
-    }
-    g_retiredTargets.pop_front();
-  }
-}
 
 // vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
 void log_memory(const char* when) {
@@ -135,17 +54,11 @@ void log_memory(const char* when) {
   const auto pool = [](vglMemType type) {
     return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
   };
-  // The system's own, outside vitaGL's pools: GXM makes the framebuffers' render targets from it.
-  SceKernelFreeMemorySizeInfo system{};
-  system.size = sizeof(system);
-  sceKernelGetFreeMemorySize(&system);
-  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; the system's free: "
-           "user {:.1f}, CDRAM {:.1f}, phycont {:.1f}; textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} "
-           "MiB); not yet uploaded: {} ({:.1f} MiB)",
+  Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
+           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB)",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
-           system.size_user / kMiB, system.size_cdram / kMiB, system.size_phycont / kMiB, g_textureCount[0].load(),
-           g_textureBytes[0].load() / kMiB, g_textureCount[1].load(), g_textureBytes[1].load() / kMiB,
-           g_pendingCount.load(), g_pendingBytes.load() / kMiB);
+           g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
+           g_textureBytes[1].load() / kMiB);
 }
 
 // A frame's draws and their programs' constant rows (ProgramInputs), and its serial, a new one
@@ -181,9 +94,7 @@ class Mesh {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
   : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
-    m_mode(primitive == MeshPrimitive::Lines    ? GL_LINES
-           : primitive == MeshPrimitive::Points ? GL_POINTS
-                                                : GL_TRIANGLES) {}
+    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -237,27 +148,8 @@ std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bo
 class Texture {
 public:
   Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> level0) noexcept
-  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {
-    m_pending = static_cast<int64_t>(m_cpu.size());
-    if (m_pending != 0) {
-      g_pendingCount.fetch_add(1, std::memory_order_relaxed);
-      g_pendingBytes.fetch_add(m_pending, std::memory_order_relaxed);
-    }
-  }
+  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {}
   ~Texture() {
-    settle_pending();
-    if (!m_targets.empty()) {
-      // A copy texture's targets: retired, the GPU perhaps still drawing into one.
-      const int kind = static_cast<int>(m_format);
-      for (const Target& target : m_targets) {
-        const GLuint texture = target.texture;
-        const GLuint framebuffer = target.framebuffer;
-        gfx::render_worker::enqueue_work([texture, framebuffer] { retire_target(texture, framebuffer); });
-        g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
-        g_textureBytes[kind].fetch_sub(target.bytes(), std::memory_order_relaxed);
-      }
-      return;
-    }
     if (m_id != 0) {
       const GLuint id = m_id;
       gfx::render_worker::enqueue_work([id] { glDeleteTextures(1, &id); });
@@ -280,7 +172,6 @@ public:
   // sets its sampler state where it changed.
   void bind(const Sampler& sampler) noexcept {
     if (m_id == 0) {
-      const uint64_t start = sceKernelGetProcessTimeWide();
       if (m_width == 0) {
         // A copy texture no copy has filled (its rectangle was empty): transparent black.
         m_width = m_height = 1;
@@ -301,10 +192,6 @@ public:
       g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
       g_textureBytes[kind].fetch_add(m_bytes, std::memory_order_relaxed);
       std::vector<uint8_t>().swap(m_cpu);
-      settle_pending();
-      g_presentCosts.textureUs += sceKernelGetProcessTimeWide() - start;
-      ++g_presentCosts.textures;
-      g_presentCosts.textureBytes += static_cast<uint64_t>(m_bytes);
     } else {
       glBindTexture(GL_TEXTURE_2D, m_id);
     }
@@ -318,113 +205,104 @@ public:
     }
   }
 
-  // Render worker: makes it a `width` x `height` RGBA8 texture with a framebuffer to draw into (an
-  // EFB copy's texture, or a copy's scratch) and returns the framebuffer. A destination copied at
-  // several sizes (the game's spare buffer serves several effects) keeps a target for each, its
-  // texture the latest copy's: draws after a copy bind it, those before keep the one they bound.
-  // A size unused a while is retired (retire_target) when the pool is full.
-  GLuint render_target(int width, int height) noexcept {
-    const int kind = static_cast<int>(m_format);
-    if (m_id != 0 && m_targets.empty()) {
-      // The stand-in bind made before any copy (a transparent black texel): let go.
-      retire_target(m_id, 0);
-      g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
-      g_textureBytes[kind].fetch_sub(m_bytes, std::memory_order_relaxed);
-      m_bytes = 0;
-      m_id = 0;
+  // Render worker: fills it from the screen's `src` as the draws so far left it, on the active
+  // unit (an EFB copy's texture). vitaGL's glReadPixels ends the scene and waits for the GPU, and
+  // gives the rows bottom first; the texture's first row is the rectangle's top, as GX copies it.
+  void copy_screen(const ScreenRect& src, CopyKind kind, bool half, std::vector<uint8_t>& readback) noexcept {
+    const int width = src.width;
+    const int height = src.height;
+    if (width <= 0 || height <= 0) {
+      return;
     }
-    std::vector<uint8_t>().swap(m_cpu);
-    settle_pending();
-    Target* target = nullptr;
-    for (Target& t : m_targets) {
-      if (t.width == width && t.height == height) {
-        target = &t;
-        break;
-      }
-    }
-    if (target == nullptr) {
-      if (m_targets.size() >= kTargetsPerTexture) {
-        // The least recently used size, if no copy of the last presents used it (whatever is
-        // younger may be in a queued scene; it is retired anyway, its delete waits).
-        auto oldest = std::min_element(m_targets.begin(), m_targets.end(),
-                                       [](const Target& a, const Target& b) { return a.lastUsed < b.lastUsed; });
-        if (g_presentSerial - oldest->lastUsed >= 2) {
-          retire_target(oldest->texture, oldest->framebuffer);
-          g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
-          g_textureBytes[kind].fetch_sub(oldest->bytes(), std::memory_order_relaxed);
-          m_targets.erase(oldest);
+    readback.resize(static_cast<size_t>(width) * height * 4);
+    glReadPixels(src.x, src.y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+    const int step = half && width > 1 && height > 1 ? 2 : 1;
+    const int outWidth = width / step;
+    const int outHeight = height / step;
+    m_cpu.resize(static_cast<size_t>(outWidth) * outHeight * 4);
+    const size_t stride = static_cast<size_t>(width) * 4;
+    for (int y = 0; y < outHeight; ++y) {
+      const uint8_t* row = readback.data() + static_cast<size_t>(height - 1 - y * step) * stride;
+      uint8_t* out = m_cpu.data() + static_cast<size_t>(y) * outWidth * 4;
+      for (int x = 0; x < outWidth; ++x, out += 4) {
+        int rgba[4];
+        const uint8_t* p = row + static_cast<size_t>(x) * step * 4;
+        if (step == 1) {
+          for (int c = 0; c < 4; ++c) {
+            rgba[c] = p[c];
+          }
+        } else {
+          // GX's box filter: the 2x2 block's mean (the row before in memory is the next one down the screen).
+          const uint8_t* q = p - stride;
+          for (int c = 0; c < 4; ++c) {
+            rgba[c] = (p[c] + p[c + 4] + q[c] + q[c + 4] + 2) >> 2;
+          }
         }
+        const auto luma = [&rgba] {
+          return static_cast<uint8_t>(std::min(255, (66 * rgba[0] + 129 * rgba[1] + 25 * rgba[2] + 128) / 256 + 16));
+        };
+        uint8_t value;
+        switch (kind) {
+        case CopyKind::Rgba:
+          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = rgba[3];
+          continue;
+        case CopyKind::IntensityAlpha:
+          value = luma();
+          out[0] = out[1] = out[2] = value, out[3] = rgba[3];
+          continue;
+        case CopyKind::RedAlpha:
+          out[0] = out[1] = out[2] = rgba[0], out[3] = rgba[3];
+          continue;
+        case CopyKind::Intensity:
+          value = luma();
+          break;
+        case CopyKind::Red:
+          value = rgba[0];
+          break;
+        case CopyKind::Green:
+          value = rgba[1];
+          break;
+        case CopyKind::Blue:
+          value = rgba[2];
+          break;
+        case CopyKind::Alpha:
+          value = rgba[3];
+          break;
+        default:
+          out[0] = rgba[0], out[1] = rgba[1], out[2] = rgba[2], out[3] = 255;
+          continue;
+        }
+        out[0] = out[1] = out[2] = out[3] = value;
       }
-      Target made{.width = width, .height = height};
-      glGenTextures(1, &made.texture);
-      glBindTexture(GL_TEXTURE_2D, made.texture);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-      glGenFramebuffers(1, &made.framebuffer);
-      glBindFramebuffer(GL_FRAMEBUFFER, made.framebuffer);
-      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, made.texture, 0);
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
-      g_textureBytes[kind].fetch_add(made.bytes(), std::memory_order_relaxed);
-      g_renderTargets.fetch_add(1, std::memory_order_relaxed);
-      m_targets.push_back(made);
-      target = &m_targets.back();
     }
-    target->scenes = target->lastUsed == g_presentSerial ? target->scenes + 1 : 1;
-    target->lastUsed = g_presentSerial;
-    if (m_id != target->texture) {
-      // Another GL texture: its sampler state is its own.
-      m_id = target->texture;
+    const bool fresh = m_id == 0;
+    if (fresh) {
+      glGenTextures(1, &m_id);
+      g_textureCount[static_cast<int>(m_format)].fetch_add(1, std::memory_order_relaxed);
+    }
+    glBindTexture(GL_TEXTURE_2D, m_id);
+    if (fresh || static_cast<uint32_t>(outWidth) != m_width || static_cast<uint32_t>(outHeight) != m_height) {
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, outWidth, outHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
+      m_width = static_cast<uint32_t>(outWidth);
+      m_height = static_cast<uint32_t>(outHeight);
+      const auto bytes = static_cast<int64_t>(m_cpu.size());
+      g_textureBytes[static_cast<int>(m_format)].fetch_add(bytes - m_bytes, std::memory_order_relaxed);
+      m_bytes = bytes;
       m_samplerSet = false;
+    } else {
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, outWidth, outHeight, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
     }
-    m_width = static_cast<uint32_t>(width);
-    m_height = static_cast<uint32_t>(height);
-    return target->framebuffer;
   }
-
-  // Render worker: the scenes its `width` x `height` target has been drawn in this present (a copy
-  // texture's or the copies' scratch: copy_on_gpu keeps them within kFramebufferScenesPerFrame).
-  int scenes(int width, int height) const noexcept {
-    for (const Target& t : m_targets) {
-      if (t.width == width && t.height == height) {
-        return t.lastUsed == g_presentSerial ? t.scenes : 0;
-      }
-    }
-    return 0;
-  }
-
-  GLuint id() const noexcept { return m_id; }
 
 private:
-  void settle_pending() noexcept {
-    if (m_pending != 0) {
-      g_pendingCount.fetch_sub(1, std::memory_order_relaxed);
-      g_pendingBytes.fetch_sub(m_pending, std::memory_order_relaxed);
-      m_pending = 0;
-    }
-  }
-
   std::vector<uint8_t> m_cpu;
-  int64_t m_pending = 0; // bytes counted in g_pendingBytes, until the upload
   uint32_t m_width;
   uint32_t m_height;
   TexelFormat m_format;
-  // A copy texture's render targets, one a size (render_target).
-  struct Target {
-    int width = 0;
-    int height = 0;
-    GLuint texture = 0;
-    GLuint framebuffer = 0;
-    uint32_t lastUsed = 0; // g_presentSerial at its last copy
-    int scenes = 0;        // the scenes drawn into it in that present
-    int64_t bytes() const noexcept { return static_cast<int64_t>(width) * height * 4; }
-  };
-  static constexpr size_t kTargetsPerTexture = 4;
-
   GLuint m_id = 0;
   int64_t m_bytes = 0;
   Sampler m_sampler{};
   bool m_samplerSet = false;
-  std::vector<Target> m_targets;
 };
 
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
@@ -439,20 +317,13 @@ std::shared_ptr<Texture> make_copy_texture() noexcept {
 uint64_t texture_bytes(const Texture& texture) noexcept { return texture.bytes(); }
 
 namespace {
-// For the log: generated programs built, failed, and the time spent compiling on the render worker
-// (a compile there blocks the frame: the synchronous fallback); of them those loaded from the
-// card, and those compiled on the background compiler (its time, and the render worker's to link
-// them).
+// For the log: generated programs compiled, failed, and the time spent compiling (render worker).
 struct ProgramStats {
   uint32_t compiled = 0; // built, from the compiler or the card
   uint32_t failed = 0;
   double compileMs = 0.0;
   uint32_t loaded = 0; // of them, loaded from the card
   double loadMs = 0.0;
-  uint32_t background = 0; // of them, compiled in the background
-  double backgroundMs = 0.0;
-  double linkMs = 0.0;
-  uint32_t fallbacks = 0; // background compiles that failed or did not link, compiled again here
   uint32_t failuresLogged = 0;
 };
 ProgramStats g_programStats;
@@ -620,38 +491,31 @@ bool load_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, G
   return ok;
 }
 
-// A linked program's binary (render worker: GL calls). vitaGL's glGetProgramBinary writes the
-// whole binary whatever the buffer's size, so the buffer is the length vitaGL gives first, with
-// room to spare.
-bool program_binary(GLuint program, GLenum& format, std::vector<uint8_t>& binary) {
+void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLuint program) {
+  // vitaGL's glGetProgramBinary writes the whole binary whatever the buffer's size, so the buffer
+  // is the length vitaGL gives first, with room to spare.
   GLint length = 0;
   glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
   if (length <= 0 || static_cast<uint32_t>(length) >= kMaxBinary) {
-    return false;
+    return;
   }
-  binary.resize(static_cast<size_t>(length) + 4096);
+  std::vector<uint8_t> binary(static_cast<size_t>(length) + 4096);
   GLsizei written = 0;
+  GLenum format = 0;
   glGetProgramBinary(program, static_cast<GLsizei>(binary.size()), &written, &format, binary.data());
   if (written <= 0 || static_cast<size_t>(written) > binary.size()) {
-    return false;
+    return;
   }
-  binary.resize(static_cast<size_t>(written));
-  return true;
-}
-
-// A binary to the card (the card thread), written aside and renamed, so a file cut short (the
-// power, a crash) is never read.
-void write_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum format,
-                  const std::vector<uint8_t>& binary) {
+  // Written aside and renamed, so a file cut short (the power, a crash) is never read.
   const std::string path = cache_path(key);
   const std::string temp = path + ".tmp";
   std::FILE* file = std::fopen(temp.c_str(), "wb");
   if (file == nullptr) {
     return;
   }
-  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(binary.size())};
+  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(written)};
   const bool ok = std::fwrite(header, sizeof(header), 1, file) == 1 &&
-                  std::fwrite(binary.data(), binary.size(), 1, file) == 1;
+                  std::fwrite(binary.data(), static_cast<size_t>(written), 1, file) == 1;
   std::fclose(file);
   std::error_code ec;
   if (ok) {
@@ -660,299 +524,12 @@ void write_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, 
     std::filesystem::remove(temp, ec);
   }
 }
-
-// The card's reads and writes of program binaries, on a thread of their own. On the render worker
-// a load's read, and a compile's write with its rename, held the frame: a compiled program's link
-// took 426 ms with its write (4abc21d's run), and a room bringing dozens of programs read them
-// there. A program's binary is read as soon as the FIFO thread makes the program (Program's
-// constructor), so it is in memory by its first draws; the render worker only gives it to vitaGL.
-enum CardReadState : int { kCardReading, kCardRead, kCardAbsent };
-
-struct CardRead {
-  uint64_t key = 0;
-  uint32_t vertexLength = 0;
-  uint32_t fragmentLength = 0;
-  GLenum format = 0;
-  std::vector<uint8_t> binary;
-  std::atomic<int> state{kCardReading};
-};
-
-class CardIo {
-public:
-  void read(std::shared_ptr<CardRead> request) noexcept {
-    Job job;
-    job.kind = Job::Read;
-    job.read = std::move(request);
-    push(std::move(job));
-  }
-
-  void write(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum format,
-             std::vector<uint8_t> binary) noexcept {
-    Job job;
-    job.kind = Job::Write;
-    job.key = key;
-    job.vertexLength = vertexLength;
-    job.fragmentLength = fragmentLength;
-    job.format = format;
-    job.binary = std::move(binary);
-    push(std::move(job));
-  }
-
-  // A binary that no longer links (another vitaGL, a damaged card): a compile next time.
-  void remove(uint64_t key) noexcept {
-    Job job;
-    job.kind = Job::Remove;
-    job.key = key;
-    push(std::move(job));
-  }
-
-private:
-  struct Job {
-    enum Kind : uint8_t { Read, Write, Remove } kind = Read;
-    std::shared_ptr<CardRead> read;
-    uint64_t key = 0;
-    uint32_t vertexLength = 0;
-    uint32_t fragmentLength = 0;
-    GLenum format = 0;
-    std::vector<uint8_t> binary;
-  };
-
-  void push(Job job) noexcept {
-    {
-      std::lock_guard lock{m_mutex};
-      if (!m_started) {
-        m_started = start();
-      }
-      if (!m_started) {
-        // No thread: done here, as before the card thread.
-        run_job(job);
-        return;
-      }
-      m_jobs.push_back(std::move(job));
-    }
-    m_ready.notify_one();
-  }
-
-  bool start() noexcept {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 128 * 1024);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_t thread;
-    const auto run = [](void* self) -> void* {
-      static_cast<CardIo*>(self)->run();
-      return nullptr;
-    };
-    const bool ok = pthread_create(&thread, &attr, run, this) == 0;
-    pthread_attr_destroy(&attr);
-    return ok;
-  }
-
-  static void run_job(Job& job) noexcept {
-    switch (job.kind) {
-    case Job::Read: {
-      CardRead& read = *job.read;
-      const bool ok = load_cached(read.key, read.vertexLength, read.fragmentLength, read.format, read.binary);
-      if (!ok) {
-        std::vector<uint8_t>().swap(read.binary);
-      }
-      read.state.store(ok ? kCardRead : kCardAbsent, std::memory_order_release);
-      break;
-    }
-    case Job::Write:
-      write_cached(job.key, job.vertexLength, job.fragmentLength, job.format, job.binary);
-      break;
-    case Job::Remove: {
-      std::error_code ec;
-      std::filesystem::remove(cache_path(job.key), ec);
-      break;
-    }
-    }
-  }
-
-  void run() noexcept {
-    for (;;) {
-      Job job;
-      {
-        std::unique_lock lock{m_mutex};
-        m_ready.wait(lock, [this] { return !m_jobs.empty(); });
-        job = std::move(m_jobs.front());
-        m_jobs.pop_front();
-      }
-      run_job(job);
-    }
-  }
-
-  std::mutex m_mutex;
-  std::condition_variable m_ready;
-  std::deque<Job> m_jobs;
-  bool m_started = false;
-};
-CardIo g_cardIo;
-
-// The Cg compiler on a thread of its own. A compile took the render worker 1 to 3.8 s, the frame
-// frozen that long (an enemy's death, an effect seen for the first time: 2635657's run), so a
-// program not on the card is compiled in the background to its GXP binaries, and the render worker
-// only registers and links them (vglShaderGxpBinary, a few milliseconds, as a card load); its
-// draws go on fixed-function meanwhile.
-//
-// vitashark keeps a compile's state in globals (its input, options and output), and vitaGL compiles
-// through it too: its fixed-function shaders, at a draw needing one its cache does not hold. So
-// every compile holds g_compilerMutex from shark_compile_shader_extended to shark_clear_output; the
-// linker wraps both (CMakeLists: --wrap), vitaGL's calls as well as ours (the wrappers at the end
-// of this file). A thread holding it already (a vitaGL compile not cleared) does not lock again.
-std::mutex g_compilerMutex;
-std::atomic<std::thread::id> g_compilerOwner;
-
-void compiler_lock() noexcept {
-  if (g_compilerOwner.load(std::memory_order_acquire) == std::this_thread::get_id()) {
-    return;
-  }
-  g_compilerMutex.lock();
-  g_compilerOwner.store(std::this_thread::get_id(), std::memory_order_release);
-}
-
-void compiler_unlock() noexcept {
-  if (g_compilerOwner.load(std::memory_order_acquire) != std::this_thread::get_id()) {
-    return;
-  }
-  g_compilerOwner.store(std::thread::id{}, std::memory_order_release);
-  g_compilerMutex.unlock();
-}
-
-// Started here (initialize), not by vitaGL: vitaGL starts it with its own pools' allocator
-// (shark_set_allocators(vglMalloc, vglFree)), which another thread must not use, and vitashark
-// keeps the allocator it started with. With the C library's (thread-safe), an instance vitaGL
-// started first ended. vitaGL's own start later finds it running (shark_init does nothing then).
-bool g_compilerReady = false;
-
-void start_compiler() noexcept {
-  shark_end();
-  shark_set_allocators(malloc, free);
-  g_compilerReady = shark_init(nullptr) >= 0 || shark_init("ur0:data/external/libshacccg.suprx") >= 0;
-  if (g_compilerReady) {
-    Log.info("the Cg compiler is started: programs compile in the background");
-  } else {
-    Log.warn("the Cg compiler did not start: programs compile on the render worker");
-  }
-}
-
-// One program's compile: its sources in, its GXP binaries (or the compiler's messages) out.
-struct CompileJob {
-  std::string vertexSource;
-  std::string fragmentSource;
-  std::vector<uint8_t> vertexGxp;
-  std::vector<uint8_t> fragmentGxp;
-  std::string error;
-  double ms = 0.0;
-  std::atomic<bool> done{false};
-};
-
-// A Cg source to its GXP binary. vitashark takes the source's length in `size` (and gives the
-// binary's back in it): passed 0, the compiler failed every time with "fatal internal error"
-// (685daf0, a48830e). The options are vitaGL's (SHARK_OPT_FAST, fast math and integers).
-bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t>& gxp, std::string& error) noexcept {
-  uint32_t size = static_cast<uint32_t>(source.size());
-  const SceGxmProgram* program =
-      shark_compile_shader_extended(source.c_str(), &size, type, SHARK_OPT_FAST, SHARK_ENABLE, SHARK_DISABLE, SHARK_ENABLE);
-  if (program != nullptr && size != 0) {
-    const auto* bytes = reinterpret_cast<const uint8_t*>(program);
-    gxp.assign(bytes, bytes + size);
-  } else {
-    error = type == SHARK_VERTEX_SHADER ? "the vertex program did not compile" : "the fragment program did not compile";
-    if (const SceShaccCgCompileOutput* output = shark_get_internal_compile_output(); output != nullptr) {
-      for (int32_t i = 0; i < output->diagnosticCount && i < 4; ++i) {
-        const SceShaccCgDiagnosticMessage& message = output->diagnostics[i];
-        error += fmt::format("; line {}: {}", message.location != nullptr ? message.location->lineNumber : 0u,
-                             message.message != nullptr ? message.message : "");
-      }
-    }
-  }
-  shark_clear_output();
-  return !gxp.empty();
-}
-
-// The background compiler: one thread, its jobs in order. Its stack is the compiler's (it runs
-// deep: 32 KiB overflowed), its priority below the game's threads, so it takes the time they leave.
-class BackgroundCompiler {
-public:
-  void submit(std::shared_ptr<CompileJob> job) noexcept {
-    {
-      std::lock_guard lock{m_mutex};
-      if (!m_started) {
-        m_started = start();
-      }
-      if (!m_started) {
-        job->error = "no thread for the compiler";
-        job->done.store(true, std::memory_order_release);
-        return;
-      }
-      m_jobs.push_back(std::move(job));
-    }
-    m_ready.notify_one();
-  }
-
-  size_t waiting() noexcept {
-    std::lock_guard lock{m_mutex};
-    return m_jobs.size();
-  }
-
-private:
-  bool start() noexcept {
-    constexpr size_t kCompilerStack = 2 * 1024 * 1024;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, kCompilerStack);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_t thread;
-    const auto run = [](void* self) -> void* {
-      static_cast<BackgroundCompiler*>(self)->run();
-      return nullptr;
-    };
-    const bool ok = pthread_create(&thread, &attr, run, this) == 0;
-    pthread_attr_destroy(&attr);
-    return ok;
-  }
-
-  void run() noexcept {
-    const SceUID self = sceKernelGetThreadId();
-    sceKernelChangeThreadPriority(self, std::min(sceKernelGetThreadCurrentPriority() + 16, 191));
-    for (;;) {
-      std::shared_ptr<CompileJob> job;
-      {
-        std::unique_lock lock{m_mutex};
-        m_ready.wait(lock, [this] { return !m_jobs.empty(); });
-        job = std::move(m_jobs.front());
-        m_jobs.pop_front();
-      }
-      const auto start = std::chrono::steady_clock::now();
-      if (compile_gxp(job->vertexSource, SHARK_VERTEX_SHADER, job->vertexGxp, job->error)) {
-        compile_gxp(job->fragmentSource, SHARK_FRAGMENT_SHADER, job->fragmentGxp, job->error);
-      }
-      job->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      job->done.store(true, std::memory_order_release);
-    }
-  }
-
-  std::mutex m_mutex;
-  std::condition_variable m_ready;
-  std::deque<std::shared_ptr<CompileJob>> m_jobs;
-  bool m_started = false;
-};
-BackgroundCompiler g_compiler;
 } // namespace
 
 class Program {
 public:
   Program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept
-  : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)), m_key(key) {
-    // Its binary from the card, read on the card thread from now on (CardIo).
-    m_read = std::make_shared<CardRead>();
-    m_read->key = key;
-    m_read->vertexLength = static_cast<uint32_t>(m_vertexSource.size());
-    m_read->fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
-    g_cardIo.read(m_read);
-  }
+  : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)), m_key(key) {}
   ~Program() {
     if (m_id != 0) {
       const GLuint id = m_id;
@@ -960,43 +537,27 @@ public:
     }
   }
 
-  // Render worker: true once linked. A program on the card is loaded, once the card thread has read
-  // it, while the frame's budget allows (a few milliseconds each). One that is not goes to the
-  // background compiler, and is linked here once its binaries are made, on the same budget (it
-  // costs about as much); its draws go fixed-function meanwhile, as they do while its read is under
-  // way. Without the background compiler (it did not start), it is compiled here, one a frame, the
-  // frame waiting the compile out (a second or more).
+  // Render worker: true once linked. A program not tried yet is built while the frame's budget
+  // allows: compiles (hundreds of milliseconds) and loads from the card (a few) count apart.
   bool ready(int& compileBudget, int& loadBudget) noexcept {
     if (m_state == State::Pending) {
-      const int read = m_read->state.load(std::memory_order_acquire);
-      if (read == kCardReading) {
-        return false;
+      if (!m_cacheChecked) {
+        std::error_code ec;
+        m_inCache = std::filesystem::exists(cache_path(m_key), ec);
+        m_cacheChecked = true;
       }
-      if (read == kCardRead) {
-        if (loadBudget > 0) {
-          --loadBudget;
-          build_on_compile_stack();
-        }
-      } else if (g_compilerReady) {
-        m_job = std::make_shared<CompileJob>();
-        m_job->vertexSource = m_vertexSource;
-        m_job->fragmentSource = m_fragmentSource;
-        g_compiler.submit(m_job);
-        m_state = State::Compiling;
-      } else if (compileBudget > 0) {
-        --compileBudget;
+      int& budget = m_inCache ? loadBudget : compileBudget;
+      if (budget > 0) {
+        --budget;
         build_on_compile_stack();
       }
-    } else if (m_state == State::Compiling && loadBudget > 0 && m_job->done.load(std::memory_order_acquire)) {
-      --loadBudget;
-      build_on_compile_stack();
     }
     return m_state == State::Ready;
   }
 
   GLuint id() const noexcept { return m_id; }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
-  GLint samplers[kSamplers] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  GLint samplers[kSamplers] = {-1, -1, -1, -1};
 
   // Render worker, this program in use: sets its constants unless they are the rows it was sent
   // last. vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only
@@ -1010,17 +571,8 @@ public:
            g_uniformStats.fragment);
   }
 
-  // Render worker, this program in use: its constants from `rows` (a pass of this file's own, not
-  // a frame's draw), which a frame's draw sends over again after.
-  void send_constants(const float (*rows)[4], int count) noexcept {
-    if (m_constantsLocation != kNoUniform) {
-      glUniform4fv(m_constantsLocation, count, rows[0]);
-    }
-    m_constantsSent = {};
-  }
-
 private:
-  enum class State : uint8_t { Pending, Compiling, Ready, Failed };
+  enum class State : uint8_t { Pending, Ready, Failed };
 
   // Rows sent to a uniform array last: their frame's serial (0: none yet) and where they start.
   struct Sent {
@@ -1050,11 +602,6 @@ private:
   // of its own with a stack it fits in, while the render worker waits for it: the GL calls stay one
   // at a time, and vitaGL keeps no per-thread context.
   void build_on_compile_stack() noexcept {
-    const uint64_t start = sceKernelGetProcessTimeWide();
-    struct Timed {
-      uint64_t start;
-      ~Timed() { g_presentCosts.buildUs += sceKernelGetProcessTimeWide() - start; }
-    } timed{start};
     constexpr size_t kCompileStack = 2 * 1024 * 1024;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1074,82 +621,18 @@ private:
     pthread_attr_destroy(&attr);
   }
 
-  // A linked program from its two shaders (deleted after: the program keeps them).
-  void link(GLuint vs, GLuint fs, std::string& error) noexcept {
-    // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
-    // and passes the result on unchecked, so a name the compiler dropped would crash it. The
-    // locations are asked for after the link instead.
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-    GLint ok = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (ok == GL_TRUE) {
-      m_id = program;
-    } else {
-      error = "the link failed";
-      glDeleteProgram(program);
-    }
-  }
-
-  // The sources compiled here, through vitaGL's glCompileShader with the Cg types, and linked.
-  void compile_here(std::string& error) noexcept {
-    const GLuint vs = compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
-    const GLuint fs = vs != 0 ? compile_cg(GL_CG_FRAGMENT_SHADER_EXT, m_fragmentSource, error) : 0;
-    if (vs != 0 && fs != 0) {
-      link(vs, fs, error);
-    }
-    if (vs != 0) {
-      glDeleteShader(vs);
-    }
-    if (fs != 0) {
-      glDeleteShader(fs);
-    }
-  }
-
-  // The background compiler's GXP binaries, registered with vitaGL's shader patcher
-  // (vglShaderGxpBinary, as its compile does) and linked.
-  bool link_gxp(const CompileJob& job) noexcept {
-    const GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-    vglShaderGxpBinary(1, &vs, job.vertexGxp.data(), static_cast<GLsizei>(job.vertexGxp.size()));
-    const GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-    vglShaderGxpBinary(1, &fs, job.fragmentGxp.data(), static_cast<GLsizei>(job.fragmentGxp.size()));
-    std::string error;
-    link(vs, fs, error);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    return m_id != 0;
-  }
-
   void build() noexcept {
     const auto start = std::chrono::steady_clock::now();
     std::string error;
     const auto vertexLength = static_cast<uint32_t>(m_vertexSource.size());
     const auto fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
-    bool cached = false;
-    bool background = false;
-    if (m_job) {
-      // Compiled in the background. A compile that failed there, or binaries that do not link, are
-      // compiled here after all (the frame waits, as before the background compiler).
-      if (m_job->error.empty() && !m_job->vertexGxp.empty() && !m_job->fragmentGxp.empty() && link_gxp(*m_job)) {
-        background = true;
-        ++g_programStats.background;
-        g_programStats.backgroundMs += m_job->ms;
-      } else {
-        ++g_programStats.fallbacks;
-        if (g_programStats.failuresLogged++ < 3) {
-          Log.warn("a program compiled in the background did not link ({}): compiled on the render worker",
-                   m_job->error.empty() ? "its binaries" : m_job->error);
-        }
-        compile_here(error);
-      }
-      m_job.reset();
-    } else if (m_read->state.load(std::memory_order_acquire) == kCardRead) {
-      // The card thread's read: glProgramBinary rebuilds both shaders from their GXPs and links them.
-      cached = true;
+    GLenum format = 0;
+    std::vector<uint8_t> binary;
+    const bool cached = load_cached(m_key, vertexLength, fragmentLength, format, binary);
+    if (cached) {
+      // glProgramBinary rebuilds both shaders from their GXPs and links them.
       const GLuint program = glCreateProgram();
-      glProgramBinary(program, m_read->format, m_read->binary.data(), static_cast<GLsizei>(m_read->binary.size()));
+      glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
       GLint ok = GL_FALSE;
       glGetProgramiv(program, GL_LINK_STATUS, &ok);
       if (ok == GL_TRUE) {
@@ -1157,29 +640,47 @@ private:
       } else {
         glDeleteProgram(program);
       }
-    } else {
-      compile_here(error);
     }
-    m_read.reset();
+    const GLuint vs = cached ? 0 : compile_cg(GL_CG_VERTEX_SHADER_EXT, m_vertexSource, error);
+    const GLuint fs = vs != 0 ? compile_cg(GL_CG_FRAGMENT_SHADER_EXT, m_fragmentSource, error) : 0;
+    if (vs != 0 && fs != 0) {
+      // No glBindAttribLocation: glLinkProgram looks every bound name up in the compiled program
+      // and passes the result on unchecked, so a name the compiler dropped would crash it. The
+      // locations are asked for after the link instead.
+      const GLuint program = glCreateProgram();
+      glAttachShader(program, vs);
+      glAttachShader(program, fs);
+      glLinkProgram(program);
+      GLint ok = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (ok == GL_TRUE) {
+        m_id = program;
+      } else {
+        error = "the link failed";
+        glDeleteProgram(program);
+      }
+    }
+    if (vs != 0) {
+      glDeleteShader(vs);
+    }
+    if (fs != 0) {
+      glDeleteShader(fs);
+    }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (cached) {
       g_programStats.loadMs += ms;
       ++g_programStats.loaded;
-      ++g_presentCosts.loads;
       if (m_id == 0) {
-        g_cardIo.remove(m_key);
+        // A binary that no longer links (another vitaGL, a damaged card) goes, for a compile next time.
+        std::error_code ec;
+        std::filesystem::remove(cache_path(m_key), ec);
         error = "its binary from the card did not link (removed)";
       }
     } else {
-      // Its binary to the card, written on the card thread.
-      GLenum format = 0;
-      std::vector<uint8_t> binary;
-      if (m_id != 0 && program_binary(m_id, format, binary)) {
-        g_cardIo.write(m_key, vertexLength, fragmentLength, format, std::move(binary));
+      if (m_id != 0) {
+        save_cached(m_key, vertexLength, fragmentLength, m_id);
       }
-      (background ? g_programStats.linkMs : g_programStats.compileMs) +=
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-      ++(background ? g_presentCosts.links : g_presentCosts.compiles);
+      g_programStats.compileMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
     if (m_id == 0) {
       m_state = State::Failed;
@@ -1194,8 +695,7 @@ private:
       }
       m_vertexLocation = glGetUniformLocation(m_id, "uVert");
       m_constantsLocation = glGetUniformLocation(m_id, "uConst");
-      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3",
-                                                               "uTex4", "uTex5", "uTex6", "uTex7"};
+      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3"};
       glUseProgram(m_id);
       for (int i = 0; i < kSamplers; ++i) {
         samplers[i] = glGetUniformLocation(m_id, kSamplerNames[i]);
@@ -1213,8 +713,8 @@ private:
   std::string m_vertexSource;
   std::string m_fragmentSource;
   uint64_t m_key;
-  std::shared_ptr<CardRead> m_read;   // its binary's read from the card, till built
-  std::shared_ptr<CompileJob> m_job; // its background compile, while State::Compiling
+  bool m_cacheChecked = false;
+  bool m_inCache = false;
   GLuint m_id = 0;
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
   GLint m_vertexLocation = kNoUniform;
@@ -1319,21 +819,10 @@ struct PresentStats {
   // Draws with their generated program, and draws whose program was not ready (fixed-function).
   uint64_t programDraws = 0;
   uint64_t programPending = 0;
-  // EFB copies made on the GPU, those left for the pass's program to be built, the screen pixels
-  // copied, and the render worker's time for them (the GPU's is not in it).
+  // EFB copies made from the screen, the screen pixels they read, and their time (the GPU's wait in it).
   uint32_t copies = 0;
-  uint32_t copiesWaiting = 0;
   uint64_t copyPixels = 0;
   uint64_t copyUs = 0;
-  // The most draws in one of the display's scenes (an EFB copy ends one): what GXM's ring buffers
-  // hold until the scene is drawn (initialize).
-  uint32_t maxSceneDraws = 0;
-  // The most scenes a frame drew into the display and into one framebuffer (a copy's scratch or
-  // texture), and the copies left for the next frame to keep within them (draw_world, copy_on_gpu).
-  uint32_t maxDisplayScenes = 0;
-  uint32_t maxFramebufferScenes = 0;
-  uint32_t copiesOverDisplayScenes = 0;
-  uint32_t copiesOverFramebufferScenes = 0;
 };
 PresentStats g_presentStats;
 
@@ -1408,193 +897,10 @@ struct BoundTextures {
   }
 };
 
-// EFB copies on the GPU (milestone 5). The display's rectangle is blitted into a scratch texture
-// of the copy's size (vitaGL's blit samples the display surface itself; bilinear for a halved copy,
-// which at exactly half is GX's 2x2 box filter), then a pass of this file's draws the scratch into
-// the copy's texture through a colour matrix, the copy format's (opaque colour, intensity, one
-// channel...), with the rows flipped to GX's (a copy's first row is its rectangle's top). Each is a
-// scene of its own: the display's scene ends at the copy (its depth kept: initialize) and the next
-// draw begins it again. Nothing waits: the GPU runs the scenes in order. (The CPU readback this
-// replaces, glReadPixels, waited for the GPU: 7 to 22 ms a copy.)
-constexpr bool kFlipCopies = true;
-
-constexpr const char* kCopyVertex = "void main(float3 aPos, float2 aUv0, float4 out vPos : POSITION,\n"
-                                    "          float2 out vUv0 : TEXCOORD0) {\n"
-                                    "  vPos = float4(aPos, 1.0);\n"
-                                    "  vUv0 = aUv0;\n"
-                                    "}\n";
-constexpr const char* kCopyFragment =
-    "float4 main(float2 vUv0 : TEXCOORD0, uniform sampler2D uTex0 : TEXUNIT0, uniform float4 uConst[5]) : COLOR {\n"
-    "  float4 t = tex2D(uTex0, vUv0);\n"
-    "  return float4(dot(uConst[0], t), dot(uConst[1], t), dot(uConst[2], t), dot(uConst[3], t)) + uConst[4];\n"
-    "}\n";
-// The pass's program by a key of its own (its binary goes on the card like a generated one's).
-constexpr uint64_t kCopyProgramKey = 0x7669746163707931ull; // "vitacpy1"
-std::shared_ptr<Program> g_copyProgram;
-std::shared_ptr<Texture> g_copyScratch;
-
-// A copy format's colour matrix (four rows, each dotted with the source's RGBA) and offset, as
-// GX's copy converts: intensity is its YUV luma (with 16's offset), in all four channels as Aurora
-// samples an I8 texture; the opaque formats' alpha is 1 (the game's EFB has none).
-void copy_matrix(CopyKind kind, float rows[5][4]) noexcept {
-  std::memset(rows, 0, sizeof(float[5][4]));
-  constexpr float kLuma[4] = {66.f / 256.f, 129.f / 256.f, 25.f / 256.f, 0.f};
-  constexpr float kLumaOffset = 16.f / 255.f;
-  const auto set_row = [&rows](int r, const float (&v)[4]) { std::memcpy(rows[r], v, sizeof(v)); };
-  const auto channel = [](int c) {
-    std::array<float, 4> v{};
-    v[c] = 1.f;
-    return v;
-  };
-  switch (kind) {
-  case CopyKind::Rgba:
-    for (int r = 0; r < 4; ++r) {
-      rows[r][r] = 1.f;
-    }
-    break;
-  case CopyKind::Intensity:
-  case CopyKind::IntensityAlpha:
-    for (int r = 0; r < 4; ++r) {
-      set_row(r, kLuma);
-      rows[4][r] = kLumaOffset;
-    }
-    if (kind == CopyKind::IntensityAlpha) {
-      std::memset(rows[3], 0, sizeof(rows[3]));
-      rows[3][3] = 1.f;
-      rows[4][3] = 0.f;
-    }
-    break;
-  case CopyKind::Red:
-  case CopyKind::RedAlpha:
-  case CopyKind::Green:
-  case CopyKind::Blue:
-  case CopyKind::Alpha: {
-    const int c = kind == CopyKind::Green ? 1 : kind == CopyKind::Blue ? 2 : kind == CopyKind::Alpha ? 3 : 0;
-    const auto v = channel(c);
-    for (int r = 0; r < 4; ++r) {
-      std::memcpy(rows[r], v.data(), sizeof(float[4]));
-    }
-    if (kind == CopyKind::RedAlpha) {
-      std::memset(rows[3], 0, sizeof(rows[3]));
-      rows[3][3] = 1.f;
-    }
-    break;
-  }
-  default: // Rgb
-    for (int r = 0; r < 3; ++r) {
-      rows[r][r] = 1.f;
-    }
-    rows[4][3] = 1.f;
-    break;
-  }
-}
-
-// The copy pass's quad: a position in clip space and a texture coordinate.
-struct CopyVertex {
-  float pos[3];
-  float uv[2];
-};
-
-void draw_copy_quad(Program& program, const CopyVertex (&quad)[6]) noexcept {
-  const GLint pos = program.attr(kAttrPos);
-  const GLint uv = program.attr(kAttrUv0);
-  if (pos >= 0 && uv >= 0) {
-    glEnableVertexAttribArray(pos);
-    glEnableVertexAttribArray(uv);
-    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].pos);
-    glVertexAttribPointer(uv, 2, GL_FLOAT, GL_FALSE, sizeof(CopyVertex), &quad[0].uv);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisableVertexAttribArray(pos);
-    glDisableVertexAttribArray(uv);
-  }
-}
-
-// What copy_on_gpu did with a copy: made it, found its rectangle empty, left it for the pass's
-// program to be built, or left it for the next frame (Over: copy_on_gpu).
-enum class CopyResult : uint8_t { Made, Empty, Waiting, Over };
-
-// Render worker, in the fixed-function arrays' absence (draw_world turns them off around it):
-// makes `draw`'s copy. Its blit draws a scene into the copies' scratch and its pass one into the
-// copy's texture; a framebuffer drawn in more scenes in a frame than vitaGL made its render target
-// for came back with stale and foreign tiles (VITA_PHASE2.md: the pause screen's backdrop, its one
-// copy the third into the scratch that frame), so a copy that would is left for the next frame.
-// Unless Made, the copy's texture keeps what it had. Leaves the display's framebuffer bound, no
-// program in use, and the scissor test, blending, depth, culling and the colour mask as the pass
-// left them (draw_world sets its own again).
-CopyResult copy_on_gpu(const Draw& draw) noexcept {
-  const ScreenRect& src = draw.scissor;
-  if (src.width <= 0 || src.height <= 0) {
-    return CopyResult::Empty;
-  }
-  if (!g_copyProgram) {
-    g_copyProgram = make_program(kCopyVertex, kCopyFragment, kCopyProgramKey);
-  }
-  int compiles = 1;
-  int loads = 1;
-  if (!g_copyProgram->ready(compiles, loads)) {
-    return CopyResult::Waiting;
-  }
-  const bool half = draw.copyHalf && src.width > 1 && src.height > 1;
-  const int width = half ? src.width / 2 : src.width;
-  const int height = half ? src.height / 2 : src.height;
-  if (!g_copyScratch) {
-    g_copyScratch = make_copy_texture();
-  }
-  const int scenes = std::max(g_copyScratch->scenes(width, height), draw.copyTo->scenes(width, height));
-  if (scenes >= kFramebufferScenesPerFrame) {
-    return CopyResult::Over;
-  }
-  g_presentStats.maxFramebufferScenes =
-      std::max(g_presentStats.maxFramebufferScenes, static_cast<uint32_t>(scenes + 1));
-  glActiveTexture(GL_TEXTURE0);
-  const GLuint scratch = g_copyScratch->render_target(width, height);
-  const GLuint target = draw.copyTo->render_target(width, height);
-
-  // The blit: a draw of vitaGL's, which leaves blending, the scissor and the colour mask as they are.
-  glDisable(GL_SCISSOR_TEST);
-  glDisable(GL_BLEND);
-  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-  glBlitNamedFramebuffer(0, scratch, src.x, src.y, src.x + src.width, src.y + src.height, 0, 0, width, height,
-                         GL_COLOR_BUFFER_BIT, half ? GL_LINEAR : GL_NEAREST);
-
-  // The conversion, into the copy's texture.
-  glBindFramebuffer(GL_FRAMEBUFFER, target);
-  glViewport(0, 0, width, height);
-  glDisable(GL_DEPTH_TEST);
-  glDepthMask(GL_FALSE);
-  glDisable(GL_CULL_FACE);
-  Program& program = *g_copyProgram;
-  glUseProgram(program.id());
-  float rows[5][4];
-  copy_matrix(draw.copyKind, rows);
-  program.send_constants(rows, 5);
-  glBindTexture(GL_TEXTURE_2D, g_copyScratch->id());
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  // The output's bottom row (GL's first) takes the scratch's top: GX's first row.
-  const float bottom = kFlipCopies ? 1.f : 0.f;
-  const float top = 1.f - bottom;
-  const CopyVertex quad[6] = {
-      {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, -1.f, 0.f}, {1.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},
-      {{-1.f, -1.f, 0.f}, {0.f, bottom}}, {{1.f, 1.f, 0.f}, {1.f, top}},     {{-1.f, 1.f, 0.f}, {0.f, top}},
-  };
-  draw_copy_quad(program, quad);
-  glUseProgram(0);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  return CopyResult::Made;
-}
-
 // Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
 GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
   const bool fresh = !mesh.uploaded();
-  const uint64_t start = fresh ? sceKernelGetProcessTimeWide() : 0;
   const GLsizei count = mesh.bind();
-  if (fresh) {
-    g_presentCosts.meshUs += sceKernelGetProcessTimeWide() - start;
-    ++g_presentCosts.meshes;
-  }
   const uint64_t us = g_clock.mark(section);
   if (g_clock.on) {
     SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind())];
@@ -1755,10 +1061,6 @@ void draw_world(const Frame& frame) {
   glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
   glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
   glEnable(GL_SCISSOR_TEST);
-  // The line and point width, set where a line or point draw changes it (GXM's context keeps it).
-  uint8_t width = 1;
-  glLineWidth(1.f);
-  glPointSize(1.f);
   const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
     if (!(v == viewport)) {
       glViewport(v.x, v.y, v.width, v.height);
@@ -1773,54 +1075,10 @@ void draw_world(const Frame& frame) {
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
-  // Around a pass of this file's own (an EFB copy), which draws with a program and without the
-  // fixed-function arrays: the program in use, its uniforms, the matrices, the rectangles, the line
-  // width and the state are all set again at the next draw.
-  const auto leave_draws = [&]() {
-    enter_fixed_function();
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_COLOR_ARRAY);
-    for (int unit = 0; unit < kTexUnits; ++unit) {
-      glClientActiveTexture(GL_TEXTURE0 + unit);
-      glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    }
-  };
-  const auto return_to_draws = [&]() {
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_COLOR_ARRAY);
-    for (int unit = 0; unit < kTexUnits; ++unit) {
-      glClientActiveTexture(GL_TEXTURE0 + unit);
-      glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    }
-    glEnable(GL_SCISSOR_TEST);
-    viewport = scissor = ScreenRect{0, 0, 0, 0};
-    apply_state(current, current, true);
-    bound.units[0] = nullptr;
-    haveProjection = false;
-    for (bool& have : haveTexMatrix) {
-      have = false;
-    }
-    width = 0;
-  };
-  // The display's scenes this frame: present's clear begins the first, and the first draw or clear
-  // after a copy's blit ended one begins the next. Its render target is made for
-  // kDisplayScenesPerFrame, GXM's most, and a frame drawn in more came back with stale tiles (the
-  // Phazon Suit's effect alone begins four; the cinematics with Samus in hers, more): a copy that
-  // would end the last is left for the next frame, its texture keeping the last frame's.
-  int displayScenes = 1;
-  bool displayOpen = true;
-  const auto begin_display = [&displayScenes, &displayOpen]() {
-    if (!displayOpen) {
-      ++displayScenes;
-      displayOpen = true;
-    }
-  };
-  uint32_t sceneDraws = 0;
   for (const Draw& draw : draws) {
     if (draw.clear) {
       // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
       // the scissor's alone), with the masks GX's updates give, then the draws' masks again.
-      begin_display();
       set_rects(ScreenRect{}, draw.scissor);
       const GLboolean color = draw.clearColor ? GL_TRUE : GL_FALSE;
       glColorMask(color, color, color, draw.clearAlpha ? GL_TRUE : GL_FALSE);
@@ -1838,39 +1096,25 @@ void draw_world(const Frame& frame) {
       continue;
     }
     if (draw.copyTo != nullptr) {
-      // An EFB copy (copy_on_gpu): scenes of its own, its blit ending the display's.
-      if (displayOpen && displayScenes >= kDisplayScenesPerFrame) {
-        ++g_presentStats.copiesOverDisplayScenes;
-        continue;
-      }
+      // An EFB copy: the read ends vitaGL's scene, so the program in use, its uniforms and the
+      // matrices are all set again at the next draw. The copy's texture is left on unit 0.
+      static std::vector<uint8_t> sReadback;
       const uint64_t start = sceKernelGetProcessTimeWide();
-      leave_draws();
-      const CopyResult result = copy_on_gpu(draw);
-      return_to_draws();
-      const bool made = result == CopyResult::Made;
-      if (made) {
-        displayOpen = false;
-        sceneDraws = 0;
+      enter_fixed_function();
+      glActiveTexture(GL_TEXTURE0);
+      draw.copyTo->copy_screen(draw.scissor, draw.copyKind, draw.copyHalf, sReadback);
+      bound.units[0] = nullptr;
+      haveProjection = false;
+      for (bool& have : haveTexMatrix) {
+        have = false;
       }
-      ++(result == CopyResult::Waiting ? g_presentStats.copiesWaiting
-         : result == CopyResult::Over  ? g_presentStats.copiesOverFramebufferScenes
-                                       : g_presentStats.copies);
-      g_presentStats.copyPixels += made ? static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height : 0;
-      const uint64_t copyUs = sceKernelGetProcessTimeWide() - start;
-      g_presentStats.copyUs += copyUs;
-      g_presentCosts.copyUs += copyUs;
-      ++g_presentCosts.copies;
+      ++g_presentStats.copies;
+      g_presentStats.copyPixels += static_cast<uint64_t>(draw.scissor.width) * draw.scissor.height;
+      g_presentStats.copyUs += sceKernelGetProcessTimeWide() - start;
       g_clock.mark(kCopy);
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
-    begin_display();
-    g_presentStats.maxSceneDraws = std::max(g_presentStats.maxSceneDraws, ++sceneDraws);
-    if (draw.width != width && draw.mesh->mode() != GL_TRIANGLES) {
-      glLineWidth(static_cast<GLfloat>(draw.width));
-      glPointSize(static_cast<GLfloat>(draw.width));
-      width = draw.width;
-    }
     Program* program = draw.program.program.get();
     if (program != nullptr) {
       const int budgetBefore = compileBudget + loadBudget;
@@ -1950,26 +1194,16 @@ void draw_world(const Frame& frame) {
     g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
     g_clock.mark(kFixedState);
-    const uint64_t fixedStart = sceKernelGetProcessTimeWide();
     glDrawArrays(draw.mesh->mode(), 0, count);
-    const uint64_t fixedUs = sceKernelGetProcessTimeWide() - fixedStart;
-    g_presentCosts.fixedUs += fixedUs;
-    g_presentCosts.fixedMaxUs = std::max(g_presentCosts.fixedMaxUs, fixedUs);
-    ++g_presentCosts.fixedDraws;
     g_clock.mark(kFixedDraw);
   }
-  g_presentStats.maxDisplayScenes = std::max(g_presentStats.maxDisplayScenes, static_cast<uint32_t>(displayScenes));
   enter_fixed_function();
   // Back to GL's defaults for the overlay (ImGui's backend sets blending, depth and culling
   // itself, but not the alpha test, the masks or the winding).
   apply_state(RenderState{.depthTest = false}, current, true);
   glFrontFace(GL_CCW);
   glDisable(GL_SCISSOR_TEST);
-  if (width != 1) {
-    glLineWidth(1.f);
-    glPointSize(1.f);
-  }
-  glViewport(0, 0, g_width, g_height);
+  glViewport(0, 0, kWidth, kHeight);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
     glClientActiveTexture(GL_TEXTURE0 + unit);
@@ -1988,62 +1222,7 @@ void draw_world(const Frame& frame) {
   glLoadIdentity();
 }
 
-// GXM keeps a depth surface's contents from one scene to the next only when told to (forced load
-// and store), and this vitaGL's build does not (its STORE_DEPTH_STENCIL is off): each of the
-// display's scenes began with its depth cleared. An EFB copy ends the display's scene within a
-// frame (copy_on_gpu), and the draws after it would have tested against nothing. As vitaGL's own
-// STORE_DEPTH_STENCIL does: the buffer's mask update bits set, then load and store forced, for a
-// few MiB of the GPU's bandwidth at each scene's start and end. Off: kKeepDisplayDepth.
-constexpr bool kKeepDisplayDepth = true;
-
-void keep_display_depth() {
-  SceGxmDepthStencilSurface& surface = gxm_depth_stencil_surface;
-  if (!kKeepDisplayDepth) {
-    return;
-  }
-  if (surface.depthData == nullptr) {
-    Log.warn("vitaGL's display has no depth buffer of its own: its depth is not kept across scenes");
-    return;
-  }
-  // As vitaGL allocates it: the size aligned to GXM's tiles, a word a sample (no multisampling).
-  const auto align = [](size_t value, size_t to) { return (value + to - 1) / to * to; };
-  const size_t bytes = align(g_width, SCE_GXM_TILE_SIZEX) * align(g_height, SCE_GXM_TILE_SIZEY) * 4;
-  std::memset(surface.depthData, 0x80, bytes);
-  sceGxmDepthStencilSurfaceSetForceLoadMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
-  sceGxmDepthStencilSurfaceSetForceStoreMode(&surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
-  Log.info("the display's depth is kept across scenes ({} KiB)", bytes / 1024);
-}
-
-// A smaller screen than the Vita's, which its display scales up (fewer pixels for the GPU to fill:
-// its share of a frame, the EFB copies' most), where resolution.txt in the game's folder names one
-// of the sizes the display takes ("720x408", the GameCube's pixels about; "640x368").
-void read_resolution() noexcept {
-  const std::string path = std::string{g_config.userPath} + "/resolution.txt";
-  FILE* file = std::fopen(path.c_str(), "r");
-  if (file == nullptr) {
-    return;
-  }
-  int width = 0;
-  int height = 0;
-  const int read = std::fscanf(file, "%dx%d", &width, &height);
-  std::fclose(file);
-  constexpr int kSizes[][2] = {{960, 544}, {720, 408}, {640, 368}, {480, 272}};
-  for (const auto& size : kSizes) {
-    if (read == 2 && width == size[0] && height == size[1]) {
-      g_width = width;
-      g_height = height;
-      Log.info("{}: the screen at {}x{}", path, width, height);
-      return;
-    }
-  }
-  Log.warn("{}: not one of the display's sizes (960x544, 720x408, 640x368, 480x272); the screen stays {}x{}", path,
-           g_width, g_height);
-}
-
 } // namespace
-
-int screen_width() noexcept { return g_width; }
-int screen_height() noexcept { return g_height; }
 
 bool initialize() noexcept {
   // vitaGL compiles the shaders behind its fixed-function calls (the overlay's) with the Vita's
@@ -2055,56 +1234,16 @@ bool initialize() noexcept {
   // The generated programs' own cache (Program, load_cached).
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
-  // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
-  // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
-  // KiB) were made for scenes of a few hundred plain draws; the water's generated programs (four
-  // to seven textures each) put 1100 to 4300 draws in one scene, and a run in Tallon Overworld
-  // ended in a GPU hang with the water black at some angles (VITA_PHASE2.md). Four times each; the
-  // vertex ring (2 MiB) twice.
-  vglSetFragmentBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_RING_BUFFER_SIZE);
-  vglSetVDMBufferSize(4 * SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE);
-  vglSetVertexBufferSize(2 * SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE);
-  vglSetUSSEBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE);
-  // Each EFB copy ends the display's scene and begins another (copy_on_gpu), and draws into two
-  // framebuffers of its own: the pause screen's blur makes four a frame, the display five scenes
-  // and more. vitaGL makes its render targets for one scene a frame unless told; GXM sizes a target's
-  // per-scene state by it. The copies came back with stale tiles and black triangles (the charged
-  // shot's warp, the pause screen's backdrop, the cinematics' blur) and the GPU hung twice.
-  vglSetupRenderTargetScenesNum(kDisplayScenesPerFrame, kFramebufferScenesPerFrame);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
-  read_resolution();
-  const bool clamped = vglInitExtended(kLegacyPool, g_width, g_height, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
+  const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
   g_active = true;
   if (clamped) {
-    Log.warn("vitaGL started at the display's maximum size, not {}x{}", g_width, g_height);
-    g_width = 960;
-    g_height = 544;
+    Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
   } else {
-    Log.info("vitaGL started at {}x{}", g_width, g_height);
+    Log.info("vitaGL started at {}x{}", kWidth, kHeight);
   }
-  if (!clamped) {
-    keep_display_depth();
-  }
-  // For the log: the memory GXM takes from the system for a render target of the screen's size
-  // and of half of it, by its scenes a frame (vitaGL makes one for each framebuffer).
-  for (const auto& [width, height] : {std::pair{g_width, g_height}, std::pair{g_width / 2, g_height / 2}}) {
-    std::string sizes;
-    for (const unsigned scenes : {1u, 2u, 3u, 4u, 8u}) {
-      SceGxmRenderTargetParams params{};
-      params.width = static_cast<uint16_t>(width);
-      params.height = static_cast<uint16_t>(height);
-      params.scenesPerFrame = static_cast<uint16_t>(scenes);
-      params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
-      params.driverMemBlock = -1;
-      unsigned int bytes = 0;
-      sceGxmGetRenderTargetMemSize(&params, &bytes);
-      sizes += fmt::format("{}{} scenes {} KiB", sizes.empty() ? "" : ", ", scenes, bytes / 1024);
-    }
-    Log.info("a {}x{} render target's memory: {}", width, height, sizes);
-  }
-  start_compiler();
   log_memory("started");
   return true;
 }
@@ -2196,17 +1335,13 @@ void present(ImDrawData* overlay) noexcept {
   }
   g_clock.on = ++g_clock.presents % kTimedEvery == 0;
   g_clock.start();
-  g_presentCosts = {};
-  g_presentCosts.start = sceKernelGetProcessTimeWide();
-  ++g_presentSerial;
-  delete_retired_targets();
   // The font texture is made here, on the render worker, from the atlas the game thread built;
   // the atlas only changes when the fonts do (fonts_changed).
   if (g_fontsChanged.exchange(false, std::memory_order_acq_rel)) {
     ImGui_ImplOpenGL2_DestroyFontsTexture();
   }
   ImGui_ImplOpenGL2_NewFrame();
-  glViewport(0, 0, g_width, g_height);
+  glViewport(0, 0, kWidth, kHeight);
   glDisable(GL_SCISSOR_TEST);
   // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first).
   glClearColor(0.f, 0.f, 0.f, 1.f);
@@ -2223,26 +1358,15 @@ void present(ImDrawData* overlay) noexcept {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {:.0f} ms compiling; {} loaded from the card, "
              "{:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; "
-             "EFB copies on the GPU: {} ({} waiting for their pass's program, {} and {} left for the next frame by "
-             "the display's scenes and a framebuffer's; {:.0f} kpixels; render worker {:.1f} ms, {:.2f} ms each; {} "
-             "render targets made in all); most draws in a scene: {}; most scenes in a frame: the display's {}, a "
-             "framebuffer's {}",
+             "EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.compileMs, g_programStats.loaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
-             g_presentStats.copies, g_presentStats.copiesWaiting, g_presentStats.copiesOverDisplayScenes,
-             g_presentStats.copiesOverFramebufferScenes, g_presentStats.copyPixels / 1000.0,
-             g_presentStats.copyUs / 1000.0,
-             g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
-             g_renderTargets.load(std::memory_order_relaxed), g_presentStats.maxSceneDraws,
-             g_presentStats.maxDisplayScenes, g_presentStats.maxFramebufferScenes);
-    Log.info("background compiler: {} programs compiled ({:.0f} ms there; linked here in {:.0f} ms), {} compiled on "
-             "the render worker after all, {} waiting",
-             g_programStats.background, g_programStats.backgroundMs, g_programStats.linkMs, g_programStats.fallbacks,
-             g_compiler.waiting());
+             g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
+             g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0);
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");
@@ -2252,26 +1376,12 @@ void present(ImDrawData* overlay) noexcept {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }
   g_clock.mark(kOverlay);
-  const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(GL_FALSE);
-  const uint64_t end = sceKernelGetProcessTimeWide();
-  g_presentCosts.swapUs = end - swapStart;
   g_clock.mark(kSwap);
   if (g_clock.on) {
     ++g_clock.frames;
   }
   g_clock.on = false;
-  const PresentCosts& c = g_presentCosts;
-  if (const uint64_t total = end - c.start; total >= kSlowPresentUs) {
-    const uint64_t named = c.buildUs + c.textureUs + c.meshUs + c.fixedUs + c.copyUs + c.swapUs;
-    const auto ms = [](uint64_t us) { return static_cast<double>(us) / 1000.0; };
-    Log.info("[slow present] {:.0f} ms: program builds {:.0f} ms ({} loaded, {} linked, {} compiled here); first "
-             "uploads: textures {:.0f} ms ({}, {} KiB), meshes {:.0f} ms ({}); fixed-function draws {:.0f} ms ({}, "
-             "the slowest {:.0f} ms); EFB copies {:.0f} ms ({}); swap {:.0f} ms; the rest {:.0f} ms",
-             ms(total), ms(c.buildUs), c.loads, c.links, c.compiles, ms(c.textureUs), c.textures,
-             c.textureBytes / 1024, ms(c.meshUs), c.meshes, ms(c.fixedUs), c.fixedDraws, ms(c.fixedMaxUs),
-             ms(c.copyUs), c.copies, ms(c.swapUs), ms(total > named ? total - named : 0));
-  }
   report_sections();
 }
 
@@ -2350,29 +1460,3 @@ void frame_end() noexcept {
 }
 } // namespace fifo_clock
 } // namespace aurora::vita_gl
-
-// vitashark's compile and its output's release, for every caller (vitaGL's and ours: the linker
-// wraps both, CMakeLists): a compile holds the compiler from the one to the other
-// (aurora::vita_gl::compiler_lock), as vitashark keeps a compile's state in globals.
-extern "C" {
-SceGxmProgram* __real_shark_compile_shader_extended(const char* src, uint32_t* size, shark_type type, shark_opt opt,
-                                                    int32_t useFastmath, int32_t useFastprecision, int32_t useFastint);
-void __real_shark_clear_output();
-
-SceGxmProgram* __wrap_shark_compile_shader_extended(const char* src, uint32_t* size, shark_type type, shark_opt opt,
-                                                    int32_t useFastmath, int32_t useFastprecision, int32_t useFastint) {
-  aurora::vita_gl::compiler_lock();
-  return __real_shark_compile_shader_extended(src, size, type, opt, useFastmath, useFastprecision, useFastint);
-}
-
-void __wrap_shark_clear_output() {
-  __real_shark_clear_output();
-  aurora::vita_gl::compiler_unlock();
-}
-
-// vitaGL's splash screen: its logo, which vglInit has a thread of its own draw on a GXM context of
-// its own until the first frame's scene. Not started (the linker wraps its start, CMakeLists): its
-// flag stays off, so that scene and the swaps take their usual paths, as in vitaGL's system app
-// mode, which skips it too.
-void __wrap_invoke_splashscreen() {}
-}

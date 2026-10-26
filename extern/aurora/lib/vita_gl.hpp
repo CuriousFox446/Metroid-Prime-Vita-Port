@@ -18,36 +18,25 @@
 #include <imgui.h>
 
 namespace aurora::vita_gl {
-// The screen vitaGL draws to, in pixels: the Vita's 960x544, or a smaller size the display scales
-// up to it (720x408, 640x368 or 480x272: fewer pixels for the GPU to fill) where resolution.txt in
-// the game's folder asks for one (initialize).
-#ifdef AURORA_VITA_GL
-int screen_width() noexcept;
-int screen_height() noexcept;
-#else
-inline int screen_width() noexcept { return 960; }
-inline int screen_height() noexcept { return 544; }
-#endif
+// The screen vitaGL draws to, in pixels.
+constexpr int kScreenWidth = 960;
+constexpr int kScreenHeight = 544;
 
 // A rectangle of the screen as GL takes it (glViewport, glScissor): pixels, origin at the bottom left.
 struct ScreenRect {
   int16_t x = 0;
   int16_t y = 0;
-  int16_t width = static_cast<int16_t>(screen_width());
-  int16_t height = static_cast<int16_t>(screen_height());
+  int16_t width = kScreenWidth;
+  int16_t height = kScreenHeight;
   bool operator==(const ScreenRect&) const = default;
 };
 
 // The texture units a fixed-function draw can use: vitaGL's fixed-function pipeline has two
 // texture coordinate sets, each with its own texture matrix.
 constexpr int kTexUnits = 2;
-// The texture coordinate sets a mesh carries, a generated program's coordinate slots (the first
-// kTexCoords may read the mesh's sets; the rest are made from the position or the normal) and the
-// textures it samples. Seven slots, with the fog's depth and two lit channels, are GXM's ten
-// TEXCOORD varyings; the water's surfaces take seven textures and coordinates.
+// The texture coordinate sets a mesh carries, and the textures a generated program samples.
 constexpr int kTexCoords = 4;
-constexpr int kProgramCoords = 7;
-constexpr int kSamplers = 8;
+constexpr int kSamplers = 4;
 
 // A vertex of the Vita path's meshes: position, its texture coordinate sets, the colour the
 // fixed-function draw uses (the face's shading in it), the vertex colour as GX has it (white
@@ -73,8 +62,8 @@ enum class MeshKind : uint8_t { List, Skinned, Immediate, Indexed, Other, Count 
 // a program (`clientMemory`) has no buffer: vitaGL copies it into its per-frame pool at the draw
 // (one copy for a program's interleaved attributes), with no buffer to make, fill and delete. The
 // fixed-function path copies each attribute apart, so its meshes keep a buffer.
-// A mesh's primitives: triangles, lines (two vertices each) or points.
-enum class MeshPrimitive : uint8_t { Triangles, Lines, Points };
+// A mesh's primitives: triangles, or lines (two vertices each).
+enum class MeshPrimitive : uint8_t { Triangles, Lines };
 class Mesh;
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false,
                                 MeshPrimitive primitive = MeshPrimitive::Triangles) noexcept;
@@ -145,18 +134,15 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
 
 // The constants a generated program may read, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
-// the alpha compare's references (x, y), the fog colour and the fog's A, B and C; for indirect
-// texturing, each coordinate slot's texel scale (GX's SU scale), each texture slot's size and the
-// three indirect matrices (two rows each); and the 2x4 matrix of each coordinate slot the fragment
-// program makes (two rows each: gx/vita_tev.hpp, TevLayout::fragmentMtx). A program declares only
-// those its source reads, packed in this order (gx/vita_tev.cpp).
-constexpr int kProgramConstants = 15 + kProgramCoords + kSamplers + 6 + 2 * kProgramCoords;
+// the alpha compare's references (x, y). A program declares only those its source reads, packed
+// in this order (gx/vita_tev.cpp).
+constexpr int kProgramConstants = 13;
 // The vertex program's (gx/vita_tev.cpp, tev_vertex_rows): the projection times the position
 // matrix (4 rows); each texture coordinate set's matrix (3 rows of 4 for a projective set, else 2)
 // and its post-transform matrix (3 more, when it has one); for a lit program the position and
 // normal matrices (3 rows each); and each lit channel's lights, five rows apiece (position,
 // direction, colour, angle and distance attenuation), up to GX's eight for each of four channels.
-constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5;
+constexpr int kProgramVertexConstants = 4 + 6 * kTexCoords + 6 + 4 * 8 * 5;
 
 // A draw's generated program and what it reads: its textures (sampler slot order), where its
 // vertex and fragment constants are among its frame's constant rows (record_constants; as many as
@@ -176,9 +162,7 @@ struct ProgramInputs {
 
 // One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
 // GL's depth range); its fixed-function texture units and state; and its generated program, when
-// it has one (drawn with it once the program is ready). GX's viewport and scissor, on the screen;
-// a line or point mesh's width, in the screen's pixels (GX's line width or point size; GXM takes
-// whole pixels, 1 to 16).
+// it has one (drawn with it once the program is ready). GX's viewport and scissor, on the screen.
 // Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
 // colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
@@ -192,7 +176,6 @@ struct Draw {
   ProgramInputs program;
   ScreenRect viewport;
   ScreenRect scissor;
-  uint8_t width = 1;
   bool clear = false;
   bool clearColor = false;
   bool clearAlpha = false;
@@ -205,7 +188,7 @@ struct Draw {
 };
 
 #ifdef AURORA_VITA_GL
-// Starts vitaGL at the screen's size (true). After it GXM is vitaGL's: SDL's renderer, GXM
+// Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
 // too, must never be created.
 bool initialize() noexcept;
 bool active() noexcept;

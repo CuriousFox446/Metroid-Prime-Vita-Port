@@ -657,14 +657,6 @@ if(VITA)
     target_link_options(metroid_prime_port PRIVATE
         "LINKER:--wrap=printf,--wrap=fprintf,--wrap=sprintf,--wrap=snprintf"
         "LINKER:--wrap=vprintf,--wrap=vfprintf,--wrap=vsprintf,--wrap=vsnprintf")
-    # vitashark keeps a compile's state in globals, and the Vita path compiles in the background
-    # while vitaGL may compile on the render worker: every compile, vitaGL's too, holds one lock
-    # from the compile to its output's release (extern/aurora/lib/vita_gl.cpp's wrappers).
-    target_link_options(metroid_prime_port PRIVATE
-        "LINKER:--wrap=shark_compile_shader_extended,--wrap=shark_clear_output")
-    # vitaGL's own splash screen (its logo, drawn from vglInit until the first frame) is not
-    # started: the game starts on black (vita_gl.cpp's __wrap_invoke_splashscreen).
-    target_link_options(metroid_prime_port PRIVATE "LINKER:--wrap=invoke_splashscreen")
     target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
     # libstdc++ calls pthreads through weak references and treats threading as off
     # when pthread_cancel is missing; nothing references that (or pthread_once)
@@ -680,7 +672,7 @@ if(VITA)
     set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
         VERSION "00.32"
-        NAME "Metroid Prime"
+        NAME "Metroid Prime Port (headless)"
         FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png

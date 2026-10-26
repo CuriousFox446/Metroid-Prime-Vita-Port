@@ -485,7 +485,6 @@ static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
     static uint32_t sFrames = 0;
     if (++sFrames % 300 == 0) {
       gx::vita::log_stats();
-      gx::texture::log_cache_holdings();
     }
     if (sFrames % 16 == 0) {
       gx::vita::drop_lone_textures();

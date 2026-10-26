@@ -48,8 +48,6 @@ void shutdown() noexcept;
 void set_content_cache_budget_for_testing(uint64_t bytes) noexcept;
 // Times the leak detector has logged a suspected per-frame texture leak.
 uint64_t leak_warning_count() noexcept;
-// Logs what the content and object caches hold, and of it the PS Vita's copies' bytes.
-void log_cache_holdings() noexcept;
 
 // Internal resolvers exposed for cache tests.
 gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj);
