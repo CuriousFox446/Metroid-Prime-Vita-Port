@@ -1047,4 +1047,6 @@ slow "card", and one write three times its size: every line whole, each thread's
 missing; ThreadSanitizer found no race. Its mutex and condition variables are never destroyed:
 destroyed at exit with the writer still waiting, glibc's condition variable waited forever. The
 streamed music was not it: disc reads go through Aurora's DVD worker thread. Not changed: the quick-resume snapshot, taken on
-the main thread every 20 to 30 seconds in a room (10 to 50 ms each, `[resume] snapshot`).
+the main thread 2 seconds into a room and every 30 seconds in it (`kResumeStableSeconds`,
+`kResumeRefreshSeconds`) and written to the card at once: 10 to 50 ms to take
+(`[resume] snapshot`), then the write.
