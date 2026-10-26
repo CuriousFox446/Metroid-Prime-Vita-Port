@@ -8,10 +8,6 @@
 #include <array>
 #include <cstring>
 
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-#include <arm_neon.h>
-#endif
-
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gfx {
@@ -177,13 +173,6 @@ static ByteBuffer DecodeTiled(uint32_t width, uint32_t height, uint32_t mips, Ar
         for (uint32_t y = 0; y < numRows; ++y) {
           auto* target = targetMip + (baseY + y) * w + baseX;
           const auto n = std::min(w - baseX, T::BlockWidth);
-          if constexpr (requires(typename T::Target* t, const typename T::Source* s) { T::decode_row(t, s); }) {
-            if (n == T::BlockWidth) {
-              T::decode_row(target, in);
-              in += T::BlockWidth / T::Frac;
-              continue;
-            }
-          }
           for (uint32_t x = 0; x < n; ++x) {
             T::decode_texel(target, in, x);
           }
@@ -248,15 +237,6 @@ struct TextureDecoderI8 {
     target[x].b = intensity;
     target[x].a = intensity;
   }
-
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-  // A tile's whole row at once (DecodeTiled), each intensity to the four channels: a movie's frame
-  // is three I8 planes, converted as each is drawn (the PS Vita).
-  static void decode_row(Target* target, const Source* in) {
-    const uint8x8_t intensity = vld1_u8(in);
-    vst4_u8(reinterpret_cast<uint8_t*>(target), uint8x8x4_t{{intensity, intensity, intensity, intensity}});
-  }
-#endif
 };
 
 struct TextureDecoderRG8 {

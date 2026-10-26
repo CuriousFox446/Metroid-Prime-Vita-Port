@@ -8,14 +8,6 @@
 #include <cstddef>
 #include <limits>
 
-// ARMv7's NEON (the PS Vita's Cortex-A9): the IDCT four lanes at a time. The A9 has no fused
-// multiply-add, so the scalar IDCT's fmaf_exact emulates one in double, one element at a time: most
-// of a frame's decode there (inverse_dct_neon).
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-#include <arm_neon.h>
-#define AURORA_THP_NEON 1
-#endif
-
 namespace {
 // Error codes
 constexpr s32 kBadSyntax = 3;
@@ -399,11 +391,9 @@ s32 extend_value(u32 value, u8 bitCount) noexcept {
   return static_cast<s32>(value);
 }
 
-// `dcOnly`: no AC coefficient decoded (the block's pixels are all one value).
-bool decode_block(BitReader& reader, DecodeContext& context, size_t componentIndex, std::array<s16, 64>& block,
-                  bool& dcOnly) noexcept {
+bool decode_block(BitReader& reader, DecodeContext& context, size_t componentIndex,
+                  std::array<s16, 64>& block) noexcept {
   block.fill(0);
-  dcOnly = true;
   Component& component = context.components[componentIndex];
   const HuffmanTable& dcTable = context.huffmanTables[component.dcTable * 2];
   const HuffmanTable& acTable = context.huffmanTables[component.acTable * 2 + 1];
@@ -440,7 +430,6 @@ bool decode_block(BitReader& reader, DecodeContext& context, size_t componentInd
     }
     const u32 encodedValue = reader.read(bitCount);
     block[kNaturalOrder[coefficient]] = static_cast<s16>(extend_value(encodedValue, bitCount));
-    dcOnly = false;
     ++coefficient;
   }
   return true;
@@ -585,8 +574,8 @@ size_t row_extent(const s16* coefficients) noexcept {
   return extent;
 }
 
-[[maybe_unused]] std::array<u8, 64> inverse_dct(const std::array<s16, 64>& coefficients,
-                                                const QuantizationTable& quantization) noexcept {
+std::array<u8, 64> inverse_dct(const std::array<s16, 64>& coefficients,
+                               const QuantizationTable& quantization) noexcept {
   std::array<float, 64> workspace{};
   for (size_t row = 0; row < 8; ++row) {
     const s16* rowCoefficients = &coefficients[row * 8];
@@ -646,155 +635,17 @@ void write_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, cons
   }
 }
 
-#ifdef AURORA_THP_NEON
-// A block of one value (its DC alone: write_block's layout).
-void write_flat_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, u8 value) noexcept {
-  if (blockX >= width) {
-    return;
-  }
-  const size_t tilesPerRow = (width + 7) / 8;
-  const size_t columns = std::min<size_t>(8, width - blockX);
-  for (u16 row = 0; row < 8 && blockY + row < height; ++row) {
-    const u16 y = blockY + row;
-    const size_t tile = static_cast<size_t>(y / 4) * tilesPerRow + blockX / 8;
-    std::fill_n(output + tile * 32 + static_cast<size_t>(y & 3) * 8, columns, value);
-  }
-}
-
-// The AAN transform (aan_even, aan_odd, combine) on eight vectors, lane by lane, in the scalar
-// transforms' order; their fused multiply-adds a product then a sum. With kBias, the column
-// transform's (its DC terms biased).
-template <bool kBias>
-inline void aan_lanes(float32x4_t (&x)[8]) noexcept {
-  float32x4_t sum04 = vaddq_f32(x[0], x[4]);
-  float32x4_t dif04 = vsubq_f32(x[0], x[4]);
-  if constexpr (kBias) {
-    const float32x4_t bias = vdupq_n_f32(kOutputBias);
-    sum04 = vaddq_f32(sum04, bias);
-    dif04 = vaddq_f32(dif04, bias);
-  }
-  const float32x4_t sum26 = vaddq_f32(x[2], x[6]);
-  const float32x4_t dif26 = vsubq_f32(x[2], x[6]);
-  const float32x4_t rotated = vsubq_f32(vmulq_n_f32(dif26, kSqrt2), sum26);
-  const float32x4_t even0 = vaddq_f32(sum04, sum26);
-  const float32x4_t even1 = vaddq_f32(dif04, rotated);
-  const float32x4_t even2 = vsubq_f32(dif04, rotated);
-  const float32x4_t even3 = vsubq_f32(sum04, sum26);
-
-  const float32x4_t z10 = vsubq_f32(x[5], x[3]);
-  const float32x4_t z11 = vaddq_f32(x[1], x[7]);
-  const float32x4_t z12 = vsubq_f32(x[1], x[7]);
-  const float32x4_t z13 = vaddq_f32(x[5], x[3]);
-  const float32x4_t odd7 = vaddq_f32(z11, z13);
-  const float32x4_t z5 = vmulq_n_f32(vaddq_f32(z10, z12), kC2);
-  const float32x4_t odd6 = vsubq_f32(vmlsq_n_f32(z5, z10, kC2PlusC6), odd7);
-  const float32x4_t odd5 = vsubq_f32(vmulq_n_f32(vsubq_f32(z11, z13), kSqrt2), odd6);
-  const float32x4_t odd4 = vsubq_f32(vmlsq_n_f32(z5, z12, kC2MinusC6), odd5);
-
-  x[0] = vaddq_f32(even0, odd7);
-  x[1] = vaddq_f32(even1, odd6);
-  x[2] = vaddq_f32(even2, odd5);
-  x[3] = vaddq_f32(even3, odd4);
-  x[4] = vsubq_f32(even3, odd4);
-  x[5] = vsubq_f32(even2, odd5);
-  x[6] = vsubq_f32(even1, odd6);
-  x[7] = vsubq_f32(even0, odd7);
-}
-
-inline void transpose4(float32x4_t& a, float32x4_t& b, float32x4_t& c, float32x4_t& d) noexcept {
-  const float32x4x2_t ab = vtrnq_f32(a, b); // a0 b0 a2 b2, a1 b1 a3 b3
-  const float32x4x2_t cd = vtrnq_f32(c, d);
-  a = vcombine_f32(vget_low_f32(ab.val[0]), vget_low_f32(cd.val[0]));
-  b = vcombine_f32(vget_low_f32(ab.val[1]), vget_low_f32(cd.val[1]));
-  c = vcombine_f32(vget_high_f32(ab.val[0]), vget_high_f32(cd.val[0]));
-  d = vcombine_f32(vget_high_f32(ab.val[1]), vget_high_f32(cd.val[1]));
-}
-
-// inverse_dct four lanes at a time: the row transforms on four rows at once (the dequantized block's
-// quarters transposed: a vector a column), then the column transforms on four columns at once (back:
-// a vector a row), scaled, truncated and clamped as inverse_dct does. Its results differ from
-// inverse_dct's only where a fused multiply-add's single rounding would have tipped a pixel.
-void inverse_dct_neon(const std::array<s16, 64>& coefficients, const QuantizationTable& quantization,
-                      uint8x8_t (&rows)[8]) noexcept {
-  float32x4_t left[8];
-  float32x4_t right[8];
-  for (size_t row = 0; row < 8; ++row) {
-    const int16x8_t c = vld1q_s16(&coefficients[row * 8]);
-    left[row] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(c))), vld1q_f32(&quantization.values[row * 8]));
-    right[row] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(c))), vld1q_f32(&quantization.values[row * 8 + 4]));
-  }
-  transpose4(left[0], left[1], left[2], left[3]);
-  transpose4(right[0], right[1], right[2], right[3]);
-  transpose4(left[4], left[5], left[6], left[7]);
-  transpose4(right[4], right[5], right[6], right[7]);
-  // A coefficient column each, of rows 0-3 and of rows 4-7.
-  float32x4_t top[8] = {left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3]};
-  float32x4_t bottom[8] = {left[4], left[5], left[6], left[7], right[4], right[5], right[6], right[7]};
-  aan_lanes<false>(top);
-  aan_lanes<false>(bottom);
-  transpose4(top[0], top[1], top[2], top[3]);
-  transpose4(top[4], top[5], top[6], top[7]);
-  transpose4(bottom[0], bottom[1], bottom[2], bottom[3]);
-  transpose4(bottom[4], bottom[5], bottom[6], bottom[7]);
-  // A row each, of columns 0-3 and of columns 4-7.
-  float32x4_t low[8] = {top[0], top[1], top[2], top[3], bottom[0], bottom[1], bottom[2], bottom[3]};
-  float32x4_t high[8] = {top[4], top[5], top[6], top[7], bottom[4], bottom[5], bottom[6], bottom[7]};
-  aan_lanes<true>(low);
-  aan_lanes<true>(high);
-  for (size_t row = 0; row < 8; ++row) {
-    // The conversion truncates toward zero and takes a negative to 0; the narrowings stop at 255.
-    const uint32x4_t a = vcvtq_u32_f32(vmulq_n_f32(low[row], 0.125f));
-    const uint32x4_t b = vcvtq_u32_f32(vmulq_n_f32(high[row], 0.125f));
-    rows[row] = vqmovn_u16(vcombine_u16(vqmovn_u32(a), vqmovn_u32(b)));
-  }
-}
-
-// inverse_dct_neon's rows into write_block's layout: a whole block's straight into its two tiles.
-void write_block_rows(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, const uint8x8_t (&rows)[8]) noexcept {
-  if (blockX + 8 <= width && blockY + 8 <= height) {
-    const size_t tilesPerRow = (width + 7) / 8;
-    u8* const upper = output + (static_cast<size_t>(blockY / 4) * tilesPerRow + blockX / 8) * 32;
-    u8* const lower = upper + tilesPerRow * 32;
-    for (size_t row = 0; row < 4; ++row) {
-      vst1_u8(upper + row * 8, rows[row]);
-      vst1_u8(lower + row * 8, rows[row + 4]);
-    }
-    return;
-  }
-  std::array<u8, 64> pixels;
-  for (size_t row = 0; row < 8; ++row) {
-    vst1_u8(&pixels[row * 8], rows[row]);
-  }
-  write_block(output, width, height, blockX, blockY, pixels);
-}
-#endif
-
 bool decode_and_write_block(BitReader& reader, DecodeContext& context, size_t component, u8* output, u16 width,
                             u16 height, u16 x, u16 y) noexcept {
-  std::array<s16, 64> coefficients;
-  bool dcOnly = false;
-  if (!decode_block(reader, context, component, coefficients, dcOnly)) {
+  std::array<s16, 64> coefficients{};
+  if (!decode_block(reader, context, component, coefficients)) {
     return false;
   }
   const QuantizationTable& quantization = context.quantizationTables[context.components[component].quantizationTable];
   if (!quantization.valid) {
     return false;
   }
-#ifdef AURORA_THP_NEON
-  if (dcOnly) {
-    // inverse_dct's every transform passes a lone DC through (its other terms all zero): each pixel
-    // is the DC dequantized, biased and scaled, as it computes it. (Not where a compiler may fuse the
-    // product and the sum, which inverse_dct leaves to fmaf_exact: no ARMv7 NEON target has an FMA.)
-    const float scaled = (static_cast<float>(coefficients[0]) * quantization.values[0] + kOutputBias) * 0.125f;
-    write_flat_block(output, width, height, x, y, scaled <= 0.0f ? 0 : scaled >= 255.0f ? 255 : static_cast<u8>(scaled));
-    return true;
-  }
-  uint8x8_t rows[8];
-  inverse_dct_neon(coefficients, quantization, rows);
-  write_block_rows(output, width, height, x, y, rows);
-#else
   write_block(output, width, height, x, y, inverse_dct(coefficients, quantization));
-#endif
   return true;
 }
 

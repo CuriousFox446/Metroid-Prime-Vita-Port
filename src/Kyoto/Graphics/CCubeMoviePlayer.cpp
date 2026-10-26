@@ -18,7 +18,6 @@
 
 #ifdef TARGET_PC
 #include "port_debug.h"
-#include "port_profile.h"
 #endif
 
 #include "dolphin/gx/GXGeometry.h"
@@ -412,7 +411,6 @@ void CMoviePlayer::DecodeFromRead(const void* ptr) {
 #ifdef TARGET_PC
       // Bounded by the component's size and the planes' picture: the decoder
       // reads ahead of its last bit, and a corrupt frame could claim any size.
-      PORT_ZONE_TIMED("movie: THP video decode");
       THPVideoDecodeBounded(data, CBasics::SwapBytes(sizes[0]), texture.Y(), texture.U(), texture.V(),
                             x6c_videoInfo.mXSize, x6c_videoInfo.mYSize);
 #else

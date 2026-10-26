@@ -1480,9 +1480,3 @@ void frame_end() noexcept {
 }
 } // namespace fifo_clock
 } // namespace aurora::vita_gl
-
-// vitaGL's splash screen: its logo, which vglInit has a thread of its own draw on a GXM context of
-// its own until the first frame's scene. Not started (the linker wraps its start, CMakeLists): its
-// flag stays off, so that scene and the swaps take their usual paths, as in vitaGL's system app
-// mode, which skips it too.
-extern "C" void __wrap_invoke_splashscreen() {}
