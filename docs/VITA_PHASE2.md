@@ -1050,3 +1050,61 @@ streamed music was not it: disc reads go through Aurora's DVD worker thread. Not
 the main thread 2 seconds into a room and every 30 seconds in it (`kResumeStableSeconds`,
 `kResumeRefreshSeconds`) and written to the card at once: 10 to 50 ms to take
 (`[resume] snapshot`), then the write.
+
+## The escape: the water and the crowds (from fc76049)
+
+The user: the stutter gone in both apps; in the frigate's escape the flooded rooms' water black
+(a photo: the floor of a long hall flat black), and slowdowns with many enemies and explosions, the
+parasites' swarms in the escape above all. Not wanted: a lower resolution.
+
+The demo's run through the escape (917 seconds of log), by room: most of the frigate 20 to 40
+frames a second; the escape 10 to 26, the low points three kinds of limit:
+- The FIFO thread, in Subventilation Shafts A and B (about 10 frames a second, its frame 100 of
+  105 ms busy) and the Exterior Docking Hangar: its `skinned` section 57 to 75 ms a frame. Each
+  parasite's surface is a skinned list call: 118 to 137 a frame of about 1100 triangle corners,
+  130,000 to 150,000 corners, 7 to 8 MiB of vertices a frame (`[draw uploads]`), at about 0.45 us
+  a corner: copying its template's corners, posing their positions and normals, and the render
+  worker's copy of them all again. Templates were made rarely (about 100 in 300 frames): the cost
+  is the corners.
+- The GPU, in Main Ventilation Shaft F (8 to 10 frames a second): 240 to 330 particle systems, 6000
+  particles; the render worker's swap waits 78 ms of its 99 (`[draw path]`), the game 57 ms a frame
+  at `begin-wait`; 3.6 ticks a frame catching up, nearly all particle updates (38 ms a frame).
+- The main thread, in Biotech Research Area 1's explosions: a tick about 25 ms (550 particle
+  system steps and 200 new particles a frame).
+
+The water was black because no program could draw it. `CFluidPlaneCPU::RenderSetup` sets six or
+seven textures (lightmaps, two patterns, the colour layer, the environment map and its bump map),
+coordinates made from the position and the normal (the bump map's normalised through a post
+matrix), and an indirect stage: the bump map offsets the colour layer's coordinates, or the
+environment map's. `tev_layout` refused any indirect stage and more than four textures or
+coordinate sets, so the water drew fixed-function: its textures times the vertex colour, which
+channel 0 makes black (lit, no lights, a black ambient). The rolled-back branch had drawn it
+(c5af261: 33 indirect programs, none failed on hardware); now on this base:
+- Indirect stages in the generated programs as c5af261 has them (and Aurora's shaders): each
+  indirect stage sampled once (its coordinates in texels by GX's SU scale, scaled by `GX_ITS_n`,
+  the texel's a, b and g as S, T and U), a stage's TEV coordinate (the format's bits, the bias,
+  the static or dynamic matrix to a texel offset; wrapped, or added to the last stage's), the bump
+  alpha as a raster colour; constants for the coordinate slots' texel scales, the textures' sizes
+  and the three matrices. Without fog here (c5af261 came after fog), the constants follow the
+  alpha reference (slot 13 on).
+- 8 textures and 7 coordinate slots a program (`kSamplers`, `kProgramCoords`): a set from a vertex
+  attribute stays in the mesh's first four slots, those past them are made from the position or
+  normal. The lit channels' varyings go past the slots, at 5 and 6 still with four slots or fewer,
+  so the programs made before keep their sources and their binaries on the card.
+- GXM's ring buffers larger before `vglInit` (cd75c62's: fragment 4 times, VDM 4, vertex 2,
+  fragment USSE 4): c5af261's water put 1100 to 4300 program draws of up to seven textures in a
+  scene, and a run ended in a GPU hang until they grew.
+- A log line each 300 frames: the materials worked out that read an indirect stage, those left
+  fixed-function and why, the indirect programs; the first two indirect programs' sources.
+
+The crowds: a skinned call with a program now draws by index. A template keeps its vertices made
+unique for a program (the same position and normal pair, coordinates and vertex colour: a program
+reads no face's shading) and its corners as 16-bit indices into them, made once and shared by
+every call's mesh; a call poses and copies its unique vertices only, and the render worker draws
+them with `glDrawElements` (vitaGL copies client arrays up to the largest index). A call without a
+program (its program still compiling, or none) lays out every corner as before. On the PC, the
+function's own text over random templates: 644,202 corners as 238,438 vertices, each corner's
+vertex its own, alike corners sharing one, the indexed and per-corner paths the same in position,
+normal, coordinates and colour; past 65,536 vertices no order. The `skinned calls:` line adds the
+calls drawn by index and their corners against their vertices: the ratio on the parasites is the
+gain. Left for a later look: the particles' update (the GPU and the main thread in the swarm).

@@ -24,6 +24,7 @@
 namespace aurora::gx::vita {
 namespace {
 constexpr Module Log{"aurora::gx::vita"};
+using vita_gl::kProgramCoords;
 using vita_gl::kSamplers;
 using vita_gl::kTexCoords;
 using vita_gl::kTexUnits;
@@ -191,6 +192,14 @@ struct SkinnedTemplate {
   u32 maxPos = 0;
   u32 maxNrm = 0;
   bool anyNormal = false;
+  // For a draw with a program, which reads no face's shading (vita_tev.cpp: the position, the
+  // normal, the coordinates and the vertex colour): the vertices made unique (the same distinct
+  // pair, coordinates and vertex colour), each with the distinct pair it is posed from, and the
+  // corners as 16-bit indices into them, shared by every call's mesh. A call poses and copies its
+  // unique vertices, not every corner. No order: more of them than 16 bits index.
+  std::vector<vita_gl::Vertex> unique;
+  std::vector<u32> uniqueSlots;
+  std::shared_ptr<const std::vector<u16>> order;
 };
 std::unordered_map<const void*, SkinnedTemplate> sSkinned;
 
@@ -255,9 +264,19 @@ struct Stats {
   u32 materialReused = 0;
   u32 materialHits = 0;
   u32 materialMisses = 0;
-  // Skinned list calls drawn from their template, and templates made.
+  // Skinned list calls drawn from their template, and templates made; of the calls those drawn by
+  // index (a program's), with the corners they drew and the vertices they posed for them.
   u32 skinnedFromTemplate = 0;
   u32 skinnedTemplates = 0;
+  u32 skinnedIndexed = 0;
+  u64 skinnedCorners = 0;
+  u64 skinnedVertices = 0;
+  // Materials worked out whose stages read an indirect stage (water, heat haze, distortion), and
+  // of those the ones left without a program: a layout a program cannot draw, or a texture
+  // without a Vita copy.
+  u32 indirectMaterials = 0;
+  u32 indirectUnsupported = 0;
+  u32 indirectWithoutCopy = 0;
   // Draws recorded with a generated program (vita_tev.hpp), and their constant arrays (vertex and
   // fragment) put in the frame's rows, and pointed at the last ones as they repeated them.
   u32 withProgram = 0;
@@ -1065,7 +1084,8 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
   const int chosen = choose_units(choices);
   texAttrs = kNoTexAttrs;
   if (layout.supported) {
-    for (int c = 0; c < layout.coordCount; ++c) {
+    // The slots past the mesh's sets are made from the position or the normal (tev_layout).
+    for (int c = 0; c < std::min(layout.coordCount, kTexCoords); ++c) {
       // A set made from the position or the normal has no coordinates of its own in the mesh.
       const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
       texAttrs[c] = tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 ? static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))
@@ -1141,7 +1161,10 @@ struct Material {
   std::shared_ptr<vita_gl::Texture> programTextures[kSamplers];
   vita_gl::Sampler programSamplers[kSamplers] = {};
   int coordCount = 0;
-  const TcgConfig* coordTcgs[kTexCoords] = {};
+  const TcgConfig* coordTcgs[kProgramCoords] = {};
+  // GX's coordinate generators and textures by the program's slots (its indirect constants).
+  u8 coordIds[kProgramCoords] = {};
+  u8 mapIds[kSamplers] = {};
   vita_gl::RenderState programState;
   u32 used = 0; // sMaterialClock at its last use, for the set's replacement
 };
@@ -1194,12 +1217,21 @@ PipelineKey pipeline_key() noexcept {
   h = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), h);
   h = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), h);
   h = XXH3_64bits_withSeed(&s.numIndStages, sizeof(s.numIndStages), h);
+  const u32 indStages = std::min<u32>(s.numIndStages, MaxIndStages);
+  h = XXH3_64bits_withSeed(s.indStages.data(), indStages * sizeof(IndStage), h);
   u32 usedMaps = 0;
   u32 usedCoords = 0;
   for (u32 i = 0; i < stages; ++i) {
     const TevStage& stage = s.tevStages[i];
     usedMaps |= stage.texMapId < MaxTextures ? 1u << stage.texMapId : 0;
     usedCoords |= stage.texCoordId < MaxTexCoord ? 1u << stage.texCoordId : 0;
+  }
+  // The indirect stages' textures and coordinates (their scales and the stages reading them are
+  // in the hash above).
+  for (u32 i = 0; i < indStages; ++i) {
+    const IndStage& ind = s.indStages[i];
+    usedMaps |= ind.texMapId < MaxTextures ? 1u << ind.texMapId : 0;
+    usedCoords |= ind.texCoordId < MaxTexCoord ? 1u << ind.texCoordId : 0;
   }
   PipelineKey key;
   key.usedMaps = usedMaps;
@@ -1348,8 +1380,11 @@ const Material& current_material() noexcept {
   material.window = sWindow;
   material.used = sMaterialClock;
   const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
+  sStats.indirectMaterials += layout.indirect ? 1 : 0;
+  sStats.indirectUnsupported += layout.indirect && !layout.supported ? 1 : 0;
   material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs, layout);
   if (material.unitCount < 0) {
+    sStats.indirectWithoutCopy += layout.indirect && layout.supported ? 1 : 0;
     return material;
   }
   material.state = render_state();
@@ -1386,6 +1421,10 @@ const Material& current_material() noexcept {
       material.coordCount = layout.coordCount;
       for (int c = 0; c < layout.coordCount; ++c) {
         material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
+        material.coordIds[c] = static_cast<u8>(layout.coords[c]);
+      }
+      for (int m = 0; m < layout.samplerCount; ++m) {
+        material.mapIds[m] = static_cast<u8>(layout.maps[m]);
       }
       material.programState = material.state;
       material.programState.alphaFunc = kGlAlways;
@@ -1394,6 +1433,7 @@ const Material& current_material() noexcept {
         state.blend = false;
       }
     } else {
+      sStats.indirectWithoutCopy += layout.indirect ? 1 : 0;
       for (auto& texture : material.programTextures) {
         texture.reset();
       }
@@ -1501,7 +1541,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
     const TevProgram& program = *material.program;
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
-    tev_constants(program, constants);
+    tev_constants(program, material.coordIds, material.mapIds, constants);
     // Never more than the program declares (the generators' types made both counts).
     inputs.vertexCount = static_cast<u8>(std::min(row, program.vertexCount));
     inputs.constantCount = static_cast<u8>(program.constantCount);
@@ -1536,12 +1576,59 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
   ++sStats.drawsByUnits[material.unitCount];
 }
 
+// A skinned template's unique vertices for a program's draw and its corners' order of them
+// (SkinnedTemplate::unique): corners alike in their distinct pair, coordinates and vertex colour
+// share one. No order when there are more than 16-bit indices take.
+void make_unique_vertices(SkinnedTemplate& t) {
+  t.unique.clear();
+  t.uniqueSlots.clear();
+  t.order.reset();
+  struct Key {
+    u32 slot;
+    float uv[kTexCoords][2];
+    u8 raw[4];
+  };
+  static_assert(sizeof(Key) == 40); // no padding: its bytes are hashed and compared
+  const auto same = [&t](u32 index, const Key& key) {
+    const vita_gl::Vertex& v = t.unique[index];
+    return t.uniqueSlots[index] == key.slot && std::memcmp(v.uv, key.uv, sizeof(key.uv)) == 0 &&
+           std::memcmp(v.raw, key.raw, sizeof(key.raw)) == 0;
+  };
+  auto order = std::make_shared<std::vector<u16>>();
+  order->reserve(t.vertices.size());
+  std::unordered_map<u64, u32> seen;
+  seen.reserve(t.vertices.size());
+  for (size_t i = 0; i < t.vertices.size(); ++i) {
+    Key key{};
+    key.slot = t.slots[i];
+    std::memcpy(key.uv, t.vertices[i].uv, sizeof(key.uv));
+    std::memcpy(key.raw, t.vertices[i].raw, sizeof(key.raw));
+    const auto [it, added] = seen.try_emplace(XXH3_64bits(&key, sizeof(key)), static_cast<u32>(t.unique.size()));
+    u32 index = it->second;
+    if (added || !same(index, key)) {
+      // A vertex of its own (on a hash's collision, one outside the map).
+      if (t.unique.size() > UINT16_MAX) {
+        t.unique.clear();
+        t.uniqueSlots.clear();
+        return;
+      }
+      index = static_cast<u32>(t.unique.size());
+      t.unique.push_back(t.vertices[i]);
+      t.uniqueSlots.push_back(t.slots[i]);
+    }
+    order->push_back(static_cast<u16>(index));
+  }
+  t.order = std::move(order);
+}
+
 // A skinned list call's triangles from its template (SkinnedTemplate), made at its first call
-// under this state. False when the list cannot have one (positions not indexed, or more than one
-// vertex format) or a position index falls outside the array as it is now: it is then decoded
-// whole.
+// under this state: with `indexed` (a program's draw) the template's unique vertices posed, the
+// corners as `order` into them, else every corner (order null). False when the list cannot have one
+// (positions not indexed, or more than one vertex format) or a position index falls outside the
+// array as it is now: it is then decoded whole.
 bool skinned_from_template(const void* key, const resident::Entry& entry, u32 size, const TexAttrs& texAttrs,
-                           std::vector<vita_gl::Vertex>& out) noexcept {
+                           bool indexed, std::vector<vita_gl::Vertex>& out,
+                           std::shared_ptr<const std::vector<u16>>& order) noexcept {
   const GXAttrType posType = g_gxState.vtxDesc[GX_VA_POS];
   if (posType != GX_INDEX8 && posType != GX_INDEX16) {
     return false;
@@ -1567,6 +1654,9 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       t.indices.clear();
       t.distinct.clear();
       t.slots.clear();
+      t.unique.clear();
+      t.uniqueSlots.clear();
+      t.order.reset();
       return false;
     }
     t.fmt = static_cast<GXVtxFmt>(std::countr_zero(state.fmtMask));
@@ -1593,6 +1683,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     }
     t.indices.clear();
     t.indices.shrink_to_fit();
+    make_unique_vertices(t);
   }
   if (t.vertices.empty()) {
     return false;
@@ -1639,9 +1730,12 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       }
     }
   }
-  out = t.vertices;
+  // A program's draw takes the unique vertices, every corner otherwise (the face's shading).
+  const bool byIndex = indexed && t.order != nullptr;
+  const std::vector<u32>& slots = byIndex ? t.uniqueSlots : t.slots;
+  out = byIndex ? t.unique : t.vertices;
   for (size_t i = 0; i < out.size(); ++i) {
-    const PosedVertex& posed = sPosed[t.slots[i]];
+    const PosedVertex& posed = sPosed[slots[i]];
     for (u32 c = 0; c < cnt; ++c) {
       out[i].pos[c] = posed.pos[c];
     }
@@ -1649,6 +1743,10 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       std::memcpy(out[i].normal, posed.normal, sizeof(posed.normal));
     }
   }
+  order = byIndex ? t.order : nullptr;
+  sStats.skinnedIndexed += byIndex ? 1 : 0;
+  sStats.skinnedCorners += t.vertices.size();
+  sStats.skinnedVertices += out.size();
   return true;
 }
 } // namespace
@@ -1670,7 +1768,8 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   if (!position_array_resident(g_gxState.arrays[GX_VA_POS].data)) {
     ZoneScopedN("vita: skinned list call");
     std::vector<vita_gl::Vertex> triangles;
-    if (skinned_from_template(key, entry, size, texAttrs, triangles)) {
+    std::shared_ptr<const std::vector<u16>> order;
+    if (skinned_from_template(key, entry, size, texAttrs, material.program != nullptr, triangles, order)) {
       ++sStats.skinnedFromTemplate;
     } else {
       u8 fmtMask = 0;
@@ -1683,8 +1782,13 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       ++sStats.perCallFailed;
       return false;
     }
-    record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned, material.program != nullptr),
-                material);
+    if (order != nullptr) {
+      record_draw(vita_gl::make_indexed_mesh(std::move(triangles), std::move(order), vita_gl::MeshKind::Skinned, true),
+                  material);
+    } else {
+      record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned, material.program != nullptr),
+                  material);
+    }
     return true;
   }
   const Cached& cached = lookup(key, entry, size, texAttrs);
@@ -1983,13 +2087,18 @@ void log_stats() noexcept {
            "copy, {} replacing another, {} freed holding a texture nothing else held); key parts worked out: "
            "pipeline {}, textures {}; {} cached of {} ({} KiB), holding {} textures ({:.1f} MiB; held by "
            "materials alone {}, {:.1f} MiB); "
-           "skinned calls: {} from their template, {} decoded whole, {} templates made; {} draws with a generated "
+           "skinned calls: {} from their template ({} drawn by index; {} corners as {} vertices), {} decoded whole, "
+           "{} templates made; {} draws with a generated "
            "program ({} generated), their constant arrays {} recorded, {} repeating the last",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
-           onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.perCall, s.skinnedTemplates, s.withProgram,
-           tev_program_count(), s.constantsRecorded, s.constantsShared);
+           onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
+           s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
+  Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
+           "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}",
+           s.indirectMaterials, s.indirectUnsupported + s.indirectWithoutCopy, s.indirectUnsupported,
+           s.indirectWithoutCopy, tev_indirect_program_count(), tev_program_count());
   Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
            s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);

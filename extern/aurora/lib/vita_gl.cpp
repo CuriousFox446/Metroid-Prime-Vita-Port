@@ -98,6 +98,10 @@ public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
   : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
     m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
+  Mesh(std::vector<Vertex> vertices, std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
+       bool clientMemory) noexcept
+  : m_cpu(std::move(vertices)), m_indices(std::move(indices)), m_count(static_cast<GLsizei>(m_indices->size())),
+    m_kind(kind), m_client(clientMemory), m_mode(GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -125,7 +129,10 @@ public:
   // Render worker: whether its buffer is made yet (bind makes it; a mesh in client memory is
   // copied at every draw, so never).
   bool uploaded() const noexcept { return m_vbo != 0; }
+  // What a draw draws: its vertices, or for a mesh drawn by index its indices.
   GLsizei count() const noexcept { return m_count; }
+  // The vertices it holds, for the log (a mesh drawn by index has fewer than it draws).
+  GLsizei vertex_count() const noexcept { return m_indices ? static_cast<GLsizei>(m_cpu.size()) : m_count; }
   MeshKind kind() const noexcept { return m_kind; }
   // What glDrawArrays draws it as: GL_TRIANGLES or GL_LINES.
   GLenum mode() const noexcept { return m_mode; }
@@ -134,8 +141,19 @@ public:
     return m_client ? reinterpret_cast<const uint8_t*>(m_cpu.data()) : nullptr;
   }
 
+  // Render worker, its arrays set (bind): draws its `count` vertices, or its indices into them.
+  // vitaGL copies client-memory arrays up to the largest index a draw names.
+  void draw(GLsizei count) const noexcept {
+    if (m_indices) {
+      glDrawElements(m_mode, count, GL_UNSIGNED_SHORT, m_indices->data());
+    } else {
+      glDrawArrays(m_mode, 0, count);
+    }
+  }
+
 private:
   std::vector<Vertex> m_cpu;
+  std::shared_ptr<const std::vector<uint16_t>> m_indices;
   GLuint m_vbo = 0;
   GLsizei m_count;
   MeshKind m_kind;
@@ -146,6 +164,12 @@ private:
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory,
                                 MeshPrimitive primitive) noexcept {
   return std::make_shared<Mesh>(std::move(triangles), kind, clientMemory, primitive);
+}
+
+std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
+                                        std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
+                                        bool clientMemory) noexcept {
+  return std::make_shared<Mesh>(std::move(vertices), std::move(indices), kind, clientMemory);
 }
 
 class Texture {
@@ -577,7 +601,7 @@ public:
 
   GLuint id() const noexcept { return m_id; }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
-  GLint samplers[kSamplers] = {-1, -1, -1, -1};
+  GLint samplers[kSamplers] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
   // Render worker, this program in use: sets its constants unless they are the rows it was sent
   // last. vitaGL keeps each program's uniforms, and sends a side's uniform buffer at a draw only
@@ -715,7 +739,8 @@ private:
       }
       m_vertexLocation = glGetUniformLocation(m_id, "uVert");
       m_constantsLocation = glGetUniformLocation(m_id, "uConst");
-      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3"};
+      static constexpr const char* kSamplerNames[kSamplers] = {"uTex0", "uTex1", "uTex2", "uTex3",
+                                                               "uTex4", "uTex5", "uTex6", "uTex7"};
       glUseProgram(m_id);
       for (int i = 0; i < kSamplers; ++i) {
         samplers[i] = glGetUniformLocation(m_id, kSamplerNames[i]);
@@ -928,11 +953,11 @@ GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
     uploads.us += us;
     if (fresh) {
       ++uploads.made;
-      uploads.bytes += static_cast<uint64_t>(count) * sizeof(Vertex);
+      uploads.bytes += static_cast<uint64_t>(mesh.vertex_count()) * sizeof(Vertex);
     }
   }
-  if (fresh && path == kPathFixed && static_cast<uint32_t>(count) > g_clock.largestFixedVertices) {
-    g_clock.largestFixedVertices = static_cast<uint32_t>(count);
+  if (fresh && path == kPathFixed && static_cast<uint32_t>(mesh.vertex_count()) > g_clock.largestFixedVertices) {
+    g_clock.largestFixedVertices = static_cast<uint32_t>(mesh.vertex_count());
     g_clock.largestFixedKind = mesh.kind();
   }
   return count;
@@ -1004,7 +1029,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
   g_clock.mark(kProgramTextures);
   apply_state(inputs.state, current, false);
   g_clock.mark(kProgramState);
-  glDrawArrays(draw.mesh->mode(), 0, count);
+  draw.mesh->draw(count);
   g_clock.mark(kProgramDraw);
 }
 
@@ -1214,7 +1239,7 @@ void draw_world(const Frame& frame) {
     g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
     g_clock.mark(kFixedState);
-    glDrawArrays(draw.mesh->mode(), 0, count);
+    draw.mesh->draw(count);
     g_clock.mark(kFixedDraw);
   }
   enter_fixed_function();
@@ -1254,6 +1279,15 @@ bool initialize() noexcept {
   // The generated programs' own cache (Program, load_cached).
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
+  // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
+  // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
+  // KiB) were made for scenes of a few hundred plain draws; the water's generated programs take four
+  // to seven textures each, and 1100 to 4300 draws in one scene ended a run in Tallon Overworld in a
+  // GPU hang before (VITA_PHASE2.md). Four times each; the vertex ring (2 MiB) twice.
+  vglSetFragmentBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_RING_BUFFER_SIZE);
+  vglSetVDMBufferSize(4 * SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE);
+  vglSetVertexBufferSize(2 * SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE);
+  vglSetUSSEBufferSize(4 * SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
