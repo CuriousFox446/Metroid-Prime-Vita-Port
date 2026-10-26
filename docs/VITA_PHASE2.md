@@ -949,3 +949,42 @@ user saw was the death itself and play before it (10 to 20 FPS, a second at 3), 
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
   the bubble is deleted and the VPK installed again; the saves are in `ux0:data/MetroidPrime`.)
+
+## Milestone 6: the main menu's speed
+
+The user asked for the main menu (1938b24's log, its first 70 seconds): 7 to 11 frames a second,
+the main thread the limit. Its frame: the game's tick 75 to 90 ms, nearly all of it the front end's
+IOWin pump; the audio's DMA callbacks 10 ms (`ARQPoll + AIPortPoll`, the streamed music and the
+movie's sound: a frame's worth, so less at a higher rate); input 3 ms. The front end draws one
+thing most of the time: the menu's movie, a quad of three I8 textures (the THP frame's Y, U and V
+planes, a new set a movie frame). The FIFO thread spent 16 to 18 ms a frame converting them (an I8
+plane to RGBA8 a texel at a time, 9 ms) and hashing them, the render worker 7 to 8 ms uploading
+them; both mostly idle.
+- The tick is the movie's decode (`CMoviePlayer::DecodeFromRead`, a frame each tick):
+  Aurora's THP decoder matches the SDK's output bit for bit, its IDCT in float with every
+  multiply-add fused (`fmaf_exact`). The Cortex-A9 has no fused multiply-add (VFPv3), so each is
+  emulated in double, one element at a time: 207 double-precision operations a block, 6720 blocks
+  a 640x448 frame.
+- Now on ARMv7 with NEON the IDCT works four lanes at a time (`inverse_dct_neon`: the row
+  transforms on the dequantized block's quarters transposed, the column transforms on them
+  transposed back), a product then a sum where the scalar one fuses, and its rows go straight into
+  the plane's tiles. A block whose AC coefficients are all zero is its DC alone, written flat (each
+  of `inverse_dct`'s transforms passes it through: the same value). The PC keeps its decoder as it
+  was. On synthetic frames (a test encoder: smooth, flat and noisy areas, qualities 50 to 98,
+  640x448 and 600x440), the NEON path with its intrinsics emulated on the PC matched the scalar
+  decoder in all but 3 of 2.3 million bytes, those by 1; the PC's decode is unchanged byte for
+  byte. Compiled for the Vita, the per-block code has no double-precision operation left.
+- An I8 texture's whole tile rows convert eight texels at a time with NEON (`decode_row`).
+- The log has the decode's time (`movie: THP video decode` in the zones).
+
+## The climb from the save point
+
+1cc1616 did not work for the user, while 4445f24 did: the code went back to it (c4e947a, tag
+`savepoint`, with the user's LiveArea of 62f77ec), everything after it kept on the branch
+`before-rollback`, to bring back a step at a time with the map screen tried at each.
+- Step 1 (521e748): the memory fixes (349fe7e, d993a29). The user: it works (202 s; 19 to 27 frames
+  a second presented, the cap at 30).
+- Step 2, what the user asked for next, ahead of the order: the front end again, no fast boot, to
+  select a save (05d9f7c); no vitaGL splash screen (05d9f7c's wrap of `invoke_splashscreen`, in an
+  `extern "C"` block of its own: the background compiler's wraps come later); the app named Metroid
+  Prime (4126db4's name alone); and the menu movie's decode with NEON (3433fc7, the section above).
