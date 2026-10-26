@@ -98,6 +98,9 @@ On a Vita with HENkaku/Ensō:
 4. Fetch `ux0:data/MetroidPrime/metroid_prime_port.log` (VitaShell FTP or USB).
    Before the log starts, early output goes to `stdout.txt` and `stderr.txt` in the
    same folder. A crash leaves a core dump in `ux0:data/` (`psp2core-*.psp2dmp`).
+   The log reaches the card from a thread of its own (`platform/port_log_file.cpp`), so
+   writing it never holds up the game; the lines of a crash's last moments may be
+   missing from the file, and the core dump still holds them (`sRing`).
 
 ### Metroid Prime Demo
 

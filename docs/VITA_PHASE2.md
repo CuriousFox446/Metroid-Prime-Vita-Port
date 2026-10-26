@@ -1028,3 +1028,19 @@ apart by the title ID it runs under.
   current one's is stashed (`CMain::EnsureWorldPakReady`), so the answer was no, and the game's
   own check, made after that call, went ahead. The demo now decides inside the game's check and
   makes the frigate the current world again before it quits.
+- Second test (8b00110): the demo loops. The user: a micro stutter every second, in the demo
+  and the main build alike.
+
+## The stutter every second
+
+Once a second the log takes the report of `MP_TRACE_TIMING` and `MP_PROFILE`, some 70 lines
+(about 8 KiB): `[timing]`, `[split]`, 30 or more `[zones]`, `[gxsrc]`, `[heap]`, `[ops]`, and
+vitaGL's `[fifo path]` and `[draw path]`. The log's streams were line-buffered onto the file and
+`PortLog::Write` flushed each message, so each line was a write of its own to the card, made on
+the thread that logged it: the game's main thread for most, the GX FIFO thread for the rest. A
+card access takes milliseconds (programs read from the card took about 10 ms each), so dozens of
+them held up a frame every second. The streams now hand each line to a 128 KiB ring
+(`QueueWrite` in place of newlib's `FILE::_write`), and a thread of its own writes the ring out
+as it fills; a logging thread copies the line and goes on. The streamed music was not it: disc
+reads go through Aurora's DVD worker thread. Not changed: the quick-resume snapshot, taken on
+the main thread every 20 to 30 seconds in a room (10 to 50 ms each, `[resume] snapshot`).
