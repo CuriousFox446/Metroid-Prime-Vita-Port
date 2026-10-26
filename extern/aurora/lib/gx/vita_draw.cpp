@@ -1946,6 +1946,35 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     ++sStats.immediateFailed;
     return false;
   }
+  // For the log (VITA_PHASE2.md: the camera blur drew the same flat shapes whatever its copy held),
+  // the first camera blur quads as the list has them and as decoded, with the descriptor, format and
+  // mesh sets they were read with.
+  if (const GXState& s = g_gxState; s.numTevStages == 7 && s.numTexGens == 7) {
+    static int sLogged = 0;
+    if (sLogged < 3) {
+      ++sLogged;
+      std::string raw;
+      for (size_t i = 0; i + 4 <= vertices.size() && i < 96; i += 4) {
+        raw += fmt::format(" {:.4g}", std::bit_cast<float>(read32(vertices.data() + i, false)));
+      }
+      std::string decoded;
+      for (const vita_gl::Vertex& v : prims) {
+        decoded += fmt::format(" ({:.4g} {:.4g} {:.4g} | {:.4g} {:.4g})", v.pos[0], v.pos[1], v.pos[2], v.uv[0][0],
+                               v.uv[0][1]);
+      }
+      const VtxAttrFmt& pos = s.vtxFmts[fmt].attrs[GX_VA_POS];
+      const VtxAttrFmt& tex0 = s.vtxFmts[fmt].attrs[GX_VA_TEX0];
+      Log.info("[probe] the camera blur's quad: prim {:x} format {} {} vertices {} bytes; descriptor pos {} nrm {} clr0 "
+               "{} tex0 {} tex1 {}; pos cnt {} type {}; tex0 cnt {} type {} frac {}; mesh sets {} {} {} {}; the list:{}; "
+               "decoded:{}",
+               static_cast<int>(prim), static_cast<int>(fmt), vtxCount, vertices.size(),
+               static_cast<int>(s.vtxDesc[GX_VA_POS]), static_cast<int>(s.vtxDesc[GX_VA_NRM]),
+               static_cast<int>(s.vtxDesc[GX_VA_CLR0]), static_cast<int>(s.vtxDesc[GX_VA_TEX0]),
+               static_cast<int>(s.vtxDesc[GX_VA_TEX1]), static_cast<int>(pos.cnt), static_cast<int>(pos.type),
+               static_cast<int>(tex0.cnt), static_cast<int>(tex0.type), static_cast<int>(tex0.frac), texAttrs[0],
+               texAttrs[1], texAttrs[2], texAttrs[3], raw, decoded);
+    }
+  }
   if (prim == GX_POINTS) {
     // As GL's points, GX's point size wide, drawn fixed-function: vitaGL's point size reaches only
     // its own programs (a generated one would have to write the size). The game draws none.

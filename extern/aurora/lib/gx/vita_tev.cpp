@@ -465,10 +465,12 @@ std::string fragment_body(const TevLayout& layout) {
       body += fmt::format("    float4 tex = tex2D(uTex{}, {}).{};\n", layout.stageMap[i], uv,
                           swizzle(s.tevSwapTable[stage.tevSwapTex]));
     } else if (layout.stageMap[i] >= 0) {
+      // A projective set whole (tex2Dproj divides); a slot the fragment program makes, its own.
       const int coord = layout.stageCoord[i];
       const bool proj = projective(s.tcgs[layout.coords[coord]]);
-      body += fmt::format("    float4 tex = {}(uTex{}, vUv{}).{};\n", proj ? "tex2Dproj" : "tex2D",
-                          layout.stageMap[i], coord, swizzle(s.tevSwapTable[stage.tevSwapTex]));
+      body += fmt::format("    float4 tex = {}(uTex{}, {}).{};\n", proj ? "tex2Dproj" : "tex2D", layout.stageMap[i],
+                          proj ? fmt::format("vUv{}", coord) : fragment_uv(layout, coord),
+                          swizzle(s.tevSwapTable[stage.tevSwapTex]));
     } else if (reads_texture(stage)) {
       body += "    float4 tex = float4(0.0);\n";
     }

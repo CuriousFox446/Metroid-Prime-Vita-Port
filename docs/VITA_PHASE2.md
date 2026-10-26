@@ -1332,6 +1332,32 @@ scene). Three faults show:
   (`blur<n>_scratch.ppm`, upside down: the blit's picture before the pass, to tell the blit's quarter
   from the pass's), and for 40 frames after the blur begins every copy into its texture is logged.
 
+Its run (1938b24; two pauses): the black quarter is gone. `blur<n>_texture` and `blur<n>_scratch`
+are the whole room (the scratch upright; the two within 6 levels a channel, the pass's conversion),
+no copy went into the blur's texture in the 40 frames after it began, none was left over.
+- The blur's program did not compile: its stages sampled `vUv0` to `vUv6`, which a slot the
+  fragment program makes no longer has (`uv0` and on are its own; the log's warning). So the blur
+  drew fixed-function, and its picture has 6eeff2c's shapes to the pixel (the top left 240x136 flat,
+  the band, the rest black) at 0.6 of its colours (the fixed-function path's vertex colour): neither
+  the varyings nor the program make the shapes.
+- The flat quarter is the copy's first texel's colour exactly (96 111 118), and the blur's picture
+  is `pause_8_texture`'s (the texture drawn on the screen ten frames on) blurred by a pixel at the
+  band's edges: the blur samples where it should, and what it samples is flat. `pause_8_texture`
+  has the texture's own colours, not the fixed-function 0.6: no draw of the run made that picture.
+  It is three colours: the first texel over the top left quarter (one of GXM's 2x2 macrotiles at
+  480x272), a band, black. Yet `blur1_texture`, the same texture drawn just before the blur in its
+  first frame, is the room. Between the two, with readbacks (the GPU waited for) on either side:
+  the scratch drawn, and the blur's sampler set on the texture (clamp, nearest: what the copy pass
+  sets on the scratch, which samples right afterwards).
+- Now a stage samples a fragment-made slot at its own coordinates (`fragment_uv`). And at the blur's
+  first frame, the texture's memory as the CPU reads it before the blur and after
+  (`blur<n>_memory.ppm`, `blur<n>_memory_after.ppm`; `pause_8_memory.ppm` at the 8th step) with its
+  GXM descriptor (layout, format, size, data, filters, addressing, the raw words); the texture
+  drawn again once the blur's sampler is set on it (`blur<n>_sampled.ppm`); for 30 presents from
+  then, its memory's hash at each present's start, logged where it or the descriptor changes. The
+  log also has the first three blur quads as the list has them and as decoded, the program's
+  attribute locations in the render probe lines, and its rows in the blur's first line.
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
