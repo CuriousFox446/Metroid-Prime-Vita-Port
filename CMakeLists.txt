@@ -670,16 +670,38 @@ if(VITA)
     target_link_libraries(metroid_prime_port PRIVATE "-Wl,--whole-archive" pthread "-Wl,--no-whole-archive")
     include("${VITASDK}/share/vita.cmake" REQUIRED)
     set(MP_VITA_TITLEID "MPPT00001" CACHE STRING "Vita title ID (4 letters, 5 digits)")
+    # Metroid Prime Demo: the same eboot.bin packaged again under its own title ID, so it
+    # installs beside the game instead of over it. vita_platform.cpp knows it by this ID: the
+    # frigate only, from a new game with no front end, and the frigate's way out starts a new game
+    # again (PortDebug::Demo).
+    set(MP_VITA_DEMO_TITLEID "MPPD00001" CACHE STRING "Metroid Prime Demo's Vita title ID")
+    set_property(SOURCE platform/vita/vita_platform.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS "MP_VITA_DEMO_TITLEID=\"${MP_VITA_DEMO_TITLEID}\"")
     vita_create_self(eboot.bin metroid_prime_port UNSAFE)
     # ATTRIBUTE2=12: the extended memory budget. The executable's static data (the
     # emulated main memory among it) and the heap do not fit the default one.
     set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
+    # vita_create_vpk is a macro that adds its title ID and files to these: the demo's VPK
+    # starts from them as they are here.
+    set(_mp_vita_sfo_flags "${VITA_MKSFOEX_FLAGS}")
+    set(_mp_vita_vpk_flags "${VITA_PACK_VPK_FLAGS}")
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
         VERSION "00.32"
         NAME "Metroid Prime"
         FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+    set(VITA_MKSFOEX_FLAGS "${_mp_vita_sfo_flags}")
+    set(VITA_PACK_VPK_FLAGS "${_mp_vita_vpk_flags}")
+    unset(resources)
+    # The demo's icon and LiveArea logo carry a DEMO mark: the home screen's bubbles have no names.
+    vita_create_vpk(metroid_prime_port_demo.vpk ${MP_VITA_DEMO_TITLEID} eboot.bin
+        VERSION "00.32"
+        NAME "Metroid Prime Demo"
+        FILE platform/vita/sce_sys/demo/icon0.png sce_sys/icon0.png
+        FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+        FILE platform/vita/sce_sys/demo/startup.png sce_sys/livearea/contents/startup.png
         FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
 endif()
 

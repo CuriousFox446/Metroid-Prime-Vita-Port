@@ -558,6 +558,10 @@ void UpdateControllerNav() {
 
 void Toggle() {
   EnsureInitialized();
+  // Metroid Prime Demo has no port menu: it does not open, whatever asks.
+  if (!sVisible && Demo()) {
+    return;
+  }
   sVisible = !sVisible;
   SetMouseCaptured(false);
   // A press that never got its release (seen on the Android tablet with a mouse

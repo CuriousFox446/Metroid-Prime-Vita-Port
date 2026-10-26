@@ -65,6 +65,10 @@ bool FastBoot();
 // MP_BOOT_WORLD=<MLVL hex>[:<MREA hex>]: no splash screens or front end; a new game
 // starts straight in that world (its default area without an MREA). Tests only.
 bool BootWorld(uint32_t& worldId, uint32_t& areaAssetId);
+// MP_DEMO=1: Metroid Prime Demo, the Vita's second app (platform/vita/vita_platform.cpp sets it,
+// with MP_FAST_BOOT): the frigate only. Its way out starts a new game instead of leaving for
+// Tallon Overworld (CScriptWorldTeleporter), and the port menu does not open.
+bool Demo();
 // MP_SKIP_CUTSCENES / MP_CUTSCENE_SPEED (tests only; not a saved setting).
 bool SkipCutscenes();
 float CutsceneSpeed();

@@ -89,6 +89,11 @@ bool BootWorld(uint32_t& worldId, uint32_t& areaAssetId) {
   return sSet;
 }
 
+bool Demo() {
+  static const bool sDemo = port::EnvFlag("MP_DEMO");
+  return sDemo;
+}
+
 bool SkipCutscenes() { return Loaded(sSkipCutscenes); }
 
 float CutsceneSpeed() { return Loaded(sCutsceneSpeed); }

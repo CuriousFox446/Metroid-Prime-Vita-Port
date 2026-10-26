@@ -1007,3 +1007,18 @@ Tallon's Landing Site ran at 7 to 10 frames a second, a frame 100 to 130 ms:
 - An immediate draw allocated its vertices, then its triangles or lines a push at a time (a line
   list of hundreds doubling over and over). Now the vertices go in the FIFO thread's room for them
   and the triangles and lines are sized at once (a list's triangles grow by doubling).
+
+## Metroid Prime Demo (from 41226a3)
+
+Asked for alongside the Tallon work: a separate app that stops with the frigate, so it never
+replaces the build being worked on. One build makes both packages (docs/VITA.md, "Metroid Prime
+Demo"): the same `eboot.bin` as Metroid Prime Demo, `MPPD00001`, which `vita_platform.cpp` tells
+apart by the title ID it runs under.
+- The menu skip again, for the demo only (`MP_FAST_BOOT`): a new game on the frigate, so no save
+  can be loaded (and the frigate has no save station).
+- The frigate's way out (`CScriptWorldTeleporter`, `kSM_SetToZero` to another world) quits as the
+  pause screen's Quit Game does, and the reset and the front end start a new game on the frigate.
+  Dying does the same.
+- No port menu: Select + Start is Start, and the hint about the menu is not shown.
+- Saves, settings, logs and the shader cache in `ux0:data/MetroidPrimeDemo`; the disc read from
+  `ux0:data/MetroidPrime`. A DEMO banner on its icon and LiveArea logo.

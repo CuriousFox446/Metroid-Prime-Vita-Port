@@ -1,7 +1,9 @@
 // PS Vita process setup, run before main: memory budgets, clocks, and the data
 // folder. Everything the port reads and writes lives in ux0:data/MetroidPrime/
-// (app0: is read-only): the disc image, saves, settings and the log.
+// (app0: is read-only): the disc image, saves, settings and the log. Metroid Prime
+// Demo, the same executable under its own title ID, writes in ux0:data/MetroidPrimeDemo/.
 
+#include <psp2/appmgr.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
 #include <psp2/power.h>
@@ -62,6 +64,20 @@ int posix_memalign(void** out, size_t alignment, size_t size) {
 namespace {
 
 constexpr const char* kDataDir = "ux0:data/MetroidPrime/";
+// Metroid Prime Demo: this eboot.bin packaged again under its own title ID (CMakeLists.txt's
+// MP_VITA_DEMO_TITLEID), so it installs beside the game. Its saves, settings, shader cache and
+// logs are its own; the disc is the one in its folder, else the game's.
+constexpr const char* kDemoDataDir = "ux0:data/MetroidPrimeDemo/";
+
+// The title ID this app was installed under (the game's or the demo's), empty if unreadable.
+std::string titleId() {
+  char id[256] = {};
+  // 12: the running application's title ID.
+  if (sceAppMgrAppParamGetString(0, 12, id, sizeof(id)) < 0) {
+    return {};
+  }
+  return id;
+}
 
 bool hasDiscExtension(const char* name) {
   const size_t len = std::strlen(name);
@@ -72,10 +88,10 @@ bool hasDiscExtension(const char* name) {
   return endsWith(".iso") || endsWith(".gcm");
 }
 
-// The first .iso/.gcm in the data folder, when MP_DISC does not name one. Says what
-// the folder holds when there is none, since nothing else on the Vita will.
-std::string findDisc() {
-  const std::string folder(kDataDir, std::strlen(kDataDir) - 1); // sceIoDopen without the slash
+// The first .iso/.gcm in a data folder, when MP_DISC does not name one. Says what
+// the folder holds, since nothing else on the Vita will.
+std::string findDisc(const char* dataDir) {
+  const std::string folder(dataDir, std::strlen(dataDir) - 1); // sceIoDopen without the slash
   const SceUID dir = sceIoDopen(folder.c_str());
   if (dir < 0) {
     std::fprintf(stderr, "vita: cannot list %s (error 0x%08x)\n", folder.c_str(), static_cast<unsigned>(dir));
@@ -92,7 +108,7 @@ std::string findDisc() {
                  static_cast<long long>(entry.d_stat.st_size), static_cast<unsigned>(entry.d_stat.st_mode),
                  disc && found.empty() ? "  <- disc" : "");
     if (disc && found.empty()) {
-      found = std::string(kDataDir) + entry.d_name;
+      found = std::string(dataDir) + entry.d_name;
     }
   }
   sceIoDclose(dir);
@@ -111,22 +127,34 @@ __attribute__((constructor(101))) void vitaSetup() {
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
 
-    sceIoMkdir(kDataDir, 0777);
+    const std::string title = titleId();
+    const bool demo = title == MP_VITA_DEMO_TITLEID;
+    const char* const dataDir = demo ? kDemoDataDir : kDataDir;
+    sceIoMkdir(dataDir, 0777);
     // Nothing reads the Vita's stdout or stderr; keep them as files, line-buffered so
     // a crash leaves the last lines behind.
-    const std::string dir(kDataDir);
+    const std::string dir(dataDir);
     if (std::freopen((dir + "stdout.txt").c_str(), "w", stdout) != nullptr) {
       std::setvbuf(stdout, nullptr, _IOLBF, 0);
     }
     if (std::freopen((dir + "stderr.txt").c_str(), "w", stderr) != nullptr) {
       std::setvbuf(stderr, nullptr, _IOLBF, 0);
     }
+    std::fprintf(stderr, "vita: title ID %s%s\n", title.empty() ? "unreadable" : title.c_str(),
+                 demo ? ": Metroid Prime Demo" : "");
 
-    setenv("MP_USER_PATH", kDataDir, 0);
+    setenv("MP_USER_PATH", dataDir, 0);
     // Log presented/throughput FPS once a second. The front end runs (the boot logos, the
     // title, file select), so a save can be loaded: the headless build, whose menus could not
     // be seen, booted straight into a new game instead (MP_FAST_BOOT).
     setenv("MP_TRACE_TIMING", "1", 0);
+    if (demo) {
+      // The demo is the frigate only. It boots straight into a new game (MP_FAST_BOOT), so no
+      // save can be loaded, and the frigate's way out starts a new game again; the port menu
+      // does not open (MP_DEMO, PortDebug::Demo).
+      setenv("MP_FAST_BOOT", "1", 1);
+      setenv("MP_DEMO", "1", 1);
+    }
     // The retail world geometry's display lists made into GPU-side triangle lists once,
     // instead of re-read primitive by primitive every frame (port_retail_resident.h).
     setenv("MP_RETAIL_RESIDENT", "1", 0);
@@ -162,12 +190,15 @@ __attribute__((constructor(101))) void vitaSetup() {
     setenv("MP_NO_DISC_DIALOG", "1", 0);
     const char* disc = std::getenv("MP_DISC");
     if (disc == nullptr || disc[0] == '\0') {
-      const std::string found = findDisc();
+      std::string found = findDisc(dataDir);
+      if (found.empty() && demo) {
+        found = findDisc(kDataDir);
+      }
       if (!found.empty()) {
         std::fprintf(stderr, "vita: disc %s\n", found.c_str());
         setenv("MP_DISC", found.c_str(), 1);
       } else {
-        std::fprintf(stderr, "vita: no .iso or .gcm in %s\n", kDataDir);
+        std::fprintf(stderr, "vita: no .iso or .gcm in %s%s\n", dataDir, demo ? " or ux0:data/MetroidPrime/" : "");
       }
     }
   }

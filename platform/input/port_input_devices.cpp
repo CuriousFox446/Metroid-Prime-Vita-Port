@@ -395,17 +395,20 @@ void BindPortControls(Profile& p) {
 
   // The port's own keys and the pad's overlay chord. Back + Start is ordered both
   // ways, so either can be held first; the chord also keeps Start from pausing.
-  Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
-  const Input back = NativeInput(SDL_GAMEPAD_BUTTON_BACK);
-  const Input start = NativeInput(SDL_GAMEPAD_BUTTON_START);
-  if (back.Valid() && start.Valid()) {
-    for (int order = 0; order < 2; ++order) {
-      Binding b;
-      b.action = Action::PortMenu;
-      b.inputs[0] = order == 0 ? back : start;
-      b.inputs[1] = order == 0 ? start : back;
-      b.count = 2;
-      p.bindings.push_back(b);
+  // Metroid Prime Demo has no port menu: there Select + Start is Start.
+  if (!PortDebug::Demo()) {
+    Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
+    const Input back = NativeInput(SDL_GAMEPAD_BUTTON_BACK);
+    const Input start = NativeInput(SDL_GAMEPAD_BUTTON_START);
+    if (back.Valid() && start.Valid()) {
+      for (int order = 0; order < 2; ++order) {
+        Binding b;
+        b.action = Action::PortMenu;
+        b.inputs[0] = order == 0 ? back : start;
+        b.inputs[1] = order == 0 ? start : back;
+        b.count = 2;
+        p.bindings.push_back(b);
+      }
     }
   }
   Bind(p, Action::SaveState, Make(Device::Key, SDL_SCANCODE_F5));
@@ -888,6 +891,8 @@ void BuildBaseProfile(Profile& out) {
 // (and no pad one while a pad is connected), F1 opens it again, so a hand-edited
 // controls.toml or an unplugged pad can't lock anyone out of the settings.
 void KeepPortMenuReachable(Profile& p) {
+  // Metroid Prime Demo has none to reach (BindPortControls).
+  if (PortDebug::Demo()) return;
   bool pad = false;
   for (const Binding& b : p.bindings) {
     if (b.action != Action::PortMenu || b.count == 0) continue;

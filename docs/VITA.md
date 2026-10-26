@@ -72,7 +72,7 @@ In WSL or Linux, with [VitaSDK](https://vitasdk.org) installed (`$VITASDK`, defa
 packages (`vdpm install ...`), and Ninja:
 
 ```sh
-tools/vita_build.sh            # configure + build -> build/vita/metroid_prime_port.vpk
+tools/vita_build.sh            # configure + build -> build/vita/metroid_prime_port.vpk, metroid_prime_port_demo.vpk
 ```
 
 The null WebGPU's generated half is regenerated from Dawn's header with
@@ -98,6 +98,26 @@ On a Vita with HENkaku/Ensō:
 4. Fetch `ux0:data/MetroidPrime/metroid_prime_port.log` (VitaShell FTP or USB).
    Before the log starts, early output goes to `stdout.txt` and `stderr.txt` in the
    same folder. A crash leaves a core dump in `ux0:data/` (`psp2core-*.psp2dmp`).
+
+### Metroid Prime Demo
+
+The build makes a second package, `metroid_prime_port_demo.vpk`: the same `eboot.bin` under
+its own title ID (`MPPD00001`, `MP_VITA_DEMO_TITLEID`), so **Metroid Prime Demo** installs
+beside **Metroid Prime** (`MPPT00001`) instead of over it. Its icon and LiveArea logo carry a
+DEMO banner (`platform/vita/sce_sys/demo/`), since the home screen's bubbles have no names.
+`vita_platform.cpp` knows it by the title ID:
+
+- It is the frigate only. There is no front end: it boots straight into a new game
+  (`MP_FAST_BOOT`), so no save can be loaded, and the frigate has no save station to make
+  one. The frigate's way out to Tallon Overworld (its world teleporter,
+  `CScriptWorldTeleporter`) starts a new game on the frigate instead, the way the pause
+  screen's Quit Game does: the boot logos, then the frigate from its start. Dying and Quit
+  Game start one too.
+- The port menu does not open (`MP_DEMO`, `PortDebug::Demo`): Select + Start is Start, and
+  the hint about the menu is not shown at launch.
+- What it writes (saves, settings, the shader cache, `metroid_prime_port.log`, `stdout.txt`,
+  `stderr.txt`) goes in `ux0:data/MetroidPrimeDemo/`, never the game's folder. It reads the
+  disc from there if one is there, else from `ux0:data/MetroidPrime/`.
 
 The numbers that matter are the once-a-second lines
 `[timing] presented=… FPS throughput=… FPS simulation=… ticks/s`. **Throughput**

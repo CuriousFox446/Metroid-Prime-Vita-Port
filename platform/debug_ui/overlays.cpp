@@ -590,7 +590,8 @@ std::string HotkeyHint() {
 void DrawMenuHintToast() {
   static double sShownAt = -1.0;
   static bool sDone = false;
-  if (sDone || !sShowMenuHint) {
+  // Metroid Prime Demo has no port menu to point to.
+  if (sDone || !sShowMenuHint || Demo()) {
     return;
   }
   if (sVisible) {
