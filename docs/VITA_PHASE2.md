@@ -968,3 +968,13 @@ user saw was the death itself and play before it (10 to 20 FPS, a second at 3), 
 - Back to step 1 as the base (the user's call): steps 2 and 3 reverted, kept on the branch
   `climb-step3`. Open: what the pause menu's problem is on the user's save (the backdrop, or the map
   screen crashing), and whether step 1 has it there too; booting fast, it has only run new games.
+- From step 1, the newer fixes as never done (the user), the menu asked for again and done afresh
+  (5085bbc, 4a55340): the front end (no `MP_FAST_BOOT`), vitaGL's splash screen not started
+  (`vglInit` calls an empty `__wrap_invoke_splashscreen`), the VPK named Metroid Prime (param.sfo's
+  TITLE and STITLE), and the menu movie's decode with NEON (`inverse_dct_neon`, flat blocks written
+  whole), I8 tile rows converted eight texels at once. Tested again against this base's own
+  decoder: the PC path the same byte for byte; the NEON path, its intrinsics emulated, all but 3 of
+  2.3 million bytes, those by 1; the I8 conversion's own text, both paths, 452,952 texels over whole
+  and partial tiles and mipmaps, none wrong. Compiled for the Vita, the per-block decode has no
+  double-precision operation. These are step 2's four again, which on the user's save showed the
+  pause menu's problem: this build's logs on that save are to tell what it is.
