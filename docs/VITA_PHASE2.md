@@ -988,3 +988,11 @@ them; both mostly idle.
   select a save (05d9f7c); no vitaGL splash screen (05d9f7c's wrap of `invoke_splashscreen`, in an
   `extern "C"` block of its own: the background compiler's wraps come later); the app named Metroid
   Prime (4126db4's name alone); and the menu movie's decode with NEON (3433fc7, the section above).
+  The user: the pause menu has the old problem. Step 1's run had been a new game on the frigate (the
+  save point and step 1 boot fast, into one), so step 2 was the first of these builds on the user's
+  own save. On this base the screen copies are off (`kScreenCopies`): the blur samples the
+  transparent stand-in and draws nothing, the backdrop is whatever the frame was cleared to, and
+  the light quarters multiply over it in the 2x2 pattern first seen at cd75c62.
+- Step 3 (95a8ebb): the pause screens' backdrop plain black on the Vita (1cc1616's
+  `CCameraBlurPass::Draw` change alone: an opaque black quad for CPauseScreenBlur's persistent blur,
+  the copy counted as made so the world stops being drawn behind it).

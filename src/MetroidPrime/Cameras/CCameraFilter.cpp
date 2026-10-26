@@ -579,10 +579,12 @@ void CCameraBlurPass::Draw() const {
 
 #if defined(__vita__)
   // Port (PS Vita): the pause screens' backdrop (CPauseScreenBlur's persistent blur: the pause and
-  // map screens, the save and message screens) is plain black for now, as it was while EFB copies
-  // stood in black: its copy and seven-tap blur came out wrong on the Vita, and the map screen
-  // crashed with them (docs/VITA_PHASE2.md). The copy counts as made, so the world stops being
-  // drawn behind the pause screen as it would (CPauseScreenBlur::Draw).
+  // map screens, the save and message screens) is plain black for now. With the Vita's screen
+  // copies off, the blur samples a transparent stand-in and draws nothing, leaving whatever colour
+  // the frame was cleared to (not always black) with the light quarters multiplied over it in a 2x2
+  // pattern; the copies later made on the GPU came out wrong (docs/VITA_PHASE2.md). The copy counts
+  // as made, so the world stops being drawn behind the pause screen as it would
+  // (CPauseScreenBlur::Draw).
   if (x2c_usePersistent && x10_curType != kBT_XRay) {
     x2d_noPersistentCopy = true;
     CCameraFilterPass::DrawFilter(CCameraFilterPass::kFT_Blend, CCameraFilterPass::kFS_Fullscreen,
