@@ -1041,6 +1041,10 @@ the thread that logged it: the game's main thread for most, the GX FIFO thread f
 card access takes milliseconds (programs read from the card took about 10 ms each), so dozens of
 them held up a frame every second. The streams now hand each line to a 128 KiB ring
 (`QueueWrite` in place of newlib's `FILE::_write`), and a thread of its own writes the ring out
-as it fills; a logging thread copies the line and goes on. The streamed music was not it: disc
-reads go through Aurora's DVD worker thread. Not changed: the quick-resume snapshot, taken on
+as it fills; a logging thread copies the line and goes on. On the PC, the ring's own text: 4
+threads writing 80,000 lines of up to 2 KB as newlib would, 82 MB through it (625 wraps) to a
+slow "card", and one write three times its size: every line whole, each thread's in order, none
+missing; ThreadSanitizer found no race. Its mutex and condition variables are never destroyed:
+destroyed at exit with the writer still waiting, glibc's condition variable waited forever. The
+streamed music was not it: disc reads go through Aurora's DVD worker thread. Not changed: the quick-resume snapshot, taken on
 the main thread every 20 to 30 seconds in a room (10 to 50 ms each, `[resume] snapshot`).

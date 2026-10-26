@@ -332,9 +332,11 @@ char sRing[kRingSize];
 size_t sQueued = 0;  // bytes ever handed over
 size_t sWritten = 0; // bytes ever written out
 int sFd = -1;
-std::mutex sRingMutex;
-std::condition_variable sRingData;
-std::condition_variable sRingRoom;
+// Never destroyed: the writer waits on them for as long as the process lives, and a condition
+// variable destroyed at exit with a thread still waiting on it is undefined (glibc waits forever).
+std::mutex& sRingMutex = *new std::mutex;
+std::condition_variable& sRingData = *new std::condition_variable;
+std::condition_variable& sRingRoom = *new std::condition_variable;
 
 // The streams' write function (newlib's FILE::_write), in place of the write to the file.
 _READ_WRITE_RETURN_TYPE QueueWrite(struct _reent*, void*, const char* data, _READ_WRITE_BUFSIZE_TYPE size) {
