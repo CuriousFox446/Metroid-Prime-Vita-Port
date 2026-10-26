@@ -978,3 +978,32 @@ user saw was the death itself and play before it (10 to 20 FPS, a second at 3), 
   and partial tiles and mipmaps, none wrong. Compiled for the Vita, the per-block decode has no
   double-precision operation. These are step 2's four again, which on the user's save showed the
   pause menu's problem: this build's logs on that save are to tell what it is.
+
+## Tallon Overworld's frame rate (from step 1)
+
+The menu build's run (2dc9d4e's code; the user's save, then a new game): the title at 20 to 26
+frames a second, the file select 12 to 18 (its movie's decode 12 to 28 ms a frame); no load failed,
+no memory ran short, no crash; the pause and map screens opened (about 20 and 24 frames a second).
+The user: Tallon Overworld seems too taxing, things perhaps not loading in time; the frigate normal.
+Tallon's Landing Site ran at 7 to 10 frames a second, a frame 100 to 130 ms:
+- The FIFO thread was the limit: busy 107 ms of a 113 ms frame, the main thread waiting 38 ms a
+  frame for it (`begin-wait`). Of its 107: skinned list calls 50 (40 a frame, each its template's
+  1074 vertices or so, 2.4 MiB a frame), immediate draws 25 (about 590 a frame, 13,000 vertices:
+  the HUD's 446 small ones and 60 of the world's with 10,000 vertices), recording 9, state 6, and
+  the rest under 4 each.
+- The main thread: the ticks 34 ms (5.5 a frame, catching up), drawing 22, input 3 to 4 (the pad
+  read each tick, 0.76 ms).
+- Effects that read the screen are left out on this base (screen copies off): 112 to 276 draws a
+  window in Tallon, 96 on the frigate. Programs read from the card at their first draw (650 ms for
+  40) draw fixed-function meanwhile.
+- A skinned call copied its template and read each of its triangles' vertices again, a component
+  at a time (1.2 us a vertex): a position or normal index is in several triangles. Now a template
+  keeps its distinct position and normal index pairs and each vertex's among them; a call reads each
+  pair once, checks the arrays once against the largest indices, and copies the posed pairs to the
+  vertices. Components are read a vector at a time (`read_components`, the type and the 1 / 2^frac
+  scale worked out once), and `pack_normal` rounds as `std::lround` without its library call.
+  Against the code they replace, on the PC: 960,000 components over every type, fraction and byte
+  order, 2 million normals and the rounding's edges, all the same.
+- An immediate draw allocated its vertices, then its triangles or lines a push at a time (a line
+  list of hundreds doubling over and over). Now the vertices go in the FIFO thread's room for them
+  and the triangles and lines are sized at once (a list's triangles grow by doubling).

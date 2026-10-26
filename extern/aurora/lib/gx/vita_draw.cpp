@@ -183,8 +183,27 @@ struct SkinnedTemplate {
   GXVtxFmt fmt = GX_VTXFMT0; // the one vertex format the list's primitives name
   std::vector<vita_gl::Vertex> vertices;
   std::vector<VertexIndices> indices;
+  // The distinct position and normal index pairs the vertices read, each vertex's among them, and
+  // the largest indices: a call reads each pair once (a vertex is in several triangles), and
+  // checks the arrays once for all.
+  std::vector<VertexIndices> distinct;
+  std::vector<u32> slots;
+  u32 maxPos = 0;
+  u32 maxNrm = 0;
+  bool anyNormal = false;
 };
 std::unordered_map<const void*, SkinnedTemplate> sSkinned;
+
+// A skinned call's distinct vertices as posed (skinned_from_template), and the immediate draws'
+// vertices before they are made triangles (draw_immediate): the FIFO thread's, kept for their
+// room.
+struct PosedVertex {
+  float pos[3];
+  int8_t normal[3];
+  bool hasNormal;
+};
+std::vector<PosedVertex> sPosed;
+std::vector<vita_gl::Vertex> sPrims;
 
 // For log_stats: what became of the calls since the last report, and why lists were not drawn.
 struct Stats {
@@ -266,23 +285,45 @@ u32 read32(const u8* p, bool le) noexcept {
             : static_cast<u32>((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
 }
 
-float read_component(const u8* p, GXCompType type, u8 frac, bool le) noexcept {
-  const float scale = 1.f / static_cast<float>(1u << frac);
+// `count` components of `type` in a row (GX's byte order, or the host's where `le`), the integer
+// ones times `scale` (component_scale: 1 / 2^frac), the type and the scale worked out once for the
+// vector rather than for each component.
+void read_components(const u8* p, GXCompType type, float scale, bool le, u32 count, float* out) noexcept {
   switch (type) {
   case GX_U8:
-    return p[0] * scale;
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = p[c] * scale;
+    }
+    break;
   case GX_S8:
-    return static_cast<s8>(p[0]) * scale;
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = static_cast<s8>(p[c]) * scale;
+    }
+    break;
   case GX_U16:
-    return read16(p, le) * scale;
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = read16(p + c * 2, le) * scale;
+    }
+    break;
   case GX_S16:
-    return static_cast<s16>(read16(p, le)) * scale;
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = static_cast<s16>(read16(p + c * 2, le)) * scale;
+    }
+    break;
   case GX_F32:
-    return std::bit_cast<float>(read32(p, le));
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = std::bit_cast<float>(read32(p + c * 4, le));
+    }
+    break;
   default:
-    return 0.f;
+    for (u32 c = 0; c < count; ++c) {
+      out[c] = 0.f;
+    }
+    break;
   }
 }
+
+float component_scale(u8 frac) noexcept { return 1.f / static_cast<float>(1u << frac); }
 
 void read_color(const u8* p, GXCompType type, u8 out[4]) noexcept {
   switch (type) {
@@ -331,7 +372,12 @@ void pack_normal(const float n[3], int8_t out[3]) noexcept {
   const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
   const float scale = len > 1e-8f ? 127.f / len : 0.f;
   for (int c = 0; c < 3; ++c) {
-    out[c] = static_cast<int8_t>(std::lround(std::clamp(n[c] * scale, -127.f, 127.f)));
+    // std::lround's rounding (half away from zero) without its library call: the fraction a
+    // truncation leaves is exact at these magnitudes.
+    const float v = std::clamp(n[c] * scale, -127.f, 127.f);
+    const int whole = static_cast<int>(v);
+    const float fraction = v - static_cast<float>(whole);
+    out[c] = static_cast<int8_t>(fraction >= 0.5f ? whole + 1 : fraction <= -0.5f ? whole - 1 : whole);
   }
 }
 
@@ -396,26 +442,19 @@ bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, 
       le = array.le;
     }
     const u32 cnt = comp_cnt_count(attr, attrFmt.cnt);
-    const u32 step = comp_type_size(attr, attrFmt.type);
     if (attr == GX_VA_POS) {
-      for (u32 c = 0; c < cnt && c < 3; ++c) {
-        out.pos[c] = read_component(data + c * step, attrFmt.type, attrFmt.frac, le);
-      }
+      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, std::min<u32>(cnt, 3), out.pos);
     } else if (attr == GX_VA_NRM) {
       // The normal is the first three components (of a normal, binormal and tangent's nine too).
-      float n[3] = {};
-      for (u32 c = 0; c < 3; ++c) {
-        n[c] = read_component(data + c * step, attrFmt.type, attrFmt.frac, le);
-      }
+      float n[3];
+      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, 3, n);
       pack_normal(n, out.normal);
     } else if (attr == GX_VA_CLR0) {
       read_color(data, attrFmt.type, out.color);
       std::memcpy(out.raw, out.color, sizeof(out.raw));
     } else {
       float st[2] = {};
-      for (u32 c = 0; c < cnt && c < 2; ++c) {
-        st[c] = read_component(data + c * step, attrFmt.type, attrFmt.frac, le);
-      }
+      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, std::min<u32>(cnt, 2), st);
       for (int set = 0; set < kTexCoords; ++set) {
         if (texAttrs[set] == i) {
           out.uv[set][0] = st[0];
@@ -522,6 +561,10 @@ void triangulate(GXPrimitive type, const std::vector<vita_gl::Vertex>& prim, boo
   static std::vector<u32> order;
   order.clear();
   triangle_order(type, static_cast<u32>(prim.size()), order);
+  // Room for them at once (a list's primitives append in turn: the room grows by doubling).
+  if (const size_t needed = triangles.size() + order.size(); needed > triangles.capacity()) {
+    triangles.reserve(std::max(needed, triangles.capacity() * 2));
+  }
   for (size_t i = 0; i + 2 < order.size(); i += 3) {
     append_triangle(triangles, prim[order[i]], prim[order[i + 1]], prim[order[i + 2]], textured);
     if (primPos != nullptr && outPos != nullptr) {
@@ -1522,9 +1565,34 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       state.layout = layout_hash(state.fmtMask);
       t.vertices.clear();
       t.indices.clear();
+      t.distinct.clear();
+      t.slots.clear();
       return false;
     }
     t.fmt = static_cast<GXVtxFmt>(std::countr_zero(state.fmtMask));
+    // Each vertex's distinct index pair, in the order first met.
+    t.distinct.clear();
+    t.slots.clear();
+    t.maxPos = 0;
+    t.maxNrm = 0;
+    t.anyNormal = false;
+    std::unordered_map<u64, u32> seen;
+    seen.reserve(t.indices.size());
+    t.slots.reserve(t.indices.size());
+    for (const VertexIndices& v : t.indices) {
+      const auto [it, added] = seen.try_emplace((u64{v.pos} << 32) | v.nrm, static_cast<u32>(t.distinct.size()));
+      if (added) {
+        t.distinct.push_back(v);
+        t.maxPos = std::max(t.maxPos, v.pos);
+        if (v.nrm != UINT32_MAX) {
+          t.maxNrm = std::max(t.maxNrm, v.nrm);
+          t.anyNormal = true;
+        }
+      }
+      t.slots.push_back(it->second);
+    }
+    t.indices.clear();
+    t.indices.shrink_to_fit();
   }
   if (t.vertices.empty()) {
     return false;
@@ -1536,32 +1604,49 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   if (array.data == nullptr) {
     return false;
   }
+  // Every position the template reads inside the array as it is now: the largest index's is.
+  if ((u64{t.maxPos} + array.baseIndex) * array.stride + cnt * step > array.size) {
+    return false;
+  }
   const auto* base = static_cast<const u8*>(array.data);
-  // The normals too, where the descriptor indexes them (a direct one stays the template's).
+  const float posScale = component_scale(posFmt.frac);
+  // The normals too, where the descriptor indexes them (a direct one stays the template's); one
+  // outside its array keeps the template's.
   const GXAttrType nrmType = g_gxState.vtxDesc[GX_VA_NRM];
   const VtxAttrFmt& nrmFmt = g_gxState.vtxFmts[t.fmt].attrs[GX_VA_NRM];
   const AttrArray& nrmArray = g_gxState.arrays[GX_VA_NRM];
-  const bool normals = (nrmType == GX_INDEX8 || nrmType == GX_INDEX16) && nrmArray.data != nullptr;
+  const bool normals = (nrmType == GX_INDEX8 || nrmType == GX_INDEX16) && nrmArray.data != nullptr && t.anyNormal;
   const u32 nrmStep = comp_type_size(GX_VA_NRM, nrmFmt.type);
   const auto* nrmBase = static_cast<const u8*>(nrmArray.data);
+  const float nrmScale = component_scale(nrmFmt.frac);
+  const bool allNormalsInside =
+      normals && (u64{t.maxNrm} + nrmArray.baseIndex) * nrmArray.stride + 3 * nrmStep <= nrmArray.size;
+  // Each distinct pair posed once, then copied to the vertices that read it.
+  sPosed.resize(t.distinct.size());
+  for (size_t d = 0; d < t.distinct.size(); ++d) {
+    const VertexIndices& v = t.distinct[d];
+    PosedVertex& posed = sPosed[d];
+    read_components(base + (u64{v.pos} + array.baseIndex) * array.stride, posFmt.type, posScale, array.le, cnt,
+                    posed.pos);
+    posed.hasNormal = false;
+    if (normals && v.nrm != UINT32_MAX) {
+      const u64 nrmOffset = (u64{v.nrm} + nrmArray.baseIndex) * nrmArray.stride;
+      if (allNormalsInside || nrmOffset + 3 * nrmStep <= nrmArray.size) {
+        float n[3];
+        read_components(nrmBase + nrmOffset, nrmFmt.type, nrmScale, nrmArray.le, 3, n);
+        pack_normal(n, posed.normal);
+        posed.hasNormal = true;
+      }
+    }
+  }
   out = t.vertices;
   for (size_t i = 0; i < out.size(); ++i) {
-    const u64 offset = u64(t.indices[i].pos + array.baseIndex) * array.stride;
-    if (offset + cnt * step > array.size) {
-      return false;
-    }
+    const PosedVertex& posed = sPosed[t.slots[i]];
     for (u32 c = 0; c < cnt; ++c) {
-      out[i].pos[c] = read_component(base + offset + c * step, posFmt.type, posFmt.frac, array.le);
+      out[i].pos[c] = posed.pos[c];
     }
-    if (normals && t.indices[i].nrm != UINT32_MAX) {
-      const u64 nrmOffset = u64(t.indices[i].nrm + nrmArray.baseIndex) * nrmArray.stride;
-      if (nrmOffset + 3 * nrmStep <= nrmArray.size) {
-        float n[3];
-        for (u32 c = 0; c < 3; ++c) {
-          n[c] = read_component(nrmBase + nrmOffset + c * nrmStep, nrmFmt.type, nrmFmt.frac, nrmArray.le);
-        }
-        pack_normal(n, out[i].normal);
-      }
+    if (posed.hasNormal) {
+      std::memcpy(out[i].normal, posed.normal, sizeof(posed.normal));
     }
   }
   return true;
@@ -1624,7 +1709,9 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   const TexAttrs& texAttrs = material.texAttrs;
-  std::vector<vita_gl::Vertex> prims;
+  // The vertices in the FIFO thread's room for them (no allocation a draw); the mesh's own copy is
+  // made at its size.
+  std::vector<vita_gl::Vertex>& prims = sPrims;
   const u8* vtx = vertices.data();
   sLastFail = Fail::None;
   if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, prims)) {
@@ -1636,6 +1723,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     // line width is not applied.
     std::vector<vita_gl::Vertex> lines;
     const size_t step = prim == GX_LINES ? 2 : 1;
+    lines.reserve(prims.size() < 2 ? 0 : prim == GX_LINES ? prims.size() / 2 * 2 : (prims.size() - 1) * 2);
     for (size_t i = 0; i + 1 < prims.size(); i += step) {
       lines.push_back(prims[i]);
       lines.push_back(prims[i + 1]);
@@ -1673,7 +1761,7 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
     return false;
   }
   const TexAttrs& texAttrs = material.texAttrs;
-  std::vector<vita_gl::Vertex> prims;
+  std::vector<vita_gl::Vertex>& prims = sPrims; // as draw_immediate's
   const u8* vtx = vertices.data();
   sLastFail = Fail::None;
   if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, prims)) {
