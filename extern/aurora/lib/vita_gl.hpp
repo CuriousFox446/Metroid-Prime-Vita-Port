@@ -202,18 +202,7 @@ struct Draw {
   std::shared_ptr<Texture> copyTo;
   CopyKind copyKind = CopyKind::Rgb;
   bool copyHalf = false;
-  // For the log (gx/vita_draw.cpp's frame probe): its index in the frame, the render worker logs
-  // how it drew it (-1: not logged).
-  int16_t probe = -1;
-  // For the card (gx/vita_draw.cpp's PauseDump): the screen saved after it (0 to 7), its first
-  // texture shown and saved before it (kDumpTexture), the screen saved at its frame's end
-  // (kDumpFrameEnd), or, the camera blur's first frame (kDumpBlurBegin and on, one a time it
-  // begins), its texture and the screen after it saved and its frame's copies logged; -1: none.
-  int8_t dump = -1;
 };
-constexpr int8_t kDumpTexture = 8;
-constexpr int8_t kDumpFrameEnd = 9;
-constexpr int8_t kDumpBlurBegin = 10;
 
 #ifdef AURORA_VITA_GL
 // Starts vitaGL at the screen's size (true). After it GXM is vitaGL's: SDL's renderer, GXM

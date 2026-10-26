@@ -1358,6 +1358,18 @@ no copy went into the blur's texture in the 40 frames after it began, none was l
   log also has the first three blur quads as the list has them and as decoded, the program's
   attribute locations in the render probe lines, and its rows in the blur's first line.
 
+Set aside (the user, after 1e0f2bf and 3433fc7): no progress on the backdrop, and the map screen
+crashed with it. The pause screens' backdrop goes back to plain black until the game runs faster:
+on the Vita, `CCameraBlurPass::Draw` draws CPauseScreenBlur's persistent blur (the pause and map
+screens, the save and message screens) as an opaque black quad, with no copy and no seven-tap
+blur, and counts the copy as made, so the world stops being drawn behind them as before. The other
+blurs (the cinematics', the world transitions', the X-ray visor's) still copy and blur. The pause
+probes are gone: the frame probe, the pause screen's and the blur's dumps (screen readbacks, the
+texture's memory, the per-present hash), the copy and blur-quad logs. What the investigation made
+general stays: the render targets' scenes a frame and the frames kept within them, coordinate
+slots sharing mesh sets, the fragment-made 2x4 slots and their stages' coordinates (1e0f2bf), and
+`resolution.txt`.
+
 ## Milestone 6: the main menu's speed
 
 The user asked for the main menu (1938b24's log, its first 70 seconds): 7 to 11 frames a second,

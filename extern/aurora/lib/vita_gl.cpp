@@ -19,7 +19,6 @@ extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 #include <cstdio>
 
 #include <fmt/format.h>
-#include <xxhash.h>
 
 #include <pthread.h>
 
@@ -394,21 +393,6 @@ public:
   }
 
   GLuint id() const noexcept { return m_id; }
-  // Its size now (a copy texture's: its latest copy's, in the screen's pixels), and how many render
-  // targets it keeps (for the log).
-  uint32_t width() const noexcept { return m_width; }
-  uint32_t height() const noexcept { return m_height; }
-  size_t targets() const noexcept { return m_targets.size(); }
-  // For the log: its size, then each render target's, how many presents ago a copy drew into it and
-  // in how many scenes then, and which is bound.
-  std::string describe() const {
-    std::string text = fmt::format("{} {}x{}", static_cast<const void*>(this), m_width, m_height);
-    for (const Target& t : m_targets) {
-      text += fmt::format("; target {}x{} copied {} presents ago in {} scenes{}", t.width, t.height,
-                          g_presentSerial - t.lastUsed, t.scenes, t.texture == m_id ? " (bound)" : "");
-    }
-    return text;
-  }
 
 private:
   void settle_pending() noexcept {
@@ -1505,30 +1489,6 @@ void copy_matrix(CopyKind kind, float rows[5][4]) noexcept {
   }
 }
 
-// For the card (VITA_PHASE2.md: the pause screen's backdrop): the screen at half its size, as a PPM
-// in the game's folder. glReadPixels ends the display's scene and waits for the GPU (a framebuffer's
-// own texture came back black that way: show_texture draws it on the screen first).
-void dump_screen(const std::string& name) noexcept {
-  std::vector<uint8_t> rgba(static_cast<size_t>(g_width) * g_height * 4);
-  glReadPixels(0, 0, g_width, g_height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-  const int width = g_width / 2;
-  const int height = g_height / 2;
-  const std::string path = std::string{g_config.userPath} + "/" + name;
-  if (FILE* file = std::fopen(path.c_str(), "wb")) {
-    std::fprintf(file, "P6\n%d %d\n255\n", width, height);
-    std::vector<uint8_t> rgb(static_cast<size_t>(width) * 3);
-    for (int row = height - 1; row >= 0; --row) { // GL's rows run bottom up
-      const uint8_t* line = &rgba[static_cast<size_t>(row) * 2 * g_width * 4];
-      for (int col = 0; col < width; ++col) {
-        std::memcpy(&rgb[static_cast<size_t>(col) * 3], line + static_cast<size_t>(col) * 2 * 4, 3);
-      }
-      std::fwrite(rgb.data(), 1, rgb.size(), file);
-    }
-    std::fclose(file);
-  }
-  Log.info("[probe] {}: the screen at {}x{}", path, width, height);
-}
-
 // The copy pass's quad: a position in clip space and a texture coordinate.
 struct CopyVertex {
   float pos[3];
@@ -1547,143 +1507,6 @@ void draw_copy_quad(Program& program, const CopyVertex (&quad)[6]) noexcept {
     glDisableVertexAttribArray(pos);
     glDisableVertexAttribArray(uv);
   }
-}
-
-// For the card (dump_screen): `texture` drawn over the whole screen as it holds it (a copy's first
-// row, GX's, at the top), with the copy pass's program. Leaves what copy_on_gpu leaves.
-void show_texture(const Texture& texture) noexcept {
-  int compiles = 1;
-  int loads = 1;
-  if (!g_copyProgram || !g_copyProgram->ready(compiles, loads)) {
-    return;
-  }
-  glActiveTexture(GL_TEXTURE0);
-  glViewport(0, 0, g_width, g_height);
-  glDisable(GL_SCISSOR_TEST);
-  glDisable(GL_BLEND);
-  glDisable(GL_DEPTH_TEST);
-  glDepthMask(GL_FALSE);
-  glDisable(GL_CULL_FACE);
-  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-  Program& program = *g_copyProgram;
-  glUseProgram(program.id());
-  float rows[5][4];
-  copy_matrix(CopyKind::Rgba, rows);
-  program.send_constants(rows, 5);
-  glBindTexture(GL_TEXTURE_2D, texture.id());
-  const CopyVertex quad[6] = {
-      {{-1.f, -1.f, 0.f}, {0.f, 1.f}}, {{1.f, -1.f, 0.f}, {1.f, 1.f}}, {{1.f, 1.f, 0.f}, {1.f, 0.f}},
-      {{-1.f, -1.f, 0.f}, {0.f, 1.f}}, {{1.f, 1.f, 0.f}, {1.f, 0.f}},  {{-1.f, 1.f, 0.f}, {0.f, 0.f}},
-  };
-  draw_copy_quad(program, quad);
-  glUseProgram(0);
-}
-
-// For the card: `texture`'s descriptor as vitaGL keeps it (bound to unit 0 to get it): its layout,
-// format, size, data, mipmaps, filters (min, mag, mip) and addressing (u, v), and the raw words.
-std::string describe_gxm(const Texture& texture) {
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, texture.id());
-  const SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D);
-  if (gxm == nullptr) {
-    return "no descriptor";
-  }
-  const auto type = static_cast<uint32_t>(sceGxmTextureGetType(gxm));
-  const auto* words = reinterpret_cast<const uint32_t*>(gxm);
-  return fmt::format("type {:x} format {:x} {}x{} stride {} data {} (vitaGL's {}) mipmaps {} filters {}/{}/{} "
-                     "addressing {}/{}; words {:08x} {:08x} {:08x} {:08x}",
-                     type, static_cast<uint32_t>(sceGxmTextureGetFormat(gxm)), sceGxmTextureGetWidth(gxm),
-                     sceGxmTextureGetHeight(gxm), type == SCE_GXM_TEXTURE_LINEAR_STRIDED ? sceGxmTextureGetStride(gxm) : 0,
-                     static_cast<const void*>(sceGxmTextureGetData(gxm)),
-                     static_cast<const void*>(vglGetTexDataPointer(GL_TEXTURE_2D)), sceGxmTextureGetMipmapCount(gxm),
-                     static_cast<int>(sceGxmTextureGetMinFilter(gxm)), static_cast<int>(sceGxmTextureGetMagFilter(gxm)),
-                     static_cast<int>(sceGxmTextureGetMipFilter(gxm)), static_cast<int>(sceGxmTextureGetUAddrMode(gxm)),
-                     static_cast<int>(sceGxmTextureGetVAddrMode(gxm)), words[0], words[1], words[2], words[3]);
-}
-
-// For the card: `texture`'s memory as the CPU reads it, at its size, its first row at the top (a
-// copy's: GX's top row), with its descriptor to the log. Only after a readback (dump_screen) has
-// the GPU done with what came before: what the texture's memory holds, apart from how it is sampled.
-void dump_texture_memory(const Texture& texture, const std::string& name) noexcept {
-  const std::string descriptor = describe_gxm(texture);
-  const SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D);
-  const auto* data = static_cast<const uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
-  if (gxm == nullptr || data == nullptr) {
-    Log.info("[probe] {}: no texture memory ({})", name, descriptor);
-    return;
-  }
-  const auto width = static_cast<int>(sceGxmTextureGetWidth(gxm));
-  const auto height = static_cast<int>(sceGxmTextureGetHeight(gxm));
-  // A linear texture's rows are its width rounded up to 8 texels (RGBA8: 4 bytes each).
-  const size_t stride = sceGxmTextureGetType(gxm) == SCE_GXM_TEXTURE_LINEAR_STRIDED
-                            ? sceGxmTextureGetStride(gxm)
-                            : static_cast<size_t>((width + 7) & ~7) * 4;
-  const std::string path = std::string{g_config.userPath} + "/" + name;
-  if (FILE* file = std::fopen(path.c_str(), "wb")) {
-    std::fprintf(file, "P6\n%d %d\n255\n", width, height);
-    std::vector<uint8_t> rgb(static_cast<size_t>(width) * 3);
-    for (int row = 0; row < height; ++row) {
-      const uint8_t* line = data + static_cast<size_t>(row) * stride;
-      for (int col = 0; col < width; ++col) {
-        std::memcpy(&rgb[static_cast<size_t>(col) * 3], line + static_cast<size_t>(col) * 4, 3);
-      }
-      std::fwrite(rgb.data(), 1, rgb.size(), file);
-    }
-    std::fclose(file);
-  }
-  Log.info("[probe] {}: the texture's memory at {}x{}, rows of {} bytes, its first texel {:02x}{:02x}{:02x}{:02x}; "
-           "its descriptor: {}",
-           path, width, height, stride, data[0], data[1], data[2], data[3], descriptor);
-}
-
-// For the card: the camera blur's texture from its first frame on (draw_world sets it), its memory
-// hashed at each present's start (not waiting for the GPU: within a frame or two) and logged where
-// it or the texture's descriptor changes, to tell when what it holds turns to the flat picture.
-struct BlurWatch {
-  std::weak_ptr<Texture> texture;
-  int presents = 0; // still to watch
-  int seen = 1;     // presents since the blur's first frame
-  uint64_t hash = 0;
-  std::string descriptor;
-};
-BlurWatch g_blurWatch;
-constexpr int kBlurWatchPresents = 30;
-
-void watch_blur_texture() noexcept {
-  if (g_blurWatch.presents <= 0) {
-    return;
-  }
-  --g_blurWatch.presents;
-  const int seen = g_blurWatch.seen++;
-  const std::shared_ptr<Texture> texture = g_blurWatch.texture.lock();
-  if (!texture) {
-    Log.info("[probe] the camera blur's texture, {} presents on: gone", seen);
-    g_blurWatch.presents = 0;
-    return;
-  }
-  const std::string descriptor = describe_gxm(*texture);
-  const SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D);
-  const auto* data = static_cast<const uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
-  if (gxm == nullptr || data == nullptr) {
-    return;
-  }
-  const size_t width = sceGxmTextureGetWidth(gxm);
-  const size_t height = sceGxmTextureGetHeight(gxm);
-  const size_t stride = ((width + 7) & ~size_t{7}) * 4;
-  const uint64_t hash = XXH3_64bits(data, stride * height);
-  if (hash == g_blurWatch.hash && descriptor == g_blurWatch.descriptor) {
-    return;
-  }
-  // Its texels at the corner (the flat quarter's colour) and at the middle (where the quarters meet).
-  uint32_t corner;
-  uint32_t middle;
-  std::memcpy(&corner, data, 4);
-  std::memcpy(&middle, data + (height / 2) * stride + (width / 2) * 4, 4);
-  Log.info("[probe] the camera blur's texture, {} presents on: its memory's hash {:016x}, texels {:08x} {:08x}{}{}", seen,
-           hash, corner, middle, descriptor == g_blurWatch.descriptor ? "" : "; its descriptor: ",
-           descriptor == g_blurWatch.descriptor ? "" : descriptor);
-  g_blurWatch.hash = hash;
-  g_blurWatch.descriptor = descriptor;
 }
 
 // What copy_on_gpu did with a copy: made it, found its rectangle empty, left it for the pass's
@@ -1860,7 +1683,6 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
 }
 
 void draw_world(const Frame& frame) {
-  watch_blur_texture();
   const std::vector<Draw>& draws = frame.draws;
   if (draws.empty()) {
     return;
@@ -1951,9 +1773,9 @@ void draw_world(const Frame& frame) {
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
-  // Around a pass of this file's own (an EFB copy, a texture shown for the card), which draws with
-  // a program and without the fixed-function arrays: the program in use, its uniforms, the
-  // matrices, the rectangles, the line width and the state are all set again at the next draw.
+  // Around a pass of this file's own (an EFB copy), which draws with a program and without the
+  // fixed-function arrays: the program in use, its uniforms, the matrices, the rectangles, the line
+  // width and the state are all set again at the next draw.
   const auto leave_draws = [&]() {
     enter_fixed_function();
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -1981,7 +1803,7 @@ void draw_world(const Frame& frame) {
     width = 0;
   };
   // The display's scenes this frame: present's clear begins the first, and the first draw or clear
-  // after a copy's blit (or a readback) ended one begins the next. Its render target is made for
+  // after a copy's blit ended one begins the next. Its render target is made for
   // kDisplayScenesPerFrame, GXM's most, and a frame drawn in more came back with stale tiles (the
   // Phazon Suit's effect alone begins four; the cinematics with Samus in hers, more): a copy that
   // would end the last is left for the next frame, its texture keeping the last frame's.
@@ -1993,35 +1815,6 @@ void draw_world(const Frame& frame) {
       displayOpen = true;
     }
   };
-  // The pause screen's steps for the card (gx/vita_draw.cpp's PauseDump), each a readback: it ends
-  // the display's scene, so only with two of its scenes to spare (its own draw's, the next draw's).
-  const auto can_save = [&displayScenes]() { return displayScenes + 2 <= kDisplayScenesPerFrame; };
-  const auto save_screen = [&](const std::string& name) {
-    dump_screen(name);
-    displayOpen = false;
-    return_to_draws();
-  };
-  // The name a dump's step saves under after its draw (vita_gl.hpp, Draw::dump).
-  const auto after_name = [](int8_t dump) {
-    return dump >= kDumpBlurBegin ? fmt::format("blur{}_after.ppm", dump - kDumpBlurBegin + 1)
-                                  : fmt::format("pause_{}_after.ppm", dump);
-  };
-  // A dump's step after its draw: the screen; at the blur's first frame, its texture's memory too
-  // (whether the blur's own draw changed it).
-  const auto save_after = [&](const Draw& draw, const Texture* texture) {
-    if (!((draw.dump >= 0 && draw.dump < kDumpTexture) || draw.dump >= kDumpBlurBegin) || !can_save()) {
-      return;
-    }
-    save_screen(after_name(draw.dump));
-    if (draw.dump >= kDumpBlurBegin && texture != nullptr) {
-      leave_draws();
-      dump_texture_memory(*texture, fmt::format("blur{}_memory_after.ppm", draw.dump - kDumpBlurBegin + 1));
-      return_to_draws();
-    }
-  };
-  bool saveAtEnd = false;
-  // This frame's copies so far, for the camera blur's first frame (kDumpBlurBegin).
-  std::vector<std::string> frameCopies;
   uint32_t sceneDraws = 0;
   for (const Draw& draw : draws) {
     if (draw.clear) {
@@ -2048,23 +1841,11 @@ void draw_world(const Frame& frame) {
       // An EFB copy (copy_on_gpu): scenes of its own, its blit ending the display's.
       if (displayOpen && displayScenes >= kDisplayScenesPerFrame) {
         ++g_presentStats.copiesOverDisplayScenes;
-        frameCopies.push_back(fmt::format("{}: left for the next frame (the display's last scene)",
-                                          draw.copyTo->describe()));
-        if (draw.probe >= 0) {
-          Log.info("[probe] render {}: copy left for the next frame (the display's last scene)", draw.probe);
-        }
         continue;
       }
       const uint64_t start = sceKernelGetProcessTimeWide();
       leave_draws();
       const CopyResult result = copy_on_gpu(draw);
-      static constexpr const char* kResults[] = {"made", "of an empty rectangle", "waiting for its program",
-                                                 "left for the next frame (a framebuffer's scenes)"};
-      frameCopies.push_back(fmt::format("{}: {}", draw.copyTo->describe(), kResults[static_cast<int>(result)]));
-      if (draw.probe >= 0) {
-        Log.info("[probe] render {}: copy {} into {}x{} ({} targets)", draw.probe, kResults[static_cast<int>(result)],
-                 draw.copyTo->width(), draw.copyTo->height(), draw.copyTo->targets());
-      }
       return_to_draws();
       const bool made = result == CopyResult::Made;
       if (made) {
@@ -2083,79 +1864,6 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
-    // The draw's first texture, for its dump's step (save_after).
-    Texture* dumpTexture = nullptr;
-    if (draw.dump == kDumpTexture || draw.dump >= kDumpBlurBegin) {
-      // The draw's first texture (the camera blur's copy) on the screen, saved, and its memory; the
-      // draw (the blur, opaque over the whole screen) then covers it. At the blur's first frame, the
-      // texture and the frame's copies to the log as well, and the texture shown again once the
-      // blur's sampler is set on it.
-      const std::shared_ptr<Texture>& shared =
-          draw.program.textures[0] != nullptr ? draw.program.textures[0] : draw.units[0].texture;
-      Texture* texture = shared.get();
-      dumpTexture = texture;
-      const int blur = draw.dump - kDumpBlurBegin + 1;
-      if (draw.dump >= kDumpBlurBegin && shared != nullptr) {
-        g_blurWatch = BlurWatch{.texture = shared, .presents = kBlurWatchPresents};
-      }
-      if (draw.dump >= kDumpBlurBegin) {
-        std::string copies;
-        for (const std::string& c : frameCopies) {
-          copies += fmt::format("\n  {}", c);
-        }
-        // Its program's rows as sent: the vertex program's (the projection times the position
-        // matrix first) and the fragment program's constants.
-        std::string rows;
-        const ProgramInputs& in = draw.program;
-        for (int r = 0; r < in.vertexCount && in.vertexAt + r < frame.constants.size(); ++r) {
-          const auto& v = frame.constants[in.vertexAt + r];
-          rows += fmt::format(" v{}({:.4g} {:.4g} {:.4g} {:.4g})", r, v[0], v[1], v[2], v[3]);
-        }
-        for (int r = 0; r < in.constantCount && in.constantsAt + r < frame.constants.size(); ++r) {
-          const auto& c = frame.constants[in.constantsAt + r];
-          rows += fmt::format(" c{}({:.4g} {:.4g} {:.4g} {:.4g})", r, c[0], c[1], c[2], c[3]);
-        }
-        Log.info("[probe] the camera blur begins ({}): its texture {}; the display's scenes so far {}; its rows:{}; "
-                 "the frame's copies:{}",
-                 blur, texture != nullptr ? texture->describe() : "none", displayScenes, rows,
-                 copies.empty() ? " none" : copies);
-      }
-      if (texture != nullptr && can_save()) {
-        begin_display();
-        leave_draws();
-        show_texture(*texture);
-        return_to_draws();
-        save_screen(draw.dump >= kDumpBlurBegin ? fmt::format("blur{}_texture.ppm", blur)
-                                                : fmt::format("pause_{}_texture.ppm", draw.dump));
-        leave_draws();
-        dump_texture_memory(*texture, draw.dump >= kDumpBlurBegin ? fmt::format("blur{}_memory.ppm", blur)
-                                                                  : fmt::format("pause_{}_memory.ppm", draw.dump));
-        return_to_draws();
-        set_rects(draw.viewport, draw.scissor);
-      }
-      if (draw.dump >= kDumpBlurBegin && texture != nullptr && can_save()) {
-        // Bound as the blur's draw binds it (that bind then changes nothing), its sampler set.
-        begin_display();
-        leave_draws();
-        bound.bind(0, *texture, draw.program.textures[0] != nullptr ? draw.program.samplers[0] : draw.units[0].sampler,
-                   false);
-        show_texture(*texture);
-        return_to_draws();
-        save_screen(fmt::format("blur{}_sampled.ppm", blur));
-        set_rects(draw.viewport, draw.scissor);
-      }
-      // And the copies' scratch, the blit's picture before the pass (upside down: GL's rows), to
-      // tell which of the two left a quarter of the copy black (6eeff2c's run).
-      if (draw.dump >= kDumpBlurBegin && g_copyScratch != nullptr && can_save()) {
-        begin_display();
-        leave_draws();
-        show_texture(*g_copyScratch);
-        return_to_draws();
-        save_screen(fmt::format("blur{}_scratch.ppm", blur));
-        set_rects(draw.viewport, draw.scissor);
-      }
-    }
-    saveAtEnd = saveAtEnd || draw.dump == kDumpFrameEnd;
     begin_display();
     g_presentStats.maxSceneDraws = std::max(g_presentStats.maxSceneDraws, ++sceneDraws);
     if (draw.width != width && draw.mesh->mode() != GL_TRIANGLES) {
@@ -2176,36 +1884,10 @@ void draw_world(const Frame& frame) {
       }
       g_clock.mark(kBuild);
     }
-    if (draw.probe >= 0) {
-      std::string textures;
-      for (int i = 0; i < kSamplers && program != nullptr; ++i) {
-        const Texture* texture = draw.program.textures[i].get();
-        textures += texture != nullptr ? fmt::format(" t{} {} {}x{}", i, static_cast<const void*>(texture),
-                                                     texture->width(), texture->height())
-                                       : "";
-      }
-      for (int unit = 0; unit < kTexUnits && program == nullptr; ++unit) {
-        const Texture* texture = draw.units[unit].texture.get();
-        textures += texture != nullptr ? fmt::format(" u{} {} {}x{}", unit, static_cast<const void*>(texture),
-                                                     texture->width(), texture->height())
-                                       : "";
-      }
-      // A program's attribute locations (-1: not in it), position, raw colour, shade, normal, sets.
-      std::string attrs;
-      for (int i = 0; i < kAttrCount && program != nullptr; ++i) {
-        attrs += fmt::format(" {}", program->attr(i));
-      }
-      Log.info("[probe] render {}: {}, {} vertices;{}{}{}", draw.probe,
-               program != nullptr                ? "program"
-               : draw.program.program != nullptr ? "fixed-function, its program not ready"
-                                                 : "fixed-function",
-               draw.mesh->count(), textures, attrs.empty() ? "" : "; attributes", attrs);
-    }
     if (program != nullptr) {
       ++g_presentStats.programDraws;
       g_clock.programDraws += g_clock.on ? 1 : 0;
       draw_with_program(draw, frame, *program, usedProgram, attribsOn, current, bound);
-      save_after(draw, dumpTexture);
       continue;
     }
     if (draw.program.program != nullptr) {
@@ -2275,10 +1957,6 @@ void draw_world(const Frame& frame) {
     g_presentCosts.fixedMaxUs = std::max(g_presentCosts.fixedMaxUs, fixedUs);
     ++g_presentCosts.fixedDraws;
     g_clock.mark(kFixedDraw);
-    save_after(draw, dumpTexture);
-  }
-  if (saveAtEnd) {
-    dump_screen(fmt::format("pause_{}_frame.ppm", kDumpFrameEnd));
   }
   g_presentStats.maxDisplayScenes = std::max(g_presentStats.maxDisplayScenes, static_cast<uint32_t>(displayScenes));
   enter_fixed_function();
