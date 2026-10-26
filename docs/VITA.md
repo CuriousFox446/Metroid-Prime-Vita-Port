@@ -88,9 +88,13 @@ On a Vita with HENkaku/Ensō:
 2. Copy your own disc image, a plain `.iso` or `.gcm` of *Metroid Prime* (USA 1.00,
    `GM8E01`), to `ux0:data/MetroidPrime/`. The first one found is used; `MP_DISC`
    is not settable on the Vita.
-3. Start **Metroid Prime Port (headless)**. It boots straight into a new game
-   (`MP_FAST_BOOT`), so the opening on the frigate runs without input. Leave it
-   for a few minutes, then close it from the LiveArea.
+3. Start **Metroid Prime**. The front end runs: the boot logos, the title, file
+   select (the headless build booted straight into a new game with `MP_FAST_BOOT`,
+   which the Vita no longer sets). The saves are a GCI folder,
+   `ux0:data/MetroidPrime/USA/Card A`, with Dolphin's names
+   (`01-GM8E-MetroidPrime A.gci` and `B`): a USA save from Dolphin can be copied
+   in, the game's own `A` and `B` moved out first (it loads the newer of the two).
+   Close it from the LiveArea.
 4. Fetch `ux0:data/MetroidPrime/metroid_prime_port.log` (VitaShell FTP or USB).
    Before the log starts, early output goes to `stdout.txt` and `stderr.txt` in the
    same folder. A crash leaves a core dump in `ux0:data/` (`psp2core-*.psp2dmp`).

@@ -123,10 +123,10 @@ __attribute__((constructor(101))) void vitaSetup() {
     }
 
     setenv("MP_USER_PATH", kDataDir, 0);
-    // The headless build exists to time the game: log presented/throughput FPS once a
-    // second, and boot straight into a new game, since the menus cannot be seen.
+    // Log presented/throughput FPS once a second. The front end runs (the boot logos, the
+    // title, file select), so a save can be loaded: the headless build, whose menus could not
+    // be seen, booted straight into a new game instead (MP_FAST_BOOT).
     setenv("MP_TRACE_TIMING", "1", 0);
-    setenv("MP_FAST_BOOT", "1", 0);
     // The retail world geometry's display lists made into GPU-side triangle lists once,
     // instead of re-read primitive by primitive every frame (port_retail_resident.h).
     setenv("MP_RETAIL_RESIDENT", "1", 0);
