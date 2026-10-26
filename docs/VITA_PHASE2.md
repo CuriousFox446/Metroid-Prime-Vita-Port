@@ -1108,3 +1108,26 @@ vertex its own, alike corners sharing one, the indexed and per-corner paths the 
 normal, coordinates and colour; past 65,536 vertices no order. The `skinned calls:` line adds the
 calls drawn by index and their corners against their vertices: the ratio on the parasites is the
 gain. Left for a later look: the particles' update (the GPU and the main thread in the swarm).
+
+Its runs (b154f27; both apps at the frigate's start): textures broken in both, differently. The
+main app's helmet frame (its top band and bottom corners) was coloured noise in 4x4 blocks; the
+demo's gunship and Samus's cutscene model had black textures; a square of noise around the arm
+cannon (an effect), and smaller patches elsewhere. Not the programs: the demo's logs match
+fc76049's window by window (1, 5, 17, 18, 19 and 23 programs, every draw with its program, the
+same draws by unit count), and no indirect material was worked out in either app. The difference
+was the skinned calls, drawn by index (`300 drawn by index` a window in the cutscene).
+- vitaGL copies a draw's client-memory arrays and indices into its per-frame pool
+  (`vgl_reserve_data_pool`), which moves its pointer on by each size, unaligned. Before b154f27
+  everything put there during a frame's draws was 56-byte vertices (the legacy pool 256 KiB), so
+  it stayed 8-byte aligned. `glDrawElements` added the indices, 6 bytes a triangle: off by 2, 4 or 6
+  bytes after any call whose triangles were not a multiple of 4.
+- A BC1 texture's upload (`gpu_alloc_compressed_texture`, at its first draw) is staged in that
+  pool and read by `sceGxmTransferCopy` as 8-byte blocks into the swizzled texture: from an
+  address off by 2 its colours and indices mix (noise), or nothing lands (black). RGBA8 textures
+  are written by the CPU, so only the BC1 ones broke, and only those first drawn after such a
+  call that frame: which ones is a matter of timing, hence the two apps' different damage. The
+  textures stay so for the session.
+- Now the indices a template shares are padded to a multiple of 12 with triangles of one vertex
+  (`vita_gl::pad_triangle_indices`), so every copy is whole 8-byte blocks; and the draw is
+  `glDrawRangeElements` with the vertex count, so vitaGL no longer looks through the indices for
+  the largest at each draw.

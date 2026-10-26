@@ -96,12 +96,12 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
 class Mesh {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
-  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
-    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_vertexCount(m_count), m_kind(kind),
+    m_client(clientMemory), m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
   Mesh(std::vector<Vertex> vertices, std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
        bool clientMemory) noexcept
   : m_cpu(std::move(vertices)), m_indices(std::move(indices)), m_count(static_cast<GLsizei>(m_indices->size())),
-    m_kind(kind), m_client(clientMemory), m_mode(GL_TRIANGLES) {}
+    m_vertexCount(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory), m_mode(GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -132,7 +132,7 @@ public:
   // What a draw draws: its vertices, or for a mesh drawn by index its indices.
   GLsizei count() const noexcept { return m_count; }
   // The vertices it holds, for the log (a mesh drawn by index has fewer than it draws).
-  GLsizei vertex_count() const noexcept { return m_indices ? static_cast<GLsizei>(m_cpu.size()) : m_count; }
+  GLsizei vertex_count() const noexcept { return m_vertexCount; }
   MeshKind kind() const noexcept { return m_kind; }
   // What glDrawArrays draws it as: GL_TRIANGLES or GL_LINES.
   GLenum mode() const noexcept { return m_mode; }
@@ -142,10 +142,12 @@ public:
   }
 
   // Render worker, its arrays set (bind): draws its `count` vertices, or its indices into them.
-  // vitaGL copies client-memory arrays up to the largest index a draw names.
+  // vitaGL copies client-memory arrays up to the range's end; named, it does not look through the
+  // indices for their largest.
   void draw(GLsizei count) const noexcept {
     if (m_indices) {
-      glDrawElements(m_mode, count, GL_UNSIGNED_SHORT, m_indices->data());
+      glDrawRangeElements(m_mode, 0, static_cast<GLuint>(m_vertexCount - 1), count, GL_UNSIGNED_SHORT,
+                          m_indices->data());
     } else {
       glDrawArrays(m_mode, 0, count);
     }
@@ -156,6 +158,7 @@ private:
   std::shared_ptr<const std::vector<uint16_t>> m_indices;
   GLuint m_vbo = 0;
   GLsizei m_count;
+  GLsizei m_vertexCount;
   MeshKind m_kind;
   bool m_client;
   GLenum m_mode;
@@ -170,6 +173,12 @@ std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
                                         std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
                                         bool clientMemory) noexcept {
   return std::make_shared<Mesh>(std::move(vertices), std::move(indices), kind, clientMemory);
+}
+
+void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept {
+  if (!indices.empty()) {
+    indices.insert(indices.end(), (12 - indices.size() % 12) % 12, indices.back());
+  }
 }
 
 class Texture {

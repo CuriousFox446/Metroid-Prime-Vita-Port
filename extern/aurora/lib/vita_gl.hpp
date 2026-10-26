@@ -72,11 +72,19 @@ class Mesh;
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false,
                                 MeshPrimitive primitive = MeshPrimitive::Triangles) noexcept;
 // Triangles drawn by index: `vertices` once each, `indices` (three a triangle, shared by every
-// mesh made from them) into them. A skinned call's mesh (gx/vita_draw.cpp): its template's
-// distinct vertices posed for this frame, the template's corners as indices.
+// mesh made from them, padded by pad_triangle_indices) into them. A skinned call's mesh
+// (gx/vita_draw.cpp): its template's distinct vertices posed for this frame, the template's
+// corners as indices.
 std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
                                         std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
                                         bool clientMemory) noexcept;
+// Pads triangle indices to a multiple of 12 with triangles of one vertex (they draw nothing).
+// vitaGL copies a draw's indices from client memory into its per-frame pool, which hands its
+// memory out unaligned, one allocation after another: 6 bytes a triangle left what the frame put
+// there after them off by 2, 4 or 6 bytes, and a BC1 texture's upload, staged there and read 8
+// bytes at a time by sceGxmTransferCopy, came out as noise or black (b154f27's skinned calls).
+// Whole multiples of 8 bytes keep the alignment the 56-byte vertices keep.
+void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept;
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
 // level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the

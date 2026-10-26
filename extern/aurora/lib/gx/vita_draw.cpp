@@ -1578,7 +1578,8 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
 
 // A skinned template's unique vertices for a program's draw and its corners' order of them
 // (SkinnedTemplate::unique): corners alike in their distinct pair, coordinates and vertex colour
-// share one. No order when there are more than 16-bit indices take.
+// share one, the order padded for vitaGL's pool (vita_gl::pad_triangle_indices). No order when
+// there are more than 16-bit indices take.
 void make_unique_vertices(SkinnedTemplate& t) {
   t.unique.clear();
   t.uniqueSlots.clear();
@@ -1618,6 +1619,7 @@ void make_unique_vertices(SkinnedTemplate& t) {
     }
     order->push_back(static_cast<u16>(index));
   }
+  vita_gl::pad_triangle_indices(*order);
   t.order = std::move(order);
 }
 
