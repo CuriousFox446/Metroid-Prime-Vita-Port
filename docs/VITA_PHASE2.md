@@ -1358,6 +1358,33 @@ no copy went into the blur's texture in the 40 frames after it began, none was l
   log also has the first three blur quads as the list has them and as decoded, the program's
   attribute locations in the render probe lines, and its rows in the blur's first line.
 
+## Milestone 6: the main menu's speed
+
+The user asked for the main menu (1938b24's log, its first 70 seconds): 7 to 11 frames a second,
+the main thread the limit. Its frame: the game's tick 75 to 90 ms, nearly all of it the front end's
+IOWin pump; the audio's DMA callbacks 10 ms (`ARQPoll + AIPortPoll`, the streamed music and the
+movie's sound: a frame's worth, so less at a higher rate); input 3 ms. The front end draws one
+thing most of the time: the menu's movie, a quad of three I8 textures (the THP frame's Y, U and V
+planes, a new set a movie frame). The FIFO thread spent 16 to 18 ms a frame converting them (an I8
+plane to RGBA8 a texel at a time, 9 ms) and hashing them, the render worker 7 to 8 ms uploading
+them; both mostly idle.
+- The tick is the movie's decode (`CMoviePlayer::DecodeFromRead`, a frame each tick):
+  Aurora's THP decoder matches the SDK's output bit for bit, its IDCT in float with every
+  multiply-add fused (`fmaf_exact`). The Cortex-A9 has no fused multiply-add (VFPv3), so each is
+  emulated in double, one element at a time: 207 double-precision operations a block, 6720 blocks
+  a 640x448 frame.
+- Now on ARMv7 with NEON the IDCT works four lanes at a time (`inverse_dct_neon`: the row
+  transforms on the dequantized block's quarters transposed, the column transforms on them
+  transposed back), a product then a sum where the scalar one fuses, and its rows go straight into
+  the plane's tiles. A block whose AC coefficients are all zero is its DC alone, written flat (each
+  of `inverse_dct`'s transforms passes it through: the same value). The PC keeps its decoder as it
+  was. On synthetic frames (a test encoder: smooth, flat and noisy areas, qualities 50 to 98,
+  640x448 and 600x440), the NEON path with its intrinsics emulated on the PC matched the scalar
+  decoder in all but 3 of 2.3 million bytes, those by 1; the PC's decode is unchanged byte for
+  byte. Compiled for the Vita, the per-block code has no double-precision operation left.
+- An I8 texture's whole tile rows convert eight texels at a time with NEON (`decode_row`).
+- The log has the decode's time (`movie: THP video decode` in the zones).
+
 - The VPK has a LiveArea, in `platform/vita/sce_sys`: the user's own (from a VPK they made), style
   `ad0` with no gate, the logo a transparent live item in the bottom left over Samus, the emblem
   for the icon. (An installed app keeps the LiveArea it was installed with: a new one shows after
