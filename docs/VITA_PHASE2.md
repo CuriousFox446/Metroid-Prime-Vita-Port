@@ -1022,3 +1022,9 @@ apart by the title ID it runs under.
 - No port menu: Select + Start is Start, and the hint about the menu is not shown.
 - Saves, settings, logs and the shader cache in `ux0:data/MetroidPrimeDemo`; the disc read from
   `ux0:data/MetroidPrime`. A DEMO banner on its icon and LiveArea logo.
+- First test (db063f1): the menu skip worked, but the demo still went on to Tallon Overworld,
+  with no `[demo]` line in its log. Its check asked whether the target was a world before
+  `SetCurrentWorldId` had readied the target's PAK: as on the GameCube, every world PAK but the
+  current one's is stashed (`CMain::EnsureWorldPakReady`), so the answer was no, and the game's
+  own check, made after that call, went ahead. The demo now decides inside the game's check and
+  makes the frigate the current world again before it quits.
