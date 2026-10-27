@@ -400,86 +400,138 @@ void pack_normal(const float n[3], int8_t out[3]) noexcept {
   }
 }
 
-// One GX vertex's position, normal, colour (grey without one) and the texture units'
-// coordinates, from its bytes in the list (which advance past it). False when it has a per-vertex
-// matrix (not drawn yet) or reads outside an array. indices, when given, gets the position's and
-// the normal's array indices (UINT32_MAX for one in the list, or none).
-bool decode_vertex(const u8*& vtx, const VtxFmt& fmt, const TexAttrs& texAttrs, u8 grey, vita_gl::Vertex& out,
-                   VertexIndices* indices = nullptr) noexcept {
-  out = {};
-  out.color[0] = out.color[1] = out.color[2] = grey;
-  out.color[3] = 255;
-  out.raw[0] = out.raw[1] = out.raw[2] = out.raw[3] = 255;
+// How one of the descriptor's attributes decodes (decode_vertices): where its bytes are and what of
+// it a vertex takes, worked out once for a primitive's vertices. Going through all of GX's 21
+// attributes for each vertex instead, sizes and coordinate sets found again every time, was most
+// of the FIFO thread's 30 ms a frame of immediate draws in Tallon Overworld's heavy rooms.
+struct AttrDecode {
+  const AttrArray* array = nullptr; // an indexed one's
+  float scale = 1.f;
+  GXCompType type{};
+  u8 attr = 0;
+  u8 advance = 0;  // its bytes in the list: its own (direct) or its index (three of them for NBT3)
+  u8 elemSize = 0; // the bytes read where it is
+  u8 count = 0;    // the components read
+  u8 sets = 0;     // a texture coordinate's: the mesh's coordinate sets it fills, a bit each
+  bool direct = false;
+  bool index16 = false;
+  bool wanted = false; // the position, normal, colour and the units' coordinates
+};
+using DecodePlan = std::array<AttrDecode, GX_VA_TEX7 + 1>;
+
+// The descriptor's attributes in GX's order as format `fmt` has them, `steps` of them. False when
+// one is a per-vertex matrix index (not drawn yet).
+bool plan_vertices(const VtxFmt& fmt, const TexAttrs& texAttrs, DecodePlan& plan, u32& steps) noexcept {
+  steps = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
     const GXAttrType type = g_gxState.vtxDesc[i];
     if (type == GX_NONE) {
       continue;
     }
-    const VtxAttrFmt& attrFmt = fmt.attrs[i];
     if (attr == GX_VA_PNMTXIDX) {
       sLastFail = Fail::MatrixIndex;
       return false;
     }
-    const bool wanted = attr == GX_VA_POS || attr == GX_VA_NRM || attr == GX_VA_CLR0 ||
-                        std::find(texAttrs.begin(), texAttrs.end(), static_cast<u8>(i)) != texAttrs.end();
-    const u32 elemSize = attr >= GX_VA_PNMTXIDX && attr <= GX_VA_TEX7MTXIDX
-                             ? 1
-                             : u32(comp_type_size(attr, attrFmt.type)) * comp_cnt_count(attr, attrFmt.cnt);
-    const u8* data;
+    const VtxAttrFmt& attrFmt = fmt.attrs[i];
+    AttrDecode& d = plan[steps++];
+    d = {};
+    d.attr = static_cast<u8>(i);
+    d.direct = type == GX_DIRECT;
+    d.index16 = type != GX_INDEX8;
+    d.elemSize = attr <= GX_VA_TEX7MTXIDX
+                     ? 1
+                     : static_cast<u8>(comp_type_size(attr, attrFmt.type) * comp_cnt_count(attr, attrFmt.cnt));
+    const bool nbt3 = attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3;
+    d.advance = d.direct ? d.elemSize : static_cast<u8>((d.index16 ? 2 : 1) * (nbt3 ? 3 : 1));
+    for (int set = 0; set < kTexCoords; ++set) {
+      d.sets |= texAttrs[set] == i ? static_cast<u8>(1u << set) : 0;
+    }
+    d.wanted = attr == GX_VA_POS || attr == GX_VA_NRM || attr == GX_VA_CLR0 || d.sets != 0;
+    if (!d.wanted) {
+      continue;
+    }
+    d.type = attrFmt.type;
+    d.scale = component_scale(attrFmt.frac);
+    // The normal is the first three components (of a normal, binormal and tangent's nine too).
+    const u32 cnt = comp_cnt_count(attr, attrFmt.cnt);
+    d.count = static_cast<u8>(attr == GX_VA_POS   ? std::min<u32>(cnt, 3)
+                              : attr == GX_VA_NRM ? 3
+                                                  : std::min<u32>(cnt, 2));
+    d.array = d.direct ? nullptr : &g_gxState.arrays[i];
+  }
+  return true;
+}
+
+// One GX vertex's position, normal, colour (grey without one) and the texture units'
+// coordinates, from its bytes in the list (which advance past it), by the plan's `steps`. False
+// when it reads outside an array. indices, when given, gets the position's and the normal's array
+// indices (UINT32_MAX for one in the list, or none).
+bool decode_vertex(const u8*& vtx, const AttrDecode* plan, u32 steps, u8 grey, vita_gl::Vertex& out,
+                   VertexIndices* indices) noexcept {
+  out = {};
+  out.color[0] = out.color[1] = out.color[2] = grey;
+  out.color[3] = 255;
+  out.raw[0] = out.raw[1] = out.raw[2] = out.raw[3] = 255;
+  for (u32 s = 0; s < steps; ++s) {
+    const AttrDecode& d = plan[s];
+    const u8* data = vtx;
     bool le = false;
-    if (type == GX_DIRECT) {
-      data = vtx;
-      vtx += elemSize;
-      if (!wanted) {
+    if (d.direct) {
+      vtx += d.advance;
+      if (!d.wanted) {
         continue;
       }
     } else {
-      const bool nbt3 = attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3;
-      const u32 index = type == GX_INDEX8 ? vtx[0] : read16(vtx, false);
-      vtx += (type == GX_INDEX8 ? 1 : 2) * (nbt3 ? 3 : 1);
-      if (!wanted) {
+      const u32 index = d.index16 ? read16(vtx, false) : vtx[0];
+      vtx += d.advance;
+      if (!d.wanted) {
         continue;
       }
-      if (indices != nullptr && attr == GX_VA_POS) {
+      if (indices != nullptr && d.attr == GX_VA_POS) {
         indices->pos = index;
-      } else if (indices != nullptr && attr == GX_VA_NRM) {
+      } else if (indices != nullptr && d.attr == GX_VA_NRM) {
         indices->nrm = index;
       }
-      const AttrArray& array = g_gxState.arrays[i];
+      const AttrArray& array = *d.array;
       const u64 offset = u64(index + array.baseIndex) * array.stride;
-      if (array.data == nullptr || offset + elemSize > array.size) {
+      if (array.data == nullptr || offset + d.elemSize > array.size) {
         sLastFail = Fail::Array;
         if (!sFirstFailLogged) {
           sFirstFailLogged = true;
-          Log.warn("first list not drawn: attribute {} index {} (+{}) stride {} past its array ({} bytes at {})", i,
-                   index, array.baseIndex, array.stride, array.size, array.data);
+          Log.warn("first list not drawn: attribute {} index {} (+{}) stride {} past its array ({} bytes at {})",
+                   static_cast<int>(d.attr), index, array.baseIndex, array.stride, array.size, array.data);
         }
         return false;
       }
       data = static_cast<const u8*>(array.data) + offset;
       le = array.le;
     }
-    const u32 cnt = comp_cnt_count(attr, attrFmt.cnt);
-    if (attr == GX_VA_POS) {
-      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, std::min<u32>(cnt, 3), out.pos);
-    } else if (attr == GX_VA_NRM) {
-      // The normal is the first three components (of a normal, binormal and tangent's nine too).
+    switch (d.attr) {
+    case GX_VA_POS:
+      read_components(data, d.type, d.scale, le, d.count, out.pos);
+      break;
+    case GX_VA_NRM: {
       float n[3];
-      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, 3, n);
+      read_components(data, d.type, d.scale, le, 3, n);
       pack_normal(n, out.normal);
-    } else if (attr == GX_VA_CLR0) {
-      read_color(data, attrFmt.type, out.color);
+      break;
+    }
+    case GX_VA_CLR0:
+      read_color(data, d.type, out.color);
       std::memcpy(out.raw, out.color, sizeof(out.raw));
-    } else {
+      break;
+    default: {
       float st[2] = {};
-      read_components(data, attrFmt.type, component_scale(attrFmt.frac), le, std::min<u32>(cnt, 2), st);
+      read_components(data, d.type, d.scale, le, d.count, st);
       for (int set = 0; set < kTexCoords; ++set) {
-        if (texAttrs[set] == i) {
+        if ((d.sets & (1u << set)) != 0) {
           out.uv[set][0] = st[0];
           out.uv[set][1] = st[1];
         }
       }
+      break;
+    }
     }
   }
   return true;
@@ -524,9 +576,17 @@ bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, con
   if (indices != nullptr) {
     indices->assign(count, VertexIndices{});
   }
+  if (count == 0) {
+    return vtx <= end;
+  }
+  DecodePlan plan;
+  u32 steps = 0;
+  if (!plan_vertices(g_gxState.vtxFmts[fmt], texAttrs, plan, steps)) {
+    return false;
+  }
   for (u32 i = 0; i < count; ++i) {
-    if (vtx >= end || !decode_vertex(vtx, g_gxState.vtxFmts[fmt], texAttrs, grey, out[i],
-                                     indices != nullptr ? &(*indices)[i] : nullptr)) {
+    if (vtx >= end ||
+        !decode_vertex(vtx, plan.data(), steps, grey, out[i], indices != nullptr ? &(*indices)[i] : nullptr)) {
       return false;
     }
   }
@@ -570,6 +630,33 @@ void triangle_order(GXPrimitive type, u32 count, std::vector<u32>& order) noexce
   default:
     break; // lines and points: not drawn yet
   }
+}
+
+// A primitive's triangles as indices into its vertices, for an immediate draw with a program,
+// which reads no face's shading (vita_tev.cpp): its vertices are drawn as decoded, none copied to
+// each triangle's corners. Shared by every draw of the same primitive and vertex count (a
+// particle's quad, a strip of the water's), padded for vitaGL's pool
+// (vita_gl::pad_triangle_indices). Null for one that makes no triangle.
+std::shared_ptr<const std::vector<u16>> triangle_indices(GXPrimitive type, u16 count) noexcept {
+  static std::unordered_map<u32, std::shared_ptr<const std::vector<u16>>> sPatterns;
+  const u32 key = static_cast<u32>(type) << 16 | count;
+  if (const auto it = sPatterns.find(key); it != sPatterns.end()) {
+    return it->second;
+  }
+  static std::vector<u32> order;
+  order.clear();
+  triangle_order(type, count, order);
+  if (order.empty()) {
+    return nullptr;
+  }
+  auto indices = std::make_shared<std::vector<u16>>(order.begin(), order.end());
+  vita_gl::pad_triangle_indices(*indices);
+  // A bound on what odd counts leave behind.
+  if (sPatterns.size() >= 4096) {
+    sPatterns.clear();
+  }
+  sPatterns.emplace(key, indices);
+  return indices;
 }
 
 // One primitive's vertices as triangles, appended to `triangles`; with primPos given, outPos gets
@@ -1815,6 +1902,26 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   const TexAttrs& texAttrs = material.texAttrs;
+  // A program's draw: its vertices as decoded, the mesh's own, drawn by index (triangle_indices).
+  if (material.program != nullptr && prim != GX_LINES && prim != GX_LINESTRIP) {
+    std::vector<vita_gl::Vertex> decoded;
+    const u8* vtx = vertices.data();
+    sLastFail = Fail::None;
+    if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, decoded)) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    std::shared_ptr<const std::vector<u16>> indices = triangle_indices(prim, static_cast<u16>(decoded.size()));
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
+    if (indices == nullptr) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    ++sStats.immediate;
+    record_draw(vita_gl::make_indexed_mesh(std::move(decoded), std::move(indices), vita_gl::MeshKind::Immediate, true),
+                material);
+    return true;
+  }
   // The vertices in the FIFO thread's room for them (no allocation a draw); the mesh's own copy is
   // made at its size.
   std::vector<vita_gl::Vertex>& prims = sPrims;

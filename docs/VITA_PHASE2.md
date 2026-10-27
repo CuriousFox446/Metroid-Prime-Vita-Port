@@ -1131,3 +1131,38 @@ was the skinned calls, drawn by index (`300 drawn by index` a window in the cuts
   (`vita_gl::pad_triangle_indices`), so every copy is whole 8-byte blocks; and the draw is
   `glDrawRangeElements` with the vertex count, so vitaGL no longer looks through the indices for
   the largest at each draw.
+
+Its runs (56ec84c): the demo confirmed right; the main app's run through Tallon Overworld (about
+13,000 lines of log) with no graphical fault. By window, three costs:
+- Freezes: windows at 0.6 to 2 frames a second, the render worker 0.5 to 1.6 s a frame. They were
+  compiles: 16 new programs, 26.8 s in all, 1.2 to 2.2 s each (`8925 ms` for 4 at the frigate's
+  start before), the render worker waiting each out on its compile stack.
+- The FIFO thread, 50 to 85 ms a frame in the heavy rooms (12 to 17 frames a second): immediate
+  draws 22 to 34 ms (about 600 a frame, 20,000 to 24,000 vertices, most of them `DrawWorld`'s:
+  the water), their recording 7 to 15 ms.
+- The main thread: the game's ticks 25 to 42 ms a frame (3 to 4 ticks, each `SM: Think (all
+  entities)` 4 to 6 ms and the particles' update 3 to 4), drawing 13 to 22 ms, input about 4 ms.
+  The map screen ran at 6 frames a second: 5,800 draws a frame, nearly all immediate.
+
+Now:
+- Compiles left the render worker. A program not on the card goes to a compiler thread at a low
+  priority (`compile_jobs`, started with the first job and ended when none is left, with the
+  2 MiB stack SceShaccCg needs), which calls vitashark for its two GXPs; the render worker links
+  them (`glShaderBinary` with vitaGL's own form of a shader, the matrix uniforms' count, none,
+  ahead of the GXP) once done, from the same budget as the card's loads (8 a frame), and saves
+  the program to the card as before. Its draws are fixed-function meanwhile. vitashark keeps one
+  compile in its statics: the linker wraps `shark_compile_shader_extended` and
+  `shark_clear_output` with a lock, so the compiler thread's compiles and vitaGL's own (a
+  fixed-function shader its cache lacks, on the render worker) never overlap. The direct calls of
+  685daf0 and a48830e failed because they passed a source length of 0: vitashark reads the length
+  from `size` (`shark_input.size = *size`). The presents line counts the programs sent to the
+  compiler thread, and the compile time is that thread's.
+- An immediate draw with a program draws its vertices as decoded, by index: the indices of each
+  primitive and vertex count (`triangle_indices`, padded as above) shared by every such draw, so
+  no vertex is copied to each triangle's corners and no face is shaded (a program reads neither).
+  Without a program it is triangulated and shaded as before.
+- A primitive's vertices decode by a plan made once for them (`plan_vertices`: the descriptor's
+  attributes present, their sizes, sources and coordinate sets) instead of going through all of
+  GX's 21 attributes for each vertex. On the PC, the old decode (git's HEAD) against the new over
+  200,000 random descriptors, formats, arrays and streams: the same vertices to the byte (115,383
+  of them), the same indices and the same failures.

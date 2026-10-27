@@ -661,6 +661,10 @@ if(VITA)
     # started: the game starts on black (extern/aurora/lib/vita_gl.cpp's
     # __wrap_invoke_splashscreen).
     target_link_options(metroid_prime_port PRIVATE "LINKER:--wrap=invoke_splashscreen")
+    # vitashark's compiles take a lock (extern/aurora/lib/vita_gl.cpp): the generated programs
+    # compile on a thread of their own, vitaGL's fixed-function shaders on the render worker.
+    target_link_options(metroid_prime_port PRIVATE
+        "LINKER:--wrap=shark_compile_shader_extended,--wrap=shark_clear_output")
     target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
     # libstdc++ calls pthreads through weak references and treats threading as off
     # when pthread_cancel is missing; nothing references that (or pthread_once)
