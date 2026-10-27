@@ -19,6 +19,7 @@
 
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -26,10 +27,12 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_set>
 
 namespace aurora::vita_gl {
 namespace {
@@ -379,8 +382,9 @@ struct ProgramStats {
   uint32_t failed = 0;
   uint32_t queued = 0; // sent to the compiler thread
   double compileMs = 0.0;
-  uint32_t loaded = 0; // of them, loaded from the card
-  double loadMs = 0.0;
+  uint32_t loaded = 0;   // of them, loaded from the card
+  uint32_t reloaded = 0; // read back but not linking: compiled again
+  double loadMs = 0.0;   // the card thread's reads and the links
   uint32_t failuresLogged = 0;
 };
 ProgramStats g_programStats;
@@ -494,12 +498,84 @@ constexpr GLint kNoUniform = -1;
 enum ProgramAttr { kAttrPos, kAttrRaw, kAttrShade, kAttrNrm, kAttrUv0, kAttrCount = kAttrUv0 + kTexCoords };
 constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aNrm", "aUv0", "aUv1", "aUv2", "aUv3"};
 
+// A thread of its own for work the render worker must not wait for, its jobs one at a time in
+// order: started with the first job and ended when none is left, so its stack is held only while
+// there is work.
+class JobThread {
+public:
+  JobThread(const char* name, thread::Priority priority, size_t stack) noexcept
+  : m_name(name), m_priority(priority), m_stack(stack) {}
+
+  // False when no thread could be started: the job is not taken.
+  bool submit(std::function<void()> job) noexcept {
+    std::lock_guard lock{m_mutex};
+    if (!m_running) {
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setstacksize(&attr, m_stack);
+      pthread_t thread;
+      m_running = pthread_create(&thread, &attr, &JobThread::run, this) == 0;
+      if (m_running) {
+        pthread_detach(thread);
+      }
+      pthread_attr_destroy(&attr);
+    }
+    if (m_running) {
+      m_jobs.push_back(std::move(job));
+    }
+    return m_running;
+  }
+
+private:
+  static void* run(void* arg) {
+    JobThread& self = *static_cast<JobThread*>(arg);
+    thread::set_current({.name = self.m_name, .priority = self.m_priority});
+    for (;;) {
+      std::function<void()> job;
+      {
+        std::lock_guard lock{self.m_mutex};
+        if (self.m_jobs.empty()) {
+          self.m_running = false;
+          return nullptr;
+        }
+        job = std::move(self.m_jobs.front());
+        self.m_jobs.pop_front();
+      }
+      job();
+    }
+  }
+
+  const char* m_name;
+  thread::Priority m_priority;
+  size_t m_stack;
+  std::mutex m_mutex;
+  std::deque<std::function<void()>> m_jobs;
+  bool m_running = false;
+};
+
+// SceShaccCg runs deep: it overflowed the render worker's 32 KiB stack (what VitaSDK gives a
+// std::thread) at the 18th program of the first run.
+constexpr size_t kCompileStack = 2 * 1024 * 1024;
+
 // The Cg compiler (SceShaccCg, through vitashark) takes one to two seconds a program here, and the
 // render worker used to wait each out: a room's first visit froze for as long as its new programs
-// took (a run through Tallon Overworld: 16 of them, 27 s). A program's two sources now compile on
-// a thread of their own at a low priority, one program at a time, to GXPs; the render worker links
-// them once done (a few milliseconds, as a load from the card), the program's draws fixed-function
-// meanwhile.
+// took (a run through Tallon Overworld: 16 of them, 27 s). A program's two sources compile on a
+// thread of their own at a low priority, one program at a time, to GXPs; the render worker links
+// them once done, the program's draws fixed-function meanwhile.
+JobThread& compiler_thread() noexcept {
+  static JobThread& jobs = *new JobThread("program compiler", thread::Priority::Low, kCompileStack);
+  return jobs;
+}
+
+// The memory card's side of the programs: reading a binary back, writing one, removing one. The
+// render worker did these itself, a file's existence asked at each program's first draw too, and
+// with the game streaming a room from the disc image on the same card each waited behind its
+// reads: 250 to 850 ms stalls at room changes (a run through Tallon Overworld, 7dfaad5).
+JobThread& card_thread() noexcept {
+  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024);
+  return jobs;
+}
+
 struct CompileJob {
   std::string vertexSource;
   std::string fragmentSource;
@@ -510,9 +586,17 @@ struct CompileJob {
   std::atomic<bool> done{false};
 };
 
-// SceShaccCg runs deep: it overflowed the render worker's 32 KiB stack (what VitaSDK gives a
-// std::thread) at the 18th program of the first run.
-constexpr size_t kCompileStack = 2 * 1024 * 1024;
+// A binary read back from the card (card thread): ok when its header matched.
+struct LoadJob {
+  uint64_t key = 0;
+  uint32_t vertexLength = 0;
+  uint32_t fragmentLength = 0;
+  GLenum format = 0;
+  std::vector<uint8_t> binary;
+  bool ok = false;
+  double ms = 0.0;
+  std::atomic<bool> done{false};
+};
 
 // A source compiled to a GXP, with vitaGL's own settings for a compile (custom_shaders.c: fast
 // optimisation, fast math and integers, full precision). vitashark reads the source's length from
@@ -539,66 +623,24 @@ bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t
   return !gxp.empty();
 }
 
-// The jobs the compiler thread has yet to take, and whether one runs: it starts with the first job
-// and ends when none is left, so its stack is held only while there are programs to compile.
-struct CompileQueue {
-  std::mutex mutex;
-  std::deque<std::shared_ptr<CompileJob>> jobs;
-  bool running = false;
-};
-CompileQueue& compile_queue() noexcept {
-  static CompileQueue& queue = *new CompileQueue;
-  return queue;
-}
-
-void* compile_jobs(void*) {
-  thread::set_current({.name = "program compiler", .priority = thread::Priority::Low});
-  CompileQueue& queue = compile_queue();
-  for (;;) {
-    std::shared_ptr<CompileJob> job;
-    {
-      std::lock_guard lock{queue.mutex};
-      if (queue.jobs.empty()) {
-        queue.running = false;
-        return nullptr;
-      }
-      job = std::move(queue.jobs.front());
-      queue.jobs.pop_front();
-    }
+// A program's sources to the compiler thread. Without a thread the job is done at once with nothing
+// compiled, and the program stays fixed-function.
+std::shared_ptr<CompileJob> submit_compile(std::string vertexSource, std::string fragmentSource) noexcept {
+  auto job = std::make_shared<CompileJob>();
+  job->vertexSource = std::move(vertexSource);
+  job->fragmentSource = std::move(fragmentSource);
+  const bool taken = compiler_thread().submit([job] {
     const auto start = std::chrono::steady_clock::now();
     if (compile_gxp(job->vertexSource, SHARK_VERTEX_SHADER, job->vertexGxp, job->error)) {
       compile_gxp(job->fragmentSource, SHARK_FRAGMENT_SHADER, job->fragmentGxp, job->error);
     }
     job->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     job->done.store(true, std::memory_order_release);
-  }
-}
-
-// Render worker: a program's sources to the compiler thread, started if none runs. Without a thread
-// the job is done at once with nothing compiled, and the program stays fixed-function.
-std::shared_ptr<CompileJob> submit_compile(std::string vertexSource, std::string fragmentSource) noexcept {
-  auto job = std::make_shared<CompileJob>();
-  job->vertexSource = std::move(vertexSource);
-  job->fragmentSource = std::move(fragmentSource);
-  CompileQueue& queue = compile_queue();
-  std::lock_guard lock{queue.mutex};
-  if (!queue.running) {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, kCompileStack);
-    pthread_t thread;
-    queue.running = pthread_create(&thread, &attr, compile_jobs, nullptr) == 0;
-    if (queue.running) {
-      pthread_detach(thread);
-    }
-    pthread_attr_destroy(&attr);
-  }
-  if (!queue.running) {
+  });
+  if (!taken) {
     job->error = "no thread for the compiler";
     job->done.store(true, std::memory_order_release);
-    return job;
   }
-  queue.jobs.push_back(job);
   return job;
 }
 
@@ -625,49 +667,55 @@ std::string g_programCacheDir;
 
 std::string cache_path(uint64_t key) { return fmt::format("{}/{:016x}.gxp", g_programCacheDir, key); }
 
-bool load_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum& format,
-                 std::vector<uint8_t>& binary) {
-  std::FILE* file = std::fopen(cache_path(key).c_str(), "rb");
-  if (file == nullptr) {
-    return false;
+// The keys of the programs on the card, from its folder read once at the start (index_card); a
+// program's first draw asks this, not the card (render worker).
+std::unordered_set<uint64_t> g_cardKeys;
+
+void index_card() noexcept {
+  std::error_code ec;
+  std::filesystem::directory_iterator it{g_programCacheDir, ec};
+  for (; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec)) {
+    // <16 hex digits>.gxp
+    const std::string name = it->path().filename().string();
+    uint64_t key = 0;
+    if (name.size() == 20 && name.ends_with(".gxp") &&
+        std::from_chars(name.data(), name.data() + 16, key, 16).ec == std::errc{}) {
+      g_cardKeys.insert(key);
+    }
   }
-  uint32_t header[5] = {};
-  bool ok = std::fread(header, sizeof(header), 1, file) == 1 && header[0] == kCacheMagic &&
-            header[1] == vertexLength && header[2] == fragmentLength && header[4] != 0 && header[4] < kMaxBinary;
-  if (ok) {
-    format = header[3];
-    binary.resize(header[4]);
-    ok = std::fread(binary.data(), binary.size(), 1, file) == 1;
-  }
-  std::fclose(file);
-  return ok;
 }
 
-void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLuint program) {
-  // vitaGL's glGetProgramBinary writes the whole binary whatever the buffer's size, so the buffer
-  // is the length vitaGL gives first, with room to spare.
-  GLint length = 0;
-  glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
-  if (length <= 0 || static_cast<uint32_t>(length) >= kMaxBinary) {
-    return;
+// Card thread: a program's binary read back, ok when its header matches the sources' lengths.
+void read_cached(LoadJob& job) noexcept {
+  const auto start = std::chrono::steady_clock::now();
+  if (std::FILE* file = std::fopen(cache_path(job.key).c_str(), "rb"); file != nullptr) {
+    uint32_t header[5] = {};
+    job.ok = std::fread(header, sizeof(header), 1, file) == 1 && header[0] == kCacheMagic &&
+             header[1] == job.vertexLength && header[2] == job.fragmentLength && header[4] != 0 &&
+             header[4] < kMaxBinary;
+    if (job.ok) {
+      job.format = header[3];
+      job.binary.resize(header[4]);
+      job.ok = std::fread(job.binary.data(), job.binary.size(), 1, file) == 1;
+    }
+    std::fclose(file);
   }
-  std::vector<uint8_t> binary(static_cast<size_t>(length) + 4096);
-  GLsizei written = 0;
-  GLenum format = 0;
-  glGetProgramBinary(program, static_cast<GLsizei>(binary.size()), &written, &format, binary.data());
-  if (written <= 0 || static_cast<size_t>(written) > binary.size()) {
-    return;
-  }
-  // Written aside and renamed, so a file cut short (the power, a crash) is never read.
+  job.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+// Card thread: a binary written aside and renamed, so a file cut short (the power, a crash) is
+// never read.
+void write_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, GLenum format,
+                  const std::vector<uint8_t>& binary) noexcept {
   const std::string path = cache_path(key);
   const std::string temp = path + ".tmp";
   std::FILE* file = std::fopen(temp.c_str(), "wb");
   if (file == nullptr) {
     return;
   }
-  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(written)};
+  const uint32_t header[5] = {kCacheMagic, vertexLength, fragmentLength, format, static_cast<uint32_t>(binary.size())};
   const bool ok = std::fwrite(header, sizeof(header), 1, file) == 1 &&
-                  std::fwrite(binary.data(), static_cast<size_t>(written), 1, file) == 1;
+                  std::fwrite(binary.data(), binary.size(), 1, file) == 1;
   std::fclose(file);
   std::error_code ec;
   if (ok) {
@@ -675,6 +723,25 @@ void save_cached(uint64_t key, uint32_t vertexLength, uint32_t fragmentLength, G
   } else {
     std::filesystem::remove(temp, ec);
   }
+}
+
+// Render worker: a linked program's binary in vitaGL's format, for the card. vitaGL's
+// glGetProgramBinary writes the whole binary whatever the buffer's size, so the buffer is the
+// length vitaGL gives first, with room to spare.
+bool program_binary(GLuint program, GLenum& format, std::vector<uint8_t>& binary) noexcept {
+  GLint length = 0;
+  glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+  if (length <= 0 || static_cast<uint32_t>(length) >= kMaxBinary) {
+    return false;
+  }
+  binary.resize(static_cast<size_t>(length) + 4096);
+  GLsizei written = 0;
+  glGetProgramBinary(program, static_cast<GLsizei>(binary.size()), &written, &format, binary.data());
+  if (written <= 0 || static_cast<size_t>(written) > binary.size()) {
+    return false;
+  }
+  binary.resize(static_cast<size_t>(written));
+  return true;
 }
 } // namespace
 
@@ -689,22 +756,20 @@ public:
     }
   }
 
-  // Render worker: true once linked. A program not tried yet loads from the card while the frame's
-  // budget allows (a few milliseconds each), or goes to the compiler thread; a compiled one is
-  // linked once done, from the same budget.
+  // Render worker: true once linked. A program not tried yet is read back from the card (the card's
+  // index has it) or compiled, both on threads of their own; done, it is linked while the frame's
+  // budget allows (a few milliseconds each). Its draws are fixed-function till then.
   bool ready(int& buildBudget) noexcept {
     if (m_state == State::Pending) {
-      if (!m_cacheChecked) {
-        std::error_code ec;
-        m_inCache = std::filesystem::exists(cache_path(m_key), ec);
-        m_cacheChecked = true;
-      }
-      if (!m_inCache) {
+      if (g_cardKeys.contains(m_key)) {
+        load();
+      } else {
         compile();
-      } else if (buildBudget > 0) {
-        --buildBudget;
-        on_compile_stack(&Program::load);
       }
+    }
+    if (m_state == State::Loading && buildBudget > 0 && m_load->done.load(std::memory_order_acquire)) {
+      --buildBudget;
+      on_compile_stack(&Program::link_loaded);
     }
     if (m_state == State::Compiling && buildBudget > 0 && m_job->done.load(std::memory_order_acquire)) {
       --buildBudget;
@@ -730,7 +795,7 @@ public:
   }
 
 private:
-  enum class State : uint8_t { Pending, Compiling, Ready, Failed };
+  enum class State : uint8_t { Pending, Loading, Compiling, Ready, Failed };
 
   // Rows sent to a uniform array last: their frame's serial (0: none yet) and where they start.
   struct Sent {
@@ -790,34 +855,60 @@ private:
     m_state = State::Compiling;
   }
 
-  // A program compiled in an earlier session, from the card: glProgramBinary rebuilds both shaders
-  // from their GXPs and links them. A binary that no longer links (another vitaGL, a damaged card)
-  // goes, for a compile next time; one the card no longer gives back compiles now.
+  // A program compiled in an earlier session: its binary read back on the card thread (without
+  // one, compiled).
   void load() noexcept {
-    const auto start = std::chrono::steady_clock::now();
-    GLenum format = 0;
-    std::vector<uint8_t> binary;
-    if (!load_cached(m_key, m_vertexLength, m_fragmentLength, format, binary)) {
+    auto job = std::make_shared<LoadJob>();
+    job->key = m_key;
+    job->vertexLength = m_vertexLength;
+    job->fragmentLength = m_fragmentLength;
+    if (!card_thread().submit([job] {
+          read_cached(*job);
+          job->done.store(true, std::memory_order_release);
+        })) {
       compile();
       return;
     }
-    const GLuint program = glCreateProgram();
-    glProgramBinary(program, format, binary.data(), static_cast<GLsizei>(binary.size()));
-    GLint ok = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (ok == GL_TRUE) {
-      m_id = program;
-    } else {
-      glDeleteProgram(program);
-      std::error_code ec;
-      std::filesystem::remove(cache_path(m_key), ec);
-    }
-    g_programStats.loadMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    ++g_programStats.loaded;
-    finish("its binary from the card did not link (removed)", m_vertexSource, m_fragmentSource);
+    m_load = std::move(job);
+    m_state = State::Loading;
   }
 
-  // The compiler thread's GXPs as shaders, linked, and saved to the card for the next session.
+  // A binary from the card: glProgramBinary rebuilds both shaders from their GXPs and links them.
+  // One the card did not give back, or that no longer links (another vitaGL, a damaged card), goes
+  // from the card and is compiled now.
+  void link_loaded() noexcept {
+    const auto start = std::chrono::steady_clock::now();
+    LoadJob& job = *m_load;
+    if (job.ok) {
+      const GLuint program = glCreateProgram();
+      glProgramBinary(program, job.format, job.binary.data(), static_cast<GLsizei>(job.binary.size()));
+      GLint ok = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (ok == GL_TRUE) {
+        m_id = program;
+      } else {
+        glDeleteProgram(program);
+      }
+    }
+    g_programStats.loadMs +=
+        job.ms + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    ++g_programStats.loaded;
+    m_load.reset();
+    if (m_id == 0) {
+      ++g_programStats.reloaded;
+      g_cardKeys.erase(m_key);
+      card_thread().submit([key = m_key] {
+        std::error_code ec;
+        std::filesystem::remove(cache_path(key), ec);
+      });
+      compile();
+      return;
+    }
+    finish({}, m_vertexSource, m_fragmentSource);
+  }
+
+  // The compiler thread's GXPs as shaders, linked; its binary to the card thread, for the next
+  // session.
   void link_compiled() noexcept {
     CompileJob& job = *m_job;
     std::string error = job.error;
@@ -835,7 +926,15 @@ private:
       glGetProgramiv(program, GL_LINK_STATUS, &ok);
       if (ok == GL_TRUE) {
         m_id = program;
-        save_cached(m_key, m_vertexLength, m_fragmentLength, m_id);
+        GLenum format = 0;
+        std::vector<uint8_t> binary;
+        if (program_binary(m_id, format, binary)) {
+          g_cardKeys.insert(m_key);
+          card_thread().submit([key = m_key, vertexLength = m_vertexLength, fragmentLength = m_fragmentLength,
+                                format, binary = std::move(binary)] {
+            write_cached(key, vertexLength, fragmentLength, format, binary);
+          });
+        }
       } else {
         error = "the link failed";
         glDeleteProgram(program);
@@ -886,9 +985,8 @@ private:
   // The sources' lengths, which a binary on the card must match (its header).
   uint32_t m_vertexLength = static_cast<uint32_t>(m_vertexSource.size());
   uint32_t m_fragmentLength = static_cast<uint32_t>(m_fragmentSource.size());
+  std::shared_ptr<LoadJob> m_load;
   std::shared_ptr<CompileJob> m_job;
-  bool m_cacheChecked = false;
-  bool m_inCache = false;
   GLuint m_id = 0;
   GLint m_attrs[kAttrCount] = {-1, -1, -1, -1, -1, -1, -1, -1};
   GLint m_vertexLocation = kNoUniform;
@@ -1047,9 +1145,9 @@ void apply_state(const RenderState& state, RenderState& current, bool force) {
   current = state;
 }
 
-// Generated programs built a frame at most, loaded from the card or linked from the compiler
+// Generated programs linked a frame at most, from the card thread's binaries or the compiler
 // thread's GXPs: a few milliseconds each.
-constexpr int kBuildsPerFrame = 8;
+constexpr int kBuildsPerFrame = 4;
 
 // The texture each unit holds, in a frame's draws (render worker): binding one again is skipped.
 struct BoundTextures {
@@ -1403,9 +1501,11 @@ bool initialize() noexcept {
   std::error_code ec;
   std::filesystem::create_directories(cachePath, ec);
   vglSetShaderCachePath(cachePath.c_str());
-  // The generated programs' own cache (Program, load_cached).
+  // The generated programs' own cache (Program, read_cached), and what it holds.
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
+  index_card();
+  Log.info("programs on the card: {}", g_cardKeys.size());
   // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
   // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
   // KiB) were made for scenes of a few hundred plain draws; the water's generated programs take four
@@ -1538,13 +1638,14 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
-             "compiling there; {} loaded from the card, {:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment "
-             "{}/{}; textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
+             "compiling there; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all; uniforms "
+             "sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, "
+             "{:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs, g_programStats.loaded,
-             g_programStats.loadMs,
+             g_programStats.reloaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
              g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,

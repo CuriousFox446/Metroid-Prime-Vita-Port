@@ -1166,3 +1166,22 @@ Now:
   GX's 21 attributes for each vertex. On the PC, the old decode (git's HEAD) against the new over
   200,000 random descriptors, formats, arrays and streams: the same vertices to the byte (115,383
   of them), the same indices and the same failures.
+
+Its run (7dfaad5; Tallon Overworld, about 25,000 lines of log): 40 programs went to the compiler
+thread, none failed, 68.6 s of compiling there, and no window fell below 3.5 frames a second (the
+0.6 to 2 of the compiles before). In the room held longest (about a minute at 18.5 frames a
+second, 1,070 draws a frame) the FIFO thread's immediate draws took 12 ms a frame where a like room
+took 20 before; the FIFO thread was 62 ms busy (skinned calls 11, immediate 12, recording 10, GX's
+state 7, Aurora's commands 6.5), the main thread as much (ticks 22, the game's draw 21, input 3).
+- Left: about 40 stalls of 250 to 850 ms, at room changes. The timed presents put them in the
+  render worker's builds (40 to 844 ms), before any compile was sent too: the program cache's card
+  I/O, a file's existence asked at each program's first draw, its binary read (up to 8 a frame),
+  a compiled one's written, each waiting behind the game streaming the next room from the disc
+  image on the same card.
+- Now the card's programs are listed once at the start (`index_card`: 200 or so names), and a
+  program's first draw asks that list. Reads, writes and removals go to a thread of their own
+  (`card_thread`, a `JobThread` as the compiler's now is: started with the first job, ended with
+  the last); the render worker links what they read (`link_loaded`, `glProgramBinary`) or hands
+  them a compiled program's binary (`program_binary`). A binary that does not link is removed and
+  compiled at once rather than next session. Links are 4 a frame at most. The presents line adds
+  the binaries compiled again.
