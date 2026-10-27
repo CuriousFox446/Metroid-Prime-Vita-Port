@@ -71,13 +71,6 @@ enum class MeshPrimitive : uint8_t { Triangles, Lines };
 class Mesh;
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false,
                                 MeshPrimitive primitive = MeshPrimitive::Triangles) noexcept;
-// Triangles drawn by index: `vertices` once each, `indices` (three a triangle, shared by every
-// mesh made from them, padded by pad_triangle_indices) into them. A skinned call's mesh
-// (gx/vita_draw.cpp): its template's distinct vertices posed for this frame, the template's
-// corners as indices.
-std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
-                                        std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
-                                        bool clientMemory) noexcept;
 // Pads triangle indices to a multiple of 12 with triangles of one vertex (they draw nothing).
 // vitaGL copies a draw's indices from client memory into its per-frame pool, which hands its
 // memory out unaligned, one allocation after another: 6 bytes a triangle left what the frame put
@@ -85,6 +78,21 @@ std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
 // bytes at a time by sceGxmTransferCopy, came out as noise or black (b154f27's skinned calls).
 // Whole multiples of 8 bytes keep the alignment the 56-byte vertices keep.
 void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept;
+
+// A mesh made for one frame alone and drawn with a program (gx/vita_draw.cpp: immediate draws,
+// GX's lines, skinned calls): its vertices among the frame's own (frame_vertices) and, drawn by
+// index, its indices among the frame's (frame_indices, padded as pad_triangle_indices pads). The
+// frame holds them till it is drawn, and vitaGL copies a draw's into its per-frame pool: no Mesh
+// to make and free for each (a frame's 500 or more in Tallon Overworld, two allocations each on
+// the FIFO thread and two frees on the reaper's, all through one heap lock).
+struct FrameMesh {
+  uint32_t vertexAt = 0;
+  uint32_t vertexCount = 0; // 0: none, the draw's mesh is its Mesh
+  uint32_t indexAt = 0;
+  uint32_t indexCount = 0; // 0: its vertices drawn in order
+  MeshKind kind = MeshKind::Other;
+  MeshPrimitive primitive = MeshPrimitive::Triangles;
+};
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
 // level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the
@@ -179,15 +187,17 @@ struct ProgramInputs {
   RenderState state;
 };
 
-// One draw: a mesh with GX's position matrix (3x4, rows) and projection (4x4, rows, already in
-// GL's depth range); its fixed-function texture units and state; and its generated program, when
-// it has one (drawn with it once the program is ready). GX's viewport and scissor, on the screen.
+// One draw: a mesh (its Mesh, or a mesh of its frame's own) with GX's position matrix (3x4, rows)
+// and projection (4x4, rows, already in GL's depth range); its fixed-function texture units and
+// state; and its generated program, when it has one (drawn with it once the program is ready).
+// GX's viewport and scissor, on the screen.
 // Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
 // colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
 // the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter).
 struct Draw {
   std::shared_ptr<Mesh> mesh;
+  FrameMesh frameMesh;
   float modelView[12];
   float projection[16];
   TexUnit units[kTexUnits];
@@ -226,6 +236,13 @@ void end_frame_draws() noexcept;
 uint32_t record_constants(const float (*rows)[4], int count) noexcept;
 const float* recorded_constants(uint32_t at) noexcept;
 uint32_t recording_serial() noexcept;
+// FIFO thread: room for `count` vertices of a FrameMesh among the frame's own, `at` set to where
+// it starts: the caller writes each whole (none is cleared first), before its next call here. The
+// frame's vertices cut back to `at`'s first (a draw that could not be decoded after all).
+Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept;
+void trim_frame_vertices(uint32_t at) noexcept;
+// FIFO thread: a FrameMesh's indices copied to the frame's own; returns where they start.
+uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept;
 // Render worker: clears the screen, draws the overlay (null: none) and swaps.
 void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
@@ -242,6 +259,9 @@ inline void end_frame_draws() noexcept {}
 inline uint32_t record_constants(const float (*)[4], int) noexcept { return 0; }
 inline const float* recorded_constants(uint32_t) noexcept { return nullptr; }
 inline uint32_t recording_serial() noexcept { return 0; }
+inline Vertex* frame_vertices(uint32_t, uint32_t&) noexcept { return nullptr; }
+inline void trim_frame_vertices(uint32_t) noexcept {}
+inline uint32_t frame_indices(const uint16_t*, uint32_t) noexcept { return 0; }
 inline void present(ImDrawData*) noexcept {}
 inline ImTextureID add_texture(uint32_t, uint32_t, const uint8_t*) noexcept { return ImTextureID{}; }
 inline void remove_texture(ImTextureID) noexcept {}

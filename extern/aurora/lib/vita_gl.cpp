@@ -7,6 +7,7 @@
 
 #include <vitaGL.h>
 #include <vitashark.h>
+#include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 
 #include "backends/imgui_impl_opengl2.h"
@@ -15,6 +16,7 @@
 
 #include <fmt/format.h>
 
+#include <malloc.h>
 #include <pthread.h>
 
 #include <array>
@@ -33,6 +35,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 
 namespace aurora::vita_gl {
 namespace {
@@ -69,11 +72,61 @@ void log_memory(const char* when) {
            g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB);
 }
 
-// A frame's draws and their programs' constant rows (ProgramInputs), and its serial, a new one
-// each frame (from 1), by which the render worker tells one frame's rows from another's.
+// A frame's own vertices or indices (FrameMesh), written by the FIFO thread as it records: grown
+// by doubling, and left for the caller to write (nothing is cleared first, as a vector's resize
+// would).
+template <typename T>
+class FrameArray {
+public:
+  FrameArray() = default;
+  FrameArray(FrameArray&& other) noexcept
+  : m_data(std::move(other.m_data)), m_size(std::exchange(other.m_size, 0)),
+    m_capacity(std::exchange(other.m_capacity, 0)) {}
+  FrameArray& operator=(FrameArray&& other) noexcept {
+    m_data = std::move(other.m_data);
+    m_size = std::exchange(other.m_size, 0);
+    m_capacity = std::exchange(other.m_capacity, 0);
+    return *this;
+  }
+
+  // Room for `count` more, `at` set to where it starts; it holds till the next call.
+  T* grow(uint32_t count, uint32_t& at) {
+    if (m_size + count > m_capacity) {
+      reserve(std::max(m_size + count, m_capacity * 2));
+    }
+    at = m_size;
+    m_size += count;
+    return m_data.get() + at;
+  }
+  void reserve(uint32_t capacity) {
+    if (capacity <= m_capacity) {
+      return;
+    }
+    std::unique_ptr<T[]> data(new T[capacity]);
+    if (m_size != 0) {
+      std::memcpy(data.get(), m_data.get(), sizeof(T) * m_size);
+    }
+    m_data = std::move(data);
+    m_capacity = capacity;
+  }
+  void trim(uint32_t size) { m_size = std::min(m_size, size); }
+  const T* at(uint32_t index) const { return m_data.get() + index; }
+  uint32_t size() const { return m_size; }
+
+private:
+  std::unique_ptr<T[]> m_data;
+  uint32_t m_size = 0;
+  uint32_t m_capacity = 0;
+};
+
+// A frame's draws, their programs' constant rows (ProgramInputs) and the vertices and indices of
+// its own meshes (FrameMesh), and its serial, a new one each frame (from 1), by which the render
+// worker tells one frame's rows from another's.
 struct Frame {
   std::vector<Draw> draws;
   std::vector<std::array<float, 4>> constants;
+  FrameArray<Vertex> vertices;
+  FrameArray<uint16_t> indices;
   uint32_t serial = 0;
 };
 
@@ -101,12 +154,8 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
 class Mesh {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
-  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_vertexCount(m_count), m_kind(kind),
-    m_client(clientMemory), m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
-  Mesh(std::vector<Vertex> vertices, std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
-       bool clientMemory) noexcept
-  : m_cpu(std::move(vertices)), m_indices(std::move(indices)), m_count(static_cast<GLsizei>(m_indices->size())),
-    m_vertexCount(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory), m_mode(GL_TRIANGLES) {}
+  : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
+    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -134,36 +183,21 @@ public:
   // Render worker: whether its buffer is made yet (bind makes it; a mesh in client memory is
   // copied at every draw, so never).
   bool uploaded() const noexcept { return m_vbo != 0; }
-  // What a draw draws: its vertices, or for a mesh drawn by index its indices.
+  // Its vertices, which a draw draws.
   GLsizei count() const noexcept { return m_count; }
-  // The vertices it holds, for the log (a mesh drawn by index has fewer than it draws).
-  GLsizei vertex_count() const noexcept { return m_vertexCount; }
   MeshKind kind() const noexcept { return m_kind; }
-  // What glDrawArrays draws it as: GL_TRIANGLES or GL_LINES.
-  GLenum mode() const noexcept { return m_mode; }
   // What its arrays' offsets are from: its vertices in client memory, else the bound buffer's start.
   const uint8_t* base() const noexcept {
     return m_client ? reinterpret_cast<const uint8_t*>(m_cpu.data()) : nullptr;
   }
 
-  // Render worker, its arrays set (bind): draws its `count` vertices, or its indices into them.
-  // vitaGL copies client-memory arrays up to the range's end; named, it does not look through the
-  // indices for their largest.
-  void draw(GLsizei count) const noexcept {
-    if (m_indices) {
-      glDrawRangeElements(m_mode, 0, static_cast<GLuint>(m_vertexCount - 1), count, GL_UNSIGNED_SHORT,
-                          m_indices->data());
-    } else {
-      glDrawArrays(m_mode, 0, count);
-    }
-  }
+  // Render worker, its arrays set (bind): draws its `count` vertices.
+  void draw(GLsizei count) const noexcept { glDrawArrays(m_mode, 0, count); }
 
 private:
   std::vector<Vertex> m_cpu;
-  std::shared_ptr<const std::vector<uint16_t>> m_indices;
   GLuint m_vbo = 0;
   GLsizei m_count;
-  GLsizei m_vertexCount;
   MeshKind m_kind;
   bool m_client;
   GLenum m_mode;
@@ -172,12 +206,6 @@ private:
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory,
                                 MeshPrimitive primitive) noexcept {
   return std::make_shared<Mesh>(std::move(triangles), kind, clientMemory, primitive);
-}
-
-std::shared_ptr<Mesh> make_indexed_mesh(std::vector<Vertex> vertices,
-                                        std::shared_ptr<const std::vector<uint16_t>> indices, MeshKind kind,
-                                        bool clientMemory) noexcept {
-  return std::make_shared<Mesh>(std::move(vertices), std::move(indices), kind, clientMemory);
 }
 
 void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept {
@@ -598,6 +626,61 @@ struct LoadJob {
   std::atomic<bool> done{false};
 };
 
+// The Cg compiler's memory. vitaGL hands vitashark vglMalloc, which takes newlib's malloc first,
+// so a compile's many allocations took the heap lock every other thread takes too, from the
+// compiler thread at a low priority, often preempted while holding it. In a run through Tallon
+// Overworld (cdeac54) the FIFO thread's sections that allocate for each draw (the [fifo path]
+// line's immediate and mesh) went from about 12 to 40-85 ms a frame through each compile's ten
+// seconds, and the game from 15-20 to 8-12 FPS; the others held. SceShaccCg allocates from a heap
+// of its own instead, carved once from newlib's; one compile runs at a time (shark_lock). What
+// does not fit goes to vglMalloc as before, and a free goes back where its address came from (what
+// SceShaccCg allocated before the switch included).
+constexpr size_t kCompilerHeap = 8 * 1024 * 1024;
+uint8_t* g_compilerHeap = nullptr;
+SceClibMspace g_compilerSpace = nullptr;
+// For the log: the heap's bytes in use (peak since the start), and the allocations it had no room for.
+std::atomic<uint32_t> g_compilerInUse{0};
+std::atomic<uint32_t> g_compilerPeak{0};
+std::atomic<uint32_t> g_compilerOverflows{0};
+
+void* compiler_malloc(size_t size) {
+  if (void* p = sceClibMspaceMalloc(g_compilerSpace, size)) {
+    const auto usable = static_cast<uint32_t>(sceClibMspaceMallocUsableSize(p));
+    const uint32_t inUse = g_compilerInUse.fetch_add(usable, std::memory_order_relaxed) + usable;
+    if (inUse > g_compilerPeak.load(std::memory_order_relaxed)) {
+      g_compilerPeak.store(inUse, std::memory_order_relaxed);
+    }
+    return p;
+  }
+  g_compilerOverflows.fetch_add(1, std::memory_order_relaxed);
+  return vglMalloc(size);
+}
+
+void compiler_free(void* p) {
+  const auto* bytes = static_cast<const uint8_t*>(p);
+  if (p != nullptr && bytes >= g_compilerHeap && bytes < g_compilerHeap + kCompilerHeap) {
+    g_compilerInUse.fetch_sub(sceClibMspaceMallocUsableSize(p), std::memory_order_relaxed);
+    sceClibMspaceFree(g_compilerSpace, p);
+  } else {
+    vglFree(p);
+  }
+}
+
+// After vglInit, whose shark_init gave SceShaccCg vglMalloc, before any compile.
+void use_compiler_heap() noexcept {
+  g_compilerHeap = static_cast<uint8_t*>(memalign(64, kCompilerHeap));
+  g_compilerSpace = g_compilerHeap != nullptr ? sceClibMspaceCreate(g_compilerHeap, kCompilerHeap) : nullptr;
+  if (g_compilerSpace == nullptr) {
+    std::free(g_compilerHeap);
+    g_compilerHeap = nullptr;
+    Log.warn("no heap of its own for the shader compiler: it allocates from vglMalloc");
+    return;
+  }
+  shark_set_allocators(compiler_malloc, compiler_free);
+  sceShaccCgSetDefaultAllocator(compiler_malloc, compiler_free);
+  Log.info("the shader compiler allocates from a heap of its own ({} MiB)", kCompilerHeap / (1024 * 1024));
+}
+
 // A source compiled to a GXP, with vitaGL's own settings for a compile (custom_shaders.c: fast
 // optimisation, fast math and integers, full precision). vitashark reads the source's length from
 // `size` (and writes the binary's there): 685daf0 and a48830e passed 0, an empty source, and every
@@ -1014,9 +1097,21 @@ const float* recorded_constants(uint32_t at) noexcept { return g_recording.const
 
 uint32_t recording_serial() noexcept { return g_recording.serial; }
 
+Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept { return g_recording.vertices.grow(count, at); }
+
+void trim_frame_vertices(uint32_t at) noexcept { g_recording.vertices.trim(at); }
+
+uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept {
+  uint32_t at = 0;
+  std::memcpy(g_recording.indices.grow(count, at), indices, sizeof(uint16_t) * count);
+  return at;
+}
+
 void end_frame_draws() noexcept {
   const size_t drawn = g_recording.draws.size();
   const size_t rows = g_recording.constants.size();
+  const uint32_t vertices = g_recording.vertices.size();
+  const uint32_t indices = g_recording.indices.size();
   const uint32_t serial = g_recording.serial;
   {
     std::lock_guard lock{g_framesMutex};
@@ -1030,6 +1125,8 @@ void end_frame_draws() noexcept {
   g_recording.serial = serial + 1 != 0 ? serial + 1 : 1;
   g_recording.draws.reserve(drawn);
   g_recording.constants.reserve(rows);
+  g_recording.vertices.reserve(vertices);
+  g_recording.indices.reserve(indices);
 }
 
 namespace {
@@ -1168,10 +1265,10 @@ struct BoundTextures {
   }
 };
 
-// Binds a draw's mesh (render worker), counting for the log what its path and kind upload.
-GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
+// Binds a Mesh (render worker), counting for the log what its path and kind upload.
+void bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
   const bool fresh = !mesh.uploaded();
-  const GLsizei count = mesh.bind();
+  const auto count = static_cast<uint32_t>(mesh.bind());
   const uint64_t us = g_clock.mark(section);
   if (g_clock.on) {
     SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind())];
@@ -1179,14 +1276,55 @@ GLsizei bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
     uploads.us += us;
     if (fresh) {
       ++uploads.made;
-      uploads.bytes += static_cast<uint64_t>(mesh.vertex_count()) * sizeof(Vertex);
+      uploads.bytes += static_cast<uint64_t>(count) * sizeof(Vertex);
     }
   }
-  if (fresh && path == kPathFixed && static_cast<uint32_t>(mesh.vertex_count()) > g_clock.largestFixedVertices) {
-    g_clock.largestFixedVertices = static_cast<uint32_t>(mesh.vertex_count());
+  if (fresh && path == kPathFixed && count > g_clock.largestFixedVertices) {
+    g_clock.largestFixedVertices = count;
     g_clock.largestFixedKind = mesh.kind();
   }
-  return count;
+}
+
+// Binds a draw's mesh (render worker) and gives what its arrays' offsets are from: its Mesh's
+// (bind_mesh), or for a mesh of the frame's own no buffer, its vertices in the frame, counted for
+// the log as a Mesh in client memory is (vitaGL copies them at each draw).
+const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath path, Section section) noexcept {
+  if (draw.mesh != nullptr) {
+    bind_mesh(*draw.mesh, path, section);
+    return draw.mesh->base();
+  }
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  const FrameMesh& mesh = draw.frameMesh;
+  const uint64_t us = g_clock.mark(section);
+  if (g_clock.on) {
+    SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind)];
+    ++uploads.draws;
+    uploads.us += us;
+    ++uploads.made;
+    uploads.bytes += static_cast<uint64_t>(mesh.vertexCount) * sizeof(Vertex);
+  }
+  if (path == kPathFixed && mesh.vertexCount > g_clock.largestFixedVertices) {
+    g_clock.largestFixedVertices = mesh.vertexCount;
+    g_clock.largestFixedKind = mesh.kind;
+  }
+  return reinterpret_cast<const uint8_t*>(frame.vertices.at(mesh.vertexAt));
+}
+
+// Draws a draw's mesh, its arrays set (render worker): a mesh of the frame's own by its indices
+// among the frame's, or its vertices in order.
+void draw_mesh(const Draw& draw, const Frame& frame) noexcept {
+  if (draw.mesh != nullptr) {
+    draw.mesh->draw(draw.mesh->count());
+    return;
+  }
+  const FrameMesh& mesh = draw.frameMesh;
+  const GLenum mode = mesh.primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES;
+  if (mesh.indexCount != 0) {
+    glDrawRangeElements(mode, 0, mesh.vertexCount - 1, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT,
+                        frame.indices.at(mesh.indexAt));
+  } else {
+    glDrawArrays(mode, 0, static_cast<GLsizei>(mesh.vertexCount));
+  }
 }
 
 // A draw with its generated program (render worker). Leaving the fixed-function path turns its
@@ -1221,8 +1359,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
     attribsOn = wanted;
   }
   g_clock.mark(kProgramSwitch);
-  const GLsizei count = bind_mesh(*draw.mesh, kPathProgram, kProgramUpload);
-  const auto base = reinterpret_cast<uintptr_t>(draw.mesh->base());
+  const auto base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathProgram, kProgramUpload));
   const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
   if (program.attr(kAttrPos) >= 0) {
     glVertexAttribPointer(program.attr(kAttrPos), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
@@ -1255,7 +1392,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
   g_clock.mark(kProgramTextures);
   apply_state(inputs.state, current, false);
   g_clock.mark(kProgramState);
-  draw.mesh->draw(count);
+  draw_mesh(draw, frame);
   g_clock.mark(kProgramDraw);
 }
 
@@ -1412,8 +1549,7 @@ void draw_world(const Frame& frame) {
     }
     enter_fixed_function();
     g_clock.mark(kFixedSwitch);
-    const GLsizei count = bind_mesh(*draw.mesh, kPathFixed, kFixedUpload);
-    const auto base = reinterpret_cast<uintptr_t>(draw.mesh->base());
+    const auto base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathFixed, kFixedUpload));
     const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
     glVertexPointer(3, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
     glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), pointer(offsetof(Vertex, color)));
@@ -1464,7 +1600,7 @@ void draw_world(const Frame& frame) {
     g_clock.mark(kFixedMatrices);
     apply_state(draw.state, current, false);
     g_clock.mark(kFixedState);
-    draw.mesh->draw(count);
+    draw_mesh(draw, frame);
     g_clock.mark(kFixedDraw);
   }
   enter_fixed_function();
@@ -1519,6 +1655,7 @@ bool initialize() noexcept {
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
   const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
+  use_compiler_heap();
   g_active = true;
   if (clamped) {
     Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
@@ -1638,14 +1775,15 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
-             "compiling there; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all; uniforms "
-             "sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, "
-             "{:.1f} ms, {:.2f} ms each)",
+             "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} loaded from the card, "
+             "{} of them compiled again, {:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
+             "textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
-             g_programStats.failed, g_programStats.queued, g_programStats.compileMs, g_programStats.loaded,
-             g_programStats.reloaded, g_programStats.loadMs,
+             g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
+             g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),
+             g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
              g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,

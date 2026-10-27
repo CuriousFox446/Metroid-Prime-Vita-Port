@@ -195,8 +195,9 @@ struct SkinnedTemplate {
   // For a draw with a program, which reads no face's shading (vita_tev.cpp: the position, the
   // normal, the coordinates and the vertex colour): the vertices made unique (the same distinct
   // pair, coordinates and vertex colour), each with the distinct pair it is posed from, and the
-  // corners as 16-bit indices into them, shared by every call's mesh. A call poses and copies its
-  // unique vertices, not every corner. No order: more of them than 16 bits index.
+  // corners as 16-bit indices into them, copied to each call's frame (vita_gl::frame_indices). A
+  // call poses and copies its unique vertices, not every corner. No order: more of them than 16
+  // bits index.
   std::vector<vita_gl::Vertex> unique;
   std::vector<u32> uniqueSlots;
   std::shared_ptr<const std::vector<u16>> order;
@@ -567,30 +568,35 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
 // Without a colour of their own, textured faces take their textures' as they are.
 u8 grey_for(const TexAttrs& texAttrs) noexcept { return texAttrs[0] != kNoTexAttr ? 255 : 200; }
 
-// Decodes `count` vertices from `vtx` (which advances past them), false when one cannot be.
-// indices, when given, gets each one's position and normal indices (decode_vertex).
+// Decodes `count` vertices from `vtx` (which advances past them) into `out`, room for them, false
+// when one cannot be. indices, when given, gets each one's position and normal indices
+// (decode_vertex).
 bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, const TexAttrs& texAttrs,
-                     std::vector<vita_gl::Vertex>& out, std::vector<VertexIndices>* indices = nullptr) noexcept {
-  const u8 grey = grey_for(texAttrs);
-  out.resize(count);
-  if (indices != nullptr) {
-    indices->assign(count, VertexIndices{});
-  }
+                     vita_gl::Vertex* out, VertexIndices* indices = nullptr) noexcept {
   if (count == 0) {
     return vtx <= end;
   }
+  const u8 grey = grey_for(texAttrs);
   DecodePlan plan;
   u32 steps = 0;
   if (!plan_vertices(g_gxState.vtxFmts[fmt], texAttrs, plan, steps)) {
     return false;
   }
   for (u32 i = 0; i < count; ++i) {
-    if (vtx >= end ||
-        !decode_vertex(vtx, plan.data(), steps, grey, out[i], indices != nullptr ? &(*indices)[i] : nullptr)) {
+    if (vtx >= end || !decode_vertex(vtx, plan.data(), steps, grey, out[i], indices != nullptr ? &indices[i] : nullptr)) {
       return false;
     }
   }
   return vtx <= end;
+}
+
+bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, const TexAttrs& texAttrs,
+                     std::vector<vita_gl::Vertex>& out, std::vector<VertexIndices>* indices = nullptr) noexcept {
+  out.resize(count);
+  if (indices != nullptr) {
+    indices->assign(count, VertexIndices{});
+  }
+  return decode_vertices(vtx, end, fmt, count, texAttrs, out.data(), indices != nullptr ? indices->data() : nullptr);
 }
 
 // The vertices of a primitive of `count` as triangles, three indices apiece, appended to `order`.
@@ -1550,11 +1556,13 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
           static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
 }
 
-// Records a draw of `mesh` with GX's current matrices and the material's units and state, TEV's
-// alpha folded in where it is a constant (its inputs are constants that change between draws).
-void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) noexcept {
+// Records a draw of `mesh`, or with none of `frameMesh` (the frame's own), with GX's current
+// matrices and the material's units and state, TEV's alpha folded in where it is a constant (its
+// inputs are constants that change between draws).
+void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
+                 const vita_gl::FrameMesh& frameMesh = {}) noexcept {
   // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
-  // argument); from here to the return, the draw's recording.
+  // argument; none for a mesh of the frame's own); from here to the return, the draw's recording.
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMesh);
   struct Recorded {
     ~Recorded() { vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord); }
@@ -1575,7 +1583,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material) 
   if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
     state.blend = false;
   }
-  vita_gl::Draw draw{.mesh = std::move(mesh)};
+  vita_gl::Draw draw{.mesh = std::move(mesh), .frameMesh = frameMesh};
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
@@ -1711,13 +1719,13 @@ void make_unique_vertices(SkinnedTemplate& t) {
 }
 
 // A skinned list call's triangles from its template (SkinnedTemplate), made at its first call
-// under this state: with `indexed` (a program's draw) the template's unique vertices posed, the
-// corners as `order` into them, else every corner (order null). False when the list cannot have one
-// (positions not indexed, or more than one vertex format) or a position index falls outside the
-// array as it is now: it is then decoded whole.
+// under this state: for a program's draw (`program`) posed into the frame's own vertices
+// (`frameMesh`), the template's unique vertices with its order into them as the indices (every
+// corner, in order, when there are more than 16-bit indices take); else every corner, into `out`.
+// False when the list cannot have one (positions not indexed, or more than one vertex format) or a
+// position index falls outside the array as it is now: it is then decoded whole.
 bool skinned_from_template(const void* key, const resident::Entry& entry, u32 size, const TexAttrs& texAttrs,
-                           bool indexed, std::vector<vita_gl::Vertex>& out,
-                           std::shared_ptr<const std::vector<u16>>& order) noexcept {
+                           bool program, vita_gl::FrameMesh& frameMesh, std::vector<vita_gl::Vertex>& out) noexcept {
   const GXAttrType posType = g_gxState.vtxDesc[GX_VA_POS];
   if (posType != GX_INDEX8 && posType != GX_INDEX16) {
     return false;
@@ -1820,22 +1828,35 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     }
   }
   // A program's draw takes the unique vertices, every corner otherwise (the face's shading).
-  const bool byIndex = indexed && t.order != nullptr;
+  const bool byIndex = program && t.order != nullptr;
+  const std::vector<vita_gl::Vertex>& source = byIndex ? t.unique : t.vertices;
   const std::vector<u32>& slots = byIndex ? t.uniqueSlots : t.slots;
-  out = byIndex ? t.unique : t.vertices;
-  for (size_t i = 0; i < out.size(); ++i) {
+  const auto count = static_cast<u32>(source.size());
+  vita_gl::Vertex* posedOut;
+  if (program) {
+    posedOut = vita_gl::frame_vertices(count, frameMesh.vertexAt);
+    std::memcpy(posedOut, source.data(), sizeof(vita_gl::Vertex) * count);
+    frameMesh.vertexCount = count;
+    if (byIndex) {
+      frameMesh.indexCount = static_cast<u32>(t.order->size());
+      frameMesh.indexAt = vita_gl::frame_indices(t.order->data(), frameMesh.indexCount);
+    }
+  } else {
+    out = source;
+    posedOut = out.data();
+  }
+  for (u32 i = 0; i < count; ++i) {
     const PosedVertex& posed = sPosed[slots[i]];
     for (u32 c = 0; c < cnt; ++c) {
-      out[i].pos[c] = posed.pos[c];
+      posedOut[i].pos[c] = posed.pos[c];
     }
     if (posed.hasNormal) {
-      std::memcpy(out[i].normal, posed.normal, sizeof(posed.normal));
+      std::memcpy(posedOut[i].normal, posed.normal, sizeof(posed.normal));
     }
   }
-  order = byIndex ? t.order : nullptr;
   sStats.skinnedIndexed += byIndex ? 1 : 0;
   sStats.skinnedCorners += t.vertices.size();
-  sStats.skinnedVertices += out.size();
+  sStats.skinnedVertices += count;
   return true;
 }
 } // namespace
@@ -1856,9 +1877,10 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
   // each frame is not.
   if (!position_array_resident(g_gxState.arrays[GX_VA_POS].data)) {
     ZoneScopedN("vita: skinned list call");
+    const bool program = material.program != nullptr;
+    vita_gl::FrameMesh frameMesh{.kind = vita_gl::MeshKind::Skinned};
     std::vector<vita_gl::Vertex> triangles;
-    std::shared_ptr<const std::vector<u16>> order;
-    if (skinned_from_template(key, entry, size, texAttrs, material.program != nullptr, triangles, order)) {
+    if (skinned_from_template(key, entry, size, texAttrs, program, frameMesh, triangles)) {
       ++sStats.skinnedFromTemplate;
     } else {
       u8 fmtMask = 0;
@@ -1867,17 +1889,15 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
       ++sStats.perCall;
     }
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
+    if (frameMesh.vertexCount != 0) {
+      record_draw(nullptr, material, frameMesh);
+      return true;
+    }
     if (triangles.empty()) {
       ++sStats.perCallFailed;
       return false;
     }
-    if (order != nullptr) {
-      record_draw(vita_gl::make_indexed_mesh(std::move(triangles), std::move(order), vita_gl::MeshKind::Skinned, true),
-                  material);
-    } else {
-      record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned, material.program != nullptr),
-                  material);
-    }
+    record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Skinned, program), material);
     return true;
   }
   const Cached& cached = lookup(key, entry, size, texAttrs);
@@ -1902,28 +1922,44 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   const TexAttrs& texAttrs = material.texAttrs;
-  // A program's draw: its vertices as decoded, the mesh's own, drawn by index (triangle_indices).
-  if (material.program != nullptr && prim != GX_LINES && prim != GX_LINESTRIP) {
-    std::vector<vita_gl::Vertex> decoded;
-    const u8* vtx = vertices.data();
-    sLastFail = Fail::None;
-    if (!decode_vertices(vtx, vertices.data() + vertices.size(), fmt, vtxCount, texAttrs, decoded)) {
-      ++sStats.immediateFailed;
-      return false;
+  // A program's draw but a line strip's: its vertices decoded into the frame's own
+  // (vita_gl::frame_vertices), none copied to each triangle's corners: triangles drawn by index
+  // (triangle_indices, copied there too), GX's lines as they are (the rain: 64 draws and 10,000
+  // vertices a frame in Tallon Overworld's rooms with it).
+  if (material.program != nullptr && prim != GX_LINESTRIP) {
+    const bool lines = prim == GX_LINES;
+    std::shared_ptr<const std::vector<u16>> indices;
+    if (!lines) {
+      indices = triangle_indices(prim, vtxCount);
     }
-    std::shared_ptr<const std::vector<u16>> indices = triangle_indices(prim, static_cast<u16>(decoded.size()));
+    const u32 count = lines ? vtxCount & ~1u : indices != nullptr ? vtxCount : 0;
+    vita_gl::FrameMesh mesh{.kind = vita_gl::MeshKind::Immediate,
+                            .primitive = lines ? vita_gl::MeshPrimitive::Lines : vita_gl::MeshPrimitive::Triangles};
+    if (count != 0) {
+      vita_gl::Vertex* out = vita_gl::frame_vertices(count, mesh.vertexAt);
+      const u8* vtx = vertices.data();
+      sLastFail = Fail::None;
+      if (decode_vertices(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out)) {
+        mesh.vertexCount = count;
+        if (indices != nullptr) {
+          mesh.indexCount = static_cast<u32>(indices->size());
+          mesh.indexAt = vita_gl::frame_indices(indices->data(), mesh.indexCount);
+        }
+      } else {
+        vita_gl::trim_frame_vertices(mesh.vertexAt);
+      }
+    }
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
-    if (indices == nullptr) {
+    if (mesh.vertexCount == 0) {
       ++sStats.immediateFailed;
       return false;
     }
-    ++sStats.immediate;
-    record_draw(vita_gl::make_indexed_mesh(std::move(decoded), std::move(indices), vita_gl::MeshKind::Immediate, true),
-                material);
+    ++(lines ? sStats.immediateLines : sStats.immediate);
+    record_draw(nullptr, material, mesh);
     return true;
   }
   // The vertices in the FIFO thread's room for them (no allocation a draw); the mesh's own copy is
-  // made at its size.
+  // made at its size, a program's line strip's in the frame's own vertices.
   std::vector<vita_gl::Vertex>& prims = sPrims;
   const u8* vtx = vertices.data();
   sLastFail = Fail::None;
@@ -1932,24 +1968,37 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return false;
   }
   if (prim == GX_LINES || prim == GX_LINESTRIP) {
-    // As GL's lines, two vertices each (the map's outlines, among others). One pixel wide: GX's
-    // line width is not applied.
-    std::vector<vita_gl::Vertex> lines;
+    // As GL's lines, two vertices each (the map's outlines, the rain's splashes, among others). One
+    // pixel wide: GX's line width is not applied.
     const size_t step = prim == GX_LINES ? 2 : 1;
-    lines.reserve(prims.size() < 2 ? 0 : prim == GX_LINES ? prims.size() / 2 * 2 : (prims.size() - 1) * 2);
-    for (size_t i = 0; i + 1 < prims.size(); i += step) {
-      lines.push_back(prims[i]);
-      lines.push_back(prims[i + 1]);
+    const auto count =
+        static_cast<u32>(prims.size() < 2 ? 0 : prim == GX_LINES ? prims.size() / 2 * 2 : (prims.size() - 1) * 2);
+    vita_gl::FrameMesh mesh{.kind = vita_gl::MeshKind::Immediate, .primitive = vita_gl::MeshPrimitive::Lines};
+    std::vector<vita_gl::Vertex> lines;
+    vita_gl::Vertex* out;
+    if (count != 0 && material.program != nullptr) {
+      out = vita_gl::frame_vertices(count, mesh.vertexAt);
+      mesh.vertexCount = count;
+    } else {
+      lines.resize(count);
+      out = lines.data();
+    }
+    for (size_t i = 0, o = 0; i + 1 < prims.size(); i += step, o += 2) {
+      out[o] = prims[i];
+      out[o + 1] = prims[i + 1];
     }
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
-    if (lines.empty()) {
+    if (count == 0) {
       ++sStats.immediateFailed;
       return false;
     }
     ++sStats.immediateLines;
-    record_draw(vita_gl::make_mesh(std::move(lines), vita_gl::MeshKind::Immediate, material.program != nullptr,
-                                   vita_gl::MeshPrimitive::Lines),
-                material);
+    if (mesh.vertexCount != 0) {
+      record_draw(nullptr, material, mesh);
+    } else {
+      record_draw(vita_gl::make_mesh(std::move(lines), vita_gl::MeshKind::Immediate, false, vita_gl::MeshPrimitive::Lines),
+                  material);
+    }
     return true;
   }
   std::vector<vita_gl::Vertex> triangles;

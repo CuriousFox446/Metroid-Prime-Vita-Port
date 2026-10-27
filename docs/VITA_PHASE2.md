@@ -1185,3 +1185,32 @@ state 7, Aurora's commands 6.5), the main thread as much (ticks 22, the game's d
   them a compiled program's binary (`program_binary`). A binary that does not link is removed and
   compiled at once rather than next session. Links are 4 a frame at most. The presents line adds
   the binaries compiled again.
+
+Its run (cdeac54; Tallon Overworld, about 16,000 lines of log): 1,103 programs on the card at the
+start, one stall left (the game's load, 1 s), none at room changes. 148 programs loaded from the
+card (about 50 ms each, on the card thread), 4 sent to the compiler thread, 2 of them linked (21.9 s
+of compiling, 11 s each). The heavy rooms ran at 15 to 20 frames a second, the lighter 25 to 42,
+the map screen at 6 to 7.
+- The slowest windows, 8 to 12 frames a second, were the compiles: about 37 windows in four
+  stretches, each as long as a compile. In them the FIFO thread's `mesh` section (one `make_shared` a draw)
+  went from about 2 to 17-39 ms a frame and `immediate` (a vector a draw) from about 10 to 24-47;
+  GX's state, the lookups, the recording and the rest held. Input on the main thread doubled as
+  well (its controls profile, rebuilt each frame with vectors). vitaGL hands vitashark `vglMalloc`
+  (`start_shader_compiler`), which tries newlib's `malloc` first: SceShaccCg's allocations took the
+  heap lock every thread's take, from the compiler thread at a low priority, often preempted
+  while holding it.
+- Now SceShaccCg allocates from a heap of its own (`use_compiler_heap`: 8 MiB carved once from
+  newlib's heap, a `sceClibMspace` over it, given to `sceShaccCgSetDefaultAllocator` after
+  `vglInit`); one compile runs at a time (the vitashark lock). What does not fit goes to
+  `vglMalloc` as before, and a free goes back by its address. The presents line adds the heap's
+  most in use at once and the allocations past it.
+- The frame's own meshes: an immediate draw with a program (triangles by index, and GX's lines:
+  the rain, 64 draws and about 10,000 vertices a frame), a program's line strip and a skinned call
+  with a program decode or pose their vertices into the recording frame's own array
+  (`vita_gl::frame_vertices`) and copy their indices to its own (`frame_indices`), and the draw
+  carries a `FrameMesh` (where they are) instead of a `Mesh`. No `make_shared` and vector a draw
+  on the FIFO thread, nor their frees on the reaper's thread (500 to 1,100 draws a frame, all
+  through newlib's lock); the arrays grow by doubling, are not cleared first, and start each frame
+  at the last one's size. The render worker points the arrays into the frame (vitaGL copies them
+  into its pool at the draw, as it did a client-memory mesh) and draws by the frame's indices or in
+  order. The rest (lists, draws without a program) keep their `Mesh`.
