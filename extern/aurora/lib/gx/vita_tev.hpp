@@ -76,6 +76,12 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
 // Programs generated so far, and of them those that read an indirect stage.
 size_t tev_program_count() noexcept;
 size_t tev_indirect_program_count() noexcept;
+// The warm-up (docs/VITA_PHASE2.md), at each frame's end (FIFO thread, or the game thread with the
+// FIFO drained): the material records the sessions before saved on the card made into programs with
+// this session's generator, a couple of milliseconds' worth, and those the card lacks compiled ahead
+// of their first draw (vita_gl::warm_up). Its counts, for the log.
+void tev_warm_up_step() noexcept;
+void tev_log_warm_up() noexcept;
 // False with MP_VITA_TEV=0: every draw fixed-function.
 bool tev_enabled() noexcept;
 } // namespace aurora::gx::vita

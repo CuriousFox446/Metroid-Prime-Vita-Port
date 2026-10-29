@@ -23,10 +23,33 @@
 #include <Windows.h>
 #elif defined(__APPLE__)
 #include <pthread.h>
+#elif defined(__vita__)
+#include "internal.hpp"
+
+#include <fmt/format.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #endif
 
 namespace aurora::thread {
 namespace {
+#if defined(__vita__)
+constexpr Module Log{"aurora::thread"};
+
+// The threads named so far (register_current), for log_cpu: each one's time run and moves between
+// cores at the last log (seen: it has been logged once).
+struct Named {
+  std::string name;
+  SceUID id = 0;
+  bool seen = false;
+  uint64_t run = 0;
+  int32_t moves = 0;
+};
+std::mutex sNamedMutex;
+std::vector<Named> sNamed;
+uint64_t sLastLog = 0;
+#endif
+
 struct Processor {
   uint16_t group = 0;
   uint32_t number = 0;
@@ -287,12 +310,61 @@ void set_current(const Options& options) noexcept {
 #ifdef TRACY_ENABLE
     tracy::SetThreadName(options.name.c_str());
 #endif
+    register_current(options.name);
   }
 
   SDL_SetCurrentThreadPriority(to_sdl_priority(options.priority));
   if (options.affinity == Affinity::SharedCache) {
     pin_shared_cache();
   }
+}
+
+void register_current(const std::string& name) noexcept {
+#if defined(__vita__)
+  const SceUID id = sceKernelGetThreadId();
+  std::lock_guard lock{sNamedMutex};
+  for (Named& named : sNamed) {
+    if (named.id == id) {
+      named.name = name;
+      return;
+    }
+  }
+  sNamed.push_back({.name = name, .id = id});
+#else
+  (void)name;
+#endif
+}
+
+void log_cpu() noexcept {
+#if defined(__vita__)
+  std::lock_guard lock{sNamedMutex};
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  const uint64_t span = sLastLog != 0 ? now - sLastLog : 0;
+  sLastLog = now;
+  std::string threads;
+  for (auto it = sNamed.begin(); it != sNamed.end();) {
+    SceKernelThreadInfo info{};
+    info.size = sizeof(info);
+    if (sceKernelGetThreadInfo(it->id, &info) < 0) {
+      it = sNamed.erase(it); // it has ended (a job thread with no work left)
+      continue;
+    }
+    // Its run time and the span are both microseconds.
+    const uint64_t run = info.runClocks;
+    const std::string busy = it->seen && span != 0
+                                 ? fmt::format("{:.0f}%", 100.0 * static_cast<double>(run - it->run) / static_cast<double>(span))
+                                 : std::string("new");
+    threads += fmt::format("{}{}: core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves", threads.empty() ? "" : " | ",
+                           it->name, info.currentCpuId, info.lastExecutedCpuId,
+                           static_cast<uint32_t>(info.currentCpuAffinityMask), info.currentPriority, busy,
+                           it->seen ? info.changeCpuCount - it->moves : info.changeCpuCount);
+    it->seen = true;
+    it->run = run;
+    it->moves = info.changeCpuCount;
+    ++it;
+  }
+  Log.info("[threads] over {:.1f} s: {}", static_cast<double>(span) / 1e6, threads);
+#endif
 }
 
 } // namespace aurora::thread

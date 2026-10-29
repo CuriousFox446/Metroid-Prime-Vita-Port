@@ -24,6 +24,7 @@
 #include "dvd.hpp"
 
 #include "../../internal.hpp"
+#include "../../thread.hpp"
 
 using namespace aurora::dvd::impl;
 
@@ -526,6 +527,7 @@ private:
 #ifdef TRACY_ENABLE
     tracy::SetThreadName("Aurora DVD worker");
 #endif
+    aurora::thread::register_current("Aurora DVD worker");
 
     std::unique_lock lk{m_mutex};
     while (true) {

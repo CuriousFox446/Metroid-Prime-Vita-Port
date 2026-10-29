@@ -7,13 +7,18 @@
 #include <xxhash.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace aurora::gx::vita {
 namespace {
@@ -660,6 +665,153 @@ std::string texgen_input(const TcgConfig& tcg, int c) {
   }
   return fmt::format("float4(aUv{}, 1.0, 1.0)", c);
 }
+
+// The program for the current GX state with `layout`: its sources, `info` (all but its Program) and
+// the key naming it (its binary on the card too). Made by tev_program, and by the warm-up for the
+// material records of the sessions before (tev_warm_up_step).
+void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSource, std::string& fragmentSource,
+              u64& key);
+
+// The warm-up (docs/VITA_PHASE2.md). Each material state a program is made for is saved on the card
+// (vita_gl::save_material) as the generator reads it; the next session makes those programs again
+// with its own generator and compiles any the card lacks in the background from its start
+// (tev_warm_up_step): after the generator changed (fog, the light counts), at the title screen
+// rather than at each material's first draw. What no stage reads is cleared (the generators and
+// descriptor entries no stage names, the indirect stages past the count, unlit parts' light masks,
+// the alpha references and a generator's matrix, which are a draw's constants), so materials alike
+// save alike.
+struct MaterialRecord {
+  u32 format = 0;
+  u8 numTevStages = 0;
+  u8 numIndStages = 0;
+  u8 _p1 = 0;
+  u8 _p2 = 0;
+  GXFogType fogType = GX_FOG_NONE;
+  AlphaCompare alphaCompare{};
+  std::array<TevSwap, MaxTevSwap> tevSwapTable{};
+  std::array<ColorChannelConfig, MaxColorChannels> colorChannelConfig{};
+  std::array<u32, MaxColorChannels> lightMasks{};
+  std::array<IndStage, MaxIndStages> indStages{};
+  std::array<TcgConfig, MaxTexCoord> tcgs{};
+  std::array<GXAttrType, GX_VA_TEX7 - GX_VA_TEX0 + 1> texDesc{};
+  // Last: a record holds its first numTevStages alone.
+  std::array<TevStage, MaxTevStages> tevStages{};
+};
+static_assert(std::has_unique_object_representations_v<MaterialRecord>);
+constexpr size_t kRecordHead = offsetof(MaterialRecord, tevStages);
+// Records of another build's layout are skipped.
+constexpr u32 kRecordFormat = 1u << 24 | static_cast<u32>(sizeof(MaterialRecord));
+
+// The current GX state as a record, and its length (its stages past the count left off).
+MaterialRecord capture_material(size_t& length) noexcept {
+  const GXState& s = g_gxState;
+  MaterialRecord r;
+  r.format = kRecordFormat;
+  r.numTevStages = static_cast<u8>(std::min<u32>(s.numTevStages, MaxTevStages));
+  r.numIndStages = static_cast<u8>(std::min<u32>(s.numIndStages, MaxIndStages));
+  r.fogType = s.fog.type;
+  r.alphaCompare = s.alphaCompare;
+  r.alphaCompare.ref0 = 0;
+  r.alphaCompare.ref1 = 0;
+  r.tevSwapTable = s.tevSwapTable;
+  r.colorChannelConfig = s.colorChannelConfig;
+  for (u32 part = 0; part < MaxColorChannels; ++part) {
+    r.lightMasks[part] = s.colorChannelConfig[part].lightingEnabled
+                             ? static_cast<u32>(s.colorChannelState[part].lightMask.to_ulong())
+                             : 0;
+  }
+  u32 usedCoords = 0;
+  for (u32 i = 0; i < r.numTevStages; ++i) {
+    r.tevStages[i] = s.tevStages[i];
+    usedCoords |= s.tevStages[i].texCoordId < MaxTexCoord ? 1u << s.tevStages[i].texCoordId : 0;
+  }
+  for (u32 i = 0; i < r.numIndStages; ++i) {
+    r.indStages[i] = s.indStages[i];
+    usedCoords |= s.indStages[i].texCoordId < MaxTexCoord ? 1u << s.indStages[i].texCoordId : 0;
+  }
+  for (u32 i = 0; i < MaxTexCoord; ++i) {
+    if ((usedCoords & (1u << i)) == 0) {
+      continue;
+    }
+    r.tcgs[i] = s.tcgs[i];
+    r.tcgs[i].mtx = GX_IDENTITY;
+    const GXTexGenSrc src = s.tcgs[i].src;
+    if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7) {
+      r.texDesc[src - GX_TG_TEX0] = s.vtxDesc[GX_VA_TEX0 + (src - GX_TG_TEX0)];
+    }
+  }
+  length = kRecordHead + r.numTevStages * sizeof(TevStage);
+  return r;
+}
+
+// Swaps a record with the GX state it stands for: in while its program is made, back after.
+void swap_material(MaterialRecord& r) noexcept {
+  GXState& s = g_gxState;
+  std::swap(s.numTevStages, r.numTevStages);
+  std::swap(s.numIndStages, r.numIndStages);
+  std::swap(s.fog.type, r.fogType);
+  std::swap(s.alphaCompare, r.alphaCompare);
+  std::swap(s.tevSwapTable, r.tevSwapTable);
+  std::swap(s.colorChannelConfig, r.colorChannelConfig);
+  for (u32 part = 0; part < MaxColorChannels; ++part) {
+    const auto mask = static_cast<u32>(s.colorChannelState[part].lightMask.to_ulong());
+    s.colorChannelState[part].lightMask = GX::LightMask{r.lightMasks[part]};
+    r.lightMasks[part] = mask;
+  }
+  std::swap(s.indStages, r.indStages);
+  std::swap(s.tcgs, r.tcgs);
+  for (size_t n = 0; n < r.texDesc.size(); ++n) {
+    std::swap(s.vtxDesc[GX_VA_TEX0 + n], r.texDesc[n]);
+  }
+  std::swap(s.tevStages, r.tevStages);
+}
+
+// The warm-up's progress (FIFO thread): the card's records (where each is among
+// vita_gl::saved_materials, and their hashes with those saved since, so a record is saved once), the
+// next to make, and for the log the counts.
+struct WarmUp {
+  bool indexed = false;
+  std::vector<std::pair<u32, u32>> records;
+  std::unordered_set<u64> saved;
+  size_t next = 0;
+  u32 skipped = 0; // another build's, or one no program draws
+  u32 known = 0;   // the card had its program, or it was being compiled
+  u32 sent = 0;    // compiled ahead of its first draw
+  u32 added = 0;   // saved this session
+};
+WarmUp sWarmUp;
+
+void index_records() noexcept {
+  if (sWarmUp.indexed) {
+    return;
+  }
+  sWarmUp.indexed = true;
+  const std::vector<u8>& bytes = vita_gl::saved_materials();
+  size_t at = 0;
+  while (bytes.size() - at >= sizeof(u32)) {
+    u32 length = 0;
+    std::memcpy(&length, bytes.data() + at, sizeof(length));
+    at += sizeof(length);
+    if (length > bytes.size() - at) {
+      break; // cut short (the power, a crash)
+    }
+    sWarmUp.records.emplace_back(static_cast<u32>(at), length);
+    sWarmUp.saved.insert(XXH3_64bits(bytes.data() + at, length));
+    at += length;
+  }
+}
+
+// The current material state saved for the warm-up of the sessions after, once.
+void save_material() noexcept {
+  index_records();
+  size_t length = 0;
+  const MaterialRecord record = capture_material(length);
+  if (!sWarmUp.saved.insert(XXH3_64bits(&record, length)).second) {
+    return;
+  }
+  ++sWarmUp.added;
+  vita_gl::save_material(&record, length);
+}
 } // namespace
 
 bool tev_enabled() noexcept {
@@ -821,7 +973,33 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   if (const auto it = sProgramsByState.find(stateKey); it != sProgramsByState.end()) {
     return it->second;
   }
+  // A material state new to the session: saved for the next sessions' warm-up.
+  save_material();
   TevProgram info;
+  std::string vertexSource;
+  std::string fragmentSource;
+  u64 key = 0;
+  generate(layout, info, vertexSource, fragmentSource, key);
+  TevProgram& program = sPrograms[key];
+  if (!program.program) {
+    // The first indirect programs' sources, for the log (they compile on the Vita alone).
+    static int sIndirectLogged = 0;
+    if (info.indirect && sIndirectLogged < 2) {
+      ++sIndirectLogged;
+      Log.info("an indirect program ({} textures, {} coordinate sets):\n-- vertex --\n{}-- fragment --\n{}",
+               layout.samplerCount, layout.coordCount, vertexSource, fragmentSource);
+    }
+    info.program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
+    program = std::move(info);
+  }
+  sProgramsByState.emplace(stateKey, &program);
+  return &program;
+}
+
+namespace {
+void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSource, std::string& fragmentSource,
+              u64& key) {
+  const GXState& s = g_gxState;
   info.indirect = layout.indirect;
   const std::string body = pack_constants(fragment_body(layout), info);
   const bool raw = body.find("vRaw") != std::string::npos;
@@ -933,30 +1111,16 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
     add(fragmentParams, fmt::format("uniform float4 uConst[{}]", info.constantCount));
   }
   const std::string vertexUniforms = fmt::format("uniform float4 uVert[{}]", row);
-  std::string vertexSource =
-      fmt::format("void main({}, {}, {}) {{\n{}}}\n", vertexParams, vertexUniforms, vertexOuts, vertexBody);
-  std::string fragmentSource = fmt::format("float4 main({}) : COLOR {{\n{}}}\n", fragmentParams, body);
+  vertexSource = fmt::format("void main({}, {}, {}) {{\n{}}}\n", vertexParams, vertexUniforms, vertexOuts, vertexBody);
+  fragmentSource = fmt::format("float4 main({}) : COLOR {{\n{}}}\n", fragmentParams, body);
 
   // The key also names the program's binary on the memory card (vita_gl.cpp); the seed changes
   // when what a source compiles to could (the compiler's options, the attribute layout).
   constexpr u64 kBinaryVersion = 3;
-  u64 key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
+  key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
-  TevProgram& program = sPrograms[key];
-  if (!program.program) {
-    // The first indirect programs' sources, for the log (they compile on the Vita alone).
-    static int sIndirectLogged = 0;
-    if (info.indirect && sIndirectLogged < 2) {
-      ++sIndirectLogged;
-      Log.info("an indirect program ({} textures, {} coordinate sets):\n-- vertex --\n{}-- fragment --\n{}",
-               layout.samplerCount, layout.coordCount, vertexSource, fragmentSource);
-    }
-    info.program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
-    program = std::move(info);
-  }
-  sProgramsByState.emplace(stateKey, &program);
-  return &program;
 }
+} // namespace
 
 void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapIds,
                    float out[vita_gl::kProgramConstants][4]) noexcept {
@@ -1095,5 +1259,56 @@ size_t tev_indirect_program_count() noexcept {
     count += program.indirect ? 1 : 0;
   }
   return count;
+}
+
+void tev_warm_up_step() noexcept {
+  if (!tev_enabled()) {
+    return;
+  }
+  index_records();
+  // A couple of milliseconds a frame at most, and while the render worker has room for one more.
+  constexpr auto kBudget = std::chrono::milliseconds(2);
+  const auto start = std::chrono::steady_clock::now();
+  const std::vector<u8>& bytes = vita_gl::saved_materials();
+  while (sWarmUp.next < sWarmUp.records.size() && std::chrono::steady_clock::now() - start < kBudget &&
+         vita_gl::warm_up_room()) {
+    const auto [at, length] = sWarmUp.records[sWarmUp.next++];
+    MaterialRecord record;
+    if (length < kRecordHead || length > sizeof(record) || (length - kRecordHead) % sizeof(TevStage) != 0) {
+      ++sWarmUp.skipped;
+      continue;
+    }
+    std::memcpy(&record, bytes.data() + at, length);
+    if (record.format != kRecordFormat || record.numTevStages != (length - kRecordHead) / sizeof(TevStage) ||
+        record.numIndStages > MaxIndStages) {
+      ++sWarmUp.skipped;
+      continue;
+    }
+    // The record stands in for GX's state while its program is made; the state is put back after.
+    swap_material(record);
+    const TevLayout layout = tev_layout();
+    TevProgram info;
+    std::string vertexSource;
+    std::string fragmentSource;
+    u64 key = 0;
+    if (layout.supported) {
+      generate(layout, info, vertexSource, fragmentSource, key);
+    }
+    swap_material(record);
+    if (!layout.supported) {
+      ++sWarmUp.skipped;
+    } else if (vita_gl::program_known(key)) {
+      ++sWarmUp.known;
+    } else {
+      ++sWarmUp.sent;
+      vita_gl::warm_up(key, std::move(vertexSource), std::move(fragmentSource));
+    }
+  }
+}
+
+void tev_log_warm_up() noexcept {
+  Log.info("material records: {} on the card at the start, {} saved since; warm-up: {} made again ({} on the card "
+           "already, {} sent to be compiled, {} of another build or not drawable)",
+           sWarmUp.records.size(), sWarmUp.added, sWarmUp.next, sWarmUp.known, sWarmUp.sent, sWarmUp.skipped);
 }
 } // namespace aurora::gx::vita

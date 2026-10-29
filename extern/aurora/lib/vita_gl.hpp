@@ -10,6 +10,7 @@
 // vitaGL is not thread-safe: after initialize (game thread) every GL call is made on Aurora's
 // render worker, where frames are presented.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -246,6 +247,17 @@ Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept;
 void trim_frame_vertices(uint32_t at) noexcept;
 // FIFO thread: a FrameMesh's indices copied to the frame's own; returns where they start.
 uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept;
+// The warm-up's side here (gx/vita_tev.cpp has the rest): the material records on the card, read at
+// initialize, each a 32-bit length and its bytes; and a new one, appended there (FIFO thread; the
+// card thread writes them a batch at a time).
+const std::vector<uint8_t>& saved_materials() noexcept;
+void save_material(const void* record, size_t size) noexcept;
+// FIFO thread: whether the program `key` is on the card, being compiled or waiting to be; whether
+// the warm-up has room for another (one waits at most); and a program the card lacks, to compile
+// ahead of its first draw (the render worker builds them one at a time, each dropped once saved).
+bool program_known(uint64_t key) noexcept;
+bool warm_up_room() noexcept;
+void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource) noexcept;
 // Render worker: clears the screen, draws the overlay (null: none) and swaps.
 void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
@@ -265,6 +277,14 @@ inline uint32_t recording_serial() noexcept { return 0; }
 inline Vertex* frame_vertices(uint32_t, uint32_t&) noexcept { return nullptr; }
 inline void trim_frame_vertices(uint32_t) noexcept {}
 inline uint32_t frame_indices(const uint16_t*, uint32_t) noexcept { return 0; }
+inline const std::vector<uint8_t>& saved_materials() noexcept {
+  static const std::vector<uint8_t> none;
+  return none;
+}
+inline void save_material(const void*, size_t) noexcept {}
+inline bool program_known(uint64_t) noexcept { return true; }
+inline bool warm_up_room() noexcept { return false; }
+inline void warm_up(uint64_t, std::string, std::string) noexcept {}
 inline void present(ImDrawData*) noexcept {}
 inline ImTextureID add_texture(uint32_t, uint32_t, const uint8_t*) noexcept { return ImTextureID{}; }
 inline void remove_texture(ImTextureID) noexcept {}

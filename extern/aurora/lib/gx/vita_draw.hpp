@@ -32,6 +32,8 @@ void record_copy_clear() noexcept;
 void log_stats() noexcept;
 // Frees the cached materials holding a texture nothing else holds (FIFO thread, at a frame end).
 void drop_lone_textures() noexcept;
+// The generated programs' warm-up, a step (vita_tev.hpp: FIFO thread, at a frame end).
+void warm_up_step() noexcept;
 #else
 inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
@@ -42,5 +44,6 @@ inline void record_copy() noexcept {}
 inline void record_copy_clear() noexcept {}
 inline void log_stats() noexcept {}
 inline void drop_lone_textures() noexcept {}
+inline void warm_up_step() noexcept {}
 #endif
 } // namespace aurora::gx::vita

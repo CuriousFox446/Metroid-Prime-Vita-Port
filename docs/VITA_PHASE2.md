@@ -1240,3 +1240,23 @@ Milestone 4's parts the rollback to step 1 took, asked for again and done afresh
   GL points, fixed-function (vitaGL's point size reaches only its own programs); the game draws
   none. The immediate-draws line counts lines and points apart. Not done: GX's line and point
   texture offsets.
+
+The programs' warm-up, and a thread log (asked for while 748e22a was tried):
+- Each material state a program is made for is saved on the card (`vita_programs/materials.bin`)
+  as the generator reads it (`MaterialRecord`: the TEV stages, swap tables, channels and their
+  light masks, the alpha compare's operators, the indirect stages, the coordinate generators the
+  stages name and their descriptor entries, the fog's type). What no stage reads is cleared, so
+  materials alike save alike, once each; the card thread appends them a batch a job.
+- The next session reads them at the start, and at each frame's end the FIFO thread makes their
+  programs again with its own generator (a record swapped in for GX's state, then back), up to 2 ms
+  a frame. Each one the card lacks goes to the render worker, which compiles it in the background,
+  links it, saves its binary and drops it; the draw that needs it reads it from the card. One at a
+  time: a draw's own compile waits behind one at most, and a draw whose program the warm-up is
+  compiling waits for it (`g_compilingKeys`, shared by both, so neither compiles a program twice).
+- So after a change to the generator (fog, the light counts), the programs of materials seen
+  before compile from the title screen on rather than at their first draw; places never seen still
+  compile at their first draw. A session's first run with it only saves. The log adds the records,
+  the programs made again, those the card had and those sent, and the warm-up's builds.
+- The thread log, each 300 presents (`[threads]`): each named thread's core (the one it is on, the
+  one it last ran on, its affinity mask), priority, the share of the time it ran, and its moves
+  between cores (`SceKernelThreadInfo`), to see where the compiler's time goes before placing it.

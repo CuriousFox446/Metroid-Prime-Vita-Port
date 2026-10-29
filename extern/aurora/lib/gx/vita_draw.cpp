@@ -2080,6 +2080,8 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
 
 void retained() noexcept { sPosAnswerKnown = false; }
 
+void warm_up_step() noexcept { tev_warm_up_step(); }
+
 // EFB copies read back from the screen: off till milestone 5. Each took 7 to 22 ms (glReadPixels
 // ends vitaGL's scene and waits for the GPU), about one a frame in play, and the pause screen's
 // backdrop came out flat grey; materials sampling a copy take the black stand-in meanwhile.
@@ -2300,6 +2302,7 @@ void log_stats() noexcept {
            s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
            s.cornered, s.copies, s.depthCopies, sCopyTextures.size(), s.copyClears, s.alphaConstant,
            s.alphaRejected, s.alphaTexture);
+  tev_log_warm_up();
   sStats = {};
 }
 } // namespace aurora::gx::vita

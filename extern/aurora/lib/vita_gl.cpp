@@ -19,6 +19,7 @@
 #include <malloc.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -759,8 +760,52 @@ std::string g_programCacheDir;
 std::string cache_path(uint64_t key) { return fmt::format("{}/{:016x}.gxp", g_programCacheDir, key); }
 
 // The keys of the programs on the card, from its folder read once at the start (index_card); a
-// program's first draw asks this, not the card (render worker).
+// program's first draw asks this, not the card (render worker). And those being compiled, by a
+// draw's program or the warm-up's, so that neither starts a second compile of one. The FIFO thread
+// asks both too (program_known): under g_keysMutex.
 std::unordered_set<uint64_t> g_cardKeys;
+std::unordered_set<uint64_t> g_compilingKeys;
+std::mutex g_keysMutex;
+
+// The warm-up's material records on the card (gx/vita_tev.cpp): read whole at the start; new ones
+// gathered and appended by the card thread, a batch a job (their materials come in bursts, a room's
+// at its first draws).
+std::string g_materialsPath;
+std::vector<uint8_t> g_savedMaterials;
+std::mutex g_materialsMutex;
+std::vector<uint8_t> g_materialsPending;
+bool g_materialsQueued = false;
+
+void read_materials() noexcept {
+  std::FILE* file = std::fopen(g_materialsPath.c_str(), "rb");
+  if (file == nullptr) {
+    return;
+  }
+  if (std::fseek(file, 0, SEEK_END) == 0) {
+    const long size = std::ftell(file);
+    if (size > 0 && size < (32l << 20) && std::fseek(file, 0, SEEK_SET) == 0) {
+      g_savedMaterials.resize(static_cast<size_t>(size));
+      if (std::fread(g_savedMaterials.data(), g_savedMaterials.size(), 1, file) != 1) {
+        g_savedMaterials.clear();
+      }
+    }
+  }
+  std::fclose(file);
+}
+
+// Card thread: the records gathered since the last batch, appended.
+void write_materials() noexcept {
+  std::vector<uint8_t> batch;
+  {
+    std::lock_guard lock{g_materialsMutex};
+    batch.swap(g_materialsPending);
+    g_materialsQueued = false;
+  }
+  if (std::FILE* file = std::fopen(g_materialsPath.c_str(), "ab"); file != nullptr) {
+    std::fwrite(batch.data(), batch.size(), 1, file);
+    std::fclose(file);
+  }
+}
 
 void index_card() noexcept {
   std::error_code ec;
@@ -848,13 +893,21 @@ public:
   }
 
   // Render worker: true once linked. A program not tried yet is read back from the card (the card's
-  // index has it) or compiled, both on threads of their own; done, it is linked while the frame's
-  // budget allows (a few milliseconds each). Its draws are fixed-function till then.
+  // index has it) or compiled, both on threads of their own (one the warm-up is compiling waits for
+  // it, then is read back); done, it is linked while the frame's budget allows (a few milliseconds
+  // each). Its draws are fixed-function till then.
   bool ready(int& buildBudget) noexcept {
     if (m_state == State::Pending) {
-      if (g_cardKeys.contains(m_key)) {
+      bool onCard = false;
+      bool compiling = false;
+      {
+        std::lock_guard lock{g_keysMutex};
+        onCard = g_cardKeys.contains(m_key);
+        compiling = g_compilingKeys.contains(m_key);
+      }
+      if (onCard) {
         load();
-      } else {
+      } else if (!compiling) {
         compile();
       }
     }
@@ -870,6 +923,8 @@ public:
   }
 
   GLuint id() const noexcept { return m_id; }
+  // Linked, or failed: nothing more to build.
+  bool settled() const noexcept { return m_state == State::Ready || m_state == State::Failed; }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
   GLint samplers[kSamplers] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
@@ -941,6 +996,10 @@ private:
 
   // Its sources to the compiler thread; the draws are fixed-function till its GXPs are linked.
   void compile() noexcept {
+    {
+      std::lock_guard lock{g_keysMutex};
+      g_compilingKeys.insert(m_key);
+    }
     m_job = submit_compile(std::move(m_vertexSource), std::move(m_fragmentSource));
     ++g_programStats.queued;
     m_state = State::Compiling;
@@ -987,7 +1046,10 @@ private:
     m_load.reset();
     if (m_id == 0) {
       ++g_programStats.reloaded;
-      g_cardKeys.erase(m_key);
+      {
+        std::lock_guard lock{g_keysMutex};
+        g_cardKeys.erase(m_key);
+      }
       card_thread().submit([key = m_key] {
         std::error_code ec;
         std::filesystem::remove(cache_path(key), ec);
@@ -1020,7 +1082,10 @@ private:
         GLenum format = 0;
         std::vector<uint8_t> binary;
         if (program_binary(m_id, format, binary)) {
-          g_cardKeys.insert(m_key);
+          {
+            std::lock_guard lock{g_keysMutex};
+            g_cardKeys.insert(m_key);
+          }
           card_thread().submit([key = m_key, vertexLength = m_vertexLength, fragmentLength = m_fragmentLength,
                                 format, binary = std::move(binary)] {
             write_cached(key, vertexLength, fragmentLength, format, binary);
@@ -1034,6 +1099,10 @@ private:
       glDeleteShader(fs);
     }
     g_programStats.compileMs += job.ms;
+    {
+      std::lock_guard lock{g_keysMutex};
+      g_compilingKeys.erase(m_key);
+    }
     finish(error, job.vertexSource, job.fragmentSource);
     m_job.reset();
   }
@@ -1089,6 +1158,102 @@ private:
 
 std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept {
   return std::make_shared<Program>(std::move(vertexSource), std::move(fragmentSource), key);
+}
+
+const std::vector<uint8_t>& saved_materials() noexcept { return g_savedMaterials; }
+
+void save_material(const void* record, size_t size) noexcept {
+  const auto length = static_cast<uint32_t>(size);
+  const auto* lengthBytes = reinterpret_cast<const uint8_t*>(&length);
+  const auto* bytes = static_cast<const uint8_t*>(record);
+  std::lock_guard lock{g_materialsMutex};
+  g_materialsPending.insert(g_materialsPending.end(), lengthBytes, lengthBytes + sizeof(length));
+  g_materialsPending.insert(g_materialsPending.end(), bytes, bytes + size);
+  if (!g_materialsQueued) {
+    g_materialsQueued = card_thread().submit(write_materials);
+  }
+}
+
+namespace {
+// The warm-up's programs (gx/vita_tev.cpp): the FIFO thread's, waiting (one at most: warm_up_room),
+// and the one the render worker builds (warm_up_step), dropped once its binary is on the card, from
+// where the draw that needs it reads it back.
+struct WarmUpJob {
+  uint64_t key = 0;
+  std::string vertexSource;
+  std::string fragmentSource;
+};
+std::mutex g_warmUpMutex;
+std::deque<WarmUpJob> g_warmUpQueue;
+std::shared_ptr<Program> g_warmingUp;
+// For the log: the warm-up's programs built, failed, and found built or being built by their turn.
+struct WarmUpStats {
+  uint32_t built = 0;
+  uint32_t failed = 0;
+  uint32_t skipped = 0;
+};
+WarmUpStats g_warmUpStats;
+
+// Render worker, each present: the warm-up's program a step further (linked once compiled, its
+// binary to the card, then dropped), or the next one waiting started.
+void warm_up_step() noexcept {
+  if (g_warmingUp != nullptr) {
+    int budget = 1;
+    g_warmingUp->ready(budget);
+    if (!g_warmingUp->settled()) {
+      return;
+    }
+    ++(g_warmingUp->id() != 0 ? g_warmUpStats.built : g_warmUpStats.failed);
+    g_warmingUp.reset();
+    // Its link made it the program in use (to set its samplers): the overlay draws fixed-function.
+    glUseProgram(0);
+  }
+  for (;;) {
+    WarmUpJob job;
+    {
+      std::lock_guard lock{g_warmUpMutex};
+      if (g_warmUpQueue.empty()) {
+        return;
+      }
+      job = std::move(g_warmUpQueue.front());
+      g_warmUpQueue.pop_front();
+    }
+    bool known = false;
+    {
+      std::lock_guard lock{g_keysMutex};
+      known = g_cardKeys.contains(job.key) || g_compilingKeys.contains(job.key);
+    }
+    if (known) {
+      ++g_warmUpStats.skipped;
+      continue;
+    }
+    g_warmingUp = std::make_shared<Program>(std::move(job.vertexSource), std::move(job.fragmentSource), job.key);
+    int budget = 0;
+    g_warmingUp->ready(budget); // its sources to the compiler thread
+    return;
+  }
+}
+} // namespace
+
+bool program_known(uint64_t key) noexcept {
+  {
+    std::lock_guard lock{g_keysMutex};
+    if (g_cardKeys.contains(key) || g_compilingKeys.contains(key)) {
+      return true;
+    }
+  }
+  std::lock_guard lock{g_warmUpMutex};
+  return std::any_of(g_warmUpQueue.begin(), g_warmUpQueue.end(), [key](const WarmUpJob& job) { return job.key == key; });
+}
+
+bool warm_up_room() noexcept {
+  std::lock_guard lock{g_warmUpMutex};
+  return g_warmUpQueue.empty();
+}
+
+void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource) noexcept {
+  std::lock_guard lock{g_warmUpMutex};
+  g_warmUpQueue.push_back({key, std::move(vertexSource), std::move(fragmentSource)});
 }
 
 void record(Draw draw) noexcept { g_recording.draws.push_back(std::move(draw)); }
@@ -1169,6 +1334,7 @@ public:
 
 private:
   void run() noexcept {
+    thread::register_current("frame reaper");
     for (;;) {
       Frame frame;
       {
@@ -1664,7 +1830,10 @@ bool initialize() noexcept {
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
   index_card();
-  Log.info("programs on the card: {}", g_cardKeys.size());
+  // The warm-up's material records (gx/vita_tev.cpp), read here before the FIFO thread asks.
+  g_materialsPath = g_programCacheDir + "/materials.bin";
+  read_materials();
+  Log.info("programs on the card: {}; material records: {} KiB", g_cardKeys.size(), g_savedMaterials.size() / 1024);
   // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
   // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
   // KiB) were made for scenes of a few hundred plain draws; the water's generated programs take four
@@ -1793,20 +1962,24 @@ void present(ImDrawData* overlay) noexcept {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   Frame frame = take_frame();
   draw_world(frame);
+  warm_up_step();
+  g_clock.mark(kBuild);
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
              "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} loaded from the card, "
-             "{} of them compiled again, {:.0f} ms) in all; uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
-             "textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
+             "{} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} failed, {} built or being built by "
+             "their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; EFB "
+             "copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
              g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),
-             g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs,
+             g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs, g_warmUpStats.built,
+             g_warmUpStats.failed, g_warmUpStats.skipped,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
              g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
@@ -1814,6 +1987,7 @@ void present(ImDrawData* overlay) noexcept {
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");
+    thread::log_cpu();
   }
   g_clock.mark(kOther);
   if (overlay != nullptr && overlay->CmdListsCount > 0) {
