@@ -225,6 +225,7 @@ struct Stats {
   // Immediate draws (GXBegin, uncalled display lists, GXBeginIndexed).
   u32 immediate = 0;
   u32 immediateLines = 0;
+  u32 immediatePoints = 0;
   u32 immediateFailed = 0;
   u32 recorded = 0;
   u32 failMatrixIndex = 0;
@@ -1277,9 +1278,9 @@ u64 sLastGeneration = 0;
 // out again only when their registers were written (the Vita's dirty bits, DirtyBits): hashing
 // all of it, some 1.2 KiB, for each draw that wrote any took 10 us a draw.
 // - The pipeline part (DirtyPipeline): the TEV stages, blending, depth, culling, the colour mask
-//   and the alpha compare, the swap tables and channels, and the texture coordinate generators the
-//   stages name. Every register it reads sets DirtyPipeline (regs.cpp), as the last-draw shortcut
-//   in current_material already relies on.
+//   and the alpha compare, the swap tables and channels, the fog's type, and the texture coordinate
+//   generators the stages name. Every register it reads sets DirtyPipeline (regs.cpp), as the
+//   last-draw shortcut in current_material already relies on.
 // - The texture part (DirtyTextures, or the pipeline part's maps changed, or the bind generation
 //   moved): the textures the stages name, with their palettes, and whether one is an EFB copy.
 // The game leaves slots and generators no stage reads holding whatever it set last, so they are
@@ -1300,7 +1301,7 @@ PipelineKey pipeline_key() noexcept {
       static_cast<u32>(s.blendFacDst),  static_cast<u32>(s.blendOp), static_cast<u32>(s.depthFunc),
       s.depthCompare,  s.depthUpdate,   s.colorUpdate,  s.alphaUpdate, static_cast<u32>(s.cullMode),
       static_cast<u32>(alpha.comp0),    alpha.ref0,     static_cast<u32>(alpha.op),
-      static_cast<u32>(alpha.comp1),    alpha.ref1,
+      static_cast<u32>(alpha.comp1),    alpha.ref1,     static_cast<u32>(s.fog.type),
   };
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
@@ -1556,11 +1557,20 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
           static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
 }
 
+// GX's line width or point size (sixths of a pixel of its framebuffer) in the screen's whole pixels,
+// as GXM takes them (1 to 16).
+u8 screen_width(u8 sixths) noexcept {
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  const float scale = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
+  return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
+}
+
 // Records a draw of `mesh`, or with none of `frameMesh` (the frame's own), with GX's current
 // matrices and the material's units and state, TEV's alpha folded in where it is a constant (its
-// inputs are constants that change between draws).
+// inputs are constants that change between draws). A line or point mesh is drawn `width` pixels
+// wide (screen_width).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
-                 const vita_gl::FrameMesh& frameMesh = {}) noexcept {
+                 const vita_gl::FrameMesh& frameMesh = {}, u8 width = 1) noexcept {
   // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
   // argument; none for a mesh of the frame's own); from here to the return, the draw's recording.
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMesh);
@@ -1584,6 +1594,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
     state.blend = false;
   }
   vita_gl::Draw draw{.mesh = std::move(mesh), .frameMesh = frameMesh};
+  draw.width = width;
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
@@ -1912,21 +1923,17 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
 bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept {
   ZoneScoped;
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
-  if (prim == GX_POINTS) {
-    ++sStats.immediateLines;
-    return false;
-  }
   const Material& material = current_material();
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
   if (material.unitCount < 0) {
     return false;
   }
   const TexAttrs& texAttrs = material.texAttrs;
-  // A program's draw but a line strip's: its vertices decoded into the frame's own
+  // A program's draw but a line strip's or points': its vertices decoded into the frame's own
   // (vita_gl::frame_vertices), none copied to each triangle's corners: triangles drawn by index
   // (triangle_indices, copied there too), GX's lines as they are (the rain: 64 draws and 10,000
-  // vertices a frame in Tallon Overworld's rooms with it).
-  if (material.program != nullptr && prim != GX_LINESTRIP) {
+  // vertices a frame in Tallon Overworld's rooms with it), GX's line width wide.
+  if (material.program != nullptr && prim != GX_LINESTRIP && prim != GX_POINTS) {
     const bool lines = prim == GX_LINES;
     std::shared_ptr<const std::vector<u16>> indices;
     if (!lines) {
@@ -1955,7 +1962,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
       return false;
     }
     ++(lines ? sStats.immediateLines : sStats.immediate);
-    record_draw(nullptr, material, mesh);
+    record_draw(nullptr, material, mesh, lines ? screen_width(g_gxState.lineWidth) : 1);
     return true;
   }
   // The vertices in the FIFO thread's room for them (no allocation a draw); the mesh's own copy is
@@ -1967,9 +1974,25 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     ++sStats.immediateFailed;
     return false;
   }
+  if (prim == GX_POINTS) {
+    // As GL's points, GX's point size wide, drawn fixed-function: vitaGL's point size reaches only
+    // its own programs (a generated one would have to write the size). The game draws none.
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
+    if (prims.empty()) {
+      ++sStats.immediateFailed;
+      return false;
+    }
+    ++sStats.immediatePoints;
+    Material fixedFunction = material;
+    fixedFunction.program = nullptr;
+    record_draw(vita_gl::make_mesh(std::vector<vita_gl::Vertex>(prims.begin(), prims.end()),
+                                   vita_gl::MeshKind::Immediate, false, vita_gl::MeshPrimitive::Points),
+                fixedFunction, {}, screen_width(g_gxState.pointSize));
+    return true;
+  }
   if (prim == GX_LINES || prim == GX_LINESTRIP) {
-    // As GL's lines, two vertices each (the map's outlines, the rain's splashes, among others). One
-    // pixel wide: GX's line width is not applied.
+    // As GL's lines, two vertices each (the map's outlines, the rain's splashes, among others), GX's
+    // line width wide in whole pixels. GX's line texture offsets are not applied.
     const size_t step = prim == GX_LINES ? 2 : 1;
     const auto count =
         static_cast<u32>(prims.size() < 2 ? 0 : prim == GX_LINES ? prims.size() / 2 * 2 : (prims.size() - 1) * 2);
@@ -1993,11 +2016,12 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
       return false;
     }
     ++sStats.immediateLines;
+    const u8 width = screen_width(g_gxState.lineWidth);
     if (mesh.vertexCount != 0) {
-      record_draw(nullptr, material, mesh);
+      record_draw(nullptr, material, mesh, width);
     } else {
       record_draw(vita_gl::make_mesh(std::move(lines), vita_gl::MeshKind::Immediate, false, vita_gl::MeshPrimitive::Lines),
-                  material);
+                  material, {}, width);
     }
     return true;
   }
@@ -2257,9 +2281,9 @@ void log_stats() noexcept {
            "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}",
            s.indirectMaterials, s.indirectUnsupported + s.indirectWithoutCopy, s.indirectUnsupported,
            s.indirectWithoutCopy, tev_indirect_program_count(), tev_program_count());
-  Log.info("immediate draws: {} drawn, {} lines or points, {} not decodable; list calls with positions made "
+  Log.info("immediate draws: {} drawn, {} lines, {} points, {} not decodable; list calls with positions made "
            "each frame: {} decoded and drawn, {} not decodable",
-           s.immediate, s.immediateLines, s.immediateFailed, s.perCall, s.perCallFailed);
+           s.immediate, s.immediateLines, s.immediatePoints, s.immediateFailed, s.perCall, s.perCallFailed);
   Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
            "(matrix index {}, array {}, command {}, empty {}); decoded again for changed textures {}, vertex layout "
            "{}, array {}; {} cached",

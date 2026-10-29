@@ -1214,3 +1214,29 @@ the map screen at 6 to 7.
   at the last one's size. The render worker points the arrays into the frame (vitaGL copies them
   into its pool at the draw, as it did a client-memory mesh) and draws by the frame's indices or in
   order. The rest (lists, draws without a program) keep their `Mesh`.
+
+Milestone 4's parts the rollback to step 1 took, asked for again and done afresh on this base
+(after the designs of 9ee73b0, 4126db4 and ef82f19):
+- Fog. The generated programs fog as GX does and Aurora's shaders have it (shader.cpp): the vertex
+  program passes clip z and w (`vFog`, in the TEXCOORD varying the lit sums leave free past the
+  coordinate slots: 4 with four slots or fewer, else the one after the last slot), and the fragment
+  program takes GL's window depth from them (the viewport's depth range is in the projection, so it
+  is the EFB's z): perspective A / (B - z) or orthographic A * z, less C, clamped, through the
+  type's curve, the colour (clamped, as GX's pixel engine takes it) mixed toward the fog's. Two
+  more constants, last among the slots (the fog colour; A, B, C). The fog type is in the program's
+  key and the material's pipeline key (its register, 0xF1, sets `DirtyPipeline`). A program
+  without fog keeps its source, and its binary on the card; a fogged material needs one of its own,
+  compiled in the background at its first draw and unfogged till then. Not done: GX's range
+  adjustment (the game leaves it off), and fog on the fixed-function path.
+- Lit programs by light counts rounded up to 1, 2, 4 or 8 (`program_lights`); exact counts made 17
+  combinations and 257 lit programs before the rollback. The lights past the mask's are dark:
+  black, far off, both attenuations (1, 0, 0), finite for every attenuation function (the all-zero
+  padding, which the mask changing without the program used, divided zero by zero). A part with 3,
+  5, 6 or 7 lights changes its program's source: compiled again once.
+- Lines GX's line width wide. A line or point draw carries its width (`Draw::width`: GX's sixths
+  of a framebuffer pixel scaled to the screen and rounded, 1 to 16 as GXM takes them), and the
+  render worker sets `glLineWidth` and `glPointSize` where a line or point draw changes it (GXM's
+  context keeps them, for the programs and the fixed-function path alike). GX points are drawn as
+  GL points, fixed-function (vitaGL's point size reaches only its own programs); the game draws
+  none. The immediate-draws line counts lines and points apart. Not done: GX's line and point
+  texture offsets.

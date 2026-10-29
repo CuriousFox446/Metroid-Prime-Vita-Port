@@ -149,13 +149,20 @@ void to_column_major(const float* rows, int rowCount, float out[16]) {
     }
   }
 }
+
+// What GL draws a mesh's primitives as.
+GLenum gl_mode(MeshPrimitive primitive) {
+  return primitive == MeshPrimitive::Lines    ? GL_LINES
+         : primitive == MeshPrimitive::Points ? GL_POINTS
+                                              : GL_TRIANGLES;
+}
 } // namespace
 
 class Mesh {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
   : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
-    m_mode(primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES) {}
+    m_primitive(primitive) {}
   ~Mesh() {
     if (m_vbo != 0) {
       const GLuint vbo = m_vbo;
@@ -186,13 +193,14 @@ public:
   // Its vertices, which a draw draws.
   GLsizei count() const noexcept { return m_count; }
   MeshKind kind() const noexcept { return m_kind; }
+  MeshPrimitive primitive() const noexcept { return m_primitive; }
   // What its arrays' offsets are from: its vertices in client memory, else the bound buffer's start.
   const uint8_t* base() const noexcept {
     return m_client ? reinterpret_cast<const uint8_t*>(m_cpu.data()) : nullptr;
   }
 
   // Render worker, its arrays set (bind): draws its `count` vertices.
-  void draw(GLsizei count) const noexcept { glDrawArrays(m_mode, 0, count); }
+  void draw(GLsizei count) const noexcept { glDrawArrays(gl_mode(m_primitive), 0, count); }
 
 private:
   std::vector<Vertex> m_cpu;
@@ -200,7 +208,7 @@ private:
   GLsizei m_count;
   MeshKind m_kind;
   bool m_client;
-  GLenum m_mode;
+  MeshPrimitive m_primitive;
 };
 
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory,
@@ -1318,7 +1326,7 @@ void draw_mesh(const Draw& draw, const Frame& frame) noexcept {
     return;
   }
   const FrameMesh& mesh = draw.frameMesh;
-  const GLenum mode = mesh.primitive == MeshPrimitive::Lines ? GL_LINES : GL_TRIANGLES;
+  const GLenum mode = gl_mode(mesh.primitive);
   if (mesh.indexCount != 0) {
     glDrawRangeElements(mode, 0, mesh.vertexCount - 1, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT,
                         frame.indices.at(mesh.indexAt));
@@ -1468,6 +1476,11 @@ void draw_world(const Frame& frame) {
   glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
   glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
   glEnable(GL_SCISSOR_TEST);
+  // The line and point width, set where a line or point draw changes it (GXM's context keeps it,
+  // for the programs and the fixed-function path alike).
+  uint8_t width = 1;
+  glLineWidth(1.f);
+  glPointSize(1.f);
   const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
     if (!(v == viewport)) {
       glViewport(v.x, v.y, v.width, v.height);
@@ -1522,6 +1535,12 @@ void draw_world(const Frame& frame) {
       continue;
     }
     set_rects(draw.viewport, draw.scissor);
+    const MeshPrimitive primitive = draw.mesh != nullptr ? draw.mesh->primitive() : draw.frameMesh.primitive;
+    if (primitive != MeshPrimitive::Triangles && draw.width != width) {
+      glLineWidth(static_cast<GLfloat>(draw.width));
+      glPointSize(static_cast<GLfloat>(draw.width));
+      width = draw.width;
+    }
     Program* program = draw.program.program.get();
     if (program != nullptr) {
       const int budgetBefore = buildBudget;
@@ -1609,6 +1628,10 @@ void draw_world(const Frame& frame) {
   apply_state(RenderState{.depthTest = false}, current, true);
   glFrontFace(GL_CCW);
   glDisable(GL_SCISSOR_TEST);
+  if (width != 1) {
+    glLineWidth(1.f);
+    glPointSize(1.f);
+  }
   glViewport(0, 0, kWidth, kHeight);
   for (int unit = kTexUnits - 1; unit >= 0; --unit) {
     glActiveTexture(GL_TEXTURE0 + unit);

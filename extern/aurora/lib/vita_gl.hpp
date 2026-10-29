@@ -66,8 +66,8 @@ enum class MeshKind : uint8_t { List, Skinned, Immediate, Indexed, Other, Count 
 // a program (`clientMemory`) has no buffer: vitaGL copies it into its per-frame pool at the draw
 // (one copy for a program's interleaved attributes), with no buffer to make, fill and delete. The
 // fixed-function path copies each attribute apart, so its meshes keep a buffer.
-// A mesh's primitives: triangles, or lines (two vertices each).
-enum class MeshPrimitive : uint8_t { Triangles, Lines };
+// A mesh's primitives: triangles, lines (two vertices each) or points.
+enum class MeshPrimitive : uint8_t { Triangles, Lines, Points };
 class Mesh;
 std::shared_ptr<Mesh> make_mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory = false,
                                 MeshPrimitive primitive = MeshPrimitive::Triangles) noexcept;
@@ -161,9 +161,10 @@ std::shared_ptr<Program> make_program(std::string vertexSource, std::string frag
 // The constants a generated program may read, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and
 // the alpha compare's references (x, y); for indirect texturing, each coordinate slot's texel scale
-// (GX's SU scale), each texture slot's size and the three indirect matrices (two rows each). A
-// program declares only those its source reads, packed in this order (gx/vita_tev.cpp).
-constexpr int kProgramConstants = 13 + kProgramCoords + kSamplers + 6;
+// (GX's SU scale), each texture slot's size and the three indirect matrices (two rows each); GX's
+// fog colour, and its A, B and C (x, y, z). A program declares only those its source reads, packed
+// in this order (gx/vita_tev.cpp).
+constexpr int kProgramConstants = 13 + kProgramCoords + kSamplers + 6 + 2;
 // The vertex program's (gx/vita_tev.cpp, tev_vertex_rows): the projection times the position
 // matrix (4 rows); each texture coordinate slot's matrix (3 rows of 4 for a projective set, else 2)
 // and its post-transform matrix (3 more, when it has one); for a lit program the position and
@@ -190,7 +191,8 @@ struct ProgramInputs {
 // One draw: a mesh (its Mesh, or a mesh of its frame's own) with GX's position matrix (3x4, rows)
 // and projection (4x4, rows, already in GL's depth range); its fixed-function texture units and
 // state; and its generated program, when it has one (drawn with it once the program is ready).
-// GX's viewport and scissor, on the screen.
+// GX's viewport and scissor, on the screen; a line or point mesh's width in the screen's pixels
+// (GX's line width or point size; GXM takes whole pixels, 1 to 16).
 // Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
 // colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
@@ -205,6 +207,7 @@ struct Draw {
   ProgramInputs program;
   ScreenRect viewport;
   ScreenRect scissor;
+  uint8_t width = 1;
   bool clear = false;
   bool clearColor = false;
   bool clearAlpha = false;

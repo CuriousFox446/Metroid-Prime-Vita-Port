@@ -35,7 +35,10 @@ constexpr int kConstAlphaRef = 12;
 constexpr int kConstTexCoordScale = 13;
 constexpr int kConstTexSize = kConstTexCoordScale + kProgramCoords;
 constexpr int kConstIndMtx = kConstTexSize + kSamplers;
-static_assert(kConstIndMtx + 2 * MaxIndTexMtxs == vita_gl::kProgramConstants);
+// GX's fog: its colour, and its A, B and C (x, y, z) as regs.cpp decodes them.
+constexpr int kConstFogColor = kConstIndMtx + 2 * MaxIndTexMtxs;
+constexpr int kConstFogParams = kConstFogColor + 1;
+static_assert(kConstFogParams + 1 == vita_gl::kProgramConstants);
 
 // Programs by the hash of their source (an unordered_map's elements stay where they are), and by
 // the hash of the GX state they were made from.
@@ -104,6 +107,11 @@ int light_count(int part) noexcept {
              ? static_cast<int>(g_gxState.colorChannelState[part].lightMask.count())
              : 0;
 }
+
+// The lights a program sums for a part summing `count`: rounded up to 1, 2, 4 or 8, the rest dark
+// (tev_vertex_rows). Each combination of the four parts' counts is a program of its own: before
+// the rollback, exact counts made 17 combinations and 257 lit programs (ef82f19).
+int program_lights(int count) noexcept { return count <= 2 ? count : count <= 4 ? 4 : 8; }
 
 // A channel's raster colour (n 0 or 1), as GX lights it: the material colour (the vertex colour
 // or the register), times the ambient colour plus the channel's lights, clamped. The vertex
@@ -514,6 +522,37 @@ std::string fragment_body(const TevLayout& layout) {
     }
     body += fmt::format("  if (!{}) {{\n    discard;\n  }}\n", pass);
   }
+  if (const GXFogType fogType = s.fog.type; fogType != GX_FOG_NONE) {
+    // GX's fog, as Aurora's shaders have it (shader.cpp): from the depth the EFB keeps (the vertex
+    // program's clip z and w; the viewport's depth range is in the projection, so GL's window depth
+    // is GX's), perspective A / (B - z) or orthographic A * z, less C, clamped, through the type's
+    // curve; the colour, clamped as GX's pixel engine takes it, mixed toward the fog's. GX's range
+    // adjustment is not applied (the game leaves it off).
+    body += "  float fogZ = vFog.x / vFog.y * 0.5 + 0.5;\n";
+    body += (fogType & 0x08) != 0
+                ? fmt::format("  float fogF = uConst[{0}].x * fogZ;\n", kConstFogParams)
+                : fmt::format("  float fogF = uConst[{0}].x / (uConst[{0}].y - fogZ);\n", kConstFogParams);
+    body += fmt::format("  fogF = saturate(fogF - uConst[{}].z);\n", kConstFogParams);
+    switch (fogType & 0x07) {
+    case GX_FOG_PERSP_EXP:
+      body += "  float fog = 1.0 - exp2(-8.0 * fogF);\n";
+      break;
+    case GX_FOG_PERSP_EXP2:
+      body += "  float fog = 1.0 - exp2(-8.0 * fogF * fogF);\n";
+      break;
+    case GX_FOG_PERSP_REVEXP:
+      body += "  float fog = exp2(-8.0 * (1.0 - fogF));\n";
+      break;
+    case GX_FOG_PERSP_REVEXP2:
+      body += "  fogF = 1.0 - fogF;\n  float fog = exp2(-8.0 * fogF * fogF);\n";
+      break;
+    default:
+      body += "  float fog = fogF;\n";
+      break;
+    }
+    body += fmt::format("  R{0}.rgb = lerp(saturate(R{0}.rgb), uConst[{1}].rgb, saturate(fog));\n", lastOut,
+                        kConstFogColor);
+  }
   body += fmt::format("  return R{};\n", lastOut);
   // The result's register is read at the end (its alpha may be from before the last stage).
   registerRead[lastOut] = true;
@@ -743,11 +782,12 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   const AlphaCompare& compare = s.alphaCompare;
   // A coordinate set by its generator's type, source (a texture coordinate, the position or the
   // normal), normalisation and whether it has a post-transform matrix; the lights each channel
-  // part sums.
+  // part sums (program_lights); the fog's type.
   constexpr int kCoordKeys = 4;
   constexpr int kLightKeys = kCoordKeys + kProgramCoords;
-  u32 fixed[kLightKeys + 4] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
-                               static_cast<u32>(compare.op)};
+  constexpr int kFogKey = kLightKeys + 4;
+  u32 fixed[kFogKey + 1] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
+                            static_cast<u32>(compare.op)};
   for (int c = 0; c < layout.coordCount; ++c) {
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
@@ -755,8 +795,9 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
                             (has_post(tcg) ? 1u : 0u) << 13;
   }
   for (int part = 0; part < 4; ++part) {
-    fixed[kLightKeys + part] = static_cast<u32>(light_count(part));
+    fixed[kLightKeys + part] = static_cast<u32>(program_lights(light_count(part)));
   }
+  fixed[kFogKey] = static_cast<u32>(s.fog.type);
   u64 stateKey = XXH3_64bits(fixed, sizeof(fixed));
   stateKey = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), stateKey);
   stateKey = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), stateKey);
@@ -789,7 +830,7 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   bool lit = false;
   for (int n = 0; n < 2; ++n) {
     for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
-      info.lightCounts[part] = static_cast<u8>(litChannel[n] ? light_count(part) : 0);
+      info.lightCounts[part] = static_cast<u8>(litChannel[n] ? program_lights(light_count(part)) : 0);
       lit = lit || info.lightCounts[part] != 0;
     }
   }
@@ -850,6 +891,14 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
     }
     vertexBody += fmt::format("  vUv{0} = tc{0}{1};\n", c, projective(tcg) ? "" : ".xy");
     add(fragmentParams, fmt::format("{} vUv{} : TEXCOORD{}", type, c, c));
+  }
+  if (body.find("vFog") != std::string::npos) {
+    // The fog's depth: clip z and w, divided per fragment. In the TEXCOORD varying the lit sums
+    // leave free past the coordinate slots' (4 with four slots or fewer).
+    const int fogVarying = std::max(kTexCoords, layout.coordCount);
+    add(vertexOuts, fmt::format("float2 out vFog : TEXCOORD{}", fogVarying));
+    vertexBody += "  vFog = float2(dot(uVert[2], p), dot(uVert[3], p));\n";
+    add(fragmentParams, fmt::format("float2 vFog : TEXCOORD{}", fogVarying));
   }
   if (lit) {
     // The view-space position and normal (a zero normal stays zero), then each lit channel's lights.
@@ -947,7 +996,7 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
       value[1] = static_cast<float>(texture.height());
       value[2] = 0.f;
       value[3] = 0.f;
-    } else {
+    } else if (slot < kConstFogColor) {
       const IndTexMtxInfo& matrix = s.indTexMtxs[(slot - kConstIndMtx) / 2];
       const auto& m = matrix.mtx;
       if (((slot - kConstIndMtx) & 1) == 0) {
@@ -961,6 +1010,13 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
         value[2] = std::exp2(static_cast<float>(matrix.scaleExp));
         value[3] = 0.f;
       }
+    } else if (slot == kConstFogColor) {
+      std::memcpy(value, &s.fog.color, sizeof(float[4]));
+    } else {
+      value[0] = s.fog.a;
+      value[1] = s.fog.b;
+      value[2] = s.fog.c;
+      value[3] = 0.f;
     }
   }
 }
@@ -1003,22 +1059,27 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
   std::memcpy(out[row], &matrices.pos, sizeof(float[12]));
   std::memcpy(out[row + 3], &matrices.nrm, sizeof(float[12]));
   row += 6;
-  // Each lit channel part's lights, in tev_program's order: its mask's first ones (a light short of
-  // the count, which the mask changing without the program would make, is dark).
+  // Each lit channel part's lights, in tev_program's order: its mask's, then dark ones up to the
+  // program's count (program_lights rounds it up; the mask changing without the program short of
+  // it too): black, far off, with both attenuations' first coefficient 1, so every function a
+  // light's attenuation can use stays finite (an all-zero light divides zero by zero: NaN, which
+  // black does not cancel).
+  static constexpr float kDark[20] = {1e5f, 1e5f, 1e5f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f,
+                                      0.f,  0.f,  1.f,  0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
   for (int n = 0; n < 2; ++n) {
     for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
       const GX::LightMask& mask = s.colorChannelState[part].lightMask;
       int written = 0;
       for (u32 i = 0; i < GX::MaxLights && written < program.lightCounts[part]; ++i) {
         if (mask.test(i)) {
-          static_assert(sizeof(Light) == sizeof(float[20]));
+          static_assert(sizeof(Light) == sizeof(kDark));
           std::memcpy(out[row], &s.lights[i], sizeof(Light));
           row += 5;
           ++written;
         }
       }
       for (; written < program.lightCounts[part]; ++written) {
-        std::memset(out[row], 0, sizeof(float[20]));
+        std::memcpy(out[row], kDark, sizeof(kDark));
         row += 5;
       }
     }
