@@ -8,11 +8,16 @@ is compiled as vitashark compiles it for vita_gl.cpp's compile_gxp (the source n
 entry "main", useFx, optimisation 3, fast math and integers, full precision, warnings off), so the
 binaries are the ones the Vita would make. The module is never copied into this tree.
 
-  # once: the module as an ELF, and the oracle's import and trap maps for it
+  # once: the module as an ELF (unwrapped from its SELF, its stack guard import resolved), and the
+  # oracle's import and trap maps for it
   precompile.py prepare --module libshacccg.suprx --oracle ~/open-shacccg --work ~/shacc/work
 
-  # the sources (precompile_sources: build.sh) compiled into the pack the Vita reads
+  # the sources (precompile_sources: build.sh) compiled into the pack the Vita reads; each
+  # program's GXPs are kept in <work>/gxp, so a second run compiles only what is new
   precompile.py compile --oracle ~/open-shacccg --work ~/shacc/work --sources <dir> --out precompiled.bin
+
+Run it with Python 3.10 or later and Unicorn 2 (pip install unicorn). Checked with the module of
+SDK 3.0.0 (shacc r13225): its GXPs were byte for byte the ones the Vita compiled.
 
 The pack (vita_gl.cpp, read_pack_index): "VPK1", the count, then per program sorted by key
 (u64 key, u32 vertex offset, u32 vertex size, u32 fragment offset, u32 fragment size), then the
@@ -21,40 +26,141 @@ GXPs. It goes in ux0:data/MetroidPrime/vita_programs/ beside the card's program 
 from __future__ import annotations
 
 import argparse
+import json
 import multiprocessing
 import shutil
 import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 MAGIC = b"VPK1"
+
+
+def unwrap_self(data: bytes) -> bytes:
+    """The ELF inside a fake-signed SELF (what ShaRKF00D writes): the ELF header and program headers
+    the SELF keeps, and each segment where its program header puts it, inflated when compressed.
+    What vita-unmake-fself does, which VitaSDK's builds lack."""
+    elf_offset, phdr_offset = struct.unpack_from("<QQ", data, 0x40)
+    section_info_offset = struct.unpack_from("<Q", data, 0x58)[0]
+    ehdr = bytearray(data[elf_offset:elf_offset + 0x34])
+    if ehdr[:4] != b"\x7fELF":
+        raise ValueError("no ELF header in the SELF")
+    phoff, = struct.unpack_from("<I", ehdr, 0x1C)
+    phentsize, phnum = struct.unpack_from("<HH", ehdr, 0x2A)
+    # No section headers in the output (the SELF does not keep them).
+    struct.pack_into("<I", ehdr, 0x20, 0)
+    struct.pack_into("<HHH", ehdr, 0x2E, 0, 0, 0)
+    phdrs = data[phdr_offset:phdr_offset + phentsize * phnum]
+    out = bytearray(max(phoff + len(phdrs), 0x34))
+    out[:0x34] = ehdr
+    out[phoff:phoff + len(phdrs)] = phdrs
+    for i in range(phnum):
+        p_offset, _, _, p_filesz = struct.unpack_from("<IIII", phdrs, i * phentsize + 4)
+        offset, length, compression, encryption = struct.unpack_from("<QQQQ", data, section_info_offset + 32 * i)
+        if encryption != 2:
+            raise ValueError(f"segment {i} is encrypted: not a fake-signed SELF")
+        segment = data[offset:offset + length]
+        if compression == 2:
+            segment = zlib.decompress(segment)
+        segment = segment[:p_filesz]
+        if len(out) < p_offset + len(segment):
+            out.extend(b"\0" * (p_offset + len(segment) - len(out)))
+        out[p_offset:p_offset + len(segment)] = segment
+    return bytes(out)
+
+
+def resolve_variables(elf: bytes, imports: dict, address: int) -> bytes:
+    """The module's variable imports pointed at `address`, a word of zeros the oracle maps: the oracle
+    resolves the functions a module imports, not its variables, and SceShaccCg reads one, SceLibKernel's
+    __stack_chk_guard, in its functions' prologues (module_start's first read of it was of address 0).
+    A variable's import entry points to the table of its references: its size in bytes (header
+    included) shifted left 4, then 8 bytes a place, the relocation's code in bits 8-15 (a Thumb MOVW
+    or MOVT, all of them here) and the segment in bits 4-7, and the place's offset in that segment."""
+    data = bytearray(elf)
+    phoff, = struct.unpack_from("<I", data, 0x1C)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x2A)
+    segments = [struct.unpack_from("<IIIII", data, phoff + phentsize * i) for i in range(phnum)]
+
+    def file_offset(segment: int, offset: int, size: int) -> int:
+        p_type, p_offset, _, _, p_filesz = segments[segment]
+        if p_type != 1 or offset + size > p_filesz:  # PT_LOAD
+            raise ValueError(f"segment {segment} + {offset:#x} is outside its file data")
+        return p_offset + offset
+
+    def segment_of(va: int) -> tuple[int, int]:
+        for i, (p_type, _, p_vaddr, _, p_filesz) in enumerate(segments):
+            if p_type == 1 and p_vaddr <= va < p_vaddr + p_filesz:
+                return i, va - p_vaddr
+        raise ValueError(f"{va:#x} is in no segment")
+
+    patched = 0
+    for lib in imports["imports"]:
+        for entry in lib["variable_entries"]:
+            table = file_offset(*segment_of(entry), 4)
+            size = struct.unpack_from("<I", data, table)[0] >> 4
+            for pos in range(4, size, 8):
+                info, offset = struct.unpack_from("<II", data, table + pos)
+                code, segment = (info >> 8) & 0xFF, (info >> 4) & 0xF
+                at = file_offset(segment, offset, 4)
+                if code == 2:  # R_ARM_ABS32
+                    struct.pack_into("<I", data, at, address)
+                elif code in (47, 48):  # R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS
+                    imm = (address if code == 47 else address >> 16) & 0xFFFF
+                    first, second = struct.unpack_from("<HH", data, at)
+                    first = (first & 0xFBF0) | (imm >> 12) | (((imm >> 11) & 1) << 10)
+                    second = (second & 0x8F00) | (((imm >> 8) & 7) << 12) | (imm & 0xFF)
+                    struct.pack_into("<HH", data, at, first, second)
+                else:
+                    raise ValueError(f"a variable's reference of relocation type {code} is not handled")
+                patched += 1
+    print(f"variable imports: {patched} references pointed at {address:#x}")
+    return bytes(data)
 
 
 def load_oracle(oracle_dir: Path):
     sys.path.insert(0, str(oracle_dir / "tools" / "oracle"))
     import unicorn_oracle  # noqa: E402
 
+    if getattr(unicorn_oracle, "vita_precompile", False):
+        return unicorn_oracle
+    unicorn_oracle.vita_precompile = True
     # The oracle's heap never reuses what it frees: room for a program's two compiles.
     unicorn_oracle.HEAP_SIZE = 0x0E000000
+    # Two SceLibKernel imports of the module the Vita has (SDK 3.0.0, shacc r13225) that the
+    # oracle's (1.6.5) did not make (names from VitaSDK's NID database).
+    unicorn_oracle.KNOWN_IMPORTS.setdefault(0x37691BF8, "__stack_chk_fail")
+    unicorn_oracle.KNOWN_IMPORTS.setdefault(0xB295EB61, "sceKernelGetTLSAddr")
+    dispatch = unicorn_oracle.Oracle._dispatch_import
+
+    def dispatch_more(self, nid, name, a0, a1, a2, a3):
+        if name == "sceKernelGetTLSAddr":
+            # A slot of the thread's TLS, which TPIDRURO points to (the oracle's one thread's).
+            self._ret(unicorn_oracle.TLS_BASE + 4 * a0 if 4 * a0 < unicorn_oracle.TLS_SIZE else 0)
+            return
+        if name == "__stack_chk_fail":
+            raise RuntimeError("the guest's stack check failed")
+        dispatch(self, nid, name, a0, a1, a2, a3)
+
+    unicorn_oracle.Oracle._dispatch_import = dispatch_more
     return unicorn_oracle
 
 
 def prepare(ns) -> int:
     work = ns.work
     work.mkdir(parents=True, exist_ok=True)
+    # The GXPs compiled with the module prepared before (compile_pack).
+    shutil.rmtree(work / "gxp", ignore_errors=True)
     elf = work / "libshacccg.elf"
     data = ns.module.read_bytes()
+    # The SELF's segments come relocated for the addresses their program headers give, which is
+    # where the oracle maps them.
     if data[:4] == b"\x7fELF":
         elf.write_bytes(data)
     elif data[:4] == b"SCE\0":
-        # A fake-signed SELF: its ELF follows the header (vita-unmake-fself's own unwrapping).
-        tool = shutil.which("vita-unmake-fself")
-        if tool is None:
-            print("the module is a SELF: put VitaSDK's bin in PATH (vita-unmake-fself)", file=sys.stderr)
-            return 1
-        subprocess.run([tool, str(ns.module), str(elf)], check=True)
+        elf.write_bytes(unwrap_self(data))
     else:
         print("the module is neither an ELF nor a SELF", file=sys.stderr)
         return 1
@@ -62,9 +168,12 @@ def prepare(ns) -> int:
     imports = work / "imports.json"
     with imports.open("w") as out:
         subprocess.run([sys.executable, str(tools / "vita_imports.py"), str(elf), "--json"], check=True, stdout=out)
+    um = load_oracle(ns.oracle)
+    # Past the oracle's four callback trampolines, in their page.
+    elf.write_bytes(resolve_variables(elf.read_bytes(), json.loads(imports.read_text()), um.TRAMP_BASE + 0x100))
     subprocess.run([sys.executable, str(tools / "patch_import_stubs.py"), str(elf), str(imports),
                     str(work / "libshacccg.oracle.elf"), str(work / "trap_map.json")], check=True)
-    oracle = load_oracle(ns.oracle).Oracle(elf, imports, work / "trap_map.json")
+    oracle = um.Oracle(elf, imports, work / "trap_map.json")
     print(f"prepared: {oracle.get_version()}")
     return 0
 
@@ -120,8 +229,21 @@ def compile_program(task):
 
 def compile_pack(ns) -> int:
     keys = [line.split()[0] for line in (ns.sources / "manifest.txt").read_text().splitlines() if line.strip()]
-    tasks = [(ns.oracle, ns.work, ns.sources, key) for key in keys]
+    # Each program's GXPs are kept as it is compiled (5 to 45 s each here), so a run cut short goes
+    # on where it stopped, and a pack made again with more material records compiles only theirs. A
+    # key is its sources' hash; prepare empties this for another module.
+    cache = ns.work / "gxp"
+    cache.mkdir(exist_ok=True)
     built: dict[int, tuple[bytes, bytes]] = {}
+    todo = []
+    for key in keys:
+        vertex, fragment = cache / f"{key}.vgxp", cache / f"{key}.fgxp"
+        if vertex.exists() and fragment.exists():
+            built[int(key, 16)] = (vertex.read_bytes(), fragment.read_bytes())
+        else:
+            todo.append(key)
+    print(f"{len(keys)} programs: {len(built)} compiled before, {len(todo)} to compile", flush=True)
+    tasks = [(ns.oracle, ns.work, ns.sources, key) for key in todo]
     failed = 0
     start = time.time()
     with multiprocessing.Pool(ns.jobs, maxtasksperchild=1) as pool:
@@ -130,8 +252,14 @@ def compile_pack(ns) -> int:
                 failed += 1
                 print(f"{result['key']}: {result['error']}", file=sys.stderr)
             else:
-                built[int(result["key"], 16)] = (result["vertex"], result["fragment"])
-            if n % 50 == 0 or n == len(tasks):
+                key = result["key"]
+                # The fragment GXP last: both there means both whole.
+                for stage, suffix in (("vertex", "vgxp"), ("fragment", "fgxp")):
+                    partial = cache / f"{key}.{suffix}.part"
+                    partial.write_bytes(result[stage])
+                    partial.replace(cache / f"{key}.{suffix}")
+                built[int(key, 16)] = (result["vertex"], result["fragment"])
+            if n % 25 == 0 or n == len(tasks):
                 print(f"{n}/{len(tasks)} ({failed} failed), {time.time() - start:.0f} s", flush=True)
     order = sorted(built)
     header = MAGIC + struct.pack("<I", len(order))

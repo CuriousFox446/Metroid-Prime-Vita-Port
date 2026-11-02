@@ -1285,3 +1285,39 @@ so the GXPs are the ones the Vita would make. `tools/vita_precompile`:
 - It covers the materials a session has seen (its records): it pays after a change to the
   generator (every program the records make, compiled on the PC in minutes rather than on the Vita
   over hours) and on a card without the programs; a material never seen still compiles on the Vita.
+
+The run that sent the module (873832b, the warm-up's build: tallon5 was installed, not tallon6):
+three sessions, each ending in a crash about a minute in.
+- Two, the last two, at the title screen: the render worker ran 0x78 bytes past its 32 KiB stack
+  inside SceShaccCg. vitaGL compiles a fixed-function shader its own cache (`vitagl_shader_cache`)
+  lacks inside the draw: `glDrawRangeElements`, `_glDrawElements_FixedFunctionIMPL`,
+  `reload_ffp_shaders` (a frame of some 17 KiB), `shark_compile_shader_extended`. Now the vitashark
+  wrapper runs a compile called with less than half the compiler thread's stack left on a thread
+  with that stack (2 MiB), its caller waiting, and the log says each one and its time.
+- One, the first, in play (the main thread in the particles' update): the FIFO thread aborted on an
+  uncaught `std::bad_alloc`. The dump holds no stacks and none of the heap's state, and the next two
+  sessions overwrote that session's log (the last held at 134-137 MiB in use of 224), so what
+  failed is not known. Now a failed `operator new` writes its size, the thread, the heap (in use,
+  free, taken from the system, of 224 MiB) and the code addresses on the stack to the log before
+  it throws (each, less the `operator new` address the line gives plus its address in the ELF, is a
+  return address in the ELF), and an uncaught exception's type and message reach the log
+  (`std::set_terminate`): libstdc++'s own report went to stderr, whose lines a thread writes to
+  the log, and the abort stopped that thread first. A crash report's lines now wait for it (a
+  second at most). The `[threads]` line gives each thread's ID, as the dumps name them.
+
+The pipeline with the user's module (`libshacccg.suprx`, SDK 3.0.0, shacc r13225) and card:
+- The module is a fake-signed SELF (ShaRKF00D's); `prepare` unwraps it itself (VitaSDK has no
+  `vita-unmake-fself`); its segments come relocated for the addresses their headers give. The
+  oracle, made with a 1.6.5 module, lacked three of this one's imports: SceLibKernel's
+  `__stack_chk_guard`, a variable (3,916 MOVW/MOVT references; the oracle resolves functions only),
+  now pointed at a word of zeros in the oracle's trampoline page, and `__stack_chk_fail` and
+  `sceKernelGetTLSAddr` (a slot of the oracle's TLS block), answered from `precompile.py`.
+- The card's `materials.bin`: 678 records, 552 programs, whose 552 keys are the names of the card's
+  552 binaries: the PC's generator makes the Vita's sources. Eight programs compiled and compared:
+  all 16 GXPs byte for byte the card's (SceShaccCg's output runs 1 to 3 bytes of padding past a
+  GXP's own size, to 4). A program takes 5 to 45 s under the emulation; each one's GXPs are kept
+  (`<work>/gxp`), so a run cut short goes on, and a pack made again compiles only new programs.
+- The pack of all 552: 27 minutes on 12 cores (11 processes), none failed, 1,119 KiB; every one
+  of its 1,104 GXPs byte for byte the card's. The card has every one of these programs already, so
+  on that card it changes nothing; it is ready for the next change to the generator, and a card
+  without the binaries links them from it.
