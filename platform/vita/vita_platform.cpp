@@ -3,20 +3,32 @@
 // (app0: is read-only): the disc image, saves, settings and the log. Metroid Prime
 // Demo, the same executable under its own title ID, writes in ux0:data/MetroidPrimeDemo/.
 
+#include "port_log_file.h"
+
 #include <psp2/appmgr.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
+#include <psp2/kernel/clib.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 
 #include <sys/lock.h>
 #include <sys/types.h>
 
+#include <cxxabi.h>
+
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <malloc.h>
+#include <new>
 #include <string>
+#include <typeinfo>
 
 extern "C" {
 // newlib's heap. Aurora's decoded textures and the game's allocations come from it.
@@ -116,10 +128,106 @@ std::string findDisc(const char* dataDir) {
   return found;
 }
 
+// Failed allocations. When newlib's malloc has nothing for a request, operator new throws
+// std::bad_alloc, which no thread here catches: a run of tallon5 (873832b) aborted that way on
+// the GX FIFO thread, and neither the log nor the crash dump said what had been asked for, or by
+// whom. The first few failures say so in the log first: the size, the thread, the heap, and the
+// Thumb code addresses on the stack above (return addresses mostly: each, less operator new's
+// address here plus its address in the ELF, is one in the ELF, for addr2line).
+std::atomic<int> sFailedAllocations{0};
+
+[[gnu::noinline]] void reportFailedAllocation(std::size_t size, const void* caller) {
+  constexpr int kReports = 8;
+  if (sFailedAllocations.fetch_add(1, std::memory_order_relaxed) >= kReports) {
+    return;
+  }
+  const struct mallinfo heap = mallinfo();
+  SceKernelThreadInfo thread{};
+  thread.size = sizeof(thread);
+  const SceUID id = sceKernelGetThreadId();
+  const bool known = sceKernelGetThreadInfo(id, &thread) >= 0;
+  const auto self = reinterpret_cast<uintptr_t>(static_cast<void* (*)(std::size_t)>(&::operator new));
+  char line[768];
+  int used = sceClibSnprintf(line, sizeof(line),
+                             "vita: out of memory: operator new(%u) failed on thread 0x%08X (%s), called from 0x%08X; "
+                             "heap: %u KiB in use, %u KiB free, %u KiB taken from the system of %u KiB; operator new "
+                             "at 0x%08X; code addresses on the stack:",
+                             static_cast<unsigned>(size), static_cast<unsigned>(id), known ? thread.name : "?",
+                             static_cast<unsigned>(reinterpret_cast<uintptr_t>(caller)),
+                             static_cast<unsigned>(heap.uordblks / 1024), static_cast<unsigned>(heap.fordblks / 1024),
+                             static_cast<unsigned>(heap.arena / 1024),
+                             static_cast<unsigned>(_newlib_heap_size_user / 1024), static_cast<unsigned>(self));
+  if (known) {
+    // From above this buffer up, 4 KiB at most and not past the stack's top; the code is some 16 MiB.
+    const uintptr_t top = reinterpret_cast<uintptr_t>(thread.stack) + thread.stackSize;
+    const uintptr_t from = (reinterpret_cast<uintptr_t>(line + sizeof(line)) + 3) & ~uintptr_t{3};
+    int found = 0;
+    for (uintptr_t at = from; at + 4 <= top && at < from + 4096 && found < 24; at += 4) {
+      const uint32_t value = *reinterpret_cast<const volatile uint32_t*>(at);
+      if ((value & 1) != 0 && value - (self - 0x01000000u) < 0x02000000u && used < static_cast<int>(sizeof(line)) - 16) {
+        used += sceClibSnprintf(line + used, sizeof(line) - used, " 0x%08X", static_cast<unsigned>(value));
+        ++found;
+      }
+    }
+  }
+  used = std::min(used, static_cast<int>(sizeof(line)) - 2);
+  line[used++] = '\n';
+  PortLogFile::WriteRaw(line, static_cast<size_t>(used));
+}
+
+void* allocate(std::size_t size, const void* caller) {
+  if (size == 0) {
+    size = 1;
+  }
+  for (;;) {
+    if (void* block = std::malloc(size)) {
+      return block;
+    }
+    if (const std::new_handler handler = std::get_new_handler()) {
+      handler();
+      continue;
+    }
+    reportFailedAllocation(size, caller);
+    throw std::bad_alloc();
+  }
+}
+
+// An uncaught exception. libstdc++'s own report (its verbose terminate handler) goes to stderr,
+// and the abort after it stopped the thread that writes stderr's lines to the log first
+// (port_log_file.cpp): what was thrown never reached the file.
+[[noreturn]] void onTerminate() {
+  const std::exception_ptr current = std::current_exception();
+  const char* type = "";
+  const char* what = "";
+  if (current) {
+    try {
+      std::rethrow_exception(current);
+    } catch (const std::exception& e) {
+      what = e.what();
+    } catch (...) {
+    }
+    if (const std::type_info* info = abi::__cxa_current_exception_type(); info != nullptr) {
+      int status = 0;
+      const char* demangled = abi::__cxa_demangle(info->name(), nullptr, nullptr, &status);
+      type = demangled != nullptr ? demangled : info->name();
+    }
+  }
+  char line[512];
+  const auto id = static_cast<unsigned>(sceKernelGetThreadId());
+  int used = current ? sceClibSnprintf(line, sizeof(line), "vita: std::terminate on thread 0x%08X: uncaught %s%s%s", id,
+                                       type, what[0] != '\0' ? ": " : "", what)
+                     : sceClibSnprintf(line, sizeof(line), "vita: std::terminate on thread 0x%08X, no exception in flight", id);
+  used = std::min(used, static_cast<int>(sizeof(line)) - 2);
+  line[used++] = '\n';
+  PortLogFile::WriteRaw(line, static_cast<size_t>(used));
+  std::abort();
+}
+
 // Runs before every constructor of default priority, so the game's static
 // initialisers (some reach Aurora: CStopwatch reads OSGetTime) find the environment
 // set and their output, a std::terminate message among it, lands in the files.
 __attribute__((constructor(101))) void vitaSetup() {
+  std::set_terminate(onTerminate);
   {
     // The highest clocks a homebrew app may set; the stock 333 MHz CPU clock is not enough.
     scePowerSetArmClockFrequency(444);
@@ -205,3 +313,9 @@ __attribute__((constructor(101))) void vitaSetup() {
 }
 
 } // namespace
+
+void* operator new(std::size_t size) { return allocate(size, __builtin_return_address(0)); }
+void* operator new[](std::size_t size) { return allocate(size, __builtin_return_address(0)); }
+// No report for these: their callers expect the failure.
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept { return std::malloc(size == 0 ? 1 : size); }
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept { return std::malloc(size == 0 ? 1 : size); }

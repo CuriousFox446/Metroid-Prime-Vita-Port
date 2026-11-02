@@ -41,6 +41,7 @@
 #include <SDL3/SDL_system.h>
 #elif defined(__vita__)
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -570,9 +571,13 @@ void WriteRaw(const char* data, size_t size) {
   }
 #endif
 #if defined(__vita__)
-  // stderr is a reopened stream (Start), not necessarily descriptor 2.
+  // stderr is a reopened stream (Start), not necessarily descriptor 2, whose lines a thread
+  // writes out (QueueWrite): an abort follows, which would stop it, so wait for it (a second at
+  // most).
   std::fwrite(data, 1, size, stderr);
   std::fflush(stderr);
+  std::unique_lock< std::mutex > lock(sRingMutex);
+  sRingRoom.wait_for(lock, std::chrono::seconds(1), [] { return sWritten == sQueued; });
 #else
   WriteAll(STDERR_FILENO, data, static_cast< ssize_t >(size));
 #endif

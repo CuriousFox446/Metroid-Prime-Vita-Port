@@ -354,8 +354,10 @@ void log_cpu() noexcept {
     const std::string busy = it->seen && span != 0
                                  ? fmt::format("{:.0f}%", 100.0 * static_cast<double>(run - it->run) / static_cast<double>(span))
                                  : std::string("new");
-    threads += fmt::format("{}{}: core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves", threads.empty() ? "" : " | ",
-                           it->name, info.currentCpuId, info.lastExecutedCpuId,
+    // Its ID too: a crash dump names threads by theirs.
+    threads += fmt::format("{}{} ({:#x}): core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves",
+                           threads.empty() ? "" : " | ", it->name, static_cast<uint32_t>(it->id), info.currentCpuId,
+                           info.lastExecutedCpuId,
                            static_cast<uint32_t>(info.currentCpuAffinityMask), info.currentPriority, busy,
                            it->seen ? info.changeCpuCount - it->moves : info.changeCpuCount);
     it->seen = true;

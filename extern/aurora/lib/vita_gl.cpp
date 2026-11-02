@@ -9,6 +9,7 @@
 #include <vitashark.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 
 #include "backends/imgui_impl_opengl2.h"
 
@@ -2192,10 +2193,25 @@ extern "C" void __wrap_invoke_splashscreen() {}
 // the render worker). The linker wraps both entry points (CMakeLists): a compile takes the lock,
 // and clearing its output, which follows every compile on its thread (vitaGL's and the compiler
 // thread's alike), gives it back.
+//
+// vitaGL compiles inside a draw call (reload_ffp_shaders, whose own frame is some 17 KiB), and on
+// the render worker's 32 KiB SceShaccCg ran past the stack's end: twice at the title screen in a
+// run of tallon5 (873832b). A compile called with less than half the compiler thread's stack left
+// runs on a thread with that stack, its caller waiting.
 namespace {
 std::mutex& shark_lock() noexcept {
   static std::mutex& lock = *new std::mutex;
   return lock;
+}
+
+// The calling thread's stack left below here (0 when the kernel does not say).
+size_t stack_left() noexcept {
+  SceKernelThreadInfo info{};
+  info.size = sizeof(info);
+  if (sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) < 0) {
+    return 0;
+  }
+  return reinterpret_cast<uintptr_t>(&info) - reinterpret_cast<uintptr_t>(info.stack);
 }
 } // namespace
 
@@ -2206,8 +2222,45 @@ void __real_shark_clear_output();
 
 SceGxmProgram* __wrap_shark_compile_shader_extended(const char* src, uint32_t* size, shark_type type, shark_opt opt,
                                                     int32_t useFastmath, int32_t useFastprecision, int32_t useFastint) {
+  using aurora::vita_gl::kCompileStack;
   shark_lock().lock();
-  return __real_shark_compile_shader_extended(src, size, type, opt, useFastmath, useFastprecision, useFastint);
+  if (stack_left() >= kCompileStack / 2) {
+    return __real_shark_compile_shader_extended(src, size, type, opt, useFastmath, useFastprecision, useFastint);
+  }
+  struct Call {
+    const char* src;
+    uint32_t* size;
+    shark_type type;
+    shark_opt opt;
+    int32_t useFastmath;
+    int32_t useFastprecision;
+    int32_t useFastint;
+    SceGxmProgram* program;
+  } call{src, size, type, opt, useFastmath, useFastprecision, useFastint, nullptr};
+  const auto run = [](void* arg) -> void* {
+    Call& c = *static_cast<Call*>(arg);
+    c.program = __real_shark_compile_shader_extended(c.src, c.size, c.type, c.opt, c.useFastmath, c.useFastprecision,
+                                                     c.useFastint);
+    return nullptr;
+  };
+  const uint64_t start = sceKernelGetProcessTimeWide();
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, kCompileStack);
+  pthread_t thread;
+  const bool own = pthread_create(&thread, &attr, run, &call) == 0;
+  if (own) {
+    pthread_join(thread, nullptr);
+  } else {
+    run(&call); // no thread for it: on the caller's stack, as before
+  }
+  pthread_attr_destroy(&attr);
+  aurora::vita_gl::Log.info("vitaGL compiled a {} shader of its own in {} ms{}{}",
+                            type == SHARK_VERTEX_SHADER ? "vertex" : "fragment",
+                            (sceKernelGetProcessTimeWide() - start) / 1000,
+                            own ? "" : " on its caller's stack (no thread for it)",
+                            call.program == nullptr ? ": it failed" : "");
+  return call.program;
 }
 
 void __wrap_shark_clear_output() {
