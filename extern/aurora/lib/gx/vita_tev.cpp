@@ -1261,6 +1261,35 @@ size_t tev_indirect_program_count() noexcept {
   return count;
 }
 
+std::vector<u8> tev_capture_material() noexcept {
+  size_t length = 0;
+  const MaterialRecord record = capture_material(length);
+  const auto* bytes = reinterpret_cast<const u8*>(&record);
+  return {bytes, bytes + length};
+}
+
+bool tev_record_program(const u8* bytes, size_t length, std::string& vertexSource, std::string& fragmentSource,
+                        u64& key) noexcept {
+  MaterialRecord record;
+  if (length < kRecordHead || length > sizeof(record) || (length - kRecordHead) % sizeof(TevStage) != 0) {
+    return false;
+  }
+  std::memcpy(&record, bytes, length);
+  if (record.format != kRecordFormat || record.numTevStages != (length - kRecordHead) / sizeof(TevStage) ||
+      record.numIndStages > MaxIndStages) {
+    return false;
+  }
+  // The record stands in for GX's state while its program is made; the state is put back after.
+  swap_material(record);
+  const TevLayout layout = tev_layout();
+  if (layout.supported) {
+    TevProgram info;
+    generate(layout, info, vertexSource, fragmentSource, key);
+  }
+  swap_material(record);
+  return layout.supported;
+}
+
 void tev_warm_up_step() noexcept {
   if (!tev_enabled()) {
     return;
@@ -1273,29 +1302,10 @@ void tev_warm_up_step() noexcept {
   while (sWarmUp.next < sWarmUp.records.size() && std::chrono::steady_clock::now() - start < kBudget &&
          vita_gl::warm_up_room()) {
     const auto [at, length] = sWarmUp.records[sWarmUp.next++];
-    MaterialRecord record;
-    if (length < kRecordHead || length > sizeof(record) || (length - kRecordHead) % sizeof(TevStage) != 0) {
-      ++sWarmUp.skipped;
-      continue;
-    }
-    std::memcpy(&record, bytes.data() + at, length);
-    if (record.format != kRecordFormat || record.numTevStages != (length - kRecordHead) / sizeof(TevStage) ||
-        record.numIndStages > MaxIndStages) {
-      ++sWarmUp.skipped;
-      continue;
-    }
-    // The record stands in for GX's state while its program is made; the state is put back after.
-    swap_material(record);
-    const TevLayout layout = tev_layout();
-    TevProgram info;
     std::string vertexSource;
     std::string fragmentSource;
     u64 key = 0;
-    if (layout.supported) {
-      generate(layout, info, vertexSource, fragmentSource, key);
-    }
-    swap_material(record);
-    if (!layout.supported) {
+    if (!tev_record_program(bytes.data() + at, length, vertexSource, fragmentSource, key)) {
       ++sWarmUp.skipped;
     } else if (vita_gl::program_known(key)) {
       ++sWarmUp.known;

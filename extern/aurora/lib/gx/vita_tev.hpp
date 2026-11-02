@@ -14,6 +14,8 @@
 
 #include <array>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace aurora::gx::vita {
 // The texture coordinate sets and textures the current TEV stages sample, as a program's slots. A
@@ -82,6 +84,13 @@ size_t tev_indirect_program_count() noexcept;
 // of their first draw (vita_gl::warm_up). Its counts, for the log.
 void tev_warm_up_step() noexcept;
 void tev_log_warm_up() noexcept;
+// A material record's program (the warm-up's, and the PC's precompile tool's,
+// tools/vita_precompile): its sources and key made with this generator, the record standing in for
+// GX's state meanwhile. False for a record of another build, or one no program draws.
+bool tev_record_program(const u8* bytes, size_t length, std::string& vertexSource, std::string& fragmentSource,
+                        u64& key) noexcept;
+// The current GX state's material record, as the warm-up saves it (the precompile tool's self-test).
+std::vector<u8> tev_capture_material() noexcept;
 // False with MP_VITA_TEV=0: every draw fixed-function.
 bool tev_enabled() noexcept;
 } // namespace aurora::gx::vita

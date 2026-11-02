@@ -1260,3 +1260,28 @@ The programs' warm-up, and a thread log (asked for while 748e22a was tried):
 - The thread log, each 300 presents (`[threads]`): each named thread's core (the one it is on, the
   one it last ran on, its affinity mask), priority, the share of the time it ran, and its moves
   between cores (`SceKernelThreadInfo`), to see where the compiler's time goes before placing it.
+
+Precompiled programs (asked for next: compiled on the PC, not the Vita). The compiler is Sony's
+own, the module vitashark loads (`ur0:data/libshacccg.suprx`, the user's), run on the PC by
+open-shacccg's oracle (MIT; Unicorn's ARM emulation, the module's 25 imports answered by the host),
+so the GXPs are the ones the Vita would make. `tools/vita_precompile`:
+- `build.sh` builds `precompile_sources`: the generator itself (`vita_tev.cpp`) compiled for the PC
+  from the Vita build's dependency trees. It reads a session's `materials.bin` and makes each
+  record's program as the Vita would (`tev_record_program`, shared with the warm-up: the record
+  swapped in for GX's state, the same sources and keys), writing the sources and a manifest.
+  `--self-test` makes a textured, vertex-coloured, fogged material's record and prints its program.
+- `precompile.py prepare` turns the module into the oracle's ELF and import maps (once);
+  `precompile.py compile` compiles every program in the manifest as vitashark does for
+  `compile_gxp` (the source named `<built-in>`, `main`, useFx, optimisation 3, fast math and
+  integers, full precision, warnings off), a process a program across the PC's cores, into
+  `precompiled.bin`: "VPK1", the count, a table sorted by key (key, each GXP's offset and size),
+  then the GXPs.
+- The Vita reads the pack's table from `vita_programs/precompiled.bin` at the start. A program the
+  card lacks and the pack has takes its GXPs from there, read on the card thread, instead of the
+  compiler (`submit_compile`); they are linked and the binary saved to the card as a compiled
+  program's are. GXPs that do not read back or link are compiled after all. The warm-up leaves the
+  pack's programs alone (linked at their first draw, in a frame or two). The presents line counts
+  the programs taken from the pack; the start, the pack's size.
+- It covers the materials a session has seen (its records): it pays after a change to the
+  generator (every program the records make, compiled on the PC in minutes rather than on the Vita
+  over hours) and on a card without the programs; a material never seen still compiles on the Vita.

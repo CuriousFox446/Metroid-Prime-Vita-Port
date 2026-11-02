@@ -23,6 +23,7 @@ tooling is in `decomp/`, not here.
 | `android_apk.sh` | Builds and signs the Android APK through Gradle | by hand |
 | `make_android_keystore.sh` | Creates the project's Android release signing key and `android/keystore.properties` | by hand, once |
 | `android_probe.sh` | Cross-configures and builds the port for Android with a local NDK (see `docs/ANDROID.md`) | by hand |
+| `vita_precompile/` | PS Vita: the generated programs a session's material records make, compiled on the PC with the Vita's own compiler into the pack the Vita reads (see `docs/VITA_PHASE2.md`) | by hand |
 
 ## Code and asset generators
 

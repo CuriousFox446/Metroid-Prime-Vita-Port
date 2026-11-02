@@ -417,7 +417,8 @@ namespace {
 struct ProgramStats {
   uint32_t compiled = 0; // built, from the compiler or the card
   uint32_t failed = 0;
-  uint32_t queued = 0; // sent to the compiler thread
+  uint32_t queued = 0;      // sent to the compiler thread
+  uint32_t precompiled = 0; // linked from the precompiled pack's GXPs instead
   double compileMs = 0.0;
   uint32_t loaded = 0;   // of them, loaded from the card
   uint32_t reloaded = 0; // read back but not linking: compiled again
@@ -620,6 +621,7 @@ struct CompileJob {
   std::vector<uint8_t> fragmentGxp;
   std::string error;
   double ms = 0.0;
+  bool packed = false; // its GXPs read from the precompiled pack, not compiled
   std::atomic<bool> done{false};
 };
 
@@ -715,12 +717,9 @@ bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t
   return !gxp.empty();
 }
 
-// A program's sources to the compiler thread. Without a thread the job is done at once with nothing
+// A job's sources to the compiler thread. Without a thread the job is done at once with nothing
 // compiled, and the program stays fixed-function.
-std::shared_ptr<CompileJob> submit_compile(std::string vertexSource, std::string fragmentSource) noexcept {
-  auto job = std::make_shared<CompileJob>();
-  job->vertexSource = std::move(vertexSource);
-  job->fragmentSource = std::move(fragmentSource);
+void send_to_compiler(const std::shared_ptr<CompileJob>& job) noexcept {
   const bool taken = compiler_thread().submit([job] {
     const auto start = std::chrono::steady_clock::now();
     if (compile_gxp(job->vertexSource, SHARK_VERTEX_SHADER, job->vertexGxp, job->error)) {
@@ -733,6 +732,88 @@ std::shared_ptr<CompileJob> submit_compile(std::string vertexSource, std::string
     job->error = "no thread for the compiler";
     job->done.store(true, std::memory_order_release);
   }
+}
+
+// Programs compiled on the PC with the Vita's own compiler (tools/vita_precompile): the card's
+// vita_programs/precompiled.bin, its index read at the start (key, then each GXP's place). A program
+// there is linked from its GXPs, read on the card thread, rather than compiled. Read-only after
+// initialize: the render worker and the FIFO thread (program_known) both look keys up.
+struct PackEntry {
+  uint32_t vertexOffset = 0;
+  uint32_t vertexSize = 0;
+  uint32_t fragmentOffset = 0;
+  uint32_t fragmentSize = 0;
+};
+static_assert(sizeof(PackEntry) == 16);
+std::string g_packPath;
+std::unordered_map<uint64_t, PackEntry> g_pack;
+
+void read_pack_index() noexcept {
+  std::FILE* file = std::fopen(g_packPath.c_str(), "rb");
+  if (file == nullptr) {
+    return;
+  }
+  char magic[4] = {};
+  uint32_t count = 0;
+  if (std::fread(magic, sizeof(magic), 1, file) == 1 && std::memcmp(magic, "VPK1", sizeof(magic)) == 0 &&
+      std::fread(&count, sizeof(count), 1, file) == 1 && count < (1u << 20)) {
+    std::vector<uint8_t> table(static_cast<size_t>(count) * 24);
+    if (std::fread(table.data(), table.size(), 1, file) == 1) {
+      g_pack.reserve(count);
+      for (uint32_t i = 0; i < count; ++i) {
+        uint64_t key = 0;
+        PackEntry entry;
+        std::memcpy(&key, table.data() + i * 24, sizeof(key));
+        std::memcpy(&entry, table.data() + i * 24 + sizeof(key), sizeof(entry));
+        g_pack.emplace(key, entry);
+      }
+    }
+  }
+  std::fclose(file);
+}
+
+// Card thread: a precompiled program's two GXPs from the pack, false when it does not give them back.
+bool read_packed(const PackEntry& entry, CompileJob& job) noexcept {
+  std::FILE* file = std::fopen(g_packPath.c_str(), "rb");
+  if (file == nullptr) {
+    return false;
+  }
+  const auto read = [file](uint32_t offset, uint32_t size, std::vector<uint8_t>& gxp) {
+    gxp.resize(size);
+    return size >= 4 && size < (1u << 20) && std::fseek(file, static_cast<long>(offset), SEEK_SET) == 0 &&
+           std::fread(gxp.data(), size, 1, file) == 1 && std::memcmp(gxp.data(), "GXP", 4) == 0;
+  };
+  const bool ok = read(entry.vertexOffset, entry.vertexSize, job.vertexGxp) &&
+                  read(entry.fragmentOffset, entry.fragmentSize, job.fragmentGxp);
+  std::fclose(file);
+  return ok;
+}
+
+// A program's sources compiled on the compiler thread, or with `packed` (the pack has it) its GXPs
+// read from the pack on the card thread, compiled after all when the pack does not give them back.
+std::shared_ptr<CompileJob> submit_compile(std::string vertexSource, std::string fragmentSource,
+                                           const PackEntry* packed) noexcept {
+  auto job = std::make_shared<CompileJob>();
+  job->vertexSource = std::move(vertexSource);
+  job->fragmentSource = std::move(fragmentSource);
+  if (packed != nullptr) {
+    job->packed = true;
+    const bool taken = card_thread().submit([job, entry = *packed] {
+      if (read_packed(entry, *job)) {
+        job->done.store(true, std::memory_order_release);
+        return;
+      }
+      job->packed = false;
+      job->vertexGxp.clear();
+      job->fragmentGxp.clear();
+      send_to_compiler(job);
+    });
+    if (taken) {
+      return job;
+    }
+    job->packed = false;
+  }
+  send_to_compiler(job);
   return job;
 }
 
@@ -994,14 +1075,17 @@ private:
     pthread_attr_destroy(&attr);
   }
 
-  // Its sources to the compiler thread; the draws are fixed-function till its GXPs are linked.
+  // Its sources to the compiler thread, or its GXPs from the precompiled pack when it has them; the
+  // draws are fixed-function till its GXPs are linked.
   void compile() noexcept {
     {
       std::lock_guard lock{g_keysMutex};
       g_compilingKeys.insert(m_key);
     }
-    m_job = submit_compile(std::move(m_vertexSource), std::move(m_fragmentSource));
-    ++g_programStats.queued;
+    const auto packed = g_pack.find(m_key);
+    const bool inPack = packed != g_pack.end();
+    m_job = submit_compile(std::move(m_vertexSource), std::move(m_fragmentSource), inPack ? &packed->second : nullptr);
+    ++(inPack ? g_programStats.precompiled : g_programStats.queued);
     m_state = State::Compiling;
   }
 
@@ -1097,6 +1181,15 @@ private:
       }
       glDeleteShader(vs);
       glDeleteShader(fs);
+    }
+    if (m_id == 0 && job.packed) {
+      // The pack's GXPs did not link: compiled here after all (it stays among those compiling).
+      ++g_programStats.reloaded;
+      std::string vertexSource = std::move(job.vertexSource);
+      std::string fragmentSource = std::move(job.fragmentSource);
+      m_job = submit_compile(std::move(vertexSource), std::move(fragmentSource), nullptr);
+      ++g_programStats.queued;
+      return;
     }
     g_programStats.compileMs += job.ms;
     {
@@ -1236,6 +1329,10 @@ void warm_up_step() noexcept {
 } // namespace
 
 bool program_known(uint64_t key) noexcept {
+  // One in the precompiled pack is linked at its first draw, in a frame or two: nothing to warm.
+  if (g_pack.contains(key)) {
+    return true;
+  }
   {
     std::lock_guard lock{g_keysMutex};
     if (g_cardKeys.contains(key) || g_compilingKeys.contains(key)) {
@@ -1830,10 +1927,14 @@ bool initialize() noexcept {
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
   index_card();
-  // The warm-up's material records (gx/vita_tev.cpp), read here before the FIFO thread asks.
+  // The warm-up's material records (gx/vita_tev.cpp), read here before the FIFO thread asks, and the
+  // programs compiled on the PC (tools/vita_precompile).
   g_materialsPath = g_programCacheDir + "/materials.bin";
   read_materials();
-  Log.info("programs on the card: {}; material records: {} KiB", g_cardKeys.size(), g_savedMaterials.size() / 1024);
+  g_packPath = g_programCacheDir + "/precompiled.bin";
+  read_pack_index();
+  Log.info("programs on the card: {}; precompiled: {}; material records: {} KiB", g_cardKeys.size(), g_pack.size(),
+           g_savedMaterials.size() / 1024);
   // GXM's ring buffers hold a scene's draws until the GPU draws the scene (the fragment ring each
   // draw's textures and fragment state, the VDM ring its commands). The defaults (512, 128 and 16
   // KiB) were made for scenes of a few hundred plain draws; the water's generated programs take four
@@ -1969,16 +2070,17 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
-             "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} loaded from the card, "
-             "{} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} failed, {} built or being built by "
-             "their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; textures bound/kept: {}/{}; EFB "
-             "copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
+             "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} from the precompiled "
+             "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
+             "failed, {} built or being built by their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
+             "textures bound/kept: {}/{}; EFB copies: {} ({:.0f} kpixels, {:.1f} ms, {:.2f} ms each)",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
              g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),
-             g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs, g_warmUpStats.built,
+             g_programStats.precompiled, g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs,
+             g_warmUpStats.built,
              g_warmUpStats.failed, g_warmUpStats.skipped,
              g_uniformStats.vertex.uploaded, g_uniformStats.vertex.skipped, g_uniformStats.fragment.uploaded,
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
