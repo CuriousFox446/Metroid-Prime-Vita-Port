@@ -1321,3 +1321,23 @@ The pipeline with the user's module (`libshacccg.suprx`, SDK 3.0.0, shacc r13225
   of its 1,104 GXPs byte for byte the card's. The card has every one of these programs already, so
   on that card it changes nothing; it is ready for the next change to the generator, and a card
   without the binaries links them from it.
+
+The port menu on the Vita (asked for after tallon7's run, b07dbe8: six minutes, no crash):
+- Remastered. The page imports Metroid Prime Remastered's models from a Switch dump, with its
+  gallery; nothing of it runs without the import, and the Vita could not draw the models anyway.
+  It is gone there, with the Debug page's Remastered section and the search's rows for it. The
+  crosshair's Remastered style stays (Video). Remastered's look on the PC, per-pixel lighting, the
+  sun shadow and its projected actor shadows, bloom, volumetric fog and the reflection probe, never
+  reached the Vita (its programs light per vertex; `MP_SHADOWS`, `ProjectedShadows` and
+  vita_platform.cpp's settings keep the rest off), so there was no frame time to win; Video's
+  checkboxes for the first three are gone there too.
+- The search box (any text field). With no hardware keyboard SDL opens the system keyboard
+  (SceImeDialog) when a field takes text, but a common dialog draws only when the swap asks for it
+  (`vglSwapBuffers(GL_TRUE)`), and ours never did: the dialog stayed up unseen, the field waited for
+  typing, and the menu could not be left. Now SDL's is off (`SDL_ENABLE_SCREEN_KEYBOARD=0`) and the
+  overlay opens the keyboard itself. vita_gl opens, draws and closes it on the render worker, so
+  all of SceImeDialog's calls are on the thread that swaps; the overlay (ui_common.cpp) asks for it
+  when a field becomes active, with the field's text, keeps the pad and the touch screen from the
+  menu while it is up and until its last button is let go, and on confirm types the text over the
+  field's and presses Enter. Cancelled, the field closes as it was; a keyboard that cannot open
+  closes the field at once.

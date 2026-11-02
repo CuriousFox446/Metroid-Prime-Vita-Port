@@ -819,5 +819,16 @@ void aurora_set_per_pixel_lighting(bool enabled) {
   (void)enabled;
 #endif
 }
+bool aurora_open_system_keyboard(const char* text, uint32_t max_length) {
+  return aurora::vita_gl::active() && aurora::vita_gl::open_keyboard(text != nullptr ? text : "", max_length);
+}
+int aurora_system_keyboard_result(char* out, size_t size) {
+  std::string text;
+  const int result = aurora::vita_gl::keyboard_result(text);
+  if (result == 1 && out != nullptr && size > 0) {
+    SDL_strlcpy(out, text.c_str(), size);
+  }
+  return result;
+}
 void aurora_set_timescale(float scale) { aurora::time::set_scale(scale); }
 float aurora_get_timescale() { return aurora::time::scale(); }

@@ -35,7 +35,11 @@ const DebugPage kDebugPages[] = {
     {"Game", DrawGameTab},
     {"Controls", DrawControlsTab},
     {"Video", DrawVideoTab},
+#ifndef __vita__
+    // Not on the Vita: importing Remastered's models from a Switch dump, and drawing them, is
+    // beyond it. The crosshair's Remastered style is Video's.
     {"Remastered", DrawRemasteredTab},
+#endif
     {"Mods", DrawModsTab},
     {"Randomizer", DrawRandomizerTab},
     {"Archipelago", DrawArchipelagoTab},
@@ -332,7 +336,7 @@ void DrawSearchField() {
   if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_F)) {
     ImGui::SetKeyboardFocusHere();
   }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__vita__)
   const char* const kHint = "Search settings";
 #else
   const char* const kHint = "Search settings (Ctrl+F)";
@@ -361,6 +365,11 @@ void DrawSearchResults() {
     }
     std::vector< std::pair< int, const SettingsIndexRow* > > scored;
     for (const SettingsIndexRow& row : kSettingsIndex) {
+      // A page this build leaves out (the Vita's Remastered) has nothing to open.
+      if (std::none_of(std::begin(kDebugPages), std::end(kDebugPages),
+                       [&row](const DebugPage& page) { return std::strcmp(page.name, row.page) == 0; })) {
+        continue;
+      }
       const std::string label = port::Lower(row.label);
       const std::string all = label + ' ' + port::Lower(row.section) + ' ' + port::Lower(row.sub) + ' ' +
                               port::Lower(row.page) + ' ' + port::Lower(row.keywords);

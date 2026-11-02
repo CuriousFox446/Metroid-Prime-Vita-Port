@@ -263,6 +263,13 @@ void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
 ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* rgba8) noexcept;
 void remove_texture(ImTextureID id) noexcept;
+// The system keyboard (SceImeDialog), the Vita's only one, for a text field. Game thread: asked
+// for with the field's text (UTF-8, at most maxLength characters; false while one is up), then
+// its outcome: 0 while it is up, 1 confirmed (its text in `text`), -1 cancelled or not opened,
+// -2 none asked. While it is up, open (any thread) is true.
+bool open_keyboard(const char* text, uint32_t maxLength) noexcept;
+int keyboard_result(std::string& text) noexcept;
+bool keyboard_open() noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -288,5 +295,8 @@ inline void warm_up(uint64_t, std::string, std::string) noexcept {}
 inline void present(ImDrawData*) noexcept {}
 inline ImTextureID add_texture(uint32_t, uint32_t, const uint8_t*) noexcept { return ImTextureID{}; }
 inline void remove_texture(ImTextureID) noexcept {}
+inline bool open_keyboard(const char*, uint32_t) noexcept { return false; }
+inline int keyboard_result(std::string&) noexcept { return -2; }
+inline bool keyboard_open() noexcept { return false; }
 #endif
 } // namespace aurora::vita_gl

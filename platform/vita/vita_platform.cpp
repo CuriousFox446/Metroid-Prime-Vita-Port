@@ -292,6 +292,10 @@ __attribute__((constructor(101))) void vitaSetup() {
     // zones hardly run, so its clock reads no longer dominate; on for the per-draw
     // breakdown, at some cost to the [timing] numbers.
     setenv("MP_PROFILE", "1", 0);
+    // A text field's keyboard is the overlay's own (debug_ui/ui_common.cpp, through Aurora, which
+    // draws it): SDL's, opened when a field takes text, was never drawn under vitaGL and left the
+    // field waiting.
+    setenv("SDL_ENABLE_SCREEN_KEYBOARD", "0", 1);
     // Nothing can show or answer a box here: no disc dialog or message boxes, and
     // Aurora keeps running on its Null backend instead of exiting (which a missing
     // GPU means on a desktop, and is the point of this build).

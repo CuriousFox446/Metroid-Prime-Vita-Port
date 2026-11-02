@@ -147,6 +147,11 @@ void shutdown() noexcept {
 }
 
 void process_event(const SDL_Event& event) noexcept {
+  // The Vita's system keyboard takes the touch screen while it is up (vita_gl::open_keyboard): the
+  // overlay under it must not see those touches.
+  if (vita_gl::keyboard_open()) {
+    return;
+  }
   auto renderEvent = event;
   if (g_useSdlRenderer) {
     if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
@@ -162,6 +167,7 @@ bool wants_capture_event(const SDL_Event& event) noexcept {
   }
 
   const ImGuiIO& io = ImGui::GetIO();
+  const bool keyboard = vita_gl::keyboard_open(); // nor the game
   switch (event.type) {
   case SDL_EVENT_MOUSE_MOTION:
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -171,11 +177,11 @@ bool wants_capture_event(const SDL_Event& event) noexcept {
   case SDL_EVENT_FINGER_MOTION:
   case SDL_EVENT_FINGER_UP:
   case SDL_EVENT_FINGER_CANCELED:
-    return io.WantCaptureMouse;
+    return io.WantCaptureMouse || keyboard;
   case SDL_EVENT_KEY_DOWN:
   case SDL_EVENT_KEY_UP:
   case SDL_EVENT_TEXT_INPUT:
-    return io.WantCaptureKeyboard || io.WantTextInput;
+    return io.WantCaptureKeyboard || io.WantTextInput || keyboard;
   default:
     return false;
   }

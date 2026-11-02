@@ -438,6 +438,9 @@ void DrawVideoQuality() {
       SetAnisotropy(1 << aniso);
     }
     ImGui::SetItemTooltip("Keeps textures sharp at grazing angles. Recommended: 16x.");
+#ifndef __vita__
+    // None of these three reach the Vita's renderer: its programs light per vertex, and its sun
+    // and actor shadows stay off (vita_platform.cpp's MP_SHADOWS, ProjectedShadows).
     bool perPixel = sPerPixelLighting;
     if (ImGui::Checkbox("Per-pixel lighting", &perPixel)) {
       SetPerPixelLighting(perPixel);
@@ -460,6 +463,7 @@ void DrawVideoQuality() {
         "Remastered's actor shadow: each actor casts a shadow straight down onto the\n"
         "floor. Needs the Remastered world geometry; otherwise the original blob shadow\n"
         "is drawn.");
+#endif
   }
 
   bool autoScale = sRenderScale <= 0.f;

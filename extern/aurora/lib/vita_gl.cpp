@@ -7,6 +7,9 @@
 
 #include <vitaGL.h>
 #include <vitashark.h>
+#include <SDL3/SDL_stdinc.h>
+#include <psp2/common_dialog.h>
+#include <psp2/ime_dialog.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -2041,6 +2044,113 @@ void report_sections() noexcept {
 }
 } // namespace
 
+namespace {
+// The system keyboard (open_keyboard): asked for on the game thread; opened, drawn and closed on
+// the render worker, the thread that swaps. A common dialog draws at the swap
+// (vglSwapBuffers(GL_TRUE)), and SceImeDialog's calls all stay on that one thread.
+struct Keyboard {
+  enum class State : uint8_t { Closed, Asked, Open, Confirmed, Cancelled };
+  State state = State::Closed;
+  uint32_t maxLength = 0;
+  SceWChar16 initial[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1] = {};
+  SceWChar16 text[SCE_IME_DIALOG_MAX_TEXT_LENGTH + 1] = {};
+};
+std::mutex g_keyboardMutex;
+Keyboard g_keyboard;
+
+// Render worker, before each swap: opens the keyboard asked for, and takes a finished one's
+// outcome. True while one is up.
+bool update_keyboard() noexcept {
+  std::lock_guard lock{g_keyboardMutex};
+  Keyboard& k = g_keyboard;
+  if (k.state == Keyboard::State::Asked) {
+    static const SceWChar16 kTitle[] = {0};
+    SceImeDialogParam param;
+    sceImeDialogParamInit(&param);
+    param.type = SCE_IME_TYPE_DEFAULT;
+    param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
+    param.title = kTitle;
+    param.maxTextLength = k.maxLength;
+    param.initialText = k.initial;
+    param.inputTextBuffer = k.text;
+    if (const int result = sceImeDialogInit(&param); result < 0) {
+      Log.warn("the system keyboard did not open (error {:#010x})", static_cast<uint32_t>(result));
+      k.state = Keyboard::State::Cancelled;
+      return false;
+    }
+    k.state = Keyboard::State::Open;
+  }
+  if (k.state != Keyboard::State::Open) {
+    return false;
+  }
+  if (sceImeDialogGetStatus() != SCE_COMMON_DIALOG_STATUS_FINISHED) {
+    return true;
+  }
+  SceImeDialogResult result{};
+  sceImeDialogGetResult(&result);
+  sceImeDialogTerm();
+  k.state = result.button == SCE_IME_DIALOG_BUTTON_ENTER ? Keyboard::State::Confirmed : Keyboard::State::Cancelled;
+  return false;
+}
+} // namespace
+
+bool open_keyboard(const char* text, uint32_t maxLength) noexcept {
+  std::lock_guard lock{g_keyboardMutex};
+  Keyboard& k = g_keyboard;
+  if (k.state != Keyboard::State::Closed) {
+    return false;
+  }
+  k.maxLength = std::clamp<uint32_t>(maxLength, 1, SCE_IME_DIALOG_MAX_TEXT_LENGTH);
+  k.initial[0] = 0;
+  k.text[0] = 0;
+  if (char* wide = SDL_iconv_string("UTF-16LE", "UTF-8", text, SDL_strlen(text) + 1)) {
+    const auto* units = reinterpret_cast<const SceWChar16*>(wide);
+    uint32_t n = 0;
+    for (; n < k.maxLength && units[n] != 0; ++n) {
+      k.initial[n] = units[n];
+    }
+    k.initial[n] = 0;
+    SDL_free(wide);
+  }
+  k.state = Keyboard::State::Asked;
+  return true;
+}
+
+int keyboard_result(std::string& text) noexcept {
+  std::lock_guard lock{g_keyboardMutex};
+  Keyboard& k = g_keyboard;
+  switch (k.state) {
+  case Keyboard::State::Closed:
+    return -2;
+  case Keyboard::State::Asked:
+  case Keyboard::State::Open:
+    return 0;
+  case Keyboard::State::Confirmed: {
+    size_t units = 0;
+    while (units < SCE_IME_DIALOG_MAX_TEXT_LENGTH && k.text[units] != 0) {
+      ++units;
+    }
+    text.clear();
+    if (char* utf8 = SDL_iconv_string("UTF-8", "UTF-16LE", reinterpret_cast<const char*>(k.text),
+                                      units * sizeof(SceWChar16))) {
+      text = utf8;
+      SDL_free(utf8);
+    }
+    k.state = Keyboard::State::Closed;
+    return 1;
+  }
+  case Keyboard::State::Cancelled:
+    k.state = Keyboard::State::Closed;
+    return -1;
+  }
+  return -2;
+}
+
+bool keyboard_open() noexcept {
+  std::lock_guard lock{g_keyboardMutex};
+  return g_keyboard.state == Keyboard::State::Asked || g_keyboard.state == Keyboard::State::Open;
+}
+
 void present(ImDrawData* overlay) noexcept {
   if (g_clock.callUs < 0.0) {
     g_clock.callUs = timer_call_us();
@@ -2097,7 +2207,8 @@ void present(ImDrawData* overlay) noexcept {
     ImGui_ImplOpenGL2_RenderDrawData(overlay);
   }
   g_clock.mark(kOverlay);
-  vglSwapBuffers(GL_FALSE);
+  // A system keyboard that is up (open_keyboard) draws over the frame at the swap.
+  vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
   g_clock.mark(kSwap);
   if (g_clock.on) {
     ++g_clock.frames;
