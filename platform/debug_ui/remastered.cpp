@@ -63,6 +63,10 @@ void DrawPalLanguages() {
              "less played than USA: please report differences.");
     return;
   }
+#ifdef __vita__
+  // The import picks a PAL disc image with a file browser, which the Vita does not have.
+  return;
+#endif
   std::string picked;
   {
     std::lock_guard lock(sRemasteredPickMutex);

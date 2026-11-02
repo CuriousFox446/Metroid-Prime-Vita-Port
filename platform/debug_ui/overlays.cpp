@@ -577,11 +577,14 @@ void DrawShaderCompilationToast() {
 // The panel's hotkey hint, from the live Port menu/Screenshot bindings.
 std::string HotkeyHint() {
   std::string hint;
+  const auto add = [&hint](const std::string& part) { hint += (hint.empty() ? "" : "   ") + part; };
   const std::string menu = PortInputRemap::BindingsText(PortInput::Action::PortMenu, " / ");
-  if (!menu.empty()) hint += menu + ": hide   ";
-  hint += "F10: frame limit";
+  if (!menu.empty()) add(menu + ": hide");
+#ifndef __vita__
+  add("F10: frame limit"); // a key, which the Vita does not have
+#endif
   const std::string shot = PortInputRemap::BindingsText(PortInput::Action::Screenshot, " / ");
-  if (!shot.empty()) hint += "   " + shot + ": screenshot";
+  if (!shot.empty()) add(shot + ": screenshot");
   return hint;
 }
 

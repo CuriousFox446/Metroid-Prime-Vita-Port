@@ -462,8 +462,14 @@ void DrawIcon(ImDrawList* dl, ImVec2 p, float s, Icon icon, ImU32 col) {
 // An input's name without its "kind:" (the icon says it).
 // Pad buttons by raw bit (SDL_GamepadButton, then the triggers' pulls and clicks).
 constexpr const char* kPadButtonLabels[] = {
+#ifdef __vita__
+    // The Vita's own names for them.
+    "Cross",   "Circle",   "Square",   "Triangle", "Select",   "PS",       "Start",     "Left stick",
+    "Right stick", "L",    "R",        "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Share",
+#else
     "A",       "B",        "X",        "Y",        "Back",     "Guide",    "Start",     "Left stick",
     "Right stick", "LB",   "RB",       "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Share",
+#endif
     "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "Touchpad", "Misc 2",   "Misc 3",    "Misc 4",
     "Misc 5",  "Misc 6",   "LT",       "RT",       "LT click", "RT click",
 };
@@ -1391,6 +1397,11 @@ std::string BindingsText(PortInput::Action action, const char* separator) {
   std::string text;
   for (const Binding& b : profile.bindings) {
     if (b.action != action || b.count == 0) continue;
+#ifdef __vita__
+    // The Vita has no keyboard or mouse: the hints name its buttons alone (F1, F12 and F8 were
+    // shown there).
+    if (PortInput::BindingFamily(b) != PortInput::Family::Pad) continue;
+#endif
     // A chord bound in both orders is listed once.
     std::vector<Input> set(b.inputs.begin(), b.inputs.begin() + b.count);
     std::sort(set.begin(), set.end(), [](const Input& x, const Input& y) {

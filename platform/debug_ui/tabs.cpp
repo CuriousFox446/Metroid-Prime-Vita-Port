@@ -179,7 +179,9 @@ void DrawGameAudio() {
   }
   ImGui::EndDisabled();
   ImGui::SetItemTooltip("These audio options are saved globally and persist across restarts.");
+#ifndef __vita__ // its import picks a disc image with a file browser, which the Vita does not have
   DrawFlaahgraTheme();
+#endif
 }
 
 void DrawOriginalSection() {
@@ -246,10 +248,12 @@ void DrawVideoTab() {
     DrawPerformanceTab();
     ImGui::EndTabItem();
   }
+#ifndef __vita__ // GPU drivers, renderers and their self-test: the PC's and Android's
   if (SubTab("Video", "Compatibility")) {
     DrawVideoCompatibility();
     ImGui::EndTabItem();
   }
+#endif
   ImGui::EndTabBar();
 }
 
@@ -261,14 +265,23 @@ void DrawModsTab() {
 void DrawSystemTab() {
   DrawOverlaySection();
   DrawSettingsSection();
+  // Not on the Vita: the memory card's imports and exports and a new disc image are picked with a
+  // file browser it does not have, the update check opens a web page, and the disc check was asked
+  // to go with them.
+#ifndef __vita__
   DrawMemoryCard();
+#endif
 #if defined(__ANDROID__)
   PortDataFolder::DrawPanel();
 #endif
   DrawLogSection();
+#ifndef __vita__
   DrawDiscCheckSection();
+#endif
   DrawDiscordSection();
+#ifndef __vita__
   DrawUpdateSection();
+#endif
   ImGui::SeparatorText("About");
   ImGui::TextDisabled("Version %s, build %s", MP_BUILD_VERSION, MP_BUILD_REVISION);
 }

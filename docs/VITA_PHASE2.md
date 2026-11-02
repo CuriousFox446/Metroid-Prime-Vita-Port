@@ -1341,3 +1341,14 @@ The port menu on the Vita (asked for after tallon7's run, b07dbe8: six minutes, 
   menu while it is up and until its last button is let go, and on confirm types the text over the
   field's and presses Enter. Cancelled, the field closes as it was; a keyboard that cannot open
   closes the field at once.
+- What the Vita has no use for, asked to go next. Key hints: the overlay's hints list the bindings
+  of their actions (`BindingsText`), and the PC's keys are bound on the Vita too, so the header
+  read "F1 / Back + Start: hide   F10: frame limit   F12: screenshot" and the buttons "Screenshot
+  (F12)" and "Photo mode (F8)". There the hints list the pad's bindings alone, under the Vita's
+  names (Cross, Circle, Square, Triangle, Select, L, R; the Remap page too): "Select + Start:
+  hide". Video's Fullscreen (F11) goes, and its launch hint is "Show the menu hint at launch".
+  Sections: System's Memory card (imports and exports through a file browser), Disc image (its new
+  image picked the same way; its check went with it) and Updates (a web page); Video's
+  Compatibility tab (GPU drivers and renderers); Game's Flaahgra boss theme and PAL languages
+  (both import a disc image picked with a file browser); and the Archipelago page. The search
+  leaves their rows out (`HiddenOnVita`).
