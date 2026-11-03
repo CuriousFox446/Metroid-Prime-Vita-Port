@@ -562,7 +562,19 @@ std::string SettingsText() {
 
 void LoadSettings() {
   const std::string path = SettingsFilePath();
-  std::ifstream file(PortPaths::detail::FromUtf8(path));
+  const std::filesystem::path target = PortPaths::detail::FromUtf8(path);
+  std::filesystem::path partial = target;
+  partial += ".tmp";
+  // A save whose rename failed left only its temporary file (SaveSettings keeps it): on the Vita a
+  // rename removes the target before it renames (VitaSDK's _rename_r), and the settings were lost
+  // that way. It is the newest, so it is taken back.
+  std::error_code ec;
+  if (!std::filesystem::exists(target, ec) && std::filesystem::exists(partial, ec)) {
+    std::filesystem::rename(partial, target, ec);
+    PortLog::Write("metroid_prime_port: settings taken back from %s.tmp%s\n", path.c_str(),
+                   ec ? " (could not rename it; read from there)" : "");
+  }
+  std::ifstream file(std::filesystem::exists(target, ec) ? target : partial);
   if (!file.is_open()) {
     return;
   }
@@ -675,8 +687,10 @@ void SaveSettings() {
   std::error_code ec;
   std::filesystem::rename(partial, target, ec);
   if (ec) {
-    PortLog::Write("metroid_prime_port: could not replace settings at %s: %s\n", path.c_str(), ec.message().c_str());
-    std::filesystem::remove(partial, ec);
+    // The temporary file stays: on the Vita the rename has removed the settings already, and the
+    // next start takes it back (LoadSettings).
+    PortLog::Write("metroid_prime_port: could not replace settings at %s: %s (kept as %s.tmp)\n", path.c_str(),
+                   ec.message().c_str(), path.c_str());
     return;
   }
   PortLog::Write("metroid_prime_port: saved settings to %s\n", path.c_str());

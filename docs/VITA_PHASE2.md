@@ -1390,3 +1390,12 @@ Vita: it counts the PC's startup pipeline queue, which stays empty there. The Vi
 program at a material's first draw, all through play: vita_gl counts the programs sent to the
 compiler thread and those it has finished (`aurora_get_program_compiles`), and the toast shows
 while any are waiting or compiling, half a second on.
+
+The settings lost between two runs (port_settings.ini was in the folder at tallon9's start, gone at
+tallon10's, its choices back to their defaults). A save writes port_settings.ini.tmp and renames it
+over the file, and VitaSDK's rename removes the target before it renames (`_rename_r`:
+`sceIoRemove`, then `sceIoRename`, which will not replace a file). A rename that failed after the
+removal went on to delete the temporary file too, and nothing was left. Now a failed rename keeps
+the temporary file, and the next start takes it back. Aurora's own atomic writer (the GCI saves,
+the pad configuration) had the same end on the Vita: there the temporary file is kept, and logged,
+when the target is already gone.
