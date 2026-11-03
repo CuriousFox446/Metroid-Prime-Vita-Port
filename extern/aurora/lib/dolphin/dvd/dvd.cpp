@@ -530,11 +530,24 @@ public:
   }
 
 private:
+  struct Waiting {
+    DVDCommandBlock* block;
+    s32 prio;
+    u32 done = 0; // a read's bytes read so far, when it stopped for a more urgent command
+  };
+
   void run() {
 #ifdef TRACY_ENABLE
     tracy::SetThreadName("Aurora DVD worker");
 #endif
+#if defined(__vita__)
+    // Above the game's threads: a read from the memory card is mostly waiting, and a music
+    // stream's refill must not wait for a core while the game keeps all three busy. Its
+    // completion also takes the MusyX lock, which the mixer (as high) then waits on.
+    aurora::thread::set_current({.name = "Aurora DVD worker", .priority = aurora::thread::Priority::High});
+#else
     aurora::thread::register_current("Aurora DVD worker");
+#endif
 
     std::unique_lock lk{m_mutex};
     while (true) {
@@ -542,39 +555,73 @@ private:
       if (m_shutdown) {
         return;
       }
-      DVDCommandBlock* block = m_queue.front().block;
+      Waiting command = m_queue.front();
       m_queue.pop_front();
-      m_activeBlock = block;
-      atomic_store_release(block->state, DVD_STATE_BUSY);
+      m_activeBlock = command.block;
+      atomic_store_release(command.block->state, DVD_STATE_BUSY);
       lk.unlock();
-      process_command(block);
+      const bool finished = process_command(command);
       lk.lock();
       m_activeBlock = nullptr;
-      if (m_cancelActiveBlock == block) {
+      if (!finished && m_cancelActiveBlock != command.block) {
+        // The rest of a read stopped for a more urgent command: behind it, ahead of its own
+        // priority's others.
+        const auto at = std::find_if(m_queue.begin(), m_queue.end(),
+                                     [&command](const Waiting& w) { return w.prio >= command.prio; });
+        m_queue.insert(at, command);
+        continue;
+      }
+      if (m_cancelActiveBlock == command.block) {
         m_cancelActiveBlock = nullptr;
       }
       lk.unlock();
+      if (!finished) {
+        complete_canceled_command(command.block); // cancelled while it read
+      }
       m_doneCv.notify_all();
       lk.lock();
     }
   }
 
-  static std::pair<s32, u32> perform_command(DVDCommandBlock* block) {
-    s32 result;
+  // A read goes a piece at a time, so a more urgent command (a music stream's refill) waits for one
+  // piece of a long read, not the whole of it.
+  static constexpr u32 kReadPiece = 256 * 1024;
+
+  bool more_urgent_waiting(s32 prio) {
+    std::lock_guard lk{m_mutex};
+    return !m_queue.empty() && m_queue.front().prio < prio;
+  }
+
+  // Carries a command out and completes it (its result, then its callback), or stops a read short
+  // of its end for a more urgent command (false; `command.done` says how far it got).
+  bool process_command(Waiting& command) {
+    DVDCommandBlock* block = command.block;
+    s32 result = DVD_RESULT_GOOD;
     u32 transferred = 0;
     if (block->command == DVD_COMMAND_SEEK) {
       auto* handle = getCommandHandle(block);
       const int64_t seek = handle != nullptr ? handle->seek(block->offset, 0) : -1;
       result = seek < 0 ? DVD_RESULT_FATAL_ERROR : DVD_RESULT_GOOD;
     } else {
-      result = readFromHandle(getCommandHandle(block), block->addr, static_cast<s32>(block->length),
-                              static_cast<s32>(block->offset), &transferred);
+      while (true) {
+        const u32 piece = std::min(block->length - command.done, kReadPiece);
+        u32 read = 0;
+        result = readFromHandle(getCommandHandle(block), static_cast<u8*>(block->addr) + command.done,
+                                static_cast<s32>(piece), static_cast<s32>(block->offset + command.done), &read);
+        if (result < 0) {
+          break;
+        }
+        command.done += read;
+        result = static_cast<s32>(command.done);
+        transferred = command.done;
+        if (read < piece || command.done >= block->length) {
+          break; // the read's end, or the file's
+        }
+        if (more_urgent_waiting(command.prio)) {
+          return false;
+        }
+      }
     }
-    return {result, transferred};
-  }
-
-  void process_command(DVDCommandBlock* block) {
-    auto [result, transferred] = perform_command(block);
     if (consume_active_cancel(block)) {
       result = DVD_RESULT_CANCELED;
       transferred = 0;
@@ -583,6 +630,7 @@ private:
     if (block->callback != nullptr) {
       block->callback(result, block);
     }
+    return true;
   }
 
   void execute(DVDCommandBlock* block) {
@@ -591,7 +639,8 @@ private:
       m_activeBlock = block;
       atomic_store_release(block->state, DVD_STATE_BUSY);
     }
-    process_command(block);
+    Waiting command{block, 0}; // the most urgent: it runs to its end
+    process_command(command);
     {
       std::lock_guard lk{m_mutex};
       m_activeBlock = nullptr;
@@ -636,11 +685,6 @@ private:
     m_queue.clear();
     return blocks;
   }
-
-  struct Waiting {
-    DVDCommandBlock* block;
-    s32 prio;
-  };
 
   std::thread m_thread;
   std::mutex m_mutex;
