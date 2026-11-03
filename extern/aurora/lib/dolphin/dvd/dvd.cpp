@@ -419,7 +419,12 @@ public:
     m_doneCv.notify_all();
   }
 
-  void enqueue(DVDCommandBlock* block) {
+  // Waits behind every command of its priority or a higher one, as the GameCube's drive queue
+  // takes them: 0 first, then 1 (the music streams' refills, CDSPStream), 2 (everything else the
+  // game reads), 3. In arrival order alone a refill waited behind every resource read queued
+  // before it, and from a disc image on the Vita's memory card that outlasted the stream's 2 s
+  // half-buffer: the channel replayed its old half, and the left and right streams drifted apart.
+  void enqueue(DVDCommandBlock* block, s32 prio) {
     bool executeNow = false;
     {
       std::lock_guard lk(m_mutex);
@@ -427,7 +432,9 @@ public:
         executeNow = true;
       } else {
         atomic_store_release(block->state, DVD_STATE_WAITING);
-        m_queue.push_back(block);
+        const auto behind =
+            std::find_if(m_queue.begin(), m_queue.end(), [prio](const Waiting& w) { return w.prio > prio; });
+        m_queue.insert(behind, Waiting{block, prio});
       }
     }
     if (executeNow) {
@@ -445,7 +452,7 @@ public:
     DVDCommandBlock* canceledBlock = nullptr;
     std::unique_lock lk{m_mutex};
     for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
-      if (*it == block) {
+      if (it->block == block) {
         m_queue.erase(it);
         canceledBlock = block;
         lk.unlock();
@@ -495,7 +502,7 @@ public:
     DVDCommandBlock* canceledBlock = nullptr;
     std::unique_lock lk{m_mutex};
     for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
-      if (*it == block) {
+      if (it->block == block) {
         m_queue.erase(it);
         canceledBlock = block;
         lk.unlock();
@@ -535,7 +542,7 @@ private:
       if (m_shutdown) {
         return;
       }
-      DVDCommandBlock* block = m_queue.front();
+      DVDCommandBlock* block = m_queue.front().block;
       m_queue.pop_front();
       m_activeBlock = block;
       atomic_store_release(block->state, DVD_STATE_BUSY);
@@ -623,18 +630,23 @@ private:
   std::vector<DVDCommandBlock*> discard_pending_commands_locked() {
     std::vector<DVDCommandBlock*> blocks;
     blocks.reserve(m_queue.size());
-    for (auto* block : m_queue) {
-      blocks.push_back(block);
+    for (const Waiting& waiting : m_queue) {
+      blocks.push_back(waiting.block);
     }
     m_queue.clear();
     return blocks;
   }
 
+  struct Waiting {
+    DVDCommandBlock* block;
+    s32 prio;
+  };
+
   std::thread m_thread;
   std::mutex m_mutex;
   std::condition_variable m_cv;
   std::condition_variable m_doneCv;
-  std::deque<DVDCommandBlock*> m_queue;
+  std::deque<Waiting> m_queue; // by priority, then arrival (enqueue)
   DVDCommandBlock* m_activeBlock = nullptr;
   DVDCommandBlock* m_cancelActiveBlock = nullptr;
   bool m_running = false;
@@ -768,7 +780,6 @@ const u8* DVDGetDOLLocation(s32* out_size) {
 
 static int DVDReadAbsAsyncPrioInternal(DVDCommandBlock* block, u32 command, void* addr, s32 length, s32 offset,
                                        DVDCBCallback callback, s32 prio) {
-  (void)prio;
   ASSERTMSGLINE(0x780, block, "DVDReadAbsAsync(): null pointer is specified to command block address.");
   ASSERTMSGLINE(0x781, addr, "DVDReadAbsAsync(): null pointer is specified to addr.");
   ASSERTMSGLINE(0x783, isAligned(addr, 32), "DVDReadAbsAsync(): address must be aligned with 32 byte boundary.");
@@ -779,7 +790,7 @@ static int DVDReadAbsAsyncPrioInternal(DVDCommandBlock* block, u32 command, void
                 "DVDReadAbsAsync(): command block is used for processing previous request.");
 
   beginCommand(block, command, addr, static_cast<u32>(length), static_cast<u32>(offset), callback);
-  s_worker.enqueue(block);
+  s_worker.enqueue(block, prio);
   return TRUE;
 }
 
@@ -788,14 +799,13 @@ int DVDReadAbsAsyncPrio(DVDCommandBlock* block, void* addr, s32 length, s32 offs
 }
 
 int DVDSeekAbsAsyncPrio(DVDCommandBlock* block, s32 offset, DVDCBCallback callback, s32 prio) {
-  (void)prio;
   ASSERTMSGLINE(0x7AA, block, "DVDSeekAbs(): null pointer is specified to command block address.");
   ASSERTMSGLINE(0x7AC, !(offset & (4 - 1)), "DVDSeekAbs(): offset must be a multiple of 4.");
   ASSERTMSGLINE(0x7B3, isCommandBlockIdle(block),
                 "DVDSeekAbs(): command block is used for processing previous request.");
 
   beginCommand(block, DVD_COMMAND_SEEK, nullptr, 0, static_cast<u32>(offset), callback);
-  s_worker.enqueue(block);
+  s_worker.enqueue(block, prio);
   return TRUE;
 }
 
