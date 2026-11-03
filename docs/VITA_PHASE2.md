@@ -1431,3 +1431,59 @@ drawn over the rectangle with the mask, at the clear's depth where depth is clea
 it distorts a copy of the screen through its blurred alpha mask, so it needs the copies
 (milestone 5) and `GXSetDstAlpha`'s constant alpha (Samus written as 255, the rest 0), which the
 Vita path does not do yet.
+
+## Milestone 5: the copies on the GPU (tallon14)
+
+The EFB copies are made again, now on the GPU with nothing waiting for it. Before (a303747 and
+on) each was a `glReadPixels` (7 to 22 ms: it ends vitaGL's scene and waits for the GPU) and a
+CPU conversion, and they were turned off (`kScreenCopies`): the pause screen's backdrop, the
+particles' heat haze and the other effects that sample the screen drew black, or were left out.
+
+- A copy is a draw (`copy_on_gpu`). The destination's texture is attached to a framebuffer of its
+  own, and a quad is drawn into it through the copy program, which samples the display's back
+  buffer: a GL texture whose GXM texture is set, at each copy, to that buffer's own `backgroundTex`
+  (the texture GXM loads the buffer with at a scene's start; vitaGL's blit samples the display the
+  same way). The program puts the texel through a colour matrix by format (`copy_rows`): the colour
+  (alpha one for RGB565), RGBA, GX's YUV luma for the intensity formats (16 to 235, in all four
+  channels as Aurora samples I8), or one channel in all four. Where the EFB has no alpha (the
+  game's pixel format but for the Phazon Suit's and the thermal visor's frames) the alpha reads as
+  one, as on the GameCube. A halved copy samples each 2x2 block's middle with linear filtering:
+  GX's box filter. The first row of the texture is the rectangle's top, as GX copies.
+- The copy program is a generated program like the materials' (compiled on the compiler thread,
+  then read from the card: `vita_programs`), built from the first frames on, so it is ready by the
+  first copy that matters: the pause screen copies the world once, when the game pauses. Copies
+  before it is built are left unmade (the log counts them).
+- A destination keeps a texture for each of up to three sizes (`Texture::target`; the spare
+  buffer takes the particles' copy of the whole viewport and the beam change's quarter, frame
+  after frame), each with its framebuffer, to which vitaGL gives a depth buffer and a render
+  target at its first scene.
+- Each copy ends the display's scene, and the next draw starts another. GXM starts a scene with
+  the depth at its background value unless told to load it, and vitaGL tells it neither to store
+  nor load (only its STORE_DEPTH_STENCIL build does, for every scene): the draws after a copy (the
+  particles behind a wall) would have tested against nothing. A frame with copies now stores the
+  depth and stencil at the end of each scene a copy ends, and the next scene loads them
+  (`keep_depth`, on vitaGL's `gxm_depth_stencil_surface`); a frame without copies does neither. The
+  scissor's mask bit lives in that surface and is loaded with it; this vitaGL (VitaSDK's, before
+  upstream's 1199cca) clears it again at a scene's first scissor update, so it does not leak. A
+  vitaGL that skips that clear would need the mask cleared after the load.
+- Render targets: GXM sizes a target's memory by the scenes it expects a frame, one by default,
+  past which a scene waits for the GPU to finish one. The display's is now made for 8 (a frame's
+  copies and one), a copy framebuffer's for 4 (`vglSetupRenderTargetScenesNum`).
+- Not made (their materials keep the transparent black stand-in, as before): depth copies, and
+  the alpha copies (`GX_CTF_A8`: the morph ball shadow's IDs, the Phazon Suit's mask, the fog
+  volumes), whose alpha the game writes with `GXSetDstAlpha`'s constant, which the Vita path does
+  not do yet. A copy repeating the last one into its destination in a frame (the same rectangle
+  and format: the particles copy the viewport for every system they draw) is left to that one,
+  and a frame makes seven at most: each costs a scene's end and start, with the depth stored and
+  loaded.
+- The fixed-function path took no texture without a Vita copy, a copy's destination among them:
+  a draw sampling a copy was left out unless its program was ready. It now takes the copy's
+  texture as a program does.
+
+What to look for: the pause screen's blurred backdrop; the heat haze and the other particles that
+distort the screen behind them (their indirect programs are built for the first time, so expect
+compiles); the beam change's wipe, the scan visor's zoom, reflections, the X-ray visor's blur. The
+thermal visor reads a copy through a palette (C4), which the Vita path does not do: its hot pass
+shows the copy's intensity instead. The log's `EFB copies made on the GPU` (presents line) and
+`EFB copies` (textures line) count them, and a frame rate drop in rooms with many copies would show
+their cost.

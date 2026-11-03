@@ -241,11 +241,16 @@ struct Stats {
   // (EFB copies, dynamic textures).
   std::array<u32, kTexUnits + 1> drawsByUnits{};
   u32 unitsWithoutCopy = 0;
-  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (a depth copy)
+  u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (one not made)
   u32 copyTextures = 0; // materials given an EFB copy's Vita texture
   u32 loneTextures = 0; // materials freed for holding a texture nothing else held (drop_lone_textures)
-  u32 copies = 0;       // EFB copies recorded, and depth copies not made
+  // EFB copies the game made, and those not recorded (record_copy): depth and alpha copies,
+  // repeats of the last one into their destination, and those past a frame's limit.
+  u32 copies = 0;
   u32 depthCopies = 0;
+  u32 alphaCopies = 0;
+  u32 copiesRepeated = 0;
+  u32 copiesOverLimit = 0;
   // Recorded draws by their state (after the constant alpha is folded in).
   u32 blended = 0;
   u32 alphaTested = 0;
@@ -1208,12 +1213,17 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
       if (bind.ref && !bind.ref->vitaTexture) {
         add_missing_copy(*bind.ref, g_gxState.loadedTextures[choices[i].map]);
       }
-      if (!bind.ref || !bind.ref->vitaTexture) {
+      vita_gl::TexUnit& unit = units[unitCount];
+      if (bind.ref && bind.ref->vitaTexture) {
+        unit.texture = bind.ref->vitaTexture;
+      } else if (const void* data = g_gxState.loadedTextures[choices[i].map].data;
+                 g_gxState.copyTextures.contains(data)) {
+        // An EFB copy's destination: the copy's own texture (record_copy), as for a program.
+        unit.texture = copy_texture(data);
+      } else {
         ++sStats.unitsWithoutCopy;
         return -1;
       }
-      vita_gl::TexUnit& unit = units[unitCount];
-      unit.texture = bind.ref->vitaTexture;
       unit.sampler = sampler_for(bind.texObj);
       // The first unit takes the vertex colour, so it always modulates; a later one adds when its
       // stage does.
@@ -2083,23 +2093,34 @@ void retained() noexcept { sPosAnswerKnown = false; }
 
 void warm_up_step() noexcept { tev_warm_up_step(); }
 
-// EFB copies read back from the screen: off till milestone 5. Each took 7 to 22 ms (glReadPixels
-// ends vitaGL's scene and waits for the GPU), about one a frame in play, and the pause screen's
-// backdrop came out flat grey; materials sampling a copy take the black stand-in meanwhile.
-constexpr bool kScreenCopies = false;
+// EFB copies, made on the GPU (vita_gl's copy_on_gpu, milestone 5): the screen as the draws
+// before left it, drawn through a colour matrix by format into the destination's texture, where
+// GX copies it into memory. (Read back on the CPU before, each took 7 to 22 ms: glReadPixels ends
+// vitaGL's scene and waits for the GPU.) Not made, their materials keeping the black stand-in:
+// depth copies, and alpha copies (GX_CTF_A8: the morph ball shadow's IDs, the Phazon Suit's mask,
+// the fog volumes), whose alpha is GXSetDstAlpha's constant, which the Vita path does not write
+// yet. A copy repeating the last one into its destination this frame (the same rectangle and
+// format: the particles copy the viewport for each system they draw) is left to it, and a frame
+// makes seven at most: each ends vitaGL's scene, with the depth stored and loaded around it.
+constexpr size_t kCopiesPerFrame = 7;
+
+// This frame's copies (record_copy), to tell a repeat; the frame by its serial.
+struct FrameCopy {
+  const void* dest;
+  gfx::ClipRect src;
+  GXTexFmt fmt;
+  bool half;
+};
+std::vector<FrameCopy> sFrameCopies;
+u32 sFrameCopiesSerial = 0;
 
 void record_copy() noexcept {
   ++sStats.copies;
   const GXTexFmt fmt = g_gxState.texCopyFmt;
-  if (!kScreenCopies) {
-    return;
-  }
   if ((fmt & _GX_TF_ZTF) != 0) {
     ++sStats.depthCopies;
     return;
   }
-  // The EFB's alpha is GX's only with an alpha pixel format (the game's has none: opaque).
-  const bool alpha = g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
   vita_gl::CopyKind kind;
   switch (fmt) {
   case GX_TF_I4:
@@ -2108,7 +2129,7 @@ void record_copy() noexcept {
     break;
   case GX_TF_IA4:
   case GX_TF_IA8:
-    kind = alpha ? vita_gl::CopyKind::IntensityAlpha : vita_gl::CopyKind::Intensity;
+    kind = vita_gl::CopyKind::IntensityAlpha;
     break;
   case GX_CTF_R4:
   case GX_CTF_R8:
@@ -2116,7 +2137,7 @@ void record_copy() noexcept {
     break;
   case GX_CTF_RA4:
   case GX_CTF_RA8:
-    kind = alpha ? vita_gl::CopyKind::RedAlpha : vita_gl::CopyKind::Red;
+    kind = vita_gl::CopyKind::RedAlpha;
     break;
   case GX_CTF_G8:
     kind = vita_gl::CopyKind::Green;
@@ -2130,23 +2151,47 @@ void record_copy() noexcept {
   case GX_TF_RGB5A3:
   case GX_TF_RGBA8:
   case GX_CTF_YUVA8:
-    kind = alpha ? vita_gl::CopyKind::Rgba : vita_gl::CopyKind::Rgb;
+    kind = vita_gl::CopyKind::Rgba;
     break;
   default:
+    // RGB565 and the two-channel formats: the colour, opaque.
     kind = vita_gl::CopyKind::Rgb;
     break;
   }
-  std::shared_ptr<vita_gl::Texture>& texture = sCopyTextures[g_gxState.texCopyDest];
+  if (kind == vita_gl::CopyKind::Alpha) {
+    ++sStats.alphaCopies;
+    return;
+  }
+  const gfx::ClipRect& src = g_gxState.texCopySrc;
+  const void* dest = g_gxState.texCopyDest;
+  // Halved where the destination is (GX's box filter: the blur's half-size copy); else the
+  // screen's pixels, sampled at the same coordinates whatever its size.
+  const bool half = static_cast<s64>(g_gxState.texCopyDstWidth) * 3 < static_cast<s64>(src.width) * 2;
+  if (vita_gl::recording_serial() != sFrameCopiesSerial) {
+    sFrameCopies.clear();
+    sFrameCopiesSerial = vita_gl::recording_serial();
+  }
+  const auto last = std::find_if(sFrameCopies.rbegin(), sFrameCopies.rend(),
+                                 [dest](const FrameCopy& copy) { return copy.dest == dest; });
+  if (last != sFrameCopies.rend() && last->src == src && last->fmt == fmt && last->half == half) {
+    ++sStats.copiesRepeated;
+    return;
+  }
+  if (sFrameCopies.size() >= kCopiesPerFrame) {
+    ++sStats.copiesOverLimit;
+    return;
+  }
+  sFrameCopies.push_back({dest, src, fmt, half});
+  std::shared_ptr<vita_gl::Texture>& texture = sCopyTextures[dest];
   if (texture == nullptr) {
     texture = vita_gl::make_copy_texture();
   }
-  const gfx::ClipRect& src = g_gxState.texCopySrc;
   vita_gl::Draw draw;
   draw.copyTo = texture;
   draw.copyKind = kind;
-  // Halved where the destination is (GX's box filter: the blur's half-size copy); else the
-  // screen's pixels, sampled at the same coordinates whatever its size.
-  draw.copyHalf = static_cast<s64>(g_gxState.texCopyDstWidth) * 3 < static_cast<s64>(src.width) * 2;
+  draw.copyHalf = half;
+  // The EFB's alpha is GX's only with an alpha pixel format (the game's has none, so reads one).
+  draw.copyAlpha = g_gxState.pixelFmt == GX_PF_RGBA6_Z24;
   draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
                              static_cast<float>(src.height), true);
   vita_gl::record(std::move(draw));
@@ -2340,15 +2385,16 @@ void log_stats() noexcept {
            s.failMatrixIndex + s.failArray + s.failCommand + s.failEmpty, s.failMatrixIndex, s.failArray,
            s.failCommand, s.failEmpty, s.redecodeTex, s.redecodeFmt, s.redecodeArray, sCache.size());
   Log.info("textures: draws with none {}, one {}, two {}; {} draws left out for a texture without a Vita copy, {} "
-           "materials with an EFB copy's texture ({} with black: a depth copy, or screen copies off), {} copies made "
+           "materials with an EFB copy's texture ({} with black: a copy not made), {} copies made "
            "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
-           "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears ({} of the "
-           "colour or the alpha alone); TEV alpha: {} constant ({} rejected), {} from a texture",
+           "smaller viewport; EFB copies: {} (not made: {} depth, {} alpha, {} repeating the last, {} past a frame's "
+           "{}; {} destinations), {} clears ({} of the colour or the alpha alone); TEV alpha: {} constant ({} "
+           "rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyTextures,
            s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
-           s.cornered, s.copies, s.depthCopies, sCopyTextures.size(), s.copyClears, s.maskedClears, s.alphaConstant,
-           s.alphaRejected, s.alphaTexture);
+           s.cornered, s.copies, s.depthCopies, s.alphaCopies, s.copiesRepeated, s.copiesOverLimit, kCopiesPerFrame,
+           sCopyTextures.size(), s.copyClears, s.maskedClears, s.alphaConstant, s.alphaRejected, s.alphaTexture);
   tev_log_warm_up();
   sStats = {};
 }

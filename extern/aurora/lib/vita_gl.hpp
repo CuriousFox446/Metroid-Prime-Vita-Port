@@ -102,15 +102,16 @@ enum class TexelFormat : uint8_t { RGBA8, BC1 };
 class Texture;
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
                                       std::vector<uint8_t> level0) noexcept;
-// An EFB copy's texture: filled from the screen on the render worker, at each copy draw to it.
+// An EFB copy's texture: drawn into from the screen on the GPU, at each copy draw to it (render
+// worker); transparent black before its first.
 std::shared_ptr<Texture> make_copy_texture() noexcept;
 // The memory a texture's level holds (on the GPU once uploaded), for Aurora's cache budgets.
 uint64_t texture_bytes(const Texture& texture) noexcept;
 
 // How an EFB copy reads the screen into its RGBA texture, from GX's copy format: the colour
-// (alpha opaque, as the game's EFB has none), the colour and alpha, intensity (GX's YUV luma,
-// in all four channels, as Aurora samples an I8 texture), intensity with alpha, or one channel
-// in all four.
+// (alpha opaque: a format without alpha), the colour and alpha, intensity (GX's YUV luma, in all
+// four channels, as Aurora samples an I8 texture), intensity with alpha, or one channel in all
+// four. The EFB's alpha reads as one where it has none (a Draw's copyAlpha).
 enum class CopyKind : uint8_t { Rgb, Rgba, Intensity, IntensityAlpha, Red, RedAlpha, Green, Blue, Alpha };
 
 // How a unit samples its texture, as GL enums.
@@ -198,7 +199,8 @@ struct ProgramInputs {
 // colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears); the
 // colour and the alpha both or neither (one alone is a draw: gx/vita_draw.cpp, record_masked_clear).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
-// the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter).
+// the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter);
+// the screen's alpha read where `copyAlpha` (the EFB has alpha), else one.
 struct Draw {
   std::shared_ptr<Mesh> mesh;
   FrameMesh frameMesh;
@@ -219,6 +221,7 @@ struct Draw {
   std::shared_ptr<Texture> copyTo;
   CopyKind copyKind = CopyKind::Rgb;
   bool copyHalf = false;
+  bool copyAlpha = false;
 };
 
 #ifdef AURORA_VITA_GL
