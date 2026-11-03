@@ -1535,6 +1535,11 @@ Frame take_frame() {
 // worker 4 ms to destroy (their meshes, textures and programs released, the meshes made for that
 // frame alone deleted). A mesh's or texture's destructor queues its GL delete for the render
 // worker, which runs it between presents.
+// The reaper runs above the program compiler: at the same priority (the lowest, as it was), a
+// compile (a second or so) kept it off its core, the frames it had not destroyed held their
+// arrays, none came back to the spares, and each new frame took megabytes more from the heap
+// until it ran out (tallon14: 31 MiB in a second, then std::bad_alloc on the FIFO thread). And a
+// frame it is two behind on is destroyed by the caller instead, so their memory stays bounded.
 class FrameReaper {
 public:
   void reap(Frame frame) noexcept {
@@ -1544,14 +1549,27 @@ public:
         m_started = true;
         std::thread([this] { run(); }).detach();
       }
-      m_frames.push_back(std::move(frame));
+      if (m_frames.size() < kBehind) {
+        m_frames.push_back(std::move(frame));
+        m_ready.notify_one();
+        return;
+      }
+      ++m_destroyedHere;
     }
-    m_ready.notify_one();
+    // `frame` is destroyed here, on the caller's thread.
+  }
+
+  // For the log: frames destroyed by reap's caller since the last call.
+  uint32_t take_destroyed_here() noexcept {
+    std::lock_guard lock{m_mutex};
+    return std::exchange(m_destroyedHere, 0);
   }
 
 private:
+  static constexpr size_t kBehind = 2;
+
   void run() noexcept {
-    thread::register_current("frame reaper");
+    thread::set_current({.name = "frame reaper", .priority = thread::Priority::Normal});
     for (;;) {
       Frame frame;
       {
@@ -1568,6 +1586,7 @@ private:
   std::condition_variable m_ready;
   std::deque<Frame> m_frames;
   bool m_started = false;
+  uint32_t m_destroyedHere = 0;
 };
 FrameReaper g_reaper;
 
@@ -2515,7 +2534,8 @@ void present(ImDrawData* overlay) noexcept {
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
   if (++g_presentStats.presents == 300) {
-    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame; generated programs: {} draws with theirs, {} "
+    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame, {} destroyed here with the reaper two behind; "
+             "generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
              "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} from the precompiled "
              "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
@@ -2524,6 +2544,7 @@ void present(ImDrawData* overlay) noexcept {
              "the render worker, {:.2f} ms each), {} before the copy program was built",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
+             g_reaper.take_destroyed_here(),
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
              g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),

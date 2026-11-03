@@ -1487,3 +1487,21 @@ thermal visor reads a copy through a palette (C4), which the Vita path does not 
 shows the copy's intensity instead. The log's `EFB copies made on the GPU` (presents line) and
 `EFB copies` (textures line) count them, and a frame rate drop in rooms with many copies would show
 their cost.
+
+tallon14's run (415b9eb): the pause screen with the Phazon Suit drew whole, its blurred backdrop
+included (the tester's photo). The copies held: 300 to 870 a 300-frame window (three a frame at
+most), 0.2 to 0.3 ms each on the render worker where a readback took 7 to 22 ms; none repeated or
+past the limit; the Phazon Suit's frames' alpha copies left unmade, as meant; 20 indirect programs
+built, none failed. The frame rate over the last 40 s averaged 24 FPS (15 to 32).
+
+It ended in `std::bad_alloc` on the FIFO thread when shaders began compiling as the tester walked
+and shot enemies (new effects, new programs): a frame's vertices (`FrameArray::reserve`,
+2,577,680 bytes, for `draw_immediate`) with the heap at 197 MiB in use, 25 MiB free in pieces and
+2 MiB left to take from the system. The heap had held at 162 to 167 MiB all run; it took 31 MiB
+more in its last second. The frame reaper ran at the lowest priority (191, a thread's default), as
+the program compiler does, and a busy thread does not give its core to another of its priority:
+while a compile ran (a second or so each), the reaper waited, the frames it had not destroyed kept
+their arrays, none came back to the spares (`SpareStorage`), and each new frame took its vertices
+(megabytes) from the heap afresh. Now the reaper runs at Normal (160), above the compiler, and a
+frame it is two behind on is destroyed by the render worker instead (`FrameReaper::reap`; the
+presents line counts them). tallon11's crash (0ee747a, the same allocation) was likely this too.
