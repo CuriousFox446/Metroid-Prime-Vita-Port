@@ -721,19 +721,27 @@ bool compile_gxp(const std::string& source, shark_type type, std::vector<uint8_t
   return !gxp.empty();
 }
 
+// Programs sent to the compiler thread since the start, and those it has finished (compiled or
+// not): the overlay's "Compiling shaders" toast (program_compiles).
+std::atomic<uint32_t> g_compilesSent{0};
+std::atomic<uint32_t> g_compilesFinished{0};
+
 // A job's sources to the compiler thread. Without a thread the job is done at once with nothing
 // compiled, and the program stays fixed-function.
 void send_to_compiler(const std::shared_ptr<CompileJob>& job) noexcept {
+  g_compilesSent.fetch_add(1, std::memory_order_relaxed);
   const bool taken = compiler_thread().submit([job] {
     const auto start = std::chrono::steady_clock::now();
     if (compile_gxp(job->vertexSource, SHARK_VERTEX_SHADER, job->vertexGxp, job->error)) {
       compile_gxp(job->fragmentSource, SHARK_FRAGMENT_SHADER, job->fragmentGxp, job->error);
     }
     job->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    g_compilesFinished.fetch_add(1, std::memory_order_release);
     job->done.store(true, std::memory_order_release);
   });
   if (!taken) {
     job->error = "no thread for the compiler";
+    g_compilesFinished.fetch_add(1, std::memory_order_release);
     job->done.store(true, std::memory_order_release);
   }
 }
@@ -2149,6 +2157,13 @@ int keyboard_result(std::string& text) noexcept {
 bool keyboard_open() noexcept {
   std::lock_guard lock{g_keyboardMutex};
   return g_keyboard.state == Keyboard::State::Asked || g_keyboard.state == Keyboard::State::Open;
+}
+
+void program_compiles(uint32_t& sent, uint32_t& finished) noexcept {
+  // Finished first: read the other way, a compile sent and finished in between could count as
+  // finished and not sent.
+  finished = g_compilesFinished.load(std::memory_order_acquire);
+  sent = g_compilesSent.load(std::memory_order_relaxed);
 }
 
 void present(ImDrawData* overlay) noexcept {

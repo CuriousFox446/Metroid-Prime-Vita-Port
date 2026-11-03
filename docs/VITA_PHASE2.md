@@ -1368,3 +1368,25 @@ card, a refill queued behind a room's loads could miss its 2 s, and the channel 
 again (the music repeating), then went on 2 s behind the other channel (the two overlapping). The
 worker now queues by priority as the drive does (`DvdWorker::enqueue`): a refill waits for the
 one read under way at most.
+
+Still there in tallon10's run (3d02fff, 9 minutes; "likely due to low frame rate"). The frame rate
+fell to 8-17 FPS while rooms loaded, with the CPU far from full (the main thread 65% busy, waiting
+on reads). A refill could still miss its 2 s two ways: the read under way when it came may be a
+long one (the queue's order only decides what goes next), and the worker ran at the lowest
+priority (191, below the game's 160), so with the game's threads busy it waited for a core, and
+its completions take the MusyX lock the mixer (112) waits on. Now a read goes 256 KB at a time
+(`kReadPiece`), and a more urgent command waiting runs between two pieces, the rest of the read
+put back ahead of its own priority's others; on the Vita the worker runs at High (112). The log
+says when a refill still comes late (`mpstream: refill late`, once a refill). Not done: bigger
+stream buffers, which the game's emulated ARAM (its samples' room) would have to make room for.
+
+Cutscenes with Skippable cutscenes off (the same run): some were skipped all the same. The game's
+own rule lets Start skip a cinematic the memory card has seen played before, and the port added A,
+so the fire button skipped cutscenes seen in earlier sessions. Now off means none can be skipped
+(`CMFGame`); on, Start or A skips any; Original experience keeps the game's rule, Start alone.
+
+The shader compilation toast (Video > Quality, "Show shader compilation") never showed on the
+Vita: it counts the PC's startup pipeline queue, which stays empty there. The Vita compiles a
+program at a material's first draw, all through play: vita_gl counts the programs sent to the
+compiler thread and those it has finished (`aurora_get_program_compiles`), and the toast shows
+while any are waiting or compiling, half a second on.

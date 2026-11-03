@@ -270,6 +270,9 @@ void remove_texture(ImTextureID id) noexcept;
 bool open_keyboard(const char* text, uint32_t maxLength) noexcept;
 int keyboard_result(std::string& text) noexcept;
 bool keyboard_open() noexcept;
+// Any thread: the generated programs sent to the compiler thread since the start, and those it
+// has finished (compiled or failed).
+void program_compiles(uint32_t& sent, uint32_t& finished) noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -298,5 +301,6 @@ inline void remove_texture(ImTextureID) noexcept {}
 inline bool open_keyboard(const char*, uint32_t) noexcept { return false; }
 inline int keyboard_result(std::string&) noexcept { return -2; }
 inline bool keyboard_open() noexcept { return false; }
+inline void program_compiles(uint32_t& sent, uint32_t& finished) noexcept { sent = finished = 0; }
 #endif
 } // namespace aurora::vita_gl

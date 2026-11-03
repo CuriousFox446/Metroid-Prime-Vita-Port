@@ -822,6 +822,17 @@ void aurora_set_per_pixel_lighting(bool enabled) {
 bool aurora_open_system_keyboard(const char* text, uint32_t max_length) {
   return aurora::vita_gl::active() && aurora::vita_gl::open_keyboard(text != nullptr ? text : "", max_length);
 }
+void aurora_get_program_compiles(uint32_t* sent, uint32_t* finished) {
+  uint32_t s = 0;
+  uint32_t f = 0;
+  aurora::vita_gl::program_compiles(s, f);
+  if (sent != nullptr) {
+    *sent = s;
+  }
+  if (finished != nullptr) {
+    *finished = f;
+  }
+}
 int aurora_system_keyboard_result(char* out, size_t size) {
   std::string text;
   const int result = aurora::vita_gl::keyboard_result(text);

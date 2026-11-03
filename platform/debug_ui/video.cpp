@@ -423,8 +423,13 @@ void DrawVideoQuality() {
   if (ImGui::Checkbox("Show shader compilation", &sShowShaderCompilation)) {
     MarkDirty();
   }
+#ifdef __vita__
+  ImGui::SetItemTooltip("A small progress bar while shaders compile: each material's the first time it is\n"
+                        "drawn. Until its shader is ready it is drawn with a simpler look.");
+#else
   ImGui::SetItemTooltip("A small progress bar while the shader cache compiles at startup (longest on the first\n"
                         "start after an install or update). Draws whose shader isn't ready yet are skipped.");
+#endif
 #ifdef __vita__
   // The hint names the Vita's buttons; it has no F1.
   constexpr const char* kMenuHintLabel = "Show the menu hint at launch";
