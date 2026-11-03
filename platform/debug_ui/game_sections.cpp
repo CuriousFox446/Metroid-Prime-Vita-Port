@@ -43,8 +43,8 @@ void DrawCutscenesSection() {
   if (ImGui::Checkbox("Skippable cutscenes", &skippable)) {
     SetSkippableCutscenes(skippable);
   }
-  ItemHelp("Skip any cutscene with Start or A, even ones the game never lets you skip. Applies to "
-           "rooms loaded afterwards.");
+  ItemHelp("On: skip any cutscene with Start or A, even ones the game never lets you skip (from the "
+           "next room loaded). Off: no cutscene can be skipped.");
   if (PortSkipCutscenes::Forced()) {
     SameLineAfterHelp();
     ImGui::TextDisabled("(on in randomized games)");

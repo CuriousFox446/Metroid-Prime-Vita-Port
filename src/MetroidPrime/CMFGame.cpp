@@ -31,6 +31,7 @@
 #include "port_env.h"
 #include "port_freecam.h"
 #include "port_photo.h"
+#include "port_skip_cutscenes.h"
 #include "MetroidPrime/CScriptLayerManager.hpp"
 #include "port_room_env.h"
 #include <dolphin/gx/GXExtra.h>
@@ -226,8 +227,15 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 #ifdef TARGET_PC
         // Photo mode takes Start (leave) and Z (rise) for itself.
         const bool photoMode = PortPhoto::Active();
-        // A skips a skippable cinematic too (it does nothing else while one plays).
-        const bool skipPress = !photoMode && (input.PStart() || (cineCam && input.PA()));
+        // A cinematic is skipped only with Skippable cutscenes on (or forced on in a randomized
+        // game), with Start or A (it does nothing else while one plays). Off, none is: the game's
+        // own rule let Start skip any cinematic the memory card had seen played before, and A
+        // with it, so the fire button skipped cutscenes with the setting off. Original experience
+        // keeps the game's rule, Start alone.
+        const bool skipPress =
+            !photoMode && (cineCam != nullptr ? (PortSkipCutscenes::Active() && (input.PStart() || input.PA())) ||
+                                                    (PortDebug::OriginalExperience() && input.PStart())
+                                              : input.PStart());
 #else
         const bool photoMode = false;
         const bool skipPress = input.PStart();
