@@ -77,9 +77,65 @@ void log_memory(const char* when) {
            g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB);
 }
 
+// A FrameArray's storage: its elements, and how many fit.
+template <typename T>
+struct ArrayStorage {
+  std::unique_ptr<T[]> data;
+  uint32_t capacity = 0;
+};
+
+// Frame arrays' storage kept for the frames after. A heavy frame's vertices run to megabytes (5 MB
+// in a run of 0ee747a); allocated for each frame and freed a frame later on the reaper's thread,
+// they left newlib's heap in pieces too small for the next one: std::bad_alloc on the FIFO thread
+// with 55 MB free. Storage a frame lets go of comes here instead, the two largest pieces kept, and
+// a frame needing room takes the smallest that fits.
+template <typename T>
+class SpareStorage {
+public:
+  static SpareStorage& get() noexcept {
+    static SpareStorage& spares = *new SpareStorage;
+    return spares;
+  }
+  void put(ArrayStorage<T>&& storage) noexcept {
+    if (!storage.data) {
+      return;
+    }
+    ArrayStorage<T> dropped; // freed after the lock
+    std::lock_guard lock{m_mutex};
+    m_spares.push_back(std::move(storage));
+    if (m_spares.size() > kKept) {
+      const auto smallest = std::min_element(m_spares.begin(), m_spares.end(),
+                                             [](const auto& a, const auto& b) { return a.capacity < b.capacity; });
+      dropped = std::move(*smallest);
+      m_spares.erase(smallest);
+    }
+  }
+  // The smallest spare holding at least `capacity`, or none.
+  ArrayStorage<T> take(uint32_t capacity) noexcept {
+    std::lock_guard lock{m_mutex};
+    auto best = m_spares.end();
+    for (auto it = m_spares.begin(); it != m_spares.end(); ++it) {
+      if (it->capacity >= capacity && (best == m_spares.end() || it->capacity < best->capacity)) {
+        best = it;
+      }
+    }
+    if (best == m_spares.end()) {
+      return {};
+    }
+    ArrayStorage<T> storage = std::move(*best);
+    m_spares.erase(best);
+    return storage;
+  }
+
+private:
+  static constexpr size_t kKept = 2;
+  std::mutex m_mutex;
+  std::vector<ArrayStorage<T>> m_spares;
+};
+
 // A frame's own vertices or indices (FrameMesh), written by the FIFO thread as it records: grown
 // by doubling, and left for the caller to write (nothing is cleared first, as a vector's resize
-// would).
+// would). Its storage comes from and goes back to the spares (SpareStorage).
 template <typename T>
 class FrameArray {
 public:
@@ -88,11 +144,15 @@ public:
   : m_data(std::move(other.m_data)), m_size(std::exchange(other.m_size, 0)),
     m_capacity(std::exchange(other.m_capacity, 0)) {}
   FrameArray& operator=(FrameArray&& other) noexcept {
-    m_data = std::move(other.m_data);
-    m_size = std::exchange(other.m_size, 0);
-    m_capacity = std::exchange(other.m_capacity, 0);
+    if (this != &other) {
+      SpareStorage<T>::get().put({std::move(m_data), m_capacity});
+      m_data = std::move(other.m_data);
+      m_size = std::exchange(other.m_size, 0);
+      m_capacity = std::exchange(other.m_capacity, 0);
+    }
     return *this;
   }
+  ~FrameArray() { SpareStorage<T>::get().put({std::move(m_data), m_capacity}); }
 
   // Room for `count` more, `at` set to where it starts; it holds till the next call.
   T* grow(uint32_t count, uint32_t& at) {
@@ -107,12 +167,17 @@ public:
     if (capacity <= m_capacity) {
       return;
     }
-    std::unique_ptr<T[]> data(new T[capacity]);
-    if (m_size != 0) {
-      std::memcpy(data.get(), m_data.get(), sizeof(T) * m_size);
+    ArrayStorage<T> storage = SpareStorage<T>::get().take(capacity);
+    if (!storage.data) {
+      storage.data.reset(new T[capacity]);
+      storage.capacity = capacity;
     }
-    m_data = std::move(data);
-    m_capacity = capacity;
+    if (m_size != 0) {
+      std::memcpy(storage.data.get(), m_data.get(), sizeof(T) * m_size);
+    }
+    SpareStorage<T>::get().put({std::move(m_data), m_capacity});
+    m_data = std::move(storage.data);
+    m_capacity = storage.capacity;
   }
   void trim(uint32_t size) { m_size = std::min(m_size, size); }
   const T* at(uint32_t index) const { return m_data.get() + index; }

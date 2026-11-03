@@ -1399,3 +1399,19 @@ removal went on to delete the temporary file too, and nothing was left. Now a fa
 the temporary file, and the next start takes it back. Aurora's own atomic writer (the GCI saves,
 the pad configuration) had the same end on the Vita: there the temporary file is kept, and logged,
 when the target is already gone.
+
+tallon11's run (0ee747a, 29 minutes): "some scenes don't render properly, and the pause menu".
+- The scenes and the pause menu are the screen copies, still off (`kScreenCopies`): 1,683 draws a
+  window took the black stand-in for an EFB copy's texture, 195 to 214 were left out for a texture
+  without a Vita copy, and the 37 or 38 materials with an indirect stage stayed fixed-function for
+  the same reason. That is milestone 5's: copies made on the GPU.
+- Three refills came late in the 29 minutes (`mpstream: refill late`, the frigate's music), where
+  before the music repeated often.
+- The crash: `std::bad_alloc` on the FIFO thread again, now with its report. `operator new` of
+  5,251,008 bytes from `frame_vertices` (the frame's own vertices, for `draw_immediate`), the heap at
+  165 MiB in use and 55 MiB free in pieces, with 3.7 MiB left to take from the system's 224: no free
+  piece of 5 MB. The frame arrays grew by doubling, each frame's allocated afresh at the last one's
+  size and freed a frame later on the reaper's thread, and such pieces coming and going broke the
+  heap up. Now an array's storage, when its frame lets go of it, is kept for the frames after
+  (`SpareStorage`: the two largest pieces kept, the smallest that fits taken), so the frames reuse
+  the same few blocks.
