@@ -195,7 +195,8 @@ struct ProgramInputs {
 // GX's viewport and scissor, on the screen; a line or point mesh's width in the screen's pixels
 // (GX's line width or point size; GXM takes whole pixels, 1 to 16).
 // Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
-// colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears).
+// colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears); the
+// colour and the alpha both or neither (one alone is a draw: gx/vita_draw.cpp, record_masked_clear).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
 // the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter).
 struct Draw {

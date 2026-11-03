@@ -253,6 +253,7 @@ struct Stats {
   u32 depthRanged = 0; // drawn with a viewport depth range other than [0, 1]
   u32 cornered = 0;    // drawn with a viewport other than the whole screen
   u32 copyClears = 0;  // EFB copies' clears recorded
+  u32 maskedClears = 0; // of them, drawn as a quad: the colour or the alpha alone (record_masked_clear)
   // TEV's final alpha: a constant worked out, of those the draws its alpha test rejects outright,
   // and the draws whose alpha reads a texture; the rest depend on a lit or vertex alpha.
   u32 alphaConstant = 0;
@@ -2151,12 +2152,58 @@ void record_copy() noexcept {
   vita_gl::record(std::move(draw));
 }
 
+// A copy's clear of the colour alone or the alpha alone, as a quad over the rectangle drawn with
+// that mask (and at the clear's depth, where GX clears depth too): vitaGL's glClear writes all four
+// channels whatever glColorMask says (its clear program is patched once, with no mask). The Phazon
+// Suit's effect clears the alpha of the whole screen with the colour masked off (CopyTex), and as a
+// glClear that blacked out everything drawn before it: the cutscenes showing Samus, the pause
+// screen behind her model.
+void record_masked_clear(const vita_gl::ScreenRect& rect) noexcept {
+  constexpr float kCorners[6][2] = {{-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f}, {-1.f, -1.f}, {1.f, 1.f}, {-1.f, 1.f}};
+  vita_gl::FrameMesh mesh{.vertexCount = 6, .kind = vita_gl::MeshKind::Other};
+  vita_gl::Vertex* out = vita_gl::frame_vertices(mesh.vertexCount, mesh.vertexAt);
+  // Clip space as it is (identity matrices below): GL's depth -1 to 1 for the clear's 0 to 1.
+  const float z = 2.f * static_cast<float>(g_gxState.clearDepth) / 16777215.f - 1.f;
+  u8 rgba[4];
+  for (int c = 0; c < 4; ++c) {
+    rgba[c] = static_cast<u8>(std::lround(std::clamp(g_gxState.clearColor[c], 0.f, 1.f) * 255.f));
+  }
+  for (int i = 0; i < 6; ++i) {
+    vita_gl::Vertex& v = out[i];
+    v = vita_gl::Vertex{};
+    v.pos[0] = kCorners[i][0];
+    v.pos[1] = kCorners[i][1];
+    v.pos[2] = z;
+    std::memcpy(v.color, rgba, sizeof(rgba));
+    std::memcpy(v.raw, rgba, sizeof(rgba));
+    v.shade = 255;
+  }
+  vita_gl::Draw draw{.frameMesh = mesh};
+  constexpr float kRows[16] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+  std::memcpy(draw.modelView, kRows, sizeof(draw.modelView));
+  std::memcpy(draw.projection, kRows, sizeof(draw.projection));
+  draw.scissor = rect; // the viewport stays the whole screen
+  const bool depth = g_gxState.depthUpdate;
+  draw.state = {.depthTest = depth,
+                .depthFunc = kGlAlways,
+                .depthWrite = depth,
+                .colorWrite = g_gxState.colorUpdate,
+                .alphaWrite = g_gxState.alphaUpdate};
+  vita_gl::record(std::move(draw));
+  ++sStats.maskedClears;
+}
+
 void record_copy_clear() noexcept {
   const gfx::ClipRect& src = g_gxState.texCopySrc;
   vita_gl::Draw draw;
   draw.clear = true;
   draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
                              static_cast<float>(src.height), true);
+  if (g_gxState.colorUpdate != g_gxState.alphaUpdate) {
+    record_masked_clear(draw.scissor);
+    ++sStats.copyClears;
+    return;
+  }
   draw.clearColor = g_gxState.colorUpdate;
   draw.clearAlpha = g_gxState.alphaUpdate;
   draw.clearDepth = g_gxState.depthUpdate;
@@ -2296,11 +2343,11 @@ void log_stats() noexcept {
            "materials with an EFB copy's texture ({} with black: a depth copy, or screen copies off), {} copies made "
            "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
-           "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears; TEV alpha: {} "
-           "constant ({} rejected), {} from a texture",
+           "smaller viewport; EFB copies: {} ({} depth copies not made, {} destinations), {} clears ({} of the "
+           "colour or the alpha alone); TEV alpha: {} constant ({} rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyTextures,
            s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
-           s.cornered, s.copies, s.depthCopies, sCopyTextures.size(), s.copyClears, s.alphaConstant,
+           s.cornered, s.copies, s.depthCopies, sCopyTextures.size(), s.copyClears, s.maskedClears, s.alphaConstant,
            s.alphaRejected, s.alphaTexture);
   tev_log_warm_up();
   sStats = {};

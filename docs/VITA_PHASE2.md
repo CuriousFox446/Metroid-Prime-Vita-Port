@@ -1415,3 +1415,19 @@ tallon11's run (0ee747a, 29 minutes): "some scenes don't render properly, and th
   heap up. Now an array's storage, when its frame lets go of it, is kept for the frames after
   (`SpareStorage`: the two largest pieces kept, the smallest that fits taken), so the frames reuse
   the same few blocks.
+
+The scenes and the pause menu were the Phazon Suit (found by the tester after tallon12), not the
+copies being off as said above. The suit's effect (`CCubeRenderer::DrawPhazonSuitIndirectEffect`:
+for the pause screen's Samus model, `CSamusDoll`; the cutscenes' Samus, `CScriptPlayerActor`; and
+the Phazon Beam) draws Samus's shape into the EFB's alpha, blurs it there and copies it with
+`CopyTex`, which masks the colour off (`GXSetColorUpdate(false)`) for each copy and its clear: the
+first copy takes the whole viewport, and its clear is of the alpha alone. vitaGL's `glClear` writes
+all four channels whatever `glColorMask` says (its clear program is patched once at start, with no
+blend state and so no mask), so that clear blacked out everything drawn before it: the world
+behind a cutscene's Samus, the pause screen's backdrop and model. Only CopyTex clears so; the
+others turn the colour on first. Now a clear of the colour alone or the alpha alone is a quad
+drawn over the rectangle with the mask, at the clear's depth where depth is cleared too
+(`record_masked_clear`); the log counts them among the clears. The suit's glow itself still waits:
+it distorts a copy of the screen through its blurred alpha mask, so it needs the copies
+(milestone 5) and `GXSetDstAlpha`'s constant alpha (Samus written as 255, the rest 0), which the
+Vita path does not do yet.

@@ -1839,6 +1839,8 @@ void draw_world(const Frame& frame) {
     if (draw.clear) {
       // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
       // the scissor's alone), with the masks GX's updates give, then the draws' masks again.
+      // Colour and alpha both or neither: vitaGL's glClear writes all four channels whatever
+      // glColorMask says, so a clear of one of them comes as a draw (record_masked_clear).
       set_rects(ScreenRect{}, draw.scissor);
       const GLboolean color = draw.clearColor ? GL_TRUE : GL_FALSE;
       glColorMask(color, color, color, draw.clearAlpha ? GL_TRUE : GL_FALSE);
