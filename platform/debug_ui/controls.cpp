@@ -199,6 +199,15 @@ void DrawControlsKeyboardMouse() {
   }
   ImGui::SetItemTooltip("Mouse buttons are set in Controls > Remap; keyboard and controller weapon "
                         "bindings also work.");
+  DrawAimCrosshair();
+
+  ImGui::SeparatorText("Mouse buttons");
+  ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
+}
+
+// The aiming crosshair under mouse aim and twin stick: Mouse settings' on the PC, Controller
+// settings' on the Vita, which has no mouse page.
+void DrawAimCrosshair() {
   if (ImGui::Checkbox("Crosshair", &sInput.mouseCrosshair)) {
     MarkDirty();
   }
@@ -209,9 +218,6 @@ void DrawControlsKeyboardMouse() {
     SetCrosshairSize(crosshairSize);
   }
   ImGui::SetItemTooltip("Applies under mouse aim and twin stick.");
-
-  ImGui::SeparatorText("Mouse buttons");
-  ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
 }
 
 void DrawControlsController() {
@@ -263,6 +269,9 @@ void DrawControlsController() {
     }
     ImGui::EndDisabled();
   }
+#ifdef __vita__
+  DrawAimCrosshair();
+#endif
   const s32 controllerIndex = PADGetIndexForPort(PAD_CHAN0);
   if (SDL_Gamepad* pad = controllerIndex >= 0 ? PADGetSDLGamepadForIndex(static_cast< u32 >(controllerIndex)) : nullptr;
       pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {

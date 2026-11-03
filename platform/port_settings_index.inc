@@ -201,7 +201,7 @@
 {"Remastered", "", "Metroid Prime Remastered models > What to import", "Gallery", "remastered import parts gallery extras skip"},
 {"Mods", "", "Mods", "Load mods", "mods enable disable mod loader"},
 {"Mods", "", "Mods", "Reload mods", "mods reload refresh"},
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__vita__)
 {"Mods", "", "Mods", "Open mods folder", "mods folder open directory"},
 #endif
 #if !defined(__ANDROID__)

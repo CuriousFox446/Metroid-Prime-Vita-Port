@@ -327,6 +327,10 @@ void EndSearchJump() {
 }
 
 void DrawSearchField() {
+#ifdef __vita__
+  // None on the Vita: its pages are few, and a step away with the pad.
+  return;
+#endif
   // MP_DEBUG_SEARCH=<query> opens with it typed, for captures of the overlay.
   static bool sPrefill = true;
   if (sPrefill) {

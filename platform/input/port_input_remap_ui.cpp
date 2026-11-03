@@ -1040,7 +1040,12 @@ void DrawTable(const SViews& views, bool editorDrawn) {
   ImGui::SameLine();
   ImGui::Checkbox("Only bound", &sOnlyBound);
 
+#ifdef __vita__
+  // The Vita has no keyboard or mouse: their bindings are not listed (they stay in the profile).
+  std::vector<Family> families = {Family::Pad};
+#else
   std::vector<Family> families = {Family::Keyboard, Family::Pad};
+#endif
   if (kShowTouch) families.push_back(Family::Touch);
   const UserProfile* users[3] = {};
   const auto findUsers = [&] {
@@ -1202,7 +1207,7 @@ void DrawTable(const SViews& views, bool editorDrawn) {
 
       ImGui::TableNextColumn();
       if (ImGui::SmallButton("+")) {
-        BeginEdit(kEditNew, Binding{action}, Family::Keyboard);
+        BeginEdit(kEditNew, Binding{action}, families.front());
         StartCapture();
       }
       ImGui::SetItemTooltip("Add a binding for this action and start recording any key, mouse button or "
@@ -1282,7 +1287,7 @@ void ResetSection(const SView& v, const SPreset* presets, int count, int& preset
 // The reset buttons, one per device, behind a popup.
 void DrawReset(const SViews& views) {
   using PortInput::Family;
-  static int sKeyPreset = 0;
+  [[maybe_unused]] static int sKeyPreset = 0; // the Vita has no keyboard section
   static int sPadPreset = 0;
   if (ImGui::Button("Reset...")) {
     sKeyPreset = 0;
@@ -1290,7 +1295,9 @@ void DrawReset(const SViews& views) {
     ImGui::OpenPopup("resetDevice");
   }
   if (!ImGui::BeginPopup("resetDevice")) return;
+#ifndef __vita__ // no keyboard there
   ResetSection(views[Family::Keyboard], kKeyPresets, int(std::size(kKeyPresets)), sKeyPreset);
+#endif
   const bool allPads = views[Family::Pad].match.empty();
   ResetSection(views[Family::Pad], allPads ? kPadPresets : nullptr, allPads ? int(std::size(kPadPresets)) : 0,
                sPadPreset);

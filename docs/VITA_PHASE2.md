@@ -1352,3 +1352,19 @@ The port menu on the Vita (asked for after tallon7's run, b07dbe8: six minutes, 
   Compatibility tab (GPU drivers and renderers); Game's Flaahgra boss theme and PAL languages
   (both import a disc image picked with a file browser); and the Archipelago page. The search
   leaves their rows out (`HiddenOnVita`).
+- Then (tallon9's run, 6f2a5a3: 31 minutes, no crash): the Screenshot button (the Vita takes its
+  own), Open mods folder (it opened the Vita's web browser), the settings search, and the keyboard
+  and mouse: Remap lists the controller's bindings alone (the keyboard's stay in the profile,
+  unseen) and its Reset leaves out the keyboard presets; Controls' Mouse settings page is gone,
+  its crosshair and size (which twin stick uses) moved to Controller settings.
+
+The music repeating and overlapping (the same run: the frigate's music, a stream). The music
+streams (CDSPStream: each channel its own, `int_introstageL`/`R`) play from a 4 s ring buffer read
+2 s at a time; each half must be read again within 2 s of its refill being asked for. The
+GameCube's drive serves its queue by priority, and the refills ask for 1 where every other read the
+game makes asks for 2, so they never wait behind the room's loads. Aurora's DVD worker took no
+notice of priority (`(void)prio`) and read in arrival order: from a disc image on the Vita's memory
+card, a refill queued behind a room's loads could miss its 2 s, and the channel played its old half
+again (the music repeating), then went on 2 s behind the other channel (the two overlapping). The
+worker now queues by priority as the drive does (`DvdWorker::enqueue`): a refill waits for the
+one read under way at most.

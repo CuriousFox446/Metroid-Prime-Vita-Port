@@ -41,6 +41,7 @@ void DrawGameSection() {
     RequestReset();
   }
   ImGui::SameLine();
+#ifndef __vita__ // the Vita's screenshots are its own (PS button + Start)
   const std::string shotKeys = PortInputRemap::BindingsText(PortInput::Action::Screenshot, " / ");
   const std::string shotLabel =
       (shotKeys.empty() ? std::string("Screenshot") : "Screenshot (" + shotKeys + ")") + "###screenshot";
@@ -48,6 +49,7 @@ void DrawGameSection() {
     aurora::request_screenshot();
   }
   ImGui::SameLine();
+#endif
   const std::string photoKeys = PortInputRemap::BindingsText(PortInput::Action::PhotoMode, " / ");
   const std::string photoLabel =
       (photoKeys.empty() ? std::string("Photo mode") : "Photo mode (" + photoKeys + ")") + "###photomode";
@@ -213,10 +215,12 @@ void DrawControlsTab() {
     DrawControlsOptions();
     ImGui::EndTabItem();
   }
+#ifndef __vita__ // no mouse there; its crosshair options are Controller settings' (DrawAimCrosshair)
   if (SubTab("Controls", "Mouse settings")) {
     DrawControlsKeyboardMouse();
     ImGui::EndTabItem();
   }
+#endif
   if (SubTab("Controls", "Controller settings")) {
     DrawControlsController();
     ImGui::EndTabItem();

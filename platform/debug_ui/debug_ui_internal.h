@@ -427,6 +427,7 @@ void DrawTexturesSection();
 // controls.cpp
 void DrawControlsOptions();
 void DrawControlsKeyboardMouse();
+void DrawAimCrosshair();
 void DrawControlsController();
 void DrawControlsTouchGyro();
 
