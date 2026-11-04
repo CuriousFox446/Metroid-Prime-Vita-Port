@@ -1614,3 +1614,27 @@ triggers and no stick clicks. On the Vita the two presets now map onto what it h
 - In both, GameCube R (free look) has no button: the right stick aims under twin-stick. In morph
   ball it is the spider ball, so there L, with nothing to lock on to, holds R
   (`BindController`, whenever R is unmapped on the Vita).
+
+## The map's GPU crash (tallon20)
+
+tallon19's run (b5032f7): "controls look good, opening the map caused a GPU crash"
+(psp2core-1793784484-GPUCRASH). The log's last second is the map: 1,729 draws a frame (the run's
+most), 849 of them lines, nearly all with programs and blended, and fragment constants sent 750
+times a frame (each map element its own colour; about 20 in play); no copies; 30 FPS. vitaGL's
+memory steady (VRAM 26 MiB free). The dump's render worker waits in `vglSwapBuffers`: the GPU
+failed on a frame already sent. Its GPU registers (GPU_INFO) name no cause readable here.
+
+The likely one: vitaGL's shader patcher. A generated program is patched once for each blend state
+it draws with (the factors and the colour mask are in the patch), and vitaGL releases none of
+them (`patch_fragment_program`), so the variants pile up for the session in the patcher's heaps,
+1 MiB each by default; vitaGL does not check the patch, so a full heap leaves a draw a broken
+program. The pause screen and the map draw with an alpha channel (`CInGameGuiManager::Draw`
+requests RGBA6 whenever the game is not drawn), and since tallon16 GXSetDstAlpha's zero gives
+every draw there a blend state of its own (`dst_alpha_mode`: the alpha's factors ZERO and ZERO):
+another variant of every program the map draws with.
+
+- The heaps are larger (`vglSetupShaderPatcher`, before `vglInit`): fragment USSE 4 MiB, vertex
+  USSE 2 MiB, the patcher's buffer 2 MiB. The USSE memory comes from vitaGL's RAM pool, and past it
+  from the phycont pool, which no run has used (26 MiB free).
+- The log's memory line (every 300 presents) gives each heap's use, to tell whether this was it
+  and how much room is left.

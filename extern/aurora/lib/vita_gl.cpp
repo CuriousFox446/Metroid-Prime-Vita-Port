@@ -21,10 +21,12 @@
 // surfaces (each one's backgroundTex is the texture GXM loads it with at a scene's start), the one
 // the frame draws into, and the display's depth and stencil surface. The EFB copies read the
 // first (copy_on_gpu) and keep the last across the scenes they end (keep_depth).
+// And its shader patcher, whose heaps the log reports (log_memory).
 extern "C" {
 extern SceGxmColorSurface gxm_color_surfaces[];
 extern unsigned int gxm_back_buffer_index;
 extern SceGxmDepthStencilSurface gxm_depth_stencil_surface;
+extern SceGxmShaderPatcher* gxm_shader_patcher;
 }
 
 #include <cstdio>
@@ -76,17 +78,39 @@ std::atomic<int64_t> g_textureBytes[2];
 std::atomic<int64_t> g_pendingCount;
 std::atomic<int64_t> g_pendingBytes;
 
-// vitaGL's memory by pool, free of total (MiB). The game's heap is in the [heap] lines.
+// vitaGL's shader patcher's heaps (vglSetupShaderPatcher; 1 MiB each by default). Every program
+// is patched once for each blend state it draws with (the colour mask and factors among them) and
+// each stays for the session (vitaGL releases none), in the fragment USSE heap above all; vitaGL
+// does not check the patch, so a full heap leaves a draw a broken program: a GPU crash. tallon19's
+// map crashed so, likely: the pause screen and the map draw with an alpha channel, where
+// GXSetDstAlpha's zero gives every program another blend state (dst_alpha_mode), and the map
+// draws some 1,700 times a frame. The log reports what is in use (log_memory).
+constexpr uint32_t kPatcherBuffer = 2 * 1024 * 1024;
+constexpr uint32_t kPatcherVertexUsse = 2 * 1024 * 1024;
+constexpr uint32_t kPatcherFragmentUsse = 4 * 1024 * 1024;
+
+// vitaGL's memory by pool, free of total (MiB), and its shader patcher's heaps in use (KiB). The
+// game's heap is in the [heap] lines.
 void log_memory(const char* when) {
   constexpr double kMiB = 1024.0 * 1024.0;
   const auto pool = [](vglMemType type) {
     return fmt::format("{:.1f}/{:.1f}", vglMemFree(type) / kMiB, vglMemTotal(type) / kMiB);
   };
+  std::string patcher;
+  if (gxm_shader_patcher != nullptr) {
+    patcher = fmt::format("; shader patcher in use (KiB): fragment USSE {} of {}, vertex USSE {} of {}, buffer {} of "
+                          "{}, host {}",
+                          sceGxmShaderPatcherGetFragmentUsseMemAllocated(gxm_shader_patcher) / 1024,
+                          kPatcherFragmentUsse / 1024,
+                          sceGxmShaderPatcherGetVertexUsseMemAllocated(gxm_shader_patcher) / 1024,
+                          kPatcherVertexUsse / 1024, sceGxmShaderPatcherGetBufferMemAllocated(gxm_shader_patcher) / 1024,
+                          kPatcherBuffer / 1024, sceGxmShaderPatcherGetHostMemAllocated(gxm_shader_patcher) / 1024);
+  }
   Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
-           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB); not yet uploaded: {} ({:.1f} MiB)",
+           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB); not yet uploaded: {} ({:.1f} MiB){}",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
            g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
-           g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB);
+           g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB, patcher);
 }
 
 // A FrameArray's storage: its elements, and how many fit.
@@ -2371,6 +2395,8 @@ bool initialize() noexcept {
   // done with one before it). The display takes the copies' (record_copy makes 7 a frame at most)
   // and one; a copy's framebuffer, a destination copied a few times a frame (the particles').
   vglSetupRenderTargetScenesNum(8, 4);
+  // The shader patcher's heaps, larger (kPatcherFragmentUsse's comment).
+  vglSetupShaderPatcher(kPatcherBuffer, kPatcherVertexUsse, kPatcherFragmentUsse);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
