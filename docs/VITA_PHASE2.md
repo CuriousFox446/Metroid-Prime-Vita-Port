@@ -1540,3 +1540,33 @@ finds the object's ID. The Vita path wrote TEV's alpha instead, and left those c
 What to look for: the morph ball's shadow on the floor and on nearby objects; the Phazon Suit's
 glow around Samus on the pause screen and in cutscenes; fog volumes. The log's textures line counts
 the alpha copies ("of alpha").
+
+tallon16's run (1d2f5c6, 3.6 minutes, quit normally): "looks really promising". The alpha copies
+were made, four a frame in stretches (the Phazon Suit effect's chain: three blurring copies and
+the mask) and one a frame in others (the morph ball shadow's IDs); no program failed to build;
+32 FPS on average.
+
+## The thermal visor's palette (tallon17)
+
+The thermal visor's hot pass (`CCubeRenderer::DoThermalBlendHot`) copies the screen's intensity
+(I4) and reads that copy as a palette texture (C4, nearest) through the thermal palette (TLUT0):
+each texel's four bits pick one of 16 colours, the orange-to-yellow ramp. The Vita path sampled the
+copy's intensity as it was: grey where the ramp should be.
+
+- A copy read as a palette texture (C4 or C8) is now converted on the GPU into a texture of its own
+  (`copy_texture_for` in gx/vita_draw.cpp records it ahead of the draw sampling it; vita_gl's
+  `palette_on_gpu` draws it), as Aurora's WebGPU path converts it
+  (`resolve_dynamic_palette_texture`): each texel's 8-bit value as an index (C4: its top four bits,
+  as GX's I4 copy keeps them; C8: the value), that palette entry its colour. The draw then samples
+  it as any texture (the palette before the filter, as GX applies it). A palette is a texture of one
+  row (`palette_texture`, from `convert_tlut`), made once per palette and version; a conversion is
+  made again only after another copy into its source or another palette.
+- The conversion is a framebuffer's draw like a copy's: it counts among the frame's copies for the
+  depth kept across scenes.
+- A copy repeating the last one into its destination in a frame is now left to it only with
+  nothing drawn since. Before, any repeat of the rectangle and format was, and the hot pass's copy
+  repeats the cold pass's with the hot objects drawn between: it took the cold pass's copy.
+
+What to look for: the thermal visor's colours on warm creatures and objects, its cold
+surroundings as before. The log's textures line counts the conversions ("converted through a
+palette").

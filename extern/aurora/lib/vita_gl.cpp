@@ -357,6 +357,12 @@ public:
   // Render worker: true when binding it again with `sampler` would change nothing.
   bool holds(const Sampler& sampler) const noexcept { return m_id != 0 && m_samplerSet && sampler == m_sampler; }
 
+  // Render worker: its size (a copy texture's as its last copy made it), and whether a copy has
+  // filled it.
+  uint32_t width() const noexcept { return m_width; }
+  uint32_t height() const noexcept { return m_height; }
+  bool copied() const noexcept { return m_surfaces != nullptr; }
+
   // Render worker: binds it to the active unit (made from the CPU copy at the first draw) and
   // sets its sampler state where it changed.
   void bind(const Sampler& sampler) noexcept {
@@ -1487,6 +1493,8 @@ const float* recorded_constants(uint32_t at) noexcept { return g_recording.const
 
 uint32_t recording_serial() noexcept { return g_recording.serial; }
 
+uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.size()); }
+
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept { return g_recording.vertices.grow(count, at); }
 
 void trim_frame_vertices(uint32_t at) noexcept { g_recording.vertices.trim(at); }
@@ -1802,6 +1810,18 @@ constexpr uint64_t fnv1a(std::string_view text, uint64_t hash = 0xCBF29CE4842223
 constexpr uint64_t kCopyProgramKey = fnv1a(kCopyFragment, fnv1a(kCopyVertex));
 std::shared_ptr<Program> g_copyProgram;
 
+// A copy read as a palette texture, converted (palette_on_gpu): the copy's texel (nearest) as an
+// index, uConst[0].x times its 0-1 value plus .y, floored, and that palette entry (the palette one
+// row, .z its width's reciprocal). Built as the copy program is.
+constexpr std::string_view kPaletteFragment =
+    "float4 main(float2 vUv0 : TEXCOORD0, uniform sampler2D uTex0 : TEXUNIT0, uniform sampler2D uTex1 : TEXUNIT1,\n"
+    "            uniform float4 uConst[1]) : COLOR {\n"
+    "  float index = floor(tex2D(uTex0, vUv0).r * uConst[0].x + uConst[0].y);\n"
+    "  return tex2D(uTex1, float2((index + 0.5) * uConst[0].z, 0.5));\n"
+    "}\n";
+constexpr uint64_t kPaletteProgramKey = fnv1a(kPaletteFragment, fnv1a(kCopyVertex));
+std::shared_ptr<Program> g_paletteProgram;
+
 // The copy program's colour matrix for a copy (render worker): the output's r, g, b and a, each the
 // dot product of a row with the screen's texel, then the fifth row added. GX's copies to intensity
 // formats take the YUV luma, 16 for black to 235 for white. Where the EFB has no alpha (`alpha`
@@ -1951,6 +1971,52 @@ bool copy_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32
   return true;
 }
 
+// A copy read as a palette texture (render worker), converted on the GPU as Aurora's WebGPU path
+// converts it (texture.cpp, resolve_dynamic_palette_texture): each texel of the copy (units[0]) as
+// an index into its palette (units[1]), drawn through the palette program into `copyTo` at the
+// copy's size; then sampled as any texture, filtered after the palette as GX filters. A
+// framebuffer's draw as a copy's is: the display's scene ends, and the caller sets its state
+// again. False when the copy was never made (nothing to convert).
+bool palette_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn,
+                    RenderState& current, bool moreCopies) noexcept {
+  Texture& source = *draw.units[0].texture;
+  Texture& palette = *draw.units[1].texture;
+  const auto width = static_cast<int>(source.width());
+  const auto height = static_cast<int>(source.height());
+  if (!source.copied() || width <= 0 || height <= 0 || palette.width() == 0 || program.attr(kAttrPos) < 0 ||
+      program.attr(kAttrUv0) < 0) {
+    return false;
+  }
+  use_program(program, usedProgram, attribsOn);
+  apply_state(RenderState{.depthTest = false, .depthWrite = false}, current, false);
+  glDisable(GL_SCISSOR_TEST);
+  draw.copyTo->target(width, height);
+  glViewport(0, 0, width, height);
+  constexpr Sampler kNearest{GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE, GL_NEAREST, GL_NEAREST};
+  glActiveTexture(GL_TEXTURE0);
+  source.bind(kNearest);
+  glActiveTexture(GL_TEXTURE1);
+  palette.bind(kNearest);
+  glActiveTexture(GL_TEXTURE0);
+  // C4: the 8-bit value's top four bits (half a step up keeps an exact value off the edge below);
+  // C8: the value, rounded.
+  const bool four = draw.copyKind == CopyKind::Palette4;
+  const float rows[1][4] = {{four ? 255.f / 16.f : 255.f, four ? 0.5f / 16.f : 0.5f,
+                             1.f / static_cast<float>(palette.width()), 0.f}};
+  program.set_rows(rows, 1);
+  // The copy's first row to the framebuffer's (its texture's first, at the draw's bottom).
+  constexpr float kQuad[4][4] = {{-1.f, -1.f, 0.f, 0.f}, {1.f, -1.f, 1.f, 0.f}, {-1.f, 1.f, 0.f, 1.f}, {1.f, 1.f, 1.f, 1.f}};
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glVertexAttribPointer(program.attr(kAttrPos), 2, GL_FLOAT, GL_FALSE, sizeof(kQuad[0]), &kQuad[0][0]);
+  glVertexAttribPointer(program.attr(kAttrUv0), 2, GL_FLOAT, GL_FALSE, sizeof(kQuad[0]), &kQuad[0][2]);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  keep_depth(true, moreCopies);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glEnable(GL_SCISSOR_TEST);
+  g_presentStats.copyPixels += static_cast<uint64_t>(width) * height;
+  return true;
+}
+
 // A draw with its generated program (render worker).
 void draw_with_program(const Draw& draw, const Frame& frame, Program& program, GLuint& usedProgram,
                        uint32_t& attribsOn, RenderState& current, BoundTextures& bound) {
@@ -2024,12 +2090,15 @@ void draw_world(const Frame& frame) {
   int buildBudget = kBuildsPerFrame;
   GLuint usedProgram = 0;
   uint32_t attribsOn = 0;
-  // The copy program, built ahead of the copies that need it (a program just linked is left in use).
-  if (!g_copyProgram->settled()) {
-    const int budgetBefore = buildBudget;
-    g_copyProgram->ready(buildBudget);
-    if (buildBudget != budgetBefore) {
-      glUseProgram(0);
+  // The copy and palette programs, built ahead of the copies that need them (a program just linked
+  // is left in use).
+  for (Program* copier : {g_copyProgram.get(), g_paletteProgram.get()}) {
+    if (!copier->settled()) {
+      const int budgetBefore = buildBudget;
+      copier->ready(buildBudget);
+      if (buildBudget != budgetBefore) {
+        glUseProgram(0);
+      }
     }
   }
   // The frame's EFB copies still to come (copy_on_gpu: each stores the depth for the one after).
@@ -2123,7 +2192,9 @@ void draw_world(const Frame& frame) {
       // bound again at its next draw, and the matrices and the line width are loaded again.
       const uint64_t start = sceKernelGetProcessTimeWide();
       --copiesLeft;
-      Program& copier = *g_copyProgram;
+      // Or a copy's conversion through its palette (palette_on_gpu), alike but for its program.
+      const bool palette = draw.copyKind == CopyKind::Palette4 || draw.copyKind == CopyKind::Palette8;
+      Program& copier = palette ? *g_paletteProgram : *g_copyProgram;
       const int budgetBefore = buildBudget;
       const bool ready = copier.ready(buildBudget);
       if (buildBudget != budgetBefore) {
@@ -2131,7 +2202,8 @@ void draw_world(const Frame& frame) {
       }
       if (!ready) {
         ++g_presentStats.copiesWaiting;
-      } else if (copy_on_gpu(draw, copier, usedProgram, attribsOn, current, copiesLeft > 0)) {
+      } else if (palette ? palette_on_gpu(draw, copier, usedProgram, attribsOn, current, copiesLeft > 0)
+                         : copy_on_gpu(draw, copier, usedProgram, attribsOn, current, copiesLeft > 0)) {
         glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
         glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
         bound = {};
@@ -2305,6 +2377,7 @@ bool initialize() noexcept {
   const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
   use_compiler_heap();
   g_copyProgram = make_program(std::string(kCopyVertex), std::string(kCopyFragment), kCopyProgramKey);
+  g_paletteProgram = make_program(std::string(kCopyVertex), std::string(kPaletteFragment), kPaletteProgramKey);
   g_active = true;
   if (clamped) {
     Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);

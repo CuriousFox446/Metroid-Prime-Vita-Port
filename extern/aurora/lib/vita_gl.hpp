@@ -112,7 +112,21 @@ uint64_t texture_bytes(const Texture& texture) noexcept;
 // (alpha opaque: a format without alpha), the colour and alpha, intensity (GX's YUV luma, in all
 // four channels, as Aurora samples an I8 texture), intensity with alpha, or one channel in all
 // four. The EFB's alpha reads as one where it has none (a Draw's copyAlpha).
-enum class CopyKind : uint8_t { Rgb, Rgba, Intensity, IntensityAlpha, Red, RedAlpha, Green, Blue, Alpha };
+// Or a copy read as a palette texture, converted through its palette: the copy's 8-bit value as a
+// 4-bit index (C4: the value's top four bits, as GX's I4 copy keeps) or an 8-bit one (C8).
+enum class CopyKind : uint8_t {
+  Rgb,
+  Rgba,
+  Intensity,
+  IntensityAlpha,
+  Red,
+  RedAlpha,
+  Green,
+  Blue,
+  Alpha,
+  Palette4,
+  Palette8,
+};
 
 // How a unit samples its texture, as GL enums.
 struct Sampler {
@@ -205,7 +219,9 @@ struct ProgramInputs {
 // colour and the alpha both or neither (one alone is a draw: gx/vita_draw.cpp, record_masked_clear).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
 // the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter);
-// the screen's alpha read where `copyAlpha` (the EFB has alpha), else one.
+// the screen's alpha read where `copyAlpha` (the EFB has alpha), else one. With a palette kind, a
+// copy's conversion instead: units[0]'s texture (a copy) through units[1]'s (its palette, one row)
+// into `copyTo`, at the copy's size.
 struct Draw {
   std::shared_ptr<Mesh> mesh;
   FrameMesh frameMesh;
@@ -249,6 +265,8 @@ void end_frame_draws() noexcept;
 uint32_t record_constants(const float (*rows)[4], int count) noexcept;
 const float* recorded_constants(uint32_t at) noexcept;
 uint32_t recording_serial() noexcept;
+// FIFO thread: the draws recorded so far in the frame being recorded.
+uint32_t recorded_draw_count() noexcept;
 // FIFO thread: room for `count` vertices of a FrameMesh among the frame's own, `at` set to where
 // it starts: the caller writes each whole (none is cleared first), before its next call here. The
 // frame's vertices cut back to `at`'s first (a draw that could not be decoded after all).
@@ -293,6 +311,7 @@ inline void end_frame_draws() noexcept {}
 inline uint32_t record_constants(const float (*)[4], int) noexcept { return 0; }
 inline const float* recorded_constants(uint32_t) noexcept { return nullptr; }
 inline uint32_t recording_serial() noexcept { return 0; }
+inline uint32_t recorded_draw_count() noexcept { return 0; }
 inline Vertex* frame_vertices(uint32_t, uint32_t&) noexcept { return nullptr; }
 inline void trim_frame_vertices(uint32_t) noexcept {}
 inline uint32_t frame_indices(const uint16_t*, uint32_t) noexcept { return 0; }

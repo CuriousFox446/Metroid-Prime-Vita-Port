@@ -1,6 +1,7 @@
 #include "vita_draw.hpp"
 
 #include "../gfx/texture.hpp"
+#include "../gfx/texture_convert.hpp"
 #include "../internal.hpp"
 #include "../vita_gl.hpp"
 #include "gx.hpp"
@@ -259,6 +260,7 @@ struct Stats {
   u32 cornered = 0;    // drawn with a viewport other than the whole screen
   u32 copyClears = 0;  // EFB copies' clears recorded
   u32 maskedClears = 0; // of them, drawn as a quad: the colour or the alpha alone (record_masked_clear)
+  u32 paletteCopies = 0; // copies converted through a palette (copy_texture_for)
   // TEV's final alpha: a constant worked out, of those the draws its alpha test rejects outright,
   // and the draws whose alpha reads a texture; the rest depend on a lit or vertex alpha.
   u32 alphaConstant = 0;
@@ -1216,6 +1218,94 @@ const std::shared_ptr<vita_gl::Texture>& copy_texture(const void* dest) noexcept
   return it->second;
 }
 
+// Each copy destination's copies recorded so far (record_copy): its palette conversion is made
+// again only after another (copy_texture_for).
+absl::flat_hash_map<const void*, u32> sCopyVersions;
+
+// A palette GX loaded (a TLUT) as a Vita texture: one row of its entries in RGBA8, made once for each
+// palette's data and version.
+struct PaletteKey {
+  const void* data;
+  u32 tlutObjId;
+  u32 version;
+  u16 entries;
+  GXTlutFmt format;
+  bool operator==(const PaletteKey&) const = default;
+  template <typename H>
+  friend H AbslHashValue(H h, const PaletteKey& key) {
+    return H::combine(std::move(h), key.data, key.tlutObjId, key.version, key.entries, key.format);
+  }
+};
+absl::flat_hash_map<PaletteKey, std::shared_ptr<vita_gl::Texture>> sPalettes;
+
+std::shared_ptr<vita_gl::Texture> palette_texture(const GXTlutObj_& tlut) noexcept {
+  const PaletteKey key{tlut.data, tlut.tlutObjId, tlut.tlutDataVersion, tlut.numEntries, tlut.format};
+  if (const auto it = sPalettes.find(key); it != sPalettes.end()) {
+    return it->second;
+  }
+  const size_t entryBytes = size_t{tlut.numEntries} * 4;
+  const gfx::ConvertedTexture rgba =
+      gfx::convert_tlut(gfx::tlut_texture_format(tlut.format), tlut.numEntries,
+                        {static_cast<const u8*>(tlut.data), texture::tlut_source_size(tlut.numEntries)});
+  if (rgba.data.size() < entryBytes) {
+    return {};
+  }
+  // A few are in use at a time (the thermal visor's); one changing every frame does not pile up.
+  if (sPalettes.size() >= 32) {
+    sPalettes.clear();
+  }
+  auto palette = vita_gl::make_texture(tlut.numEntries, 1, vita_gl::TexelFormat::RGBA8,
+                                       std::vector<uint8_t>(rgba.data.data(), rgba.data.data() + entryBytes));
+  sPalettes.emplace(key, palette);
+  return palette;
+}
+
+// A copy read as a palette texture (C4 or C8: the thermal visor's hot pass reads its intensity copy
+// through the thermal palette) is converted through the palette on the GPU into a texture of its
+// own (vita_gl's palette_on_gpu), as Aurora's WebGPU path does (texture.cpp,
+// resolve_dynamic_palette_texture): recorded here, ahead of the draw sampling it, once after each
+// copy into it or another palette. Any other copy is sampled as it is (copy_texture).
+struct PaletteCopy {
+  std::shared_ptr<vita_gl::Texture> texture;
+  std::shared_ptr<vita_gl::Texture> palette; // the one it was last converted through
+  u32 version = 0;                           // and its source's copies then (sCopyVersions)
+};
+absl::flat_hash_map<std::pair<const void*, u32>, PaletteCopy> sPaletteCopies; // by destination and format
+
+std::shared_ptr<vita_gl::Texture> copy_texture_for(const GXTexObj_& obj) noexcept {
+  const std::shared_ptr<vita_gl::Texture>& source = copy_texture(obj.data);
+  const u32 format = obj.format();
+  if ((format != GX_TF_C4 && format != GX_TF_C8) || obj.tlut >= g_gxState.loadedTluts.size() ||
+      source == copy_stand_in()) {
+    return source;
+  }
+  const GXTlutObj_& tlut = g_gxState.loadedTluts[obj.tlut];
+  if (tlut.data == nullptr || tlut.numEntries == 0) {
+    return source;
+  }
+  std::shared_ptr<vita_gl::Texture> palette = palette_texture(tlut);
+  if (!palette) {
+    return source;
+  }
+  PaletteCopy& copy = sPaletteCopies[{obj.data, format}];
+  if (!copy.texture) {
+    copy.texture = vita_gl::make_copy_texture();
+  }
+  const u32 version = sCopyVersions[obj.data];
+  if (copy.palette != palette || copy.version != version) {
+    vita_gl::Draw draw;
+    draw.copyTo = copy.texture;
+    draw.copyKind = format == GX_TF_C4 ? vita_gl::CopyKind::Palette4 : vita_gl::CopyKind::Palette8;
+    draw.units[0].texture = source;
+    draw.units[1].texture = palette;
+    vita_gl::record(std::move(draw));
+    copy.palette = std::move(palette);
+    copy.version = version;
+    ++sStats.paletteCopies;
+  }
+  return copy.texture;
+}
+
 vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
   const auto wrap = [](GXTexWrapMode mode) -> u16 {
     switch (mode) {
@@ -1282,10 +1372,10 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
       vita_gl::TexUnit& unit = units[unitCount];
       if (bind.ref && bind.ref->vitaTexture) {
         unit.texture = bind.ref->vitaTexture;
-      } else if (const void* data = g_gxState.loadedTextures[choices[i].map].data;
-                 g_gxState.copyTextures.contains(data)) {
+      } else if (const GXTexObj_& obj = g_gxState.loadedTextures[choices[i].map];
+                 g_gxState.copyTextures.contains(obj.data)) {
         // An EFB copy's destination: the copy's own texture (record_copy), as for a program.
-        unit.texture = copy_texture(data);
+        unit.texture = copy_texture_for(obj);
       } else {
         ++sStats.unitsWithoutCopy;
         return -1;
@@ -1580,7 +1670,7 @@ const Material& current_material() noexcept {
         // backdrop) has no Vita copy of Aurora's: its own, filled from the screen (record_copy),
         // or for a depth copy transparent black, which adds nothing and fails an alpha test.
         if (g_gxState.copyTextures.contains(g_gxState.loadedTextures[layout.maps[m]].data)) {
-          material.programTextures[m] = copy_texture(g_gxState.loadedTextures[layout.maps[m]].data);
+          material.programTextures[m] = copy_texture_for(g_gxState.loadedTextures[layout.maps[m]]);
           material.programSamplers[m] = sampler_for(bind.texObj);
           continue;
         }
@@ -2173,17 +2263,20 @@ void warm_up_step() noexcept { tev_warm_up_step(); }
 // vitaGL's scene and waits for the GPU.) Alpha copies (GX_CTF_A8: the morph ball shadow's IDs, the
 // Phazon Suit's mask, the fog volumes) read the alpha GXSetDstAlpha's constant wrote
 // (dst_alpha_mode). Not made, their materials keeping the black stand-in: depth copies. A copy
-// repeating the last one into its destination this frame (the same rectangle and format: the
-// particles copy the viewport for each system they draw) is left to it, and a frame makes seven
-// at most: each ends vitaGL's scene, with the depth stored and loaded around it.
+// repeating the last one into its destination this frame (the same rectangle and format) with
+// nothing drawn since is left to it: it would copy the same. (Once any repeat was: the thermal
+// visor's hot pass copies what its cold pass copied, with the hot objects drawn between.) A frame
+// makes seven at most: each ends vitaGL's scene, with the depth stored and loaded around it.
 constexpr size_t kCopiesPerFrame = 7;
 
-// This frame's copies (record_copy), to tell a repeat; the frame by its serial.
+// This frame's copies (record_copy), to tell a repeat (`draws`: the frame's draws recorded once it
+// was); the frame by its serial.
 struct FrameCopy {
   const void* dest;
   gfx::ClipRect src;
   GXTexFmt fmt;
   bool half;
+  u32 draws;
 };
 std::vector<FrameCopy> sFrameCopies;
 u32 sFrameCopiesSerial = 0;
@@ -2244,7 +2337,8 @@ void record_copy() noexcept {
   }
   const auto last = std::find_if(sFrameCopies.rbegin(), sFrameCopies.rend(),
                                  [dest](const FrameCopy& copy) { return copy.dest == dest; });
-  if (last != sFrameCopies.rend() && last->src == src && last->fmt == fmt && last->half == half) {
+  if (last != sFrameCopies.rend() && last->src == src && last->fmt == fmt && last->half == half &&
+      last->draws == vita_gl::recorded_draw_count()) {
     ++sStats.copiesRepeated;
     return;
   }
@@ -2252,11 +2346,11 @@ void record_copy() noexcept {
     ++sStats.copiesOverLimit;
     return;
   }
-  sFrameCopies.push_back({dest, src, fmt, half});
   std::shared_ptr<vita_gl::Texture>& texture = sCopyTextures[dest];
   if (texture == nullptr) {
     texture = vita_gl::make_copy_texture();
   }
+  ++sCopyVersions[dest];
   vita_gl::Draw draw;
   draw.copyTo = texture;
   draw.copyKind = kind;
@@ -2266,6 +2360,7 @@ void record_copy() noexcept {
   draw.scissor = screen_rect(static_cast<float>(src.x), static_cast<float>(src.y), static_cast<float>(src.width),
                              static_cast<float>(src.height), true);
   vita_gl::record(std::move(draw));
+  sFrameCopies.push_back({dest, src, fmt, half, vita_gl::recorded_draw_count()});
 }
 
 // A copy's clear of the colour alone or the alpha alone, as a quad over the rectangle drawn with
@@ -2430,6 +2525,9 @@ void log_stats() noexcept {
   // Copy destinations Aurora no longer has as copies (a texture loaded there since) go; a material
   // still holding one keeps its texture till the material goes.
   absl::erase_if(sCopyTextures, [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first); });
+  absl::erase_if(sCopyVersions, [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first); });
+  absl::erase_if(sPaletteCopies,
+                 [](const auto& entry) { return !g_gxState.copyTextures.contains(entry.first.first); });
   Log.info("materials: {} draws kept the last draw's, {} found theirs cached, {} worked one out ({} sampling an EFB "
            "copy, {} replacing another, {} freed holding a texture nothing else held); key parts worked out: "
            "pipeline {}, textures {}; {} cached of {} ({} KiB), holding {} textures ({:.1f} MiB; held by "
@@ -2460,12 +2558,13 @@ void log_stats() noexcept {
            "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
            "smaller viewport; EFB copies: {} ({} of alpha; not made: {} depth, {} repeating the last, {} past a "
-           "frame's {}; {} destinations), {} clears ({} of the colour or the alpha alone); TEV alpha: {} constant ({} "
-           "rejected), {} from a texture",
+           "frame's {}; {} destinations; {} converted through a palette), {} clears ({} of the colour or the alpha "
+           "alone); TEV alpha: {} constant ({} rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyTextures,
            s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
            s.cornered, s.copies, s.alphaCopies, s.depthCopies, s.copiesRepeated, s.copiesOverLimit, kCopiesPerFrame,
-           sCopyTextures.size(), s.copyClears, s.maskedClears, s.alphaConstant, s.alphaRejected, s.alphaTexture);
+           sCopyTextures.size(), s.paletteCopies, s.copyClears, s.maskedClears, s.alphaConstant, s.alphaRejected,
+           s.alphaTexture);
   tev_log_warm_up();
   sStats = {};
 }
