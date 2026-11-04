@@ -67,8 +67,8 @@ const SControlPadAxis kControlPadAxes[PAD_AXIS_COUNT] = {
     {"R Analog", ControlMapper::kFL_RightTrigger},
 };
 
-// The PAD bit's position, PortDebug::PadAltButton's index.
-int PadBit(PADButton button) {
+// The PAD bit's position, PortDebug::PadAltButton's index (the Vita's presets set no alt buttons).
+[[maybe_unused]] int PadBit(PADButton button) {
   int bit = 0;
   while (bit < PortDebug::kPadAltCount && (static_cast< u32 >(button) >> bit) != 1u) {
     ++bit;
@@ -109,6 +109,45 @@ void ApplyPadPreset(EPadPreset preset) {
   switch (preset) {
   case EPadPreset::kGameCube:
     break;
+#if defined(__vita__)
+  // The Vita's pad has no triggers and no stick clicks, so its Remastered and Modern layouts fire
+  // on R and lock on with L (the Vita default's L), with R's free look left off: the right stick
+  // aims (twin-stick), and in morph ball L holds R for the spider ball (BindController).
+  case EPadPreset::kRemastered: {
+    // Remastered's Dual Sticks scheme on the Vita: jump on cross, morph on square, missile on
+    // circle (RB's, which the fire took), triangle held with the D-pad picks beams (and springs
+    // the ball), map on Start and pause on Select.
+    const PADButtonMapping buttons[] = {
+        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_BUTTON_A}, {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+        {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},           {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_Y},
+        {SDL_GAMEPAD_BUTTON_START, PAD_TRIGGER_Z},         {SDL_GAMEPAD_BUTTON_BACK, PAD_BUTTON_START},
+        {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+    };
+    for (const PADButtonMapping& mapping : buttons) {
+      PADSetButtonMapping(kControlPort, mapping);
+    }
+    PortDebug::SetShiftBinding(2, SDL_GAMEPAD_BUTTON_NORTH);
+    PortDebug::SetSwapScanXray(true);
+    PortDebug::SetTwinStick(true);
+    break;
+  }
+  case EPadPreset::kModern: {
+    // Modern on the Vita: jump on cross, morph on circle, missile on square, map on Select (the
+    // Vita default's) and pause on Start; triangle held with the D-pad picks beams, as LB does
+    // elsewhere (the Vita's L locks on).
+    const PADButtonMapping buttons[] = {
+        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_BUTTON_A}, {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+        {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_X},           {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
+        {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_R},
+    };
+    for (const PADButtonMapping& mapping : buttons) {
+      PADSetButtonMapping(kControlPort, mapping);
+    }
+    PortDebug::SetShiftBinding(2, SDL_GAMEPAD_BUTTON_NORTH);
+    PortDebug::SetTwinStick(true);
+    break;
+  }
+#else
   case EPadPreset::kRemastered: {
     // Remastered's Dual Sticks scheme: fire on RT and the right face button,
     // lock on with LT (the default L), missile on RB, jump on the bottom face
@@ -155,6 +194,7 @@ void ApplyPadPreset(EPadPreset preset) {
     PortDebug::SetTwinStick(true);
     break;
   }
+#endif
   case EPadPreset::kSouthpaw: {
     u32 count = 0;
     PADAxisMapping* axes = PADGetAxisMappings(kControlPort, &count);

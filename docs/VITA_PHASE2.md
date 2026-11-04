@@ -1594,3 +1594,23 @@ main thread first; the GPU waits.
 
 What to look for: the frame rate in play (the log's [timing] line), and the input zones; bindings
 and pad changes still taking effect (the Port menu's Remap page, a pad's type).
+
+tallon18's run (daaa433, 5.7 minutes, quit normally): the profile was built every frame in 149
+seconds, 144 of them with the Port menu on screen (the overlay's draw time) and the other 5 the
+second after it closed; in the 167 seconds without it, once a second. 18 FPS on average, in heavier
+rooms than tallon17's (3.6 ticks a frame, the draw 20 ms).
+
+## The Vita's controller presets (tallon19)
+
+The Remap page's reset to Remastered or Modern mapped the fire to RT, and kept the lock-on on LT
+and missile or jump on RB and LB, with free look on the right stick's click: the Vita has no
+triggers and no stick clicks. On the Vita the two presets now map onto what it has:
+
+- Remastered: fire on R, lock on with L (the Vita default's), jump on cross, morph on square,
+  missile on circle, triangle held with the D-pad picks beams (and springs the ball), map on
+  Start, pause on Select; scan and X-ray swapped, twin-stick on, as Remastered's.
+- Modern: fire on R, lock on with L, jump on cross, morph on circle, missile on square, beams on
+  triangle with the D-pad, map on Select (the Vita default's), pause on Start; twin-stick on.
+- In both, GameCube R (free look) has no button: the right stick aims under twin-stick. In morph
+  ball it is the spider ball, so there L, with nothing to lock on to, holds R
+  (`BindController`, whenever R is unmapped on the Vita).

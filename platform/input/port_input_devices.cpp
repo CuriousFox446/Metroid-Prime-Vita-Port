@@ -270,6 +270,20 @@ void BindController(Profile& p) {
     axisCount = PAD_AXIS_COUNT;
   }
   BindMapping(p, buttons, buttonCount, axes, axisCount, dz == nullptr || dz->emulateTriggers);
+#if defined(__vita__)
+  // The Vita's Remastered and Modern layouts fire on R (the Vita has no triggers) and leave
+  // GameCube R unmapped: its free look is the right stick's under twin-stick, but in morph ball it
+  // is the spider ball. There L, the lock-on with nothing to lock on to, holds it.
+  bool rMapped = false;
+  for (u32 i = 0; i < buttonCount; ++i) {
+    rMapped = rMapped || (buttons[i].padButton == PAD_TRIGGER_R && buttons[i].nativeButton != PAD_NATIVE_BUTTON_INVALID);
+  }
+  if (!rMapped) {
+    const Input l = NativeInput(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    BindIn(p, Action::PadR, l, PortInput::kCtxMorphBall);
+    BindIn(p, Action::RAnalog, l, PortInput::kCtxMorphBall);
+  }
+#endif
 }
 
 void BindKeyboard(Profile& p) {
