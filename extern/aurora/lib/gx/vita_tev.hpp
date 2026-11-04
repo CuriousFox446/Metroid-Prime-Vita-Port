@@ -63,8 +63,9 @@ struct TevProgram {
 // The layout of the current GX state (supported false when a program cannot draw it).
 TevLayout tev_layout() noexcept;
 // The program for the current GX state with that layout, generated once (cached by its source;
-// the pointer stays valid for the session).
-const TevProgram* tev_program(const TevLayout& layout) noexcept;
+// the pointer stays valid for the session). With `constantAlpha`, it returns GXSetDstAlpha's
+// constant as its alpha (tev_constants puts it in the alpha references' row), after its alpha test.
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha = false) noexcept;
 // The fragment constants `program` declares, packed, from the current GX state; `coordIds` and
 // `mapIds` are the layout's coordinate generators and textures by slot (TevLayout's coords, maps).
 void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapIds,

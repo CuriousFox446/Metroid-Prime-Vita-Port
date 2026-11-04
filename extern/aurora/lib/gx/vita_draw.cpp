@@ -244,11 +244,11 @@ struct Stats {
   u32 copyStandIns = 0; // materials given the transparent black stand-in for an EFB copy (one not made)
   u32 copyTextures = 0; // materials given an EFB copy's Vita texture
   u32 loneTextures = 0; // materials freed for holding a texture nothing else held (drop_lone_textures)
-  // EFB copies the game made, and those not recorded (record_copy): depth and alpha copies,
-  // repeats of the last one into their destination, and those past a frame's limit.
+  // EFB copies the game made, the alpha copies among them, and those not recorded (record_copy):
+  // depth copies, repeats of the last one into their destination, and those past a frame's limit.
   u32 copies = 0;
-  u32 depthCopies = 0;
   u32 alphaCopies = 0;
+  u32 depthCopies = 0;
   u32 copiesRepeated = 0;
   u32 copiesOverLimit = 0;
   // Recorded draws by their state (after the constant alpha is folded in).
@@ -881,14 +881,67 @@ u16 gl_blend_factor(GXBlendFactor factor, bool isDst) noexcept {
   }
 }
 
+// The EFB has alpha only with GX's RGBA6 pixel format (the frames of the Phazon Suit's effect, the
+// thermal visor, the morph ball's shadow, the fog volumes); without, GX reads its alpha as one and
+// writes none (Aurora's gx.cpp does the same).
+bool efb_alpha() noexcept { return g_gxState.pixelFmt == GX_PF_RGBA6_Z24; }
+
+// How a draw writes GXSetDstAlpha's constant into the EFB's alpha, as Aurora's WebGPU path does
+// without dual-source blending (gx.cpp, dst_alpha_mode): None (it is off, or nothing takes it: the
+// blended alpha as it is), Zero (the alpha blended to zero by factors of its own, no program
+// needed: the frame-long zero of those frames), or Replace (the program returns the constant as
+// its alpha, written as it is: the morph ball shadow's IDs, the Phazon Suit's 255), where the
+// colour's blending reads no source alpha. One the colour's blending reads goes unwritten.
+enum class DstAlpha : u8 { None, Zero, Replace };
+
+DstAlpha dst_alpha_mode() noexcept {
+  const GXState& s = g_gxState;
+  if (s.dstAlpha == UINT32_MAX || !s.alphaUpdate || !efb_alpha()) {
+    return DstAlpha::None;
+  }
+  if ((s.dstAlpha & 0xFF) == 0) {
+    return DstAlpha::Zero;
+  }
+  const auto readsSourceAlpha = [](GXBlendFactor factor) {
+    return factor == GX_BL_SRCALPHA || factor == GX_BL_INVSRCALPHA;
+  };
+  const bool needsSourceAlpha = s.colorUpdate && s.blendMode == GX_BM_BLEND &&
+                                (readsSourceAlpha(s.blendFacSrc) || readsSourceAlpha(s.blendFacDst));
+  // Subtracting blends the alpha the other way (GL's reverse subtract): the constant is not kept.
+  return needsSourceAlpha || s.blendMode == GX_BM_SUBTRACT ? DstAlpha::None : DstAlpha::Replace;
+}
+
+// Blending that writes the source as it is (ONE and ZERO, the alpha's too) is no blending.
+void drop_plain_blend(vita_gl::RenderState& state) noexcept {
+  const bool plainAlpha = !state.alphaBlendOwn || (state.alphaBlendSrc == kGlOne && state.alphaBlendDst == kGlZero);
+  if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero &&
+      plainAlpha) {
+    state.blend = false;
+    state.alphaBlendOwn = false;
+    state.alphaBlendSrc = kGlOne;
+    state.alphaBlendDst = kGlZero;
+  }
+}
+
 // GX's blending, alpha test, depth, colour mask and culling for the fixed-function draw.
 vita_gl::RenderState render_state() noexcept {
   vita_gl::RenderState state;
+  // An EFB without alpha reads its alpha as one (efb_alpha): the factors reading it are constants.
+  const bool hasAlpha = efb_alpha();
+  const auto factor = [hasAlpha](GXBlendFactor f) {
+    if (!hasAlpha && f == GX_BL_DSTALPHA) {
+      return GX_BL_ONE;
+    }
+    if (!hasAlpha && f == GX_BL_INVDSTALPHA) {
+      return GX_BL_ZERO;
+    }
+    return f;
+  };
   switch (g_gxState.blendMode) {
   case GX_BM_BLEND:
     state.blend = true;
-    state.blendSrc = gl_blend_factor(g_gxState.blendFacSrc, false);
-    state.blendDst = gl_blend_factor(g_gxState.blendFacDst, true);
+    state.blendSrc = gl_blend_factor(factor(g_gxState.blendFacSrc), false);
+    state.blendDst = gl_blend_factor(factor(g_gxState.blendFacDst), true);
     break;
   case GX_BM_SUBTRACT:
     state.blend = true;
@@ -943,6 +996,19 @@ vita_gl::RenderState render_state() noexcept {
   default:
     state.cullFace = 0;
     break;
+  }
+
+  if (dst_alpha_mode() == DstAlpha::Zero) {
+    // GXSetDstAlpha's zero: the alpha blended to it, the colour as GX blends it (or as it is).
+    if (!state.blend) {
+      state.blend = true;
+      state.blendEquation = kGlFuncAdd;
+      state.blendSrc = kGlOne;
+      state.blendDst = kGlZero;
+    }
+    state.alphaBlendOwn = true;
+    state.alphaBlendSrc = kGlZero;
+    state.alphaBlendDst = kGlZero;
   }
   return state;
 }
@@ -1307,12 +1373,15 @@ struct PipelineKey {
 PipelineKey pipeline_key() noexcept {
   const GXState& s = g_gxState;
   const AlphaCompare& alpha = s.alphaCompare;
+  // The EFB's alpha and GXSetDstAlpha's way into it (render_state, the program's constant alpha);
+  // the constant itself is a draw's (tev_constants).
   const u32 fixed[] = {
       s.numTevStages,  static_cast<u32>(s.blendMode),   static_cast<u32>(s.blendFacSrc),
       static_cast<u32>(s.blendFacDst),  static_cast<u32>(s.blendOp), static_cast<u32>(s.depthFunc),
       s.depthCompare,  s.depthUpdate,   s.colorUpdate,  s.alphaUpdate, static_cast<u32>(s.cullMode),
       static_cast<u32>(alpha.comp0),    alpha.ref0,     static_cast<u32>(alpha.op),
       static_cast<u32>(alpha.comp1),    alpha.ref1,     static_cast<u32>(s.fog.type),
+      efb_alpha() ? 1u : 0u,            static_cast<u32>(dst_alpha_mode()),
   };
   u64 h = XXH3_64bits(fixed, sizeof(fixed));
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
@@ -1522,7 +1591,10 @@ const Material& current_material() noexcept {
       material.programSamplers[m] = sampler_for(bind.texObj);
     }
     if (copies) {
-      material.program = tev_program(layout);
+      // GXSetDstAlpha's constant other than zero comes from the program (dst_alpha_mode); the
+      // fixed-function draw meanwhile writes its own alpha.
+      const bool constantAlpha = dst_alpha_mode() == DstAlpha::Replace;
+      material.program = tev_program(layout, constantAlpha);
       material.coordCount = layout.coordCount;
       for (int c = 0; c < layout.coordCount; ++c) {
         material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
@@ -1534,9 +1606,13 @@ const Material& current_material() noexcept {
       material.programState = material.state;
       material.programState.alphaFunc = kGlAlways;
       vita_gl::RenderState& state = material.programState;
-      if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
-        state.blend = false;
+      if (constantAlpha && state.blend) {
+        // The program's alpha is the constant: written as it is, by ONE and ZERO.
+        state.alphaBlendOwn = true;
+        state.alphaBlendSrc = kGlOne;
+        state.alphaBlendDst = kGlZero;
       }
+      drop_plain_blend(state);
     } else {
       sStats.indirectWithoutCopy += layout.indirect ? 1 : 0;
       for (auto& texture : material.programTextures) {
@@ -1601,9 +1677,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
       ++sStats.alphaTexture;
     }
   }
-  if (state.blend && state.blendEquation == kGlFuncAdd && state.blendSrc == kGlOne && state.blendDst == kGlZero) {
-    state.blend = false;
-  }
+  drop_plain_blend(state);
   vita_gl::Draw draw{.mesh = std::move(mesh), .frameMesh = frameMesh};
   draw.width = width;
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
@@ -2096,12 +2170,12 @@ void warm_up_step() noexcept { tev_warm_up_step(); }
 // EFB copies, made on the GPU (vita_gl's copy_on_gpu, milestone 5): the screen as the draws
 // before left it, drawn through a colour matrix by format into the destination's texture, where
 // GX copies it into memory. (Read back on the CPU before, each took 7 to 22 ms: glReadPixels ends
-// vitaGL's scene and waits for the GPU.) Not made, their materials keeping the black stand-in:
-// depth copies, and alpha copies (GX_CTF_A8: the morph ball shadow's IDs, the Phazon Suit's mask,
-// the fog volumes), whose alpha is GXSetDstAlpha's constant, which the Vita path does not write
-// yet. A copy repeating the last one into its destination this frame (the same rectangle and
-// format: the particles copy the viewport for each system they draw) is left to it, and a frame
-// makes seven at most: each ends vitaGL's scene, with the depth stored and loaded around it.
+// vitaGL's scene and waits for the GPU.) Alpha copies (GX_CTF_A8: the morph ball shadow's IDs, the
+// Phazon Suit's mask, the fog volumes) read the alpha GXSetDstAlpha's constant wrote
+// (dst_alpha_mode). Not made, their materials keeping the black stand-in: depth copies. A copy
+// repeating the last one into its destination this frame (the same rectangle and format: the
+// particles copy the viewport for each system they draw) is left to it, and a frame makes seven
+// at most: each ends vitaGL's scene, with the depth stored and loaded around it.
 constexpr size_t kCopiesPerFrame = 7;
 
 // This frame's copies (record_copy), to tell a repeat; the frame by its serial.
@@ -2158,10 +2232,7 @@ void record_copy() noexcept {
     kind = vita_gl::CopyKind::Rgb;
     break;
   }
-  if (kind == vita_gl::CopyKind::Alpha) {
-    ++sStats.alphaCopies;
-    return;
-  }
+  sStats.alphaCopies += kind == vita_gl::CopyKind::Alpha ? 1 : 0;
   const gfx::ClipRect& src = g_gxState.texCopySrc;
   const void* dest = g_gxState.texCopyDest;
   // Halved where the destination is (GX's box filter: the blur's half-size copy); else the
@@ -2388,12 +2459,12 @@ void log_stats() noexcept {
            "materials with an EFB copy's texture ({} with black: a copy not made), {} copies made "
            "late; "
            "{} second units added; state: {} blended, {} alpha-tested, {} culled, {} with a depth range, {} with a "
-           "smaller viewport; EFB copies: {} (not made: {} depth, {} alpha, {} repeating the last, {} past a frame's "
-           "{}; {} destinations), {} clears ({} of the colour or the alpha alone); TEV alpha: {} constant ({} "
+           "smaller viewport; EFB copies: {} ({} of alpha; not made: {} depth, {} repeating the last, {} past a "
+           "frame's {}; {} destinations), {} clears ({} of the colour or the alpha alone); TEV alpha: {} constant ({} "
            "rejected), {} from a texture",
            s.drawsByUnits[0], s.drawsByUnits[1], s.drawsByUnits[2], s.unitsWithoutCopy, s.copyTextures,
            s.copyStandIns, s.lateCopies, s.additiveUnits, s.blended, s.alphaTested, s.culled, s.depthRanged,
-           s.cornered, s.copies, s.depthCopies, s.alphaCopies, s.copiesRepeated, s.copiesOverLimit, kCopiesPerFrame,
+           s.cornered, s.copies, s.alphaCopies, s.depthCopies, s.copiesRepeated, s.copiesOverLimit, kCopiesPerFrame,
            sCopyTextures.size(), s.copyClears, s.maskedClears, s.alphaConstant, s.alphaRejected, s.alphaTexture);
   tev_log_warm_up();
   sStats = {};

@@ -1620,8 +1620,14 @@ void apply_state(const RenderState& state, RenderState& current, bool force) {
   if (force || state.blendEquation != current.blendEquation) {
     glBlendEquation(state.blendEquation);
   }
-  if (force || state.blendSrc != current.blendSrc || state.blendDst != current.blendDst) {
-    glBlendFunc(state.blendSrc, state.blendDst);
+  if (force || state.blendSrc != current.blendSrc || state.blendDst != current.blendDst ||
+      state.alphaBlendOwn != current.alphaBlendOwn || state.alphaBlendSrc != current.alphaBlendSrc ||
+      state.alphaBlendDst != current.alphaBlendDst) {
+    if (state.alphaBlendOwn) {
+      glBlendFuncSeparate(state.blendSrc, state.blendDst, state.alphaBlendSrc, state.alphaBlendDst);
+    } else {
+      glBlendFunc(state.blendSrc, state.blendDst);
+    }
   }
   const bool alphaTest = state.alphaFunc != GL_ALWAYS;
   if (force || alphaTest != (current.alphaFunc != GL_ALWAYS)) {
@@ -2518,8 +2524,10 @@ void present(ImDrawData* overlay) noexcept {
   ImGui_ImplOpenGL2_NewFrame();
   glViewport(0, 0, kWidth, kHeight);
   glDisable(GL_SCISSOR_TEST);
-  // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first).
-  glClearColor(0.f, 0.f, 0.f, 1.f);
+  // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first), and
+  // alpha 0, the game's clear colour's (CCubeRenderer::BeginScene), which an EFB with alpha starts
+  // from (the display shows no alpha, and an EFB without it reads one: dst_alpha_mode).
+  glClearColor(0.f, 0.f, 0.f, 0.f);
   glClearDepth(1.0);
   // The clear follows the masks; a draw's state may have left them off.
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

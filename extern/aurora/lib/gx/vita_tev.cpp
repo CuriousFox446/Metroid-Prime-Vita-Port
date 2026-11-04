@@ -28,8 +28,9 @@ using vita_gl::kSamplers;
 using vita_gl::kTexCoords;
 
 // The constants' slots (vita_gl::kProgramConstants): konst colours, TEV registers, the channels'
-// material and ambient colours, the alpha compare's references. Sources name them so,
-// uConst[slot], until pack_constants renumbers them to the ones the source reads.
+// material and ambient colours, the alpha compare's references (and GXSetDstAlpha's constant, in
+// its z). Sources name them so, uConst[slot], until pack_constants renumbers them to the ones the
+// source reads.
 constexpr int kConstKonst = 0;
 constexpr int kConstReg = 4;
 constexpr int kConstMat0 = 8;
@@ -413,8 +414,9 @@ std::string tev_coord_code(const TevLayout& layout, u32 i, std::string& body) {
   return simple ? "tevCoord" : fmt::format("(tevCoord / uConst[{}].xy)", kConstTexSize + layout.stageMap[i]);
 }
 
-// The fragment program's body: the stages, then the alpha compare.
-std::string fragment_body(const TevLayout& layout) {
+// The fragment program's body: the stages, then the alpha compare (and, with `constantAlpha`,
+// GXSetDstAlpha's constant as the alpha returned: tev_program).
+std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
   const GXState& s = g_gxState;
   std::string body;
   const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
@@ -558,7 +560,13 @@ std::string fragment_body(const TevLayout& layout) {
     body += fmt::format("  R{0}.rgb = lerp(saturate(R{0}.rgb), uConst[{1}].rgb, saturate(fog));\n", lastOut,
                         kConstFogColor);
   }
-  body += fmt::format("  return R{};\n", lastOut);
+  if (constantAlpha) {
+    // GXSetDstAlpha's constant for the EFB's alpha, where the blending reads no source alpha
+    // (vita_draw.cpp, dst_alpha_mode); the alpha test above took TEV's.
+    body += fmt::format("  return float4(R{}.rgb, uConst[{}].z);\n", lastOut, kConstAlphaRef);
+  } else {
+    body += fmt::format("  return R{};\n", lastOut);
+  }
   // The result's register is read at the end (its alpha may be from before the last stage).
   registerRead[lastOut] = true;
   std::string registers;
@@ -668,9 +676,10 @@ std::string texgen_input(const TcgConfig& tcg, int c) {
 
 // The program for the current GX state with `layout`: its sources, `info` (all but its Program) and
 // the key naming it (its binary on the card too). Made by tev_program, and by the warm-up for the
-// material records of the sessions before (tev_warm_up_step).
+// material records of the sessions before (tev_warm_up_step), which make none returning
+// GXSetDstAlpha's constant (`constantAlpha`: the card keeps those once compiled).
 void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSource, std::string& fragmentSource,
-              u64& key);
+              u64& key, bool constantAlpha = false);
 
 // The warm-up (docs/VITA_PHASE2.md). Each material state a program is made for is saved on the card
 // (vita_gl::save_material) as the generator reads it; the next session makes those programs again
@@ -926,7 +935,7 @@ TevLayout tev_layout() noexcept {
   return layout;
 }
 
-const TevProgram* tev_program(const TevLayout& layout) noexcept {
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha) noexcept {
   const GXState& s = g_gxState;
   // What the source is made from, hashed: generating it is the costly part, and most materials
   // share a program with another.
@@ -934,12 +943,14 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   const AlphaCompare& compare = s.alphaCompare;
   // A coordinate set by its generator's type, source (a texture coordinate, the position or the
   // normal), normalisation and whether it has a post-transform matrix; the lights each channel
-  // part sums (program_lights); the fog's type.
+  // part sums (program_lights); the fog's type; whether it returns GXSetDstAlpha's constant.
   constexpr int kCoordKeys = 4;
   constexpr int kLightKeys = kCoordKeys + kProgramCoords;
   constexpr int kFogKey = kLightKeys + 4;
-  u32 fixed[kFogKey + 1] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
-                            static_cast<u32>(compare.op)};
+  constexpr int kAlphaKey = kFogKey + 1;
+  u32 fixed[kAlphaKey + 1] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
+                              static_cast<u32>(compare.op)};
+  fixed[kAlphaKey] = constantAlpha ? 1 : 0;
   for (int c = 0; c < layout.coordCount; ++c) {
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
@@ -973,13 +984,16 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
   if (const auto it = sProgramsByState.find(stateKey); it != sProgramsByState.end()) {
     return it->second;
   }
-  // A material state new to the session: saved for the next sessions' warm-up.
-  save_material();
+  // A material state new to the session: saved for the next sessions' warm-up (which makes the
+  // programs without the constant alpha: generate).
+  if (!constantAlpha) {
+    save_material();
+  }
   TevProgram info;
   std::string vertexSource;
   std::string fragmentSource;
   u64 key = 0;
-  generate(layout, info, vertexSource, fragmentSource, key);
+  generate(layout, info, vertexSource, fragmentSource, key, constantAlpha);
   TevProgram& program = sPrograms[key];
   if (!program.program) {
     // The first indirect programs' sources, for the log (they compile on the Vita alone).
@@ -998,10 +1012,10 @@ const TevProgram* tev_program(const TevLayout& layout) noexcept {
 
 namespace {
 void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSource, std::string& fragmentSource,
-              u64& key) {
+              u64& key, bool constantAlpha) {
   const GXState& s = g_gxState;
   info.indirect = layout.indirect;
-  const std::string body = pack_constants(fragment_body(layout), info);
+  const std::string body = pack_constants(fragment_body(layout, constantAlpha), info);
   const bool raw = body.find("vRaw") != std::string::npos;
   // The channels whose lights the raster colours take (raster), and so the lights summed.
   bool litChannel[2] = {body.find("vLit0") != std::string::npos, body.find("vLit1") != std::string::npos};
@@ -1143,9 +1157,11 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
       value[2] = rgb[2];
       value[3] = (ambient ? alpha.ambColor : alpha.matColor)[3];
     } else if (slot == kConstAlphaRef) {
+      // The alpha compare's references (0 to 255), and GXSetDstAlpha's constant (0 to 1) for a
+      // program returning it.
       value[0] = static_cast<float>(s.alphaCompare.ref0 & 0xFF);
       value[1] = static_cast<float>(s.alphaCompare.ref1 & 0xFF);
-      value[2] = 0.f;
+      value[2] = s.dstAlpha != UINT32_MAX ? static_cast<float>(s.dstAlpha & 0xFF) / 255.f : 0.f;
       value[3] = 0.f;
     } else if (slot < kConstTexSize) {
       // GX's SU scale holds the size less one (Aurora's texcoord_scale adds it back).

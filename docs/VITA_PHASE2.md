@@ -1505,3 +1505,38 @@ their arrays, none came back to the spares (`SpareStorage`), and each new frame 
 (megabytes) from the heap afresh. Now the reaper runs at Normal (160), above the compiler, and a
 frame it is two behind on is destroyed by the render worker instead (`FrameReaper::reap`; the
 presents line counts them). tallon11's crash (0ee747a, the same allocation) was likely this too.
+
+tallon15's run (c478a51, about 18 minutes): no crash; the heap between 130 and 178 MiB; the
+reaper never two frames behind (the priority alone did it); 19,713 copies, 24 FPS on average, 205
+indirect programs built and none failed. The alpha copies left unmade came to 8,771, in 37 of the
+89 log windows: the main gap left. No depth copy was asked for in any run.
+
+## GXSetDstAlpha and the alpha copies (tallon16)
+
+The game draws with an alpha channel in some frames (GX's RGBA6 pixel format: the Phazon Suit's
+effect, the thermal visor, the morph ball's shadow, the fog volumes, the elevator transitions) and
+there sets the alpha it writes with `GXSetDstAlpha`: zero for the whole frame (`CCubeRenderer::
+BeginScene`), 255 for Samus in the Phazon Suit, each nearby object's ID (`id * 4`) for the morph
+ball's shadow, which then copies that alpha (`GX_CTF_A8`) and draws the shadow where a TEV compare
+finds the object's ID. The Vita path wrote TEV's alpha instead, and left those copies unmade.
+
+- `dst_alpha_mode` (gx/vita_draw.cpp) decides as Aurora's WebGPU path does without dual-source
+  blending. Zero: the alpha is blended to zero by factors of its own (`glBlendFuncSeparate`: ZERO,
+  ZERO), the colour as GX blends it; no program needed. Another constant, where the colour's
+  blending reads no source alpha (or the colour is not written): the program returns it as its
+  alpha after the alpha test (`tev_program`'s `constantAlpha` variant; the constant rides in the
+  alpha references' row, `uConst[12].z`), written as it is (ONE, ZERO). A constant the colour's
+  blending would read goes unwritten, as on the PC; so does one under subtractive blending. The
+  fixed-function draw (a program not built yet) writes its own alpha.
+- An EFB without alpha (every other frame) reads its alpha as one: a destination-alpha blend factor
+  is ONE (or ZERO for its inverse) there, where it read whatever the display's alpha held.
+- The display is cleared to alpha 0 each frame, the game's clear colour's, which an EFB with alpha
+  starts from (the display shows no alpha).
+- The material key takes the pixel format's alpha and the constant's mode (the constant itself is a
+  draw's, in its program constants), and the warm-up makes no `constantAlpha` programs (the card
+  keeps them once compiled; they compile the first time each effect is drawn).
+- The alpha copies are made: the copy program reads the screen's alpha where the EFB has it.
+
+What to look for: the morph ball's shadow on the floor and on nearby objects; the Phazon Suit's
+glow around Samus on the pause screen and in cutscenes; fog volumes. The log's textures line counts
+the alpha copies ("of alpha").

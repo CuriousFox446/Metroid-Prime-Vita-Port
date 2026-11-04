@@ -150,6 +150,11 @@ struct RenderState {
   bool colorWrite = true;
   bool alphaWrite = true;
   uint16_t cullFace = 0; // 0: none; else GL_FRONT, GL_BACK or GL_FRONT_AND_BACK (GX's front is clockwise)
+  // The alpha blended by factors of its own (glBlendFuncSeparate's), where GXSetDstAlpha's constant
+  // is written (gx/vita_draw.cpp, dst_alpha_mode); else by the colour's.
+  bool alphaBlendOwn = false;
+  uint16_t alphaBlendSrc = 1; // GL_ONE
+  uint16_t alphaBlendDst = 0; // GL_ZERO
   bool operator==(const RenderState&) const = default;
 };
 
