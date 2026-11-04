@@ -226,6 +226,7 @@ struct Stats {
   // Immediate draws (GXBegin, uncalled display lists, GXBeginIndexed).
   u32 immediate = 0;
   u32 immediateLines = 0;
+  u32 immediateLinesNarrowed = 0; // of the line draws, those GX asked wider than a pixel (line_width)
   u32 immediatePoints = 0;
   u32 immediateFailed = 0;
   u32 recorded = 0;
@@ -1742,10 +1743,22 @@ u8 screen_width(u8 sixths) noexcept {
   return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
 }
 
+// A line draw's width on the Vita: one pixel, whatever GX's line width (counted when it asks for
+// more). GXM's lines drawn wider hang the GPU now and then: the five GPU crashes since GX's widths
+// came in (4126db4, then 748e22a) all followed hundreds of wide lines a frame (Tallon Overworld's
+// rain, the map's outlines), and none came in the four days between, when lines were a pixel wide
+// (VITA_PHASE2.md, "The map's GPU crash").
+u8 line_width() noexcept {
+  if (screen_width(g_gxState.lineWidth) > 1) {
+    ++sStats.immediateLinesNarrowed;
+  }
+  return 1;
+}
+
 // Records a draw of `mesh`, or with none of `frameMesh` (the frame's own), with GX's current
 // matrices and the material's units and state, TEV's alpha folded in where it is a constant (its
 // inputs are constants that change between draws). A line or point mesh is drawn `width` pixels
-// wide (screen_width).
+// wide (a line's line_width, points' screen_width).
 void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
                  const vita_gl::FrameMesh& frameMesh = {}, u8 width = 1) noexcept {
   // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
@@ -2107,7 +2120,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
   // A program's draw but a line strip's or points': its vertices decoded into the frame's own
   // (vita_gl::frame_vertices), none copied to each triangle's corners: triangles drawn by index
   // (triangle_indices, copied there too), GX's lines as they are (the rain: 64 draws and 10,000
-  // vertices a frame in Tallon Overworld's rooms with it), GX's line width wide.
+  // vertices a frame in Tallon Overworld's rooms with it), a pixel wide (line_width).
   if (material.program != nullptr && prim != GX_LINESTRIP && prim != GX_POINTS) {
     const bool lines = prim == GX_LINES;
     std::shared_ptr<const std::vector<u16>> indices;
@@ -2137,7 +2150,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
       return false;
     }
     ++(lines ? sStats.immediateLines : sStats.immediate);
-    record_draw(nullptr, material, mesh, lines ? screen_width(g_gxState.lineWidth) : 1);
+    record_draw(nullptr, material, mesh, lines ? line_width() : 1);
     return true;
   }
   // The vertices in the FIFO thread's room for them (no allocation a draw); the mesh's own copy is
@@ -2166,8 +2179,8 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     return true;
   }
   if (prim == GX_LINES || prim == GX_LINESTRIP) {
-    // As GL's lines, two vertices each (the map's outlines, the rain's splashes, among others), GX's
-    // line width wide in whole pixels. GX's line texture offsets are not applied.
+    // As GL's lines, two vertices each (the map's outlines, the rain's splashes, among others), a
+    // pixel wide (line_width). GX's line texture offsets are not applied.
     const size_t step = prim == GX_LINES ? 2 : 1;
     const auto count =
         static_cast<u32>(prims.size() < 2 ? 0 : prim == GX_LINES ? prims.size() / 2 * 2 : (prims.size() - 1) * 2);
@@ -2191,7 +2204,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
       return false;
     }
     ++sStats.immediateLines;
-    const u8 width = screen_width(g_gxState.lineWidth);
+    const u8 width = line_width();
     if (mesh.vertexCount != 0) {
       record_draw(nullptr, material, mesh, width);
     } else {
@@ -2544,9 +2557,11 @@ void log_stats() noexcept {
            "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}",
            s.indirectMaterials, s.indirectUnsupported + s.indirectWithoutCopy, s.indirectUnsupported,
            s.indirectWithoutCopy, tev_indirect_program_count(), tev_program_count());
-  Log.info("immediate draws: {} drawn, {} lines, {} points, {} not decodable; list calls with positions made "
-           "each frame: {} decoded and drawn, {} not decodable",
-           s.immediate, s.immediateLines, s.immediatePoints, s.immediateFailed, s.perCall, s.perCallFailed);
+  Log.info("immediate draws: {} drawn, {} lines ({} of them GX's wider than a pixel, drawn a pixel wide), {} "
+           "points, {} not decodable; list calls with positions made each frame: {} decoded and drawn, {} not "
+           "decodable",
+           s.immediate, s.immediateLines, s.immediateLinesNarrowed, s.immediatePoints, s.immediateFailed, s.perCall,
+           s.perCallFailed);
   Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
            "(matrix index {}, array {}, command {}, empty {}); decoded again for changed textures {}, vertex layout "
            "{}, array {}; {} cached",

@@ -1638,3 +1638,49 @@ another variant of every program the map draws with.
   from the phycont pool, which no run has used (26 MiB free).
 - The log's memory line (every 300 presents) gives each heap's use, to tell whether this was it
   and how much room is left.
+
+It was not: tallon20's run used 83 KiB of the fragment heap and crashed the same way on the map
+(next section).
+
+## The map's GPU crash: wide lines (tallon21)
+
+tallon20's run (60ec454) drew the map for about 25 seconds, the area map (1,700 draws and 36
+resident calls a frame) and a heavier view (520 resident calls), then the GPU crashed again
+(psp2core-1793785334-GPUCRASH). Its last memory line: fragment USSE 83 KiB in use of 4,096, vertex
+USSE 79 of 2,048, buffer 0. Not the patcher's heaps.
+
+**The dumps' GPU registers.** Imagination's register header for the SGX544 (`sgx544defs.h`,
+TI's DDK; the Vita's SGX543MP4+ is close) reads most of GPU_INFO: a header (the time of the
+crash), the master bank as (register, value) pairs from 0x4000, then each core's registers as
+(register, core 0, 1, 2, 3). All five GPU crashes since Oct 25 (two in Tallon Overworld that day,
+one on Nov 2, tallon19's and tallon20's map) show the same state:
+
+- EVENT_STATUS (0x012C) 0x24142600 on core 0, 0x04142600 on the others: the TA finished, the
+  pixel back end ended a render, core 0's event timer pending. No parameter buffer out of memory,
+  no TA fault.
+- BIF_INT_STAT (0x0C04) only "flush complete", BIF_FAULT (0x0C08) 0: no bad address. A hang.
+- MEM_BLK_INFO (72-byte records: uid, name, type, address, size) puts vitaGL's VRAM pool at
+  0x62000000, and vitaGL makes the rings there first: VDM (512 KiB), vertex (4 MiB), fragment
+  (2 MiB). 0x0238 and 0x0334 point into the VDM ring, 0x0A5C into the fragment ring, in every dump
+  (the Oct 25 morning's too, with the default rings' places).
+
+**What the five share: wide lines.** GX's line widths came in with 4126db4 (Oct 25, 03:57); until
+then every line was a pixel wide.
+
+- Both Oct 25 hangs followed a burst of lines: run65 (c5af261) went from 300 lines a log window to
+  34,081 in its last; run67 (cd75c62, after the larger rings, which did not stop it) drew 95,000 a
+  window to the end.
+- The rollback's builds drew lines a pixel wide again. From then until 748e22a brought the widths
+  back (Oct 29), no GPU crash reached the PC, with the rain at the Landing Site among the runs.
+- Then Nov 2's, and the map twice: tallon20's last 300 presents drew 167,201 lines among 257,163
+  immediate draws, about 560 a frame, the outlines GX widens.
+
+The likely way (not confirmed): a line wider than a pixel is drawn as a quad whose sides come from
+the line's direction on screen, and a line seen end on has none: a room's vertical edge with the
+map seen from above, rain falling toward the camera. That fits a hang when the map opened
+(tallon19) or after 25 seconds of turning it (tallon20), and after minutes of play in the rain.
+
+**The change.** Lines are drawn a pixel wide again (`line_width` in `gx/vita_draw.cpp`); points
+keep GX's size (the game draws none). The immediate draws' line gives how many line draws GX
+asked wider. The patcher's heaps stay as tallon20 made them (their use under 200 KiB); the larger
+rings stay too.
