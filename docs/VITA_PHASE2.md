@@ -1570,3 +1570,27 @@ copy's intensity as it was: grey where the ramp should be.
 What to look for: the thermal visor's colours on warm creatures and objects, its cold
 surroundings as before. The log's textures line counts the conversions ("converted through a
 palette").
+
+tallon17's run (c500f7c, 2.2 minutes, quit normally): "looks good". 1,486 palette conversions (the
+thermal visor in use), 3,289 copies, no program failed, 30 FPS on average. Milestone 5 is done:
+depth copies, never asked for in any run, are left out.
+
+## Milestone 6: speed. The input poll (tallon18)
+
+Where a frame went in tallon17's run (the [split] and [zones] lines, averaged): the game's ticks
+24 ms (2.1 a frame: the game runs 60 a second, two at 30 FPS), its draw 6.6 ms, input 4.3 ms; the
+main thread 93% busy, the FIFO thread 79%, the render worker 36%. The CPU sets the frame rate, the
+main thread first; the GPU waits.
+
+- The input poll's 2.7 ms a frame: the controls profile built once a frame (1.2 ms: the default
+  mappings, the user's bindings, the menu rows, built and compared), PADRead (0.65 ms), the
+  devices read and the bindings engine (0.2 ms each). On the Vita the profile is now built only
+  when what it is built from moved: the user's bindings (their version), port 0's pad and its
+  type, whether there is a pad at all; while the Port menu is up (where the settings change) and
+  for a second after; and once a second besides. Elsewhere it is built once a frame as before.
+- The audio poll (`ARQPoll + AIPortPoll`) ran the game's audio callback: 6.3 ms a frame while a
+  cutscene video played (its sound decoded; the video's own decode took 20 ms), about 1 ms in
+  play. That is the work itself, left as it is.
+
+What to look for: the frame rate in play (the log's [timing] line), and the input zones; bindings
+and pad changes still taking effect (the Port menu's Remap page, a pad's type).

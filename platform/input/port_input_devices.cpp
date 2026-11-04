@@ -1153,7 +1153,36 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
   // profile is built from changes between them, and building it (the default mappings,
   // the user's bindings, the menu rows) and comparing it cost a Vita about 2.7 ms a
   // poll. So it is built once a frame (BeginFrame), or every poll without frames.
-  if (!sInit || sFrame == 0 || sProfileFrame != sFrame) {
+  bool build = !sInit || sFrame == 0 || sProfileFrame != sFrame;
+#if defined(__vita__)
+  // Once a frame still cost the Vita 1.2 ms of each (tallon17), and there the profile changes
+  // only when what it is built from does: the user's bindings (their version), port 0's pad and
+  // its type, whether there is a pad at all (KeepPortMenuReachable), and the settings, which
+  // change in the Port menu (no touch overlay on the Vita). So a frame builds it when one of
+  // those moved, while the menu is up and for a second after, and once a second besides, for
+  // anything else it reads.
+  struct Sources {
+    uint64_t userVersion = 0;
+    s32 padIndex = -1;
+    PADControllerType padType{};
+    bool hasPad = false;
+    bool operator==(const Sources&) const = default;
+  };
+  static Sources sSources;
+  static uint64_t sBuiltFrame = 0;
+  static uint64_t sMenuFrame = 0; // the last frame the Port menu was up
+  constexpr uint64_t kSecond = 30; // frames
+  if (build && sInit && sFrame != 0) {
+    const Sources sources{UserBindingsVersion(), PADGetIndexForPort(kPort), PADGetControllerType(kPort),
+                          SDL_HasGamepad()};
+    if (PortDebug::Visible()) sMenuFrame = sFrame;
+    sProfileFrame = sFrame;
+    build = !(sources == sSources) || sFrame - sMenuFrame <= kSecond || sFrame - sBuiltFrame >= kSecond;
+    sSources = sources;
+  }
+  if (build) sBuiltFrame = sFrame;
+#endif
+  if (build) {
     PORT_ZONE_TIMED("input: build the controls profile");
     sProfileFrame = sFrame;
     Profile next;
