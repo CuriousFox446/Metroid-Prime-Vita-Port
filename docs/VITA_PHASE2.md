@@ -1746,3 +1746,27 @@ Not known yet: which folder the user deleted. A broken file with a whole GXP's h
 foreign app's shader under the same name, or garbage of the right length) would get past this
 check; if the next log shows the check finding nothing and the map crashes again, the answer
 decides whether to clear the fixed-function cache at each new build.
+
+## Fixes from upstream 0.42.0 (tallon24)
+
+The user sent upstream's 0.42.0 source ("Metroid Prime Unbound", `~/upstream/0.42.0` beside
+0.32.0 from e3f2903) and asked for its fixes alone. It is mostly PC and phone features: the
+Remastered and Metroid Dread imports, the Wii Trilogy disc, a third-person camera, an iOS build.
+Three of its fixes apply to this build's code as it stands (the three files are 0.32.0's here):
+
+- **Room streaming freeze** (`CScriptDoor`). A door opening a third room while two stay loaded can
+  fill the 1,024-entry object list, and `AllocateUniqueId` then hangs. 0.32.0 released the rooms
+  behind first in Processing Center Access only; now at any door once 512 objects are loaded
+  (Central Dynamo with Quarantine Access A and Metroid Quarantine A hung so on a tablet).
+- **The empty lock-on's marker** (`CTargetReticles`, issue #250). With twin-stick or mouse aim, a
+  lock-on with no target keeps the camera's pitch, and the orbit point's marker sat above or below
+  the screen centre by that pitch; it is lifted onto the view ray.
+- **Held buttons across a controls rebuild** (`port_input_engine`, issue #235). A rebuild of the
+  controls profile (the Port menu opening or closing swaps its buttons in and out) cleared what
+  was held, so a button still down read as a fresh press: the menu could flip while its button
+  was held.
+
+Left out: #243 (switching targets while locked on belongs to 0.42.0's new Next/Previous target
+inputs), #255 (inside its new crosshair styles), #253 (mouse aim with a pad, on input code 0.32.0
+lacks), #201 (doors after loading a save state, which changes the save states' format), and its
+2,048 object slots (11 ID bits instead of 10, through every object list).

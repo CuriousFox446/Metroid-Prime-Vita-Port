@@ -115,7 +115,12 @@ void Runtime::Rebuild() {
   mSupersets.clear();
   mPasses[0].clear();
   mPasses[1].clear();
+  // What was held stays held for the next poll's edges: a rebuild with a key
+  // down must not read as a fresh press (upstream 0.42.0, issue #235: the F1
+  // overlay flipping every frame while F1 was held).
+  const auto held = mOut.held;
   mOut = {};
+  mOut.held = held;
   mHavePolled = false;
   if (mProfile == nullptr) {
     return;
