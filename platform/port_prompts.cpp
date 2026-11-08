@@ -751,6 +751,35 @@ void ApplyBound(const void* owner, BoundPrompt& bound, const std::string& stem) 
   bound.registered = bound.handle.id != 0;
 }
 
+// For the log, once per prompt texture and icon: the icon it took, or why it kept the game's art.
+void LogBindOutcome(uint32_t id, uint32_t prompt, uint32_t width, uint32_t height, const std::string& stem,
+                    bool registered) {
+  static std::set<std::string> sLogged;
+  char key[96];
+  std::snprintf(key, sizeof(key), "%08X %s", id, stem.c_str());
+  if (!sLogged.insert(key).second) {
+    return;
+  }
+  const char* label = "?";
+  for (const PromptAction& action : kActions) {
+    if (action.prompt == prompt) {
+      label = action.label;
+    }
+  }
+  std::string outcome;
+  if (stem.empty()) {
+    outcome = "the game's art (no icon for what it is bound to)";
+  } else if (const std::string path = FindIconForSize(stem, width, height); path.empty()) {
+    outcome = "the game's art (no " + stem + " icon)";
+  } else if (!registered) {
+    outcome = "the game's art (" + std::filesystem::path(path).filename().string() + " does not fit it)";
+  } else {
+    outcome = std::filesystem::path(path).filename().string();
+  }
+  PortLog::Write("metroid_prime_port: prompt texture %08X (%s, %ux%u): %s\n", id, label, width, height,
+                 outcome.c_str());
+}
+
 } // namespace
 
 namespace PortPrompts {
@@ -828,12 +857,15 @@ void Poll() {
   sLastResolveNs = nowNs != 0 ? nowNs : 1;
   // On the Vita's game thread four times a second: the profile shows what it costs there.
   PORT_ZONE_TIMED("prompts: resolve the bindings");
+  static bool sTableLogged = false;
+  bool tableChanged = !sTableLogged;
   for (size_t a = 0; a < std::size(kActions); ++a) {
     const PromptAction& action = kActions[a];
     const std::string stem = IconStemForPrompt(action.prompt, device);
     if (stem == sActionStems[a]) {
       continue;
     }
+    tableChanged = true;
     sActionStems[a] = stem;
     size_t applied = 0;
     for (auto& [owner, bound] : sBound) {
@@ -846,6 +878,19 @@ void Poll() {
       PortLog::Write("metroid_prime_port: prompt %s %s\n", action.label,
                      stem.empty() ? "(the game's own art)" : stem.c_str());
     }
+  }
+  if (tableChanged) {
+    // Each prompt's icon, at the start and whenever one changes ("-": the game's own art).
+    sTableLogged = true;
+    std::string table;
+    for (size_t a = 0; a < std::size(kActions); ++a) {
+      table += a != 0 ? ", " : "";
+      table += kActions[a].label;
+      table += ' ';
+      table += sActionStems[a].empty() ? "-" : sActionStems[a];
+    }
+    PortLog::Write("metroid_prime_port: prompt icons for %s%s: %s\n", device, map ? " on the map" : "",
+                   table.c_str());
   }
 }
 bool KeyboardActive() { return sActiveInput.load(std::memory_order_relaxed) == ActiveInput::Keyboard; }
@@ -863,7 +908,9 @@ bool BindTexture(const void* owner, uint32_t id, uint32_t width, uint32_t height
     return false;
   }
   BoundPrompt& bound = sBound[owner] = BoundPrompt{.prompt = asset->prompt, .width = width, .height = height};
-  ApplyBound(owner, bound, ActionStem(asset->prompt));
+  const std::string& stem = ActionStem(asset->prompt);
+  ApplyBound(owner, bound, stem);
+  LogBindOutcome(id, asset->prompt, width, height, stem, bound.registered);
   return true;
 }
 

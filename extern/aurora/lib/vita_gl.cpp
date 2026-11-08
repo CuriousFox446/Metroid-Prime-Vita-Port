@@ -221,6 +221,7 @@ public:
   }
   void trim(uint32_t size) { m_size = std::min(m_size, size); }
   const T* at(uint32_t index) const { return m_data.get() + index; }
+  T* at(uint32_t index) { return m_data.get() + index; }
   uint32_t size() const { return m_size; }
 
 private:
@@ -239,6 +240,7 @@ struct Frame {
   FrameArray<uint16_t> indices;
   uint32_t serial = 0;
   uint32_t copies = 0;
+  uint32_t merged = 0; // draws joined to the one before (merge_into_last)
 };
 
 // The frames: recorded on the FIFO thread, handed over at each frame's end, drawn by the render
@@ -1644,7 +1646,83 @@ void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource)
   g_warmUpAhead.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+bool same_unit(const TexUnit& a, const TexUnit& b) noexcept {
+  return a.texture == b.texture && std::memcmp(a.matrix, b.matrix, sizeof(a.matrix)) == 0 && a.sampler == b.sampler &&
+         a.envMode == b.envMode && a.coord == b.coord;
+}
+
+// A program's rows as two draws point at them: the same rows, or the same values recorded twice.
+bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
+  return count == 0 || a == b ||
+         std::memcmp(g_recording.constants[a].data(), g_recording.constants[b].data(), sizeof(float[4]) * count) == 0;
+}
+
+// `draw` joins the frame's last draw where both draw the frame's own vertices, the second's right
+// after the first's in the frame's arrays, as lists (GL's lines or triangles), and nothing else
+// about them differs: matrices, units, state, program, its textures and rows, viewport, scissor,
+// width. Drawn as one, GXM rasterises their primitives in the same order. The map draws each room's
+// outlines and faces a few at a time: Chozo Ruins' was some 5,700 draws a frame, recorded at 1 KiB
+// each, and a frame's draws grew past what the heap had in one piece (0.42.0 test 3,
+// std::bad_alloc on the FIFO thread), at 9 FPS.
+bool merge_into_last(const Draw& draw) noexcept {
+  const FrameMesh& b = draw.frameMesh;
+  if (draw.mesh != nullptr || b.vertexCount == 0 || b.primitive == MeshPrimitive::Points || draw.clear ||
+      draw.copyTo != nullptr || g_recording.draws.empty()) {
+    return false;
+  }
+  Draw& last = g_recording.draws.back();
+  FrameMesh& a = last.frameMesh;
+  if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || a.kind != b.kind ||
+      a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
+      (a.indexCount != 0) != (b.indexCount != 0) || last.width != draw.width) {
+    return false;
+  }
+  // Indices are the draw's own vertices' (from 0): the second's move past the first's, in 16 bits.
+  if (b.indexCount != 0 && (a.indexAt + a.indexCount != b.indexAt || a.vertexCount + b.vertexCount > 0x10000)) {
+    return false;
+  }
+  if (std::memcmp(last.modelView, draw.modelView, sizeof(draw.modelView)) != 0 ||
+      std::memcmp(last.projection, draw.projection, sizeof(draw.projection)) != 0 || !(last.state == draw.state) ||
+      !(last.viewport == draw.viewport) || !(last.scissor == draw.scissor)) {
+    return false;
+  }
+  for (int unit = 0; unit < kTexUnits; ++unit) {
+    if (!same_unit(last.units[unit], draw.units[unit])) {
+      return false;
+    }
+  }
+  const ProgramInputs& p = last.program;
+  const ProgramInputs& q = draw.program;
+  if (p.program != q.program || !(p.state == q.state) || p.vertexCount != q.vertexCount ||
+      p.constantCount != q.constantCount) {
+    return false;
+  }
+  for (int m = 0; m < kSamplers; ++m) {
+    if (p.textures[m] != q.textures[m] || !(p.samplers[m] == q.samplers[m])) {
+      return false;
+    }
+  }
+  if (!same_rows(p.vertexAt, q.vertexAt, p.vertexCount) || !same_rows(p.constantsAt, q.constantsAt, p.constantCount)) {
+    return false;
+  }
+  if (b.indexCount != 0) {
+    uint16_t* indices = g_recording.indices.at(b.indexAt);
+    for (uint32_t i = 0; i < b.indexCount; ++i) {
+      indices[i] = static_cast<uint16_t>(indices[i] + a.vertexCount);
+    }
+    a.indexCount += b.indexCount;
+  }
+  a.vertexCount += b.vertexCount;
+  return true;
+}
+} // namespace
+
 void record(Draw draw) noexcept {
+  if (merge_into_last(draw)) {
+    ++g_recording.merged;
+    return;
+  }
   g_recording.copies += draw.copyTo != nullptr ? 1 : 0;
   g_recording.draws.push_back(std::move(draw));
 }
@@ -1771,6 +1849,7 @@ struct PresentStats {
   uint32_t presents = 0;
   uint32_t framesWithDraws = 0;
   uint64_t draws = 0;
+  uint64_t merged = 0; // draws recorded into the one before them (merge_into_last)
   // Draws with their generated program, and draws whose program was not ready (fixed-function).
   uint64_t programDraws = 0;
   uint64_t programPending = 0;
@@ -2234,6 +2313,7 @@ void draw_world(const Frame& frame) {
   }
   ++g_presentStats.framesWithDraws;
   g_presentStats.draws += draws.size();
+  g_presentStats.merged += frame.merged;
   glUseProgram(0);
   // GX's front faces are clockwise (Aurora's WebGPU pipelines say so too).
   glFrontFace(GL_CW);
@@ -2797,7 +2877,8 @@ void present(ImDrawData* overlay) noexcept {
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
   if (++g_presentStats.presents == 300) {
-    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame, {} destroyed here with the reaper two behind; "
+    Log.info("presents: {}, {} with game draws, {:.1f} draws a frame ({:.1f} more joined to the draw before them), {} "
+             "destroyed here with the reaper two behind; "
              "generated programs: {} draws with theirs, {} "
              "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
              "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} from the precompiled "
@@ -2807,6 +2888,7 @@ void present(ImDrawData* overlay) noexcept {
              "the render worker, {:.2f} ms each), {} before the copy program was built",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
+             g_presentStats.framesWithDraws != 0 ? double(g_presentStats.merged) / g_presentStats.framesWithDraws : 0.0,
              g_reaper.take_destroyed_here(),
              g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,

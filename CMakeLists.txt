@@ -808,7 +808,7 @@ if(VITA)
     set(MP_VITA_APP_VER "${_mp_vita_major}.${_mp_vita_minor}")
     # The Vita's button prompts (tools/make_prompt_glyphs.py textures vita), which PortPrompts reads
     # from app0:/textures/bindings. The other devices' icons stay out of the VPKs.
-    file(GLOB _mp_vita_glyphs RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    file(GLOB _mp_vita_glyphs CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/textures/bindings/vita_*.dds")
     set(_mp_vita_glyph_files "")
     foreach(_mp_glyph IN LISTS _mp_vita_glyphs)

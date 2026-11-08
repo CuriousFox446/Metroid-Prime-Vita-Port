@@ -113,6 +113,9 @@ PAD_ICONS = {
         "west": "vita_button_square.png", "north": "vita_button_triangle.png",
         "start": "vita_button_start.png", "back": "vita_button_select.png",
         "leftshoulder": "vita_button_l.png", "rightshoulder": "vita_button_r.png",
+        # GameCube's L and R are analog triggers, named as such where the bindings drive them as
+        # one (or name nothing for them): on the Vita that is its L and R.
+        "lt": "vita_button_l.png", "rt": "vita_button_r.png",
         **pad_icons_for_axes("vita"),
     },
     # Keyed by the GameCube button rather than the SDL one: the port names a GC

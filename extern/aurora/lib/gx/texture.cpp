@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <list>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -140,6 +141,15 @@ uint64_t s_frameCount = 0;
 uint64_t s_bindGeneration = 1;
 std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
+// Replacements made stale by another thread (unregister_replacement runs on the game thread, which
+// the PS Vita's FIFO processor, reading these caches, is not): applied with the pending
+// invalidations, on the thread that resolves textures.
+std::mutex s_pendingReplacementsMutex;
+std::vector<uint64_t> s_pendingReplacements;
+std::atomic<uint64_t> s_pendingReplacementCount = 0;
+// An object's count of cached textures dropped for its replacement (its load finished, or the entry
+// changed): the PS Vita path names a material's textures by it (gx/vita_draw.cpp, texture_key).
+absl::flat_hash_map<u32, u32> s_replacementVersions;
 TextureStats s_stats;
 
 // Leak detector. A texture object created anew every frame with new content (#95, #107) is
@@ -265,11 +275,25 @@ void do_clear_static_texture_cache() noexcept {
   }
 }
 
+void apply_replacement_invalidation(uint64_t replacementId) noexcept;
+
 void apply_pending_invalidations() noexcept {
   // Plain loads first: this runs several times per draw, and an exchange is a locked write.
   if (s_pendingCacheClears.load(std::memory_order_acquire) == 0 &&
-      s_pendingInvalidations.load(std::memory_order_acquire) == 0) {
+      s_pendingInvalidations.load(std::memory_order_acquire) == 0 &&
+      s_pendingReplacementCount.load(std::memory_order_acquire) == 0) {
     return;
+  }
+  // Before the generation moves: a caller invalidates the replacement, then the bindings.
+  if (s_pendingReplacementCount.exchange(0, std::memory_order_acq_rel) != 0) {
+    std::vector<uint64_t> replacementIds;
+    {
+      std::lock_guard lock{s_pendingReplacementsMutex};
+      replacementIds.swap(s_pendingReplacements);
+    }
+    for (const uint64_t replacementId : replacementIds) {
+      apply_replacement_invalidation(replacementId);
+    }
   }
   const uint64_t pendingCacheClears = s_pendingCacheClears.exchange(0, std::memory_order_acq_rel);
   const uint64_t pendingInvalidations = s_pendingInvalidations.exchange(0, std::memory_order_acq_rel);
@@ -316,6 +340,28 @@ void clear_texture_dependency(u32 texObjId, u32 tlutObjId, uint64_t replacementI
 
 void clear_texture_dependency(u32 texObjId, const CachedTextureEntry& entry) {
   clear_texture_dependency(texObjId, entry.tlutObjId, entry.replacementId);
+}
+
+// The objects that took `replacementId` resolve again (texture::invalidate_replacement), each
+// counted in s_replacementVersions.
+void apply_replacement_invalidation(uint64_t replacementId) noexcept {
+  const auto users = s_replacementUsers.find(replacementId);
+  if (users == s_replacementUsers.end()) {
+    return;
+  }
+
+  auto texObjIds = std::move(users->second);
+  s_replacementUsers.erase(users);
+  for (const u32 texObjId : texObjIds) {
+    ++s_replacementVersions[texObjId];
+    const auto it = s_textureObjectCaches.find(texObjId);
+    if (it == s_textureObjectCaches.end()) {
+      continue;
+    }
+    const CachedTextureEntry entry = it->second;
+    s_textureObjectCaches.erase(it);
+    clear_texture_dependency(texObjId, entry.tlutObjId, 0);
+  }
 }
 
 void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 tlutObjId = 0, u32 tlutDataVersion = 0,
@@ -782,23 +828,19 @@ uint64_t current_bind_generation() noexcept {
   return s_bindGeneration;
 }
 
+// Any thread: queued, and applied on the thread that resolves textures (apply_pending_invalidations),
+// as the callers' invalidate_bindings is.
 void invalidate_replacement(uint64_t replacementId) noexcept {
-  const auto users = s_replacementUsers.find(replacementId);
-  if (users == s_replacementUsers.end()) {
-    return;
+  {
+    std::lock_guard lock{s_pendingReplacementsMutex};
+    s_pendingReplacements.push_back(replacementId);
   }
+  s_pendingReplacementCount.fetch_add(1, std::memory_order_release);
+}
 
-  auto texObjIds = std::move(users->second);
-  s_replacementUsers.erase(users);
-  for (const u32 texObjId : texObjIds) {
-    const auto it = s_textureObjectCaches.find(texObjId);
-    if (it == s_textureObjectCaches.end()) {
-      continue;
-    }
-    const CachedTextureEntry entry = it->second;
-    s_textureObjectCaches.erase(it);
-    clear_texture_dependency(texObjId, entry.tlutObjId, 0);
-  }
+uint32_t replacement_version(u32 texObjId) noexcept {
+  const auto it = s_replacementVersions.find(texObjId);
+  return it != s_replacementVersions.end() ? it->second : 0;
 }
 
 gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {

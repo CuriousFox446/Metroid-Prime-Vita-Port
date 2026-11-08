@@ -43,6 +43,10 @@ size_t tlut_source_size(u16 numEntries) noexcept;
 void invalidate_bindings() noexcept;
 uint64_t current_bind_generation() noexcept;
 void invalidate_replacement(uint64_t replacementId) noexcept;
+// How many times the texture object's cached texture was dropped for its replacement (a load
+// finished, an entry changed); the thread that resolves textures. The PS Vita path keys its
+// materials on it, so they take the replacement too.
+uint32_t replacement_version(u32 texObjId) noexcept;
 void end_frame() noexcept;
 void shutdown() noexcept;
 void set_content_cache_budget_for_testing(uint64_t bytes) noexcept;

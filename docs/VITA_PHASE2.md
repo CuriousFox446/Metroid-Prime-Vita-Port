@@ -1918,3 +1918,42 @@ profile zone ("prompts: resolve the bindings"), and the log names each prompt's 
 
 Not known yet: how the art reads at the HUD's size on the Vita's screen, and what the resolve costs.
 
+## 0.42.0 test 4: prompts that stay, a map in one piece
+
+**Test 3** (e55a927, the user's log and photos of Nov 8). The Vita icons showed for some prompts
+(Cross, Circle, the map's Select) and not for others (L, R, Y, Start, the sticks, the C-stick, the
+main menu's Z, the map's A), and read small. Resolving the prompts cost 0.01 ms. After ten minutes
+the game ended with `std::bad_alloc` on the FIFO processor: `operator new(7,319,552)` in
+`vita_gl::record`, from `record_draw`, with 177 MiB of the heap in use and 51 MiB free, but not in
+one piece, and 228.7 of 229.4 MiB taken from the system. The frames before it drew Chozo Ruins'
+map: 5,771 draws a frame, 5,733 of them immediate and nearly all untextured lines and faces, at
+9 FPS. Each draw is recorded at 1 KiB, so the frame's vector of draws doubled to 7 MiB.
+
+- **Merged draws.** `vita_gl::record` joins a draw to the frame's last one when both draw the
+  frame's own vertices as lists (lines or triangles), the second's right after the first's, and
+  nothing else differs: matrices, units, state, program, its textures and rows, viewport, scissor
+  and width. The second's indices are offset past the first's vertices. GXM rasterises the joined
+  primitives in the same order. The log's `presents` line counts the draws "joined to the draw
+  before them".
+- **Prompts that kept the game's art.** Aurora loads replacements in the background
+  (`AsyncTextureReplacements`). A draw that resolved before an icon was in took the game's texture
+  (or a thumbnail). Aurora then dropped that object's cached texture and moved the bind generation,
+  but the Vita path's material cache had the generation in its key only for EFB copy slots, and kept
+  the material. Aurora now counts, per texture object, how many times its cached texture was dropped
+  for its replacement (`texture::replacement_version`), and the Vita material key includes the
+  count. Only those materials are worked out again, once the icon is in.
+- **A race.** `texture::invalidate_replacement` edited Aurora's texture caches directly.
+  `unregister_replacement` calls it on the game thread (PortPrompts, when a prompt texture is freed
+  or its icon changes), while the Vita's FIFO processor reads those caches. It is now queued, and
+  applied with the pending invalidations on the thread that resolves textures.
+- **Larger icons.** The art fills the inset the game's own art fills, where it took 75% of it: a
+  third larger. L and R also serve the trigger prompts (`vita_lt`, `vita_rt`), the names the port
+  uses when the bindings drive GameCube's L and R as triggers, or bind nothing to them. The VPKs'
+  glyph list is globbed with `CONFIGURE_DEPENDS`, so new icon files reach them.
+- **The log.** Each prompt's icon at the start and whenever one changes ("prompt icons for vita: A
+  vita_south, ..."), and once per prompt texture, the icon it took or why it kept the game's art
+  ("prompt texture 6D22966B (Start, 32x32): ...").
+
+Not known yet: how far the map's draws merge (its rooms differ in colour), and why Y, Start and the
+sticks asked for the game's art in test 3, which the new log lines answer.
+

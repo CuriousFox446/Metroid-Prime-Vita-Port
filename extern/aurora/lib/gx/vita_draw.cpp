@@ -1526,8 +1526,11 @@ PipelineKey pipeline_key() noexcept {
 // The texture part of the key (PipelineKey's comment), for the maps the stages name.
 u64 texture_key(u32 usedMaps, bool& readsCopy) noexcept {
   const GXState& s = g_gxState;
-  // A texture by what identifies its contents and sampling, and a palette texture's palette.
-  u32 textures[MaxTextures][12]{};
+  // A texture by what identifies its contents and sampling, a palette texture's palette, and how
+  // often its replacement made it resolve again: a material drawn while a replacement (a prompt's
+  // icon) was still loading took the game's texture, and kept it (the bind generation, which the
+  // replacement moves too, is in the key only for an EFB copy's slot).
+  u32 textures[MaxTextures][13]{};
   for (u32 i = 0; i < MaxTextures; ++i) {
     if ((usedMaps & (1u << i)) == 0) {
       continue;
@@ -1549,6 +1552,7 @@ u64 texture_key(u32 usedMaps, bool& readsCopy) noexcept {
     textures[i][9] = obj.flags;
     textures[i][10] = tlut != nullptr ? tlut->tlutObjId : 0;
     textures[i][11] = tlut != nullptr ? tlut->tlutDataVersion : 0;
+    textures[i][12] = texture::replacement_version(obj.texObjId);
   }
   // Aurora's bind generation moves at every EFB copy (several a frame), and a static texture is
   // already named by its identity above; only a slot holding a copy's destination resolves to
