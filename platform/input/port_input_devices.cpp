@@ -1420,16 +1420,46 @@ void PollPortActions() {
   static bool sWatch = false;
   if (!sWatch) sWatch = SDL_AddEventWatch(KeyDownWatch, nullptr);
 
-  Profile next;
-  BuildProfile(next);
-  if (!sInit || next != sFull) {
-    sFull = std::move(next);
-    sProfile = sFull;
-    std::erase_if(sProfile.bindings, [](const Binding& b) {
-      return !IsPortAction(b.action) && !PortInput::IsCustom(b.action);
-    });
-    sRuntime.SetProfile(&sProfile);
-    sInit = true;
+  bool build = true;
+#if defined(__vita__)
+  // As Poll's (tallon18): the Vita builds this profile only when what it is built from moved (the
+  // user's bindings, port 0's pad and its type, whether there is a pad), while the Port menu is up
+  // and for a second after, and once a second besides. Built every frame, as it was, it cost what
+  // Poll's did before (1.2 to 2.7 ms on the Vita), on the main thread before the ticks, which the
+  // log's [split] counted as "input" with no zone to name it (0.42.0 test 4: 4.1 ms a frame).
+  struct Sources {
+    uint64_t userVersion = 0;
+    s32 padIndex = -1;
+    PADControllerType padType{};
+    bool hasPad = false;
+    bool operator==(const Sources&) const = default;
+  };
+  static Sources sSources;
+  static uint64_t sBuiltFrame = 0;
+  static uint64_t sMenuFrame = 0; // the last frame the Port menu was up
+  constexpr uint64_t kSecond = 30; // frames
+  if (sInit && sFrame != 0) {
+    const Sources sources{UserBindingsVersion(), PADGetIndexForPort(kPort), PADGetControllerType(kPort),
+                          SDL_HasGamepad()};
+    if (PortDebug::Visible()) sMenuFrame = sFrame;
+    build = !(sources == sSources) || sFrame - sMenuFrame <= kSecond || sFrame - sBuiltFrame >= kSecond;
+    sSources = sources;
+  }
+  if (build) sBuiltFrame = sFrame;
+#endif
+  if (build) {
+    PORT_ZONE_TIMED("input: build the Port actions' profile");
+    Profile next;
+    BuildProfile(next);
+    if (!sInit || next != sFull) {
+      sFull = std::move(next);
+      sProfile = sFull;
+      std::erase_if(sProfile.bindings, [](const Binding& b) {
+        return !IsPortAction(b.action) && !PortInput::IsCustom(b.action);
+      });
+      sRuntime.SetProfile(&sProfile);
+      sInit = true;
+    }
   }
 
   PortInput::RawState raw;

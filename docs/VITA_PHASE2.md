@@ -1957,3 +1957,35 @@ map: 5,771 draws a frame, 5,733 of them immediate and nearly all untextured line
 Not known yet: how far the map's draws merge (its rooms differ in colour), and why Y, Start and the
 sticks asked for the game's art in test 3, which the new log lines answer.
 
+## 0.42.0 test 5: CPU round 2 begins
+
+**Test 4** (82b3f9b, the user's log of Nov 8) ran 14 minutes and quit cleanly. Every prompt texture
+took its Vita icon: the log's per-texture lines name one for A, B, X, Y, Start, L, R, Z, both sticks
+in every direction and the D-pad. The first table, written before the bindings existed, named only L
+and R (as triggers); the full set came a second later, before any prompt texture was bound. Test 3's
+misses were the stale materials.
+
+The map's draws merged by 42% (Chozo Ruins: 5,763 to 3,325 a frame), and it stayed near 10 FPS.
+`CMapWorld::DrawAreas` sorts every surface of every room back to front and shades each surface's fill
+by its normal, so no two fills share a colour, and fills alternate with outlines: at least two draws
+a surface are left. The FIFO thread took 133 ms a frame (recording the draws 47.6 ms, decoding the
+immediate vertices 33.4) and the render worker 72.7 ms. The map code is 0.32.0's: Chozo Ruins has
+some 1,650 surfaces, against the 1,700 draws a frame of the maps tested before.
+
+Normal play (the 354 windows over 28 FPS) averaged, per frame on the main thread: input 4.1 ms,
+tick 10.0 ms (1.34 ticks), draw 5.7 ms, begin-wait 1.1 ms.
+
+**Round 2, first step.** `PortInputDevices::PollPortActions` (the port's own actions: the Port menu,
+save states, screenshots, custom actions), which `UpdateControllerNav` calls every frame, built the
+whole controls profile every frame: the build tallon18 took out of `Poll`. On the Vita it now builds
+as `Poll`'s does (when its sources move, while the Port menu is up and a second after, and once a
+second besides). The frame's start before the ticks, [split]'s "input", is now zoned part by part:
+"frame: aurora_update (the event pump)", "frame: the events", "frame: mouse capture and cursor",
+"frame: aspect", "frame: UpdateControllerNav (Port menu, Port actions)" (with "frame: UI scale and
+theme" and "frame: Port actions (PollPortActions)" inside it), "frame: PollGyro",
+"frame: PortTextures::Poll", and "input: build the Port actions' profile" when it builds.
+
+Next: whatever the zones name in those 4.1 ms; then the game's own logic (SM: Think 2.8 ms a frame,
+CrossTouchActors 0.9 ms) and the Vita draw path's cost per draw, which sets the map's speed (some
+22 us a draw on the FIFO thread and as much on the render worker).
+

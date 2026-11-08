@@ -14,6 +14,7 @@
 #include "port_input_devices.h"
 #include "port_input_remap_ui.h"
 #include "port_mods.h"
+#include "port_profile.h"
 #include "port_discord.h"
 #include "port_savestate.h"
 
@@ -558,9 +559,15 @@ void UpdateControllerNav() {
     InstallTouchOverlay();
 #endif
   }
-  UpdateUiScale();
-  ApplyThemeIfChanged();
-  PortInputDevices::PollPortActions();
+  {
+    PORT_ZONE_TIMED("frame: UI scale and theme");
+    UpdateUiScale();
+    ApplyThemeIfChanged();
+  }
+  {
+    PORT_ZONE_TIMED("frame: Port actions (PollPortActions)");
+    PortInputDevices::PollPortActions();
+  }
   if (sToggleRequested.exchange(false, std::memory_order_acq_rel)) {
     Toggle();
   }

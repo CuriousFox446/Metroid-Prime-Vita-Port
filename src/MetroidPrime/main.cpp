@@ -1005,9 +1005,14 @@ int CMain::RsMain(int argc, const char* const* argv) {
         // The pump may deliver a background event to the quick resume watch,
         // which then takes a fresh snapshot: we are between ticks here.
         PortSaveState::SetEventPumpSafe(true);
-        const AuroraEvent* event = aurora_update();
+        const AuroraEvent* event = nullptr;
+        {
+          PORT_ZONE_TIMED("frame: aurora_update (the event pump)");
+          event = aurora_update();
+        }
         PortSaveState::SetEventPumpSafe(false);
         PortPointer::BeginFrame();
+        PORT_ZONE_TIMED("frame: the events");
         while (event != nullptr && event->type != AURORA_NONE) {
           // Menu pointer gestures; ImGui keeps the events it wants itself.
           if (event->type == AURORA_SDL_EVENT && !PortDebug::Visible()) {
@@ -1072,6 +1077,8 @@ int CMain::RsMain(int argc, const char* const* argv) {
       } else
 #endif
       {
+        // The frame's start before the ticks is [split]'s "input": each part is a zone of its own.
+        PORT_ZONE_TIMED("frame: mouse capture and cursor");
         static SDL_Window* sCaptureWindow = nullptr;
         if (sCaptureWindow == nullptr) {
           sCaptureWindow = SDL_GetKeyboardFocus();
@@ -1138,15 +1145,27 @@ int CMain::RsMain(int argc, const char* const* argv) {
       }
       // Port: apply the selected aspect ratio; no-op unless it changed (e.g. the
       // debug overlay's aspect combo).
-      ApplyAspectMode();
+      {
+        PORT_ZONE_TIMED("frame: aspect");
+        ApplyAspectMode();
+      }
       // Port: feed the pad into ImGui's gamepad navigation (and toggle the
       // overlay with Back/Select) before the frame is built.
-      PortDebug::UpdateControllerNav();
+      {
+        PORT_ZONE_TIMED("frame: UpdateControllerNav (Port menu, Port actions)");
+        PortDebug::UpdateControllerNav();
+      }
       // Port: feed the pad's or the phone's gyro into the aim.
-      PortDebug::PollGyro();
+      {
+        PORT_ZONE_TIMED("frame: PollGyro");
+        PortDebug::PollGyro();
+      }
       // Port: swap the HD texture set if the active controller changed, and
       // re-icon the prompts if a binding changed.
-      PortTextures::Poll();
+      {
+        PORT_ZONE_TIMED("frame: PortTextures::Poll");
+        PortTextures::Poll();
+      }
       // The ticks below poll the pad once each: the controls profile is built once a frame.
       PortInputDevices::BeginFrame();
       PortPrompts::Poll();
