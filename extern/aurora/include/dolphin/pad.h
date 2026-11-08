@@ -224,6 +224,13 @@ BOOL PADIsGCAdapter(u32 port);
  * Returns the SDL gamepad for the index into the controller map.
  */
 struct SDL_Gamepad* PADGetSDLGamepadForIndex(u32 index);
+/**
+ * SDL_GetGamepadButton and SDL_GetGamepadAxis (button an SDL_GamepadButton, axis an
+ * SDL_GamepadAxis) as the PAD calls read them: on the Vita from one read of the pad an event pump,
+ * where each SDL call costs about 20 us.
+ */
+BOOL PADGetGamepadButton(struct SDL_Gamepad* gamepad, s32 button);
+s16 PADGetGamepadAxis(struct SDL_Gamepad* gamepad, s32 axis);
 /* Returns the first native button which is currently pressed */
 s32 PADGetNativeButtonPressed(u32 port);
 /* Returns the first native axis which is currently pulled halfway or more */

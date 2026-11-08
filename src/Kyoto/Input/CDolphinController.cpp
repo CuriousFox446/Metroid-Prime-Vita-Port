@@ -198,9 +198,10 @@ void CDolphinController::ReadDevices() {
   // Start+Back is the debug overlay chord; do not also pause the game with it.
   // Either alone may be bound to Start (the Remastered preset pauses on Back),
   // and Back to Z (the Vita's default), which would open the map.
+  // PADGetGamepadButton reads it as PADRead did (a Vita reads the pad once an event pump).
   if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0)) {
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) &&
-        SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START)) {
+    if (PADGetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) &&
+        PADGetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START)) {
       x4_status[0].button &= ~(PAD_BUTTON_START | PAD_TRIGGER_Z);
     }
   }

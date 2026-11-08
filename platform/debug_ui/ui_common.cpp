@@ -618,10 +618,13 @@ void UpdateControllerNav() {
   // player's, queues two changes a frame where ImGui applies one.
   const s32 padIndex = PADGetIndexForPort(PAD_CHAN0);
   SDL_Gamepad* pad = PADGetSDLGamepadForIndex(padIndex >= 0 ? static_cast< u32 >(padIndex) : 0);
+  // The pad is read as the PAD calls read it (PADGetGamepadButton, PADGetGamepadAxis): the Vita
+  // takes these 40 or so reads a frame from one read of the pad an event pump, where SDL's own
+  // calls cost about 20 us each (1.2 ms a frame here in 0.42.0 test 6).
 #ifdef __vita__
   const auto anyHeld = [pad] {
     for (int button = 0; pad != nullptr && button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
-      if (SDL_GetGamepadButton(pad, static_cast< SDL_GamepadButton >(button))) {
+      if (PADGetGamepadButton(pad, button)) {
         return true;
       }
     }
@@ -637,10 +640,10 @@ void UpdateControllerNav() {
   // system keyboard while it is up.
   const bool capturing = pad == nullptr || PortInputRemap::Capturing() || keyboard;
   const auto held = [pad, capturing](SDL_GamepadButton button) {
-    return !capturing && SDL_GetGamepadButton(pad, button);
+    return !capturing && PADGetGamepadButton(pad, button) != FALSE;
   };
   const auto axis = [pad, capturing](SDL_GamepadAxis a) {
-    return capturing ? Sint16{0} : SDL_GetGamepadAxis(pad, a);
+    return capturing ? Sint16{0} : static_cast< Sint16 >(PADGetGamepadAxis(pad, a));
   };
   constexpr Sint16 kStickThreshold = 16000;
   io.AddKeyEvent(ImGuiKey_GamepadDpadUp,

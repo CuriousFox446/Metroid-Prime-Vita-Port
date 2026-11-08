@@ -2011,3 +2011,63 @@ gestures, which take every touch device, and the Port menu's mouse. The front sc
 
 Test 6 also carries test 5's change, which the user had not run yet.
 
+## 0.42.0 test 7: the pad read once a pump
+
+**Test 6** (b9b0124, the user's log of Nov 8) ran 31.6 minutes and quit cleanly. The diagonal
+prompts took the Vita's diagonal icons (`prompt texture 99F6C3B4 (stick up-left, 64x32):
+vita_stick_l_up_left_64x32.dds` and the rest), and the rear touch pad was off.
+
+Normal play (the 766 windows over 28 FPS) averaged, per frame on the main thread: input 3.1 ms (4.1
+in test 4: test 5's change), tick 6.2 ms (1.25 ticks), begin-wait 4.4 ms, draw 5.1 ms. The new zones
+split the input: "frame: UpdateControllerNav" 2.65 ms, of which "frame: Port actions
+(PollPortActions)" 1.42 ms (its profile builds now 0.12 ms); then each tick's "input: controller
+Poll" (1.35 ms a frame), of which "input: PADRead" 0.54 ms, 0.44 ms a call.
+
+The slow part of the run was another kind of frame: 769 windows (42% of them) ran 12 to 18 FPS, and
+there the main thread was busy 57 ms a frame and waited for a frame slot only 2.5 ms. A frame that
+long has 3.5 of the game's 60 Hz ticks to catch up (`SM::Update` 24 ms a frame, `SM: Think` 10.9,
+`CrossTouchActors` 4.7, the HUD 3.4), and each tick reads the pad again, so a tick's cost counts
+three and a half times there, and every millisecond cut from a tick shortens the next frame's catch-up
+as well.
+
+**The pad.** Each `SDL_GetGamepadButton` or `SDL_GetGamepadAxis` takes SDL's joystick lock and looks
+the pad and its joystick up in SDL's object table, each look-up behind a lock of its own (on the Vita
+SDL's generic read-write lock: a mutex and a condition, whose `sceKernelLockLwMutex` calls add up).
+From the zones, about 20 us a call: PADRead's 0.44 ms is its 22 or so calls (each button mapping,
+eight axis halves, the triggers). The readers added up to about 100 calls a frame in play and nearly
+twice that in the slow windows: PADRead every tick; `PADGetRawState`'s 32, the first read after
+each pump (PollPortActions pays them); `UpdateControllerNav`'s 40 or so for the Port menu's
+navigation; and `get_controller_for_player`, which asks SDL for each pad's player index
+(`SDL_GetGamepadPlayerIndex`, as dear) every time a PAD call looks for a port's pad, four times a
+PADRead alone.
+
+SDL's pad state changes only when events are pumped, so on the Vita:
+
+- `pad_snapshot` (Aurora's pad.cpp) reads a pad's buttons and axes once a pump, only those its
+  mapping has (SDL's "PSVita Controller" mapping has 14 buttons and 6 axes, which it reads as the 21
+  calls with the pad's id), and every reader takes them from there: PADRead's mappings and ext
+  buttons, `PADGetRawState`, and through the new `PADGetGamepadButton` / `PADGetGamepadAxis` the Port
+  menu's navigation (`UpdateControllerNav`) and `CDolphinController`'s Start+Back check. Off the
+  Vita those are SDL's own calls, as before.
+- `player_index` keeps each pad's index for the pump. Setting an index can take it from another
+  pad, so every set Aurora makes goes through `set_gamepad_player_index`, which forgets them all, as
+  adding or removing a pad does.
+
+What test 7's log should show: "frame: UpdateControllerNav" well under 1 ms, "input: PADRead" near
+0.05 ms a call, "frame: Port actions (PollPortActions)" about 0.5 ms (the pump's one read of the pad).
+The Port menu's buttons, the remap page's capture (which still asks SDL itself) and the controls in
+play should all work as before.
+
+This helps where the main thread sets the pace, as in most of the play (at 28 to 31 FPS the FIFO
+thread was busy 22.8 ms a frame and idle 10.4). The slow room is the FIFO thread's: there it was
+busy 63.5 ms a frame for 1,176 draws, some 54 us a draw (recording 14.1 ms, skinned lists 13.3,
+state 8.4, materials 6.5, Aurora's commands 5.2, immediate draws 4.3, dispatch 3.7), and the main
+thread only filled the wait with catch-up ticks; the room held 16.7 FPS for its 13 minutes. Cutting
+the main thread's ticks does not move that frame rate: the FIFO thread's cost per draw does.
+
+Next: the FIFO thread's cost per draw. `record_draw` builds each draw's `vita_gl::Draw` (about
+1 KiB) zeroed, and `vita_gl::record` takes it by value and copies it into the frame: built in
+place, those copies go. Then the skinned lists' path, and the game's per-tick logic (`SM: Think`,
+`CrossTouchActors`, the HUD's update), which the catch-up multiplies where the main thread is the
+slower one.
+

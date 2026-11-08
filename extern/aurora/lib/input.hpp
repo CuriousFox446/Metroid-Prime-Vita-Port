@@ -44,6 +44,10 @@ struct GameController {
   std::array<uint8_t, 6> m_gcOrigin{};
   bool m_gcOriginValid = false;
   uint64_t m_gcRecalibrateStart = 0;
+  // player_index's copy of SDL_GetGamepadPlayerIndex on the Vita, read once an event pump
+  // (generation 0: not read since an index may have moved).
+  uint64_t m_playerIndexGeneration = 0;
+  Sint32 m_playerIndex = -1;
 };
 
 GameController* get_controller_for_player(uint32_t player) noexcept;
@@ -52,6 +56,9 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept;
 void remove_controller(Uint32 instance) noexcept;
 Sint32 player_index(Uint32 instance) noexcept;
 void set_player_index(Uint32 instance, Sint32 index) noexcept;
+// SDL_SetGamepadPlayerIndex for Aurora's pads, which drops player_index's copies with it: setting
+// one pad's index can take it from another.
+void set_gamepad_player_index(SDL_Gamepad* gamepad, Sint32 index) noexcept;
 std::string controller_name(Uint32 instance) noexcept;
 bool is_gamecube(Uint32 instance) noexcept;
 bool controller_has_rumble(Uint32 instance) noexcept;

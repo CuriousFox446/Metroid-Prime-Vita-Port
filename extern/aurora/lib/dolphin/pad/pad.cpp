@@ -9,6 +9,7 @@
 #include <SDL3/SDL_timer.h>
 
 #include <array>
+#include <bit>
 #include <filesystem>
 #include <limits>
 #include <ranges>
@@ -462,12 +463,12 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
 
   const int32_t oldPort = SDL_GetGamepadPlayerIndex(ctrl->m_controller);
   if (const auto* dest = aurora::input::get_controller_for_player(port); dest != nullptr && dest != ctrl) {
-    SDL_SetGamepadPlayerIndex(dest->m_controller, -1);
+    aurora::input::set_gamepad_player_index(dest->m_controller, -1);
   }
   if (oldPort >= 0 && oldPort != port) {
     aurora::input::persist_controller_for_player(oldPort, nullptr);
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, static_cast<Sint32>(port));
+  aurora::input::set_gamepad_player_index(ctrl->m_controller, static_cast<Sint32>(port));
   aurora::input::persist_controller_for_player(port, ctrl);
 }
 
@@ -493,7 +494,7 @@ void PADClearPort(const u32 port) {
   if (ctrl == nullptr) {
     return;
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
+  aurora::input::set_gamepad_player_index(ctrl->m_controller, -1);
 }
 
 // SDL also types pads as GameCube by VID/PID alone (PowerA's 20d6:a711 is shared with a Switch-style pad), and
@@ -697,17 +698,112 @@ static void EnsureMappingLoaded(aurora::input::GameController* controller) {
   }
 }
 
+#if defined(__vita__)
+// SDL's pad state changes only when events are pumped, but each SDL_GetGamepadButton or
+// SDL_GetGamepadAxis takes the joystick lock and looks the pad and its joystick up in SDL's object
+// table, each look-up behind a lock of its own (on the Vita SDL's generic read-write lock, a mutex
+// and a condition): about 20 us a call there. PADRead read each mapping a tick, PADGetRawState
+// every button and axis, and the Port menu's navigation as many again, about 100 calls a frame in
+// play and nearly twice that where the game catches up 3.5 ticks a frame (0.42.0 test 6). So a
+// pad's buttons and axes are read once a pump, only those its mapping has (SDL reads the others as
+// released and centred), and every reader takes them from that read.
+struct PadSnapshot {
+  SDL_Gamepad* gamepad = nullptr;
+  SDL_JoystickID id = 0;
+  uint64_t generation = 0;
+  u32 hasButtons = 0; // 1 << SDL_GamepadButton, for each button its mapping has
+  u32 hasAxes = 0;    // 1 << SDL_GamepadAxis
+  u32 buttons = 0;
+  std::array<Sint16, SDL_GAMEPAD_AXIS_COUNT> axes{};
+};
+static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32 && SDL_GAMEPAD_AXIS_COUNT <= 32);
+
+// The pad's read for this pump, or null before the first pump (SDL is read then).
+static const PadSnapshot* pad_snapshot(SDL_Gamepad* gamepad) {
+  const uint64_t generation = aurora::window::pump_generation();
+  if (gamepad == nullptr || generation == 0) {
+    return nullptr;
+  }
+  static std::array<PadSnapshot, PAD_CHANMAX> sSnapshots;
+  PadSnapshot* snapshot = nullptr;
+  for (auto& s : sSnapshots) {
+    if (s.gamepad == gamepad) {
+      if (s.generation == generation) {
+        return &s;
+      }
+      snapshot = &s;
+      break;
+    }
+  }
+  if (snapshot == nullptr) {
+    // A pad not read before takes the slot read longest ago.
+    snapshot = &*std::ranges::min_element(sSnapshots, {}, &PadSnapshot::generation);
+    *snapshot = PadSnapshot{.gamepad = gamepad};
+  }
+  // A pad opened after a closed one can get its address: the id tells them apart. Its mapping
+  // changes only when SDL is given a new one, which the Vita's Aurora never does.
+  if (const SDL_JoystickID id = SDL_GetGamepadID(gamepad); id != snapshot->id) {
+    snapshot->id = id;
+    snapshot->hasButtons = 0;
+    snapshot->hasAxes = 0;
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+      if (SDL_GamepadHasButton(gamepad, static_cast<SDL_GamepadButton>(b))) {
+        snapshot->hasButtons |= 1u << b;
+      }
+    }
+    for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a) {
+      if (SDL_GamepadHasAxis(gamepad, static_cast<SDL_GamepadAxis>(a))) {
+        snapshot->hasAxes |= 1u << a;
+      }
+    }
+  }
+  snapshot->generation = generation;
+  snapshot->buttons = 0;
+  for (u32 bits = snapshot->hasButtons; bits != 0; bits &= bits - 1) {
+    const int b = std::countr_zero(bits);
+    if (SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(b))) {
+      snapshot->buttons |= 1u << b;
+    }
+  }
+  snapshot->axes = {};
+  for (u32 bits = snapshot->hasAxes; bits != 0; bits &= bits - 1) {
+    const int a = std::countr_zero(bits);
+    snapshot->axes[a] = SDL_GetGamepadAxis(gamepad, static_cast<SDL_GamepadAxis>(a));
+  }
+  return snapshot;
+}
+#endif
+
+// SDL_GetGamepadButton and SDL_GetGamepadAxis; the Vita's come from the pump's read of the pad.
+static bool gamepad_button(SDL_Gamepad* gamepad, SDL_GamepadButton button) {
+#if defined(__vita__)
+  if (const PadSnapshot* snapshot = pad_snapshot(gamepad)) {
+    return button >= 0 && button < SDL_GAMEPAD_BUTTON_COUNT && ((snapshot->buttons >> button) & 1u) != 0;
+  }
+#endif
+  return SDL_GetGamepadButton(gamepad, button);
+}
+
+static Sint16 gamepad_axis(SDL_Gamepad* gamepad, SDL_GamepadAxis axis) {
+#if defined(__vita__)
+  if (const PadSnapshot* snapshot = pad_snapshot(gamepad)) {
+    return axis >= 0 && axis < SDL_GAMEPAD_AXIS_COUNT ? snapshot->axes[axis] : Sint16{0};
+  }
+#endif
+  return SDL_GetGamepadAxis(gamepad, axis);
+}
+
 // A button mapping's native button, which may be an analog trigger.
 static bool native_button_held(const aurora::input::GameController* controller, u32 nativeButton) {
   if (nativeButton == PAD_NATIVE_BUTTON_TRIGGER_LEFT || nativeButton == PAD_NATIVE_BUTTON_TRIGGER_RIGHT) {
     const auto axis =
         nativeButton == PAD_NATIVE_BUTTON_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
-    return SDL_GetGamepadAxis(controller->m_controller, axis) >= 16384;
+    return gamepad_axis(controller->m_controller, axis) >= 16384;
   }
   if (nativeButton >= SDL_GAMEPAD_BUTTON_COUNT) {
     return false;
   }
-  return SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(nativeButton));
+  return gamepad_button(controller->m_controller, static_cast<SDL_GamepadButton>(nativeButton));
 }
 
 static Sint16 _get_axis_value(const aurora::input::GameController* controller, //  NOLINT(*-reserved-identifier)
@@ -722,7 +818,7 @@ static Sint16 _get_axis_value(const aurora::input::GameController* controller, /
     const auto [nativeAxis, sign] = iter->nativeAxis;
     // clamp value to avoid overflow when casting to Sint16 if -32768 is negated
     return static_cast<Sint16>(
-        std::min(SDL_GetGamepadAxis(controller->m_controller, static_cast<SDL_GamepadAxis>(nativeAxis)) * sign,
+        std::min(gamepad_axis(controller->m_controller, static_cast<SDL_GamepadAxis>(nativeAxis)) * sign,
                  SDL_JOYSTICK_AXIS_MAX));
   }
 
@@ -1029,7 +1125,7 @@ u32 PADRead(PADStatus* status) {
       if (generation == 0 || sExtGeneration[i] != generation || sExtController[i] != controller) {
         u32 ext = 0;
         for (const auto& [native, button] : kExtButtonMappings) {
-          if (SDL_GetGamepadButton(controller->m_controller, native)) {
+          if (gamepad_button(controller->m_controller, native)) {
             ext |= button;
           }
         }
@@ -1225,12 +1321,12 @@ BOOL PADGetRawState(const u32 port, PADRawState* state) {
   }
   static_assert(SDL_GAMEPAD_BUTTON_COUNT <= PAD_RAW_BUTTON_TRIGGER_LEFT);
   for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
-    if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(b))) {
+    if (gamepad_button(controller->m_controller, static_cast<SDL_GamepadButton>(b))) {
       state->buttons |= 1u << b;
     }
   }
   for (int a = 0; a < PAD_RAW_AXIS_COUNT; ++a) {
-    state->axes[a] = SDL_GetGamepadAxis(controller->m_controller, static_cast<SDL_GamepadAxis>(a));
+    state->axes[a] = gamepad_axis(controller->m_controller, static_cast<SDL_GamepadAxis>(a));
   }
   const Sint16 tl = state->axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER];
   const Sint16 tr = state->axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER];
@@ -1987,6 +2083,14 @@ SDL_Gamepad* PADGetSDLGamepadForIndex(const u32 index) {
   }
 
   return ctrl->m_controller;
+}
+
+BOOL PADGetGamepadButton(SDL_Gamepad* gamepad, const s32 button) {
+  return gamepad != nullptr && gamepad_button(gamepad, static_cast<SDL_GamepadButton>(button)) ? TRUE : FALSE;
+}
+
+s16 PADGetGamepadAxis(SDL_Gamepad* gamepad, const s32 axis) {
+  return gamepad != nullptr ? gamepad_axis(gamepad, static_cast<SDL_GamepadAxis>(axis)) : s16{0};
 }
 
 void PADSetDefaultMapping(const PADDefaultMapping* mapping, const PADControllerType type) {
