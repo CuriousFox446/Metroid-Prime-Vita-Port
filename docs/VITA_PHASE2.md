@@ -1805,3 +1805,46 @@ the toast counting them). If the map still crashes after a new build with this, 
 next (they would go too), and the PC precompile check could compare the card's binaries with
 fresh compiles before they are deleted.
 
+## Upstream 0.42.0 (0.42.0 test 1)
+
+The user asked for the whole port on upstream's 0.42.0 ("Metroid Prime Unbound"), not 0.32.0 with
+its fixes. Branch `port-042` (worktree `~/mpport-042`): `upstream-042` is 0.32.0 (e3f2903) with
+0.42.0's tree over it (50b149f, the user's zip, `.vscode` left out); master's Vita work merged into
+that (4592513, from 6623d2d), then master again for tallon25 (e8306b9). Master stays the 0.32.0
+line until this one runs on the Vita.
+
+**The merge.** 63 files had changed on both sides; 21 conflicted:
+- Upstream's own: CScriptDoor, CTargetReticles, port_input_engine (tallon24 had backported their
+  fixes).
+- Aurora: the VFX scene copy stays a FIFO command, so the game thread does not drain the FIFO,
+  now with 0.42.0's `again` as a u8 and its copy (the level-0 view, the pause screen's second copy)
+  run on the FIFO thread. GX_AURORA_PORT_VFX_CAPTURE_SCENE and GX_AURORA_PORT_FIFO_TASK move to
+  0x0075 and 0x0076, past 0.42.0's new commands. Its array bounds checks, and its skip of draws
+  that make no whole triangle, run before the Vita's draw hooks. Lazy draw tags stay beside its
+  performance flags.
+- Input: the Vita's controls profile still builds only when its sources change (tallon18), with
+  0.42.0's new steps inside (the saved pad preset, the Morph Ball, map and target rows, twin
+  stick's free aim); whether the player is in the Morph Ball joins the sources, as twin stick frees
+  R outside it.
+- Presets: the Vita's Remastered and Modern layouts move into `ApplyPresetMapping`; on the Vita no
+  alternate fire and jump buttons (its face buttons are all taken), no LT Spider Ball row (it has
+  no LT; L holds R in the ball, BindController), no keyboard rows.
+- `main.cpp`: 0.42.0 always sets aside room geometry's 256 MB arena and larger frame buffers, free
+  on a PC until touched; the Vita takes its arena whole from newlib's heap, so there the reserve
+  stays as before, only with room geometry installed (never, on the Vita).
+- CStateManager, CElementGen: 0.42.0's additions and the Vita's profile zones both. The rest:
+  both sides' includes.
+
+**For the Vita.** The Vita's nod gains `nod_partition_find_file` (0.42.0's lookup by path, for the
+Echoes import: the FST walked from the root, ASCII case ignored as the DVD's lookup does); the log's
+instance lock is always free (newlib has no flock); the Mods page's built-in imports (Prime
+Remastered, Metroid Dread, Echoes) are hidden, as the Remastered tab was; the VPKs' APP_VER comes
+from versionName (00.42), as the game's version string does. The GX structs the material records
+hold are unchanged, so the card's records still warm up.
+
+**To watch in its first runs.** The ELF is 29 MB against 25 (code and data the heap no longer has;
+about 11 MiB of the heap was free in play). The first start compiles every program the records name
+(tallon25: another build's binaries go). 0.42.0's new options (Morph Ball rows, Dodge, Aim Lock-On,
+flick stick, toggles) have not run on a Vita; GX state 0.42.0 adds for the Remastered imports and
+the beam colours (clip planes, colour matrices, the shell) is not drawn by the Vita path.
+
