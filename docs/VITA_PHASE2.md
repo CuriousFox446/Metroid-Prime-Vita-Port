@@ -1742,10 +1742,9 @@ the file's own, which a GXP's size field always is (it counts every byte, unpadd
 GXPs in the card's own programs show). vitaGL compiles a deleted one again when a draw needs it.
 The log gives how many were on the card and which were deleted.
 
-Not known yet: which folder the user deleted. A broken file with a whole GXP's header (a
-foreign app's shader under the same name, or garbage of the right length) would get past this
-check; if the next log shows the check finding nothing and the map crashes again, the answer
-decides whether to clear the fixed-function cache at each new build.
+Not it, as it turned out: the user deleted `ux0:data/MetroidPrime/vita_programs`, and
+`ux0:data/shader_cache` had been empty all along (tallon25, below). The check stays; it costs a
+look at an empty folder.
 
 ## Fixes from upstream 0.42.0 (tallon24)
 
@@ -1770,3 +1769,39 @@ Left out: #243 (switching targets while locked on belongs to 0.42.0's new Next/P
 inputs), #255 (inside its new crosshair styles), #253 (mouse aim with a pad, on input code 0.32.0
 lacks), #201 (doors after loading a save state, which changes the save states' format), and its
 2,048 object slots (11 ID bits instead of 10, through every object list).
+
+## The map's GPU crash: another build's program binaries (tallon25)
+
+The user's answer: the folder they deleted was `ux0:data/MetroidPrime/vita_programs`, and
+`ux0:data/shader_cache` "has been empty". So it was the generated programs' own cache: their
+binaries (`<key>.gxp`) and the warm-up's records (`materials.bin`) went together.
+
+How an old binary could differ from a new compile is still not found:
+
+- Its key is XXH3 of both sources, so it is read back only for the very same sources; the
+  compiler's settings have not changed since Oct 25 (and vitaGL's `glCompileShader` path before
+  used the same); on Nov 2 every binary on the card (552) was byte-identical to a fresh compile.
+- What vitaGL stores besides the two GXPs is the attribute table the GXP decides. A loaded
+  program has it twice (`glProgramBinary` restores it, then attaching the vertex shader appends
+  the defaults again), but `glGetAttribLocation` finds the first and the draws read only the
+  first `attr_num`, so it draws as a fresh one does.
+- Our `finish` treats both alike (attributes, uniforms and samplers by name); program slots are
+  reset when reused, deletes run between frames on the render worker, and vitaGL's vertex
+  program cache never releases what it evicts.
+
+The binaries are the likelier half of the folder: the warm-up reads every record in every session,
+build change or not, and draws nothing; in tallon19's and tallon20's sessions most of the map's
+programs were read from the card (115 of 126), hardly any compiled. Worth keeping in mind too:
+the folder was probably deleted around tallon21 ("a few days" before Nov 7), which also drew
+lines a pixel wide again.
+
+**The change.** `vita_programs/build` names the build that wrote the binaries. When it names
+another (or none, as on the user's card now), the binaries are not indexed, so nothing reads
+one, and the card thread's first job deletes them (and any `.gxp.tmp` cut short), then names this
+build. That is the user's fix, made at each new build. `materials.bin` stays: the warm-up finds
+every program missing and compiles the batch from the start (about 1,200 on the user's card,
+roughly a second each: around twenty minutes of compiling in the background after each new build,
+the toast counting them). If the map still crashes after a new build with this, the records are
+next (they would go too), and the PC precompile check could compare the card's binaries with
+fresh compiles before they are deleted.
+
