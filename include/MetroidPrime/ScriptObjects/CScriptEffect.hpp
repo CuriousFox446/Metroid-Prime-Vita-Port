@@ -13,6 +13,7 @@ class CParticleElectric;
 class CGenDescription;
 class CElementGen;
 class CScriptEffect : public CActor {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   ~CScriptEffect() override;
   DECLARE_TYPES_MATCH_OR_ACCEPT;
@@ -40,6 +41,18 @@ public:
   // A Remastered effect actor's values for its system's particle variables (its
   // InitializeExternalVariables); kept, as a rebuilt system starts from the defaults again.
   void PortSetExternalVars(const std::vector< SPortExternalVar >& vars);
+  // Updates only this real variable, including the value used after a system rebuild.
+  bool PortSetExternalReal(const PortGuid& guid, float value);
+  CElementGen* PortParticleSystem() const { return x104_particleSystem.get(); }
+  CAssetId PortPartId() const { return x10c_partId; }
+  void PortAttachBarrier(TUniqueId controller, TUniqueId platform) {
+    xPortBarrierController = controller;
+    xPortBarrierPlatform = platform;
+  }
+  void PortFollowBarrier(const CActor& source);
+  // An effect Remastered has none for (PortRoomEffects::Hidden): it runs and passes its
+  // messages on as retail's does, but draws nothing and makes no light. Before kSM_Registered.
+  void PortHide() { xPortHidden = true; }
 #endif
 
 private:
@@ -79,6 +92,13 @@ private:
 #ifdef TARGET_PC
   CPortNestedLights xPortNestedLights; // lights of the nested PHDR children of x104_particleSystem
   std::vector< SPortExternalVar > xPortExternalVars;
+  TUniqueId xPortBarrierController = kInvalidUniqueId;
+  TUniqueId xPortBarrierPlatform = kInvalidUniqueId;
+  // The followed platform's model bounds: the barrier mesh's own extent, which the
+  // point-sized particle bounds miss (and which go stale once a culled effect stops updating).
+  CAABox xPortBarrierBounds = CAABox::MakeMaxInvertedBox();
+  bool xPortHasBarrierBounds = false;
+  bool xPortHidden = false;
 #endif
 };
 

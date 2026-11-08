@@ -5,17 +5,23 @@
 
 #include "port_env.h"
 #include "port_debug.h"
+#include "port_dread_samus_mod.h"
+#include "port_third_person.h"
 #include "port_graphics_backend.h"
 #include "port_gyro_motion.h"
 #include "port_dynamic_res.h"
+#include "port_input_devices.h"
+#include "port_input_remap_ui.h"
 #include "port_pointer.h"
 #include "port_hd_font.h"
 #include "port_paths.h"
 #include "port_config_reset.h"
 #include "port_textures.h"
+#include "port_zip.h"
 #include "port_gpu_driver.h"
 #include "port_mods.h"
 #include "port_savestate.h"
+#include "port_beam_colours.h"
 #include "port_suit_colours.h"
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -31,6 +37,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <filesystem>
+#include <thread>
 #include <cstdio>
 #include <mutex>
 #include <optional>
@@ -67,6 +75,11 @@ void DrawVideoDisplay() {
   }
   ImGui::SetItemTooltip("Off: cutscenes narrower than 16:9 fill the screen with the full shot.\n"
                         "On: the original 16:9 letterbox.");
+  if (ImGui::Checkbox("Morph ball black bars", &sBallBars)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Off: the world fills the screen in morph ball.\n"
+                        "On: the original narrowed ball view.");
 
   if (ImGui::Checkbox("Sharp scan window", &sSharpScanWindow)) {
     MarkDirty();
@@ -88,9 +101,18 @@ void DrawVideoDisplay() {
   ImGui::SeparatorText("Suit colours");
   {
     static int sSuitColoursSuit = 0;
+    // The Dread suits only while the Dread Samus import is on.
+    const auto& mods = PortMods::CurrentStatus().mods;
+    const bool dread = std::any_of(mods.begin(), mods.end(), [](const PortMods::ModInfo& mod) {
+      return mod.enabled && mod.name == PortDreadSamus::kModName;
+    });
+    const int suitCount = dread ? PortSuitColours::kSuitCount : PortSuitColours::kDreadFirst;
+    if (sSuitColoursSuit >= suitCount) {
+      sSuitColoursSuit = 0;
+    }
     const PortSuitColours::Suit& suit = PortSuitColours::SuitInfo(sSuitColoursSuit);
     if (ImGui::BeginCombo("Suit", suit.name)) {
-      for (int i = 0; i < PortSuitColours::kSuitCount; ++i) {
+      for (int i = 0; i < suitCount; ++i) {
         const bool custom = !PortSuitColours::PicksKey(i).empty();
         const std::string label = std::string(PortSuitColours::SuitInfo(i).name) + (custom ? " *" : "");
         if (ImGui::Selectable(label.c_str(), i == sSuitColoursSuit)) {
@@ -102,7 +124,8 @@ void DrawVideoDisplay() {
     ImGui::SetItemTooltip(
         "Each suit's colours, saved per suit (* = changed). Recoloured from your disc, so\n"
         "the change shows everywhere: cutscenes, pause screen, arm cannon, morph ball.\nA mod's "
-        "own suit textures (the Remastered import) are left alone.");
+        "own suit textures (the Remastered import) are left alone; the (Dread) suits recolour\n"
+        "the Dread Samus import's own.");
     for (int slot = 0; slot < suit.slots; ++slot) {
       ImGui::PushID(slot);
       const std::optional< uint32_t > picked = PortSuitColours::Colour(sSuitColoursSuit, slot);
@@ -119,6 +142,8 @@ void DrawVideoDisplay() {
       }
       if (sSuitColoursSuit == 3) {
         ImGui::SetItemTooltip("The Phazon Suit's body is nearly black: only its glow and accent change.");
+      } else if (suit.base && slot == suit.slots - 1) {
+        ImGui::SetItemTooltip("The white plates: the light, unsaturated parts, which keep their shading.");
       }
       ImGui::SameLine();
       ImGui::BeginDisabled(!picked);
@@ -144,6 +169,35 @@ void DrawVideoDisplay() {
     ImGui::SetItemTooltip(
         "Rebuilds the recoloured textures and reloads the mods (a moment; the game\n"
         "carries on). Original experience uses the original colours.");
+  }
+
+  ImGui::SeparatorText("Beam colours");
+  for (int beam = 0; beam < PortBeamColours::kBeamCount; ++beam) {
+    ImGui::PushID(beam);
+    const std::optional< uint32_t > picked = PortBeamColours::Colour(beam);
+    const uint32_t shown = picked ? *picked : PortBeamColours::DefaultColour(beam);
+    float rgb[3] = {float((shown >> 16) & 255) / 255.f, float((shown >> 8) & 255) / 255.f,
+                    float(shown & 255) / 255.f};
+    if (ImGui::ColorEdit3(PortBeamColours::Name(beam), rgb, ImGuiColorEditFlags_NoInputs)) {
+      uint32_t value = 0;
+      for (const float c : rgb) {
+        value = (value << 8) | uint32_t(std::clamp(std::lround(c * 255.f), 0l, 255l));
+      }
+      PortBeamColours::SetColour(beam, value);
+      MarkDirty();
+    }
+    ImGui::SetItemTooltip(
+        "The beam's shots, charge and muzzle effects, their light and the arm cannon's glow\n"
+        "take this colour at once; the cannon's body keeps its own. Whites stay white.\nThe "
+        "thermal visor and Original experience show the original colours.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!picked);
+    if (ImGui::SmallButton("Reset")) {
+      PortBeamColours::SetColour(beam, std::nullopt);
+      MarkDirty();
+    }
+    ImGui::EndDisabled();
+    ImGui::PopID();
   }
 
   ImGui::SeparatorText("HUD and view");
@@ -202,15 +256,16 @@ void DrawVideoDisplay() {
   ImGui::SetItemTooltip("The crosshair in the middle of the screen (free aim, mouse aim, twin "
                         "stick). 100%% is full strength; the game's own crosshair is much fainter (19%%).");
   {
-    static const char* const kStyles[] = {"Classic", "Remastered"};
+    static const char* const kStyles[] = {"Classic", "Remastered", "GameCube"};
     int style = static_cast< int >(sCrosshairStyle);
-    if (ImGui::Combo("Crosshair style", &style, kStyles, 2)) {
+    if (ImGui::Combo("Crosshair style", &style, kStyles, 3)) {
       sCrosshairStyle = static_cast< PortDebug::ECrosshairStyle >(style);
       MarkDirty();
     }
     ImGui::SetItemTooltip(
         "Classic: the game's own crosshair model. Remastered: rings and three spikes in\n"
-        "the Remastered design. Original experience uses Classic.");
+        "the Remastered design. GameCube: on a Trilogy disc, the GameCube crosshair in place\n"
+        "of Trilogy's aiming cursor (Classic on a GameCube disc). Original experience uses Classic.");
   }
   if (ImGui::Checkbox("Custom crosshair colour", &sCrosshairCustomColor)) {
     MarkDirty();
@@ -223,6 +278,16 @@ void DrawVideoDisplay() {
     MarkDirty();
   }
   ImGui::EndDisabled();
+  if (ImGui::Checkbox("Crosshair in X-Ray", &sCrosshairXRay)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Off hides the aiming crosshair in the X-Ray Visor.");
+  ImGui::SameLine();
+  if (ImGui::Checkbox("Crosshair in Thermal", &sCrosshairThermal)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("Off hides the aiming crosshair in the Thermal Visor, whose HUD\n"
+                        "otherwise all moves with the visor. On under Original experience.");
   if (ImGui::Checkbox("Secondary crosshairs", &sSecondaryCrosshairs)) {
     MarkDirty();
   }
@@ -234,7 +299,15 @@ void DrawVideoDisplay() {
   if (ImGui::Checkbox("Hide helmet", &hideHelmet)) {
     SetHideHelmet(hideHelmet);
   }
-  ImGui::SameLine();
+  bool thirdPerson = PortThirdPerson::Enabled();
+  if (ImGui::Checkbox("Third-person camera", &thirdPerson)) {
+    PortThirdPerson::SetEnabled(thirdPerson);
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip(
+      "Plays from behind Samus's shoulder (not the morph ball or cutscenes), showing her\n"
+      "body and hiding the arm cannon and helmet. Distance, shoulder and height:\n"
+      "console `thirdperson`, or third_person_* in the settings file.");
   bool hideVisorFx = sHideVisorEffects;
   if (ImGui::Checkbox("Hide visor effects", &hideVisorFx)) {
     SetHideVisorEffects(hideVisorFx);
@@ -257,9 +330,30 @@ void DrawVideoDisplay() {
                        0.017453292f;
     ImGui::SetItemTooltip("Back to the retail 55 deg.");
     ImGui::TextDisabled("About %.0f deg horizontal at this aspect.", hfov);
-    ImGui::SetItemTooltip("First-person vertical FOV (retail 55). The arm cannon stays at the retail\n"
-                          "FOV; morph ball and cutscene cameras are unchanged.");
+    ImGui::SetItemTooltip("First-person vertical FOV (retail 55). Morph ball and cutscene cameras\n"
+                          "are unchanged.");
   }
+  bool gunFollowsFov = sGunFollowsFov;
+  if (ImGui::Checkbox("Arm cannon follows FOV", &gunFollowsFov)) {
+    SetGunFollowsFov(gunFollowsFov);
+  }
+  ImGui::SetItemTooltip("Off: the arm cannon is drawn at its own FOV (below) whatever the field\n"
+                        "of view, so it keeps its size and place. On: it shares the world's\n"
+                        "perspective, so a wider FOV draws it smaller and further into the corner.");
+  ImGui::BeginDisabled(sGunFollowsFov);
+  float gunFov = sGunFov;
+  if (ImGui::SliderFloat("Arm cannon FOV", &gunFov, kFovMin, kFovMax, "%.0f deg")) {
+    SetGunFov(std::round(gunFov));
+  }
+  ImGui::SetItemTooltip("The FOV the arm cannon is drawn at (retail 55), apart from the world's:\n"
+                        "higher draws it smaller and further into the corner. Unused while it\n"
+                        "follows the FOV.");
+  ImGui::SameLine();
+  if (ImGui::Button("Retail##gunfov")) {
+    SetGunFov(kFovRetail);
+  }
+  ImGui::SetItemTooltip("Back to the retail 55 deg.");
+  ImGui::EndDisabled();
   {
     // Issue #72: PrimeHack-style arm cannon placement.
     float offset[3] = {sGunOffset[0], sGunOffset[1], sGunOffset[2]};
@@ -462,17 +556,42 @@ void DrawVideoQuality() {
         "is drawn.");
   }
 
-  bool autoScale = sRenderScale <= 0.f;
-  if (ImGui::Checkbox("Auto render scale (native)", &autoScale)) {
-    SetRenderScale(autoScale ? 0.f : 1.f);
+  // Dynamic resolution's mode is the two saved settings together: Auto draws up to the
+  // window's own scale (auto render scale), User up to the resolution scale set.
+  int dynMode = !sDynamicRes ? 0 : sRenderScale <= 0.f ? 1 : 2;
+  if (ImGui::Combo("Dynamic resolution", &dynMode, "Off\0" "Auto\0" "User\0")) {
+    sDynamicRes = dynMode != 0;
+    if (dynMode == 1) {
+      SetRenderScale(0.f);
+    } else if (dynMode == 2 && sRenderScale <= 0.f) {
+      SetRenderScale(std::clamp(std::round(BaseRenderScale() * 4.f) / 4.f, 1.f, 4.f));
+    }
+    ResetDynamicRes();
     MarkDirty();
   }
-  if (!autoScale) {
-    // Applied when the slider is let go: each new scale reallocates the EFB targets, which
-    // a drag would otherwise do every frame.
-    static float sPendingScale = 0.f;
+  ImGui::SetItemTooltip(
+      "Lowers the resolution scale while the GPU can't hold the target frame rate, and\n"
+      "raises it back when there is room. Each change stutters for a frame, so it moves\n"
+      "only when that is worth it.\n"
+      "Auto: up to the window's own resolution. User: between a minimum and a maximum.");
+  // Applied when a slider is let go: each new scale reallocates the EFB targets, which
+  // a drag would otherwise do every frame.
+  static float sPendingScale = 0.f;
+  static float sPendingMin = 0.f;
+  static int sPendingTarget = -1;
+  if (dynMode == 0) {
+    bool autoScale = sRenderScale <= 0.f;
+    if (ImGui::Checkbox("Auto render scale (native)", &autoScale)) {
+      SetRenderScale(autoScale ? 0.f : 1.f);
+      MarkDirty();
+    }
+    ImGui::SetItemTooltip("Draws at the window's own resolution.");
+  }
+  if (dynMode != 1 && sRenderScale > 0.f) {
     float scale = sPendingScale > 0.f ? sPendingScale : sRenderScale;
-    if (ImGui::SliderFloat("EFB scale", &scale, 1.f, 4.f, "%.2fx")) {
+    char label[32];
+    std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
+    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, 4.f, label)) {
       sPendingScale = scale;
     }
     if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
@@ -480,62 +599,71 @@ void DrawVideoQuality() {
       MarkDirty();
       sPendingScale = 0.f;
     }
-    ImGui::SetItemTooltip("Scales the internal EFB; higher values use more GPU memory.\n"
-                          "Above 2x it supersamples, and each step costs much more GPU time.");
-    if (ImGui::Checkbox("Dynamic resolution", &sDynamicRes)) {
+    ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
+                          "higher values use more GPU memory. Above 2x it supersamples, and each step\n"
+                          "costs much more GPU time.");
+  } else if (sRenderScale <= 0.f) {
+    ImGui::TextDisabled("Window resolution: %.2fx (%dp)", BaseRenderScale(), DrawnLines(0.f));
+  }
+  if (dynMode != 0) {
+    float lowest = sPendingMin > 0.f ? sPendingMin : sDynamicResMin;
+    const float top = std::max(DynamicResTop(), PortDebug::kDynamicResMinLowest);
+    char label[32];
+    std::snprintf(label, sizeof(label), "%.2fx (%dp)", lowest, DrawnLines(lowest));
+    if (ImGui::SliderFloat("Minimum resolution scale", &lowest, PortDebug::kDynamicResMinLowest, top, label,
+                           ImGuiSliderFlags_AlwaysClamp)) {
+      sPendingMin = lowest;
+    }
+    if (sPendingMin > 0.f && !ImGui::IsItemActive()) {
+      sDynamicResMin = sPendingMin;
+      sPendingMin = 0.f;
       ResetDynamicRes();
       MarkDirty();
     }
-    ImGui::SetItemTooltip(
-        "Lowers the EFB scale (down to the lowest scale below) while the GPU can't hold\n"
-        "the target frame rate, and raises it back when there is room. Each change\n"
-        "stutters for a frame, so it moves only when that is worth it.");
-    if (sDynamicRes) {
-      static const int kTargets[] = {0, 30, 60, 90, 120};
-      int target = 0;
-      for (int i = 0; i < 5; ++i) {
-        if (kTargets[i] == sDynamicResTarget) {
-          target = i;
-        }
-      }
-      ImGui::SameLine();
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.f);
-      if (ImGui::Combo("Target", &target, "Display\0" "30 fps\0" "60 fps\0" "90 fps\0" "120 fps\0")) {
-        sDynamicResTarget = kTargets[target];
-        ResetDynamicRes();
-        MarkDirty();
-      }
-      ImGui::SetItemTooltip("Display: the screen's refresh rate, or 60 with the 60 FPS cap on.");
-      static const float kLowest[] = {0.5f, 0.75f, 1.f};
-      int lowest = 2;
-      for (int i = 0; i < 3; ++i) {
-        if (kLowest[i] == sDynamicResMin) {
-          lowest = i;
-        }
-      }
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.f);
-      if (ImGui::Combo("Lowest scale", &lowest, "0.5x\0" "0.75x\0" "1x\0")) {
-        sDynamicResMin = kLowest[lowest];
-        ResetDynamicRes();
-        MarkDirty();
-      }
-      ImGui::SetItemTooltip("Below 1x it draws fewer pixels than the GameCube did and looks softer,\n"
-                            "which lets a phone reach 90 or 120 fps.");
-      ImGui::Text("Drawing at %.2fx (target %.0f fps)", sDynScale > 0.f ? sDynScale : sRenderScale,
-                  DynamicResTargetFps());
-      ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-      const char* reason = PortDynamicRes::ReasonText(sDynController.LastReason());
-      if (sDynController.GpuTimesDropped()) {
-        ImGui::Text("GPU times not used (none arrived, or lowering on them gained nothing): %s", reason);
-      } else if (sDynGpuMs > 0.0) {
-        ImGui::Text("GPU %.1f of %.1f ms a frame: %s", sDynGpuMs, 1000.0 / DynamicResTargetFps(), reason);
-      } else if (sDynGpuMs < 0.0) {
-        ImGui::Text("No GPU times (unsupported, or MP_DYNRES_GPU_TIMES=0); following the frame rate: %s", reason);
-      } else {
-        ImGui::Text("%s", reason);
-      }
-      ImGui::PopStyleColor();
+    ImGui::SetItemTooltip("The lowest it drops to. Below 1x it draws fewer pixels than the GameCube did\n"
+                          "and looks softer, which lets a phone reach 90 or 120 fps; the lowest values are\n"
+                          "for very high resolution displays.");
+    // The left end is "Display" (saved as 0).
+    constexpr int kTargetMin = 30;
+    constexpr int kTargetMax = kFpsCapMax;
+    const int saved = sPendingTarget >= 0 ? sPendingTarget : sDynamicResTarget;
+    int target = saved > 0 ? std::clamp(saved, kTargetMin, kTargetMax) : kTargetMin - 1;
+    if (ImGui::SliderInt("Frame rate target", &target, kTargetMin - 1, kTargetMax,
+                         target < kTargetMin ? "Display" : "%d fps", ImGuiSliderFlags_AlwaysClamp)) {
+      sPendingTarget = target < kTargetMin ? 0 : target;
     }
+    // Applied when let go, like the scales: a change starts the controller over.
+    if (sPendingTarget >= 0 && !ImGui::IsItemActive()) {
+      sDynamicResTarget = sPendingTarget;
+      sPendingTarget = -1;
+      ResetDynamicRes();
+      MarkDirty();
+    }
+    ImGui::SetItemTooltip("Display (all the way left): the screen's refresh rate. Never above the frame\n"
+                          "rate cap: with the 60 FPS cap on it aims for 60. Ctrl+click to type a value.");
+    if (DynamicResTop() <= sDynamicResMin) {
+      ImGui::PushTextWrapPos(0.f);
+      ImGui::TextColored(ThemeWarnColor(), "Not lowering: the minimum is not below the top scale (%.2fx). "
+                         "Lower the minimum%s.", DynamicResTop(), dynMode == 1 ? " or enlarge the window" : "");
+      ImGui::PopTextWrapPos();
+    }
+    const float drawing = sDynScale > 0.f ? sDynScale : DynamicResTop();
+    ImGui::Text("Drawing at %.2fx (%dp), target %.0f fps", drawing,
+                DrawnLines(sDynScale > 0.f ? sDynScale : sRenderScale), DynamicResTargetFps());
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    const char* reason = PortDynamicRes::ReasonText(sDynController.LastReason());
+    if (sDynController.GpuTimesDropped()) {
+      ImGui::Text("GPU times not used (none arrived, or lowering on them gained nothing): %s", reason);
+    } else if (sDynGpuMs > 0.0) {
+      ImGui::Text("GPU %.1f of %.1f ms a frame: %s", sDynGpuMs, 1000.0 / DynamicResTargetFps(), reason);
+    } else if (sDynGpuMs < 0.0) {
+      ImGui::Text("No GPU times (unsupported, or MP_DYNRES_GPU_TIMES=0); following the frame rate: %s", reason);
+    } else {
+      ImGui::Text("%s", reason);
+    }
+    ImGui::PopStyleColor();
+  }
+  if (dynMode != 0 || sRenderScale > 0.f) {
     int sharpen = sSharpenMode;
     if (ImGui::Combo("Sharpen when upscaled", &sharpen, "Off\0" "With dynamic resolution\0" "Always\0")) {
       sSharpenMode = sharpen;
@@ -571,21 +699,52 @@ void DrawVideoCompatibility() {
   ImGui::TextDisabled("For GPU driver problems, such as a black world or a crash at start. Most of "
                       "these take effect after a restart.");
   ImGui::PopTextWrapPos();
-#if defined(_WIN32)
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
   // Which API to ask Aurora for (issue #135). Read at window creation, so it takes a
   // restart: Aurora tries the choice first and falls back to its own order if it
-  // won't start, and the setting is left alone.
+  // won't start, and the setting is left alone. Only this build's choices are listed,
+  // so an API it can't start is never offered.
   {
-    static const char* const kBackendNames[] = {"Auto", "Direct3D 12", "Vulkan", "Direct3D 11"};
-    int choice = static_cast< int >(sGraphicsBackend);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.f);
-    if (ImGui::Combo("Renderer", &choice, kBackendNames, PortDebug::kGraphicsBackendCount)) {
-      SetGraphicsBackend(static_cast< PortDebug::EGraphicsBackend >(choice));
+    const std::span<const PortDebug::EGraphicsBackend> choices = PortGraphicsBackend::Choices();
+    // The labels in Choices() order, NUL-separated as ImGui wants them, built from the
+    // choices so the list cannot drift from the span. Auto asks for nothing, so it is
+    // named as such rather than by whatever Aurora picks.
+    static const std::string kBackendLabels = [] {
+      std::string labels;
+      for (const PortDebug::EGraphicsBackend choice : PortGraphicsBackend::Choices()) {
+        labels += choice == PortDebug::kGraphicsBackend_Auto
+                      ? "Auto"
+                      : PortGraphicsBackend::DisplayName(PortGraphicsBackend::ToAurora(choice));
+        labels.push_back('\0');
+      }
+      labels.push_back('\0');
+      return labels;
+    }();
+    // The combo's index is a position in Choices(), never an enum value. A saved choice
+    // this build doesn't offer (a file from another platform) shows as Auto; it applies
+    // again, untouched, where it is offered.
+    int choice = 0;
+    for (size_t i = 0; i < choices.size(); ++i) {
+      if (choices[i] == sGraphicsBackend) {
+        choice = static_cast< int >(i);
+        break;
+      }
     }
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.f);
+    if (ImGui::Combo("Renderer", &choice, kBackendLabels.c_str(), static_cast< int >(choices.size()))) {
+      SetGraphicsBackend(choices[static_cast< size_t >(choice)]);
+    }
+#if defined(_WIN32)
     ImGui::SetItemTooltip(
         "Which graphics API to start on. Auto tries Direct3D 12, then Vulkan, then\n"
         "Direct3D 11. Restart to apply. If the chosen API can't start, this run falls\n"
         "back to Auto and the setting is kept.");
+#else
+    ImGui::SetItemTooltip(
+        "Which graphics API to start on. Auto uses Vulkan. OpenGL (4.4 or newer) is for\n"
+        "GPUs whose Vulkan driver is missing or draws wrong. Restart to apply. If the\n"
+        "chosen API can't start, this run falls back to Auto and the setting is kept.");
+#endif
     // What this run asked for is the resolution of the STARTUP selection, not the
     // setting: MP_GRAPHICS_BACKEND outranks the file, and changing the combo must not
     // pretend the API this run started on was the one asked for.
@@ -732,14 +891,117 @@ void DrawTexturesSection() {
 // The user's texture pack, layered over the built-in set (see port_textures.h).
 // On Android the folder is picked with the system folder picker and copied into
 // the data folder; on the desktop the player fills the folder themselves.
+#if !defined(__ANDROID__)
+// Import texture pack .zip: the file dialog answers on another thread, so its
+// pick waits in sTexturePackZipPick for DrawTexturePack; the extraction runs on
+// its own detached thread (it touches only statics) into `<root>.partial`, then
+// the finished folder is renamed to `<root>.new` for PortTextures to swap in.
+namespace {
+std::mutex sTexturePackZipMutex;
+std::optional<std::string> sTexturePackZipPick;
+std::atomic<bool> sTexturePackZipDialogOpen{false};
+std::atomic<bool> sTexturePackZipBusy{false};
+
+void ImportTexturePackZip(std::string zipPath, std::string root) {
+  namespace fs = std::filesystem;
+  const auto utf8 = [](const std::string& text) {
+    return fs::path(std::u8string(text.begin(), text.end()));
+  };
+  const std::string partial = root + ".partial";
+  std::error_code ec;
+  fs::remove_all(utf8(partial), ec);
+  size_t count = 0;
+  std::string error;
+  const bool ok = PortZip::Extract(
+      zipPath, partial, PortZip::TexturePackFilter,
+      [](size_t done) {
+        SetTexturePackStatus("Copying the texture pack... " + std::to_string(done) + " textures");
+      },
+      count, error);
+  if (!ok) {
+    fs::remove_all(utf8(partial), ec);
+    SetTexturePackStatus("Copying the texture pack failed: " + error);
+  } else if (count == 0) {
+    fs::remove_all(utf8(partial), ec);
+    SetTexturePackStatus("No .png or .dds textures in that file (is it a .zip?); nothing changed.");
+  } else {
+    fs::remove_all(utf8(root + ".new"), ec);
+    fs::rename(utf8(partial), utf8(root + ".new"), ec);
+    if (ec) {
+      fs::remove_all(utf8(partial), ec);
+      SetTexturePackStatus("Copying the texture pack failed: " + ec.message());
+    } else {
+      PortTextures::RequestUserPackReload();
+      SetTexturePackStatus("Copied " + std::to_string(count) + " textures.");
+    }
+  }
+  sTexturePackZipBusy = false;
+}
+
+void OpenTexturePackZipDialog() {
+  int windowCount = 0;
+  SDL_Window** windows = SDL_GetWindows(&windowCount);
+  SDL_Window* window = windows != nullptr && windowCount > 0 ? windows[0] : nullptr;
+  SDL_free(windows);
+  static const SDL_DialogFileFilter filters[] = {
+      {"Zip archives", "zip"},
+      {"All files", "*"},
+  };
+  const SDL_DialogFileCallback done = [](void*, const char* const* files, int) {
+    std::lock_guard lock(sTexturePackZipMutex);
+    // Empty = cancelled; a leading \x01 marks a failed dialog's error.
+    sTexturePackZipPick = files != nullptr ? std::string(files[0] != nullptr ? files[0] : "")
+                                           : std::string("\x01") + SDL_GetError();
+    sTexturePackZipDialogOpen = false;
+  };
+  sTexturePackZipDialogOpen = true;
+  SDL_ShowOpenFileDialog(done, nullptr, window, filters, 2, nullptr, false);
+}
+
+// Starts the extraction for a pick the dialog delivered.
+void ProcessTexturePackZipPick(const char* root) {
+  std::optional<std::string> pick;
+  {
+    std::lock_guard lock(sTexturePackZipMutex);
+    pick.swap(sTexturePackZipPick);
+  }
+  if (!pick || pick->empty()) {
+    return;
+  }
+  if ((*pick)[0] == '\x01') {
+    SetTexturePackStatus("Could not open the file picker: " + pick->substr(1));
+    return;
+  }
+  if (sTexturePackZipBusy.exchange(true)) {
+    SetTexturePackStatus("A texture pack is still being copied.");
+    return;
+  }
+  SetTexturePackStatus("Copying the texture pack... 0 textures");
+  std::thread(ImportTexturePackZip, std::move(*pick), std::string(root != nullptr ? root : "")).detach();
+}
+} // namespace
+#endif
+
 void DrawTexturePack() {
   const char* root = PortTextures::UserRoot();
   if (root[0] == '\0') {
     ImGui::TextUnformatted("No user texture folder.");
     return;
   }
+  bool enabled = PortTextures::UserPackEnabled();
+  const std::string toggleKeys = PortInputRemap::BindingsText(PortInput::Action::ToggleTexturePack, " / ");
+  const std::string toggleLabel =
+      (toggleKeys.empty() ? std::string("Use the texture pack") : "Use the texture pack (" + toggleKeys + ")") +
+      "###texture-pack-enabled";
+  if (ImGui::Checkbox(toggleLabel.c_str(), &enabled)) {
+    PortTextures::SetUserPackEnabled(enabled);
+  }
+  ImGui::SetItemTooltip("Off shows the game's own textures, without deleting the pack.\n"
+                        "The binding (Controls > Remap > Port) switches it in game, to compare.");
   const size_t count = PortTextures::UserPackCount();
-  if (count > 0) {
+  if (!enabled) {
+    ImGui::TextUnformatted("Texture pack off.");
+  } else if (count > 0) {
     ImGui::Text("%zu replacements loaded, over the built-in set.", count);
   } else {
     ImGui::TextUnformatted("No texture pack loaded.");
@@ -750,22 +1012,50 @@ void DrawTexturePack() {
     ImGui::TextWrapped("%s", status.c_str());
   }
   if (ImGui::Button("Choose texture pack folder...")) {
-    PickTexturePack();
+    PickTexturePack(false);
   }
   ImGui::SameLine();
+  if (ImGui::Button("Import texture pack .zip...")) {
+    PickTexturePack(true);
+  }
   if (ImGui::Button("Remove texture pack")) {
     PortTextures::RequestUserPackRemoval();
     SetTexturePackStatus("Texture pack removed.");
   }
   ImGui::TextWrapped(
-      "The folder is copied into the data folder, so it keeps working if the original is "
-      "moved. Pick it again after changing it.");
+      "The pack is copied into the data folder, so it keeps working if the original is "
+      "moved. Pick it again after changing it. Use the .zip import if the folder picker "
+      "shows no files.");
 #else
   ImGui::TextWrapped("Folder: %s", root);
+  ProcessTexturePackZipPick(root);
+  const std::string status = TexturePackStatus();
+  if (!status.empty()) {
+    ImGui::TextWrapped("%s", status.c_str());
+  }
   if (ImGui::Button("Reload texture pack")) {
     PortTextures::RequestUserPackReload();
   }
+  ImGui::SameLine();
+  const bool busy = sTexturePackZipBusy || sTexturePackZipDialogOpen;
+  ImGui::BeginDisabled(busy);
+  if (ImGui::Button("Import texture pack .zip...")) {
+    if (root == nullptr || root[0] == '\0') {
+      SetTexturePackStatus("There is no texture pack folder to import into.");
+    } else {
+      OpenTexturePackZipDialog();
+    }
+  }
+  ImGui::EndDisabled();
 #endif
+}
+
+void ToggleTexturePack() {
+  const bool on = !PortTextures::UserPackEnabled();
+  PortTextures::SetUserPackEnabled(on);
+  // Saved now: outside the overlay, changes are otherwise written at exit.
+  SaveSettingsNow();
+  ShowNote(on ? "Texture pack: on" : "Texture pack: off");
 }
 
 } // namespace PortDebug

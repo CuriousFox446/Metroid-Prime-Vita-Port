@@ -8,11 +8,13 @@
 #include "port_gyro_motion.h"
 #include "port_photo.h"
 #include "port_pointer.h"
+#include "port_radial.h"
 #include "port_log.h"
 #include "port_paths.h"
 #include "port_config_reset.h"
 #include "port_input_devices.h"
 #include "port_savestate.h"
+#include "port_flick_stick.h"
 #include "port_mouse.h"
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -24,7 +26,7 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_timer.h>
 
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 #include "touch_pad.h"
 #endif
 
@@ -50,12 +52,21 @@ std::atomic<uint64_t> sVisorRequestUntilNs{0};
 std::atomic<int> sBeamRequest{-1};
 std::atomic<uint64_t> sBeamRequestUntilNs{0};
 std::atomic<uint64_t> sSpringRequestUntilNs{0};
+std::atomic<uint64_t> sDodgeRequestUntilNs{0};
+std::atomic<uint64_t> sTargetCycleUntilNs{0};
+std::atomic<int> sTargetCycleDir{0};
+std::atomic<bool> sGrappleHeld{false};
+std::atomic<uint64_t> sGrappleHoldUntilNs{0};
 constexpr uint64_t kWheelRequestNs = 120'000'000;
 std::mutex sMinimapMutex;
 bool sMinimapValid = false;
 bool sMinimapDrawn = false;
 float sMinimapRect[4] = {};
 std::chrono::steady_clock::time_point sMinimapStamp;
+// The HUD draw in progress (game thread only); EndMinimapFrame publishes it whole.
+bool sMinimapPendingValid = false;
+bool sMinimapPendingDrawn = false;
+float sMinimapPendingRect[4] = {};
 std::atomic< int > sMapTapPending{0};
 bool sMapTapHeld = false;
 // Drag to pan the map screen (Android): the overlay sends dp deltas and the view
@@ -83,6 +94,14 @@ bool sMouseGameplayActive = false;
 // Pointer aim's pointer, and whether it steered this tick (free look).
 PortMouse::PointerAim sPointerAim;
 bool sPointerAimFree = false;
+// The last update left the pointer free under a lock (lock-on free aim).
+bool sPointerAimLocked = false;
+// That lock had no target (UpdateMouseAim's pointerStays): its end leaves the pointer put.
+bool sPointerAimLockStays = false;
+// The last update held the pointer still under a lock (UpdateMouseAim's pointerHold).
+bool sPointerAimHeld = false;
+// A locked update this tick moved the pointer (TickAim's job for the pointer under a lock).
+bool sLockPointerRecorded = false;
 PortMouse::ButtonGate sMouseMenuGate;
 PortMouse::HeldButtons sMouseHeldButtons;
 float sMousePendingX = 0.f;
@@ -105,16 +124,19 @@ bool sAimAppliedLastTick = false;
 // The tick's first applied aim update: it keeps the twin stick turn it
 // recorded and makes the tick's only pointer edge turn (issue #140).
 PortMouse::TickAim sAimTick;
-// Gyro state: the phone's sensor is looked up once, so the sensor list is not
-// walked on every tick.
-bool sPhoneGyroSearched = false;
+// Gyro state: the phone's sensors are searched again after a miss (a sensor
+// can appear late), at most once a second so the list is not walked per tick.
+uint64_t sPhoneNextSearchNs = 0;
 SDL_Sensor* sPhoneGyro = nullptr;
 SDL_Sensor* sPhoneAccel = nullptr;
 const char* sGyroStatus = "off";
 // Calibration and gravity for the current source, reset when it changes (a
 // different pad, or the phone), and whether that source has an accelerometer.
 PortGyro::Motion sGyroMotion;
-const void* sGyroMotionSource = nullptr;
+// The source the motion state belongs to: a pad's joystick instance id (never
+// reused, unlike its pointer after a replug), or kPhoneSource; 0 for none.
+constexpr uint32_t kPhoneSource = 0xFFFFFFFFu;
+uint32_t sGyroMotionSource = 0;
 bool sGyroHasAccel = false;
 PortGyro::Filter sGyroFilter;
 } // namespace
@@ -234,7 +256,7 @@ void ResetGyroCalibration() { sGyroMotion.Reset(); }
 void RequestResetAim() { sResetAimRequested.store(true, std::memory_order_release); }
 
 float GyroCalibrationConfidence() {
-  return sGyroMotionSource != nullptr && sGyroHasAccel ? sGyroMotion.Confidence() : -1.f;
+  return sGyroMotionSource != 0 && sGyroHasAccel ? sGyroMotion.Confidence() : -1.f;
 }
 
 void SetGyroButton(bool held) { sGyroActivation.Update(sInput.gyroMode, held); }
@@ -273,7 +295,7 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
   float gyro[3];
   float accel[3];
   bool haveAccel = false;
-  const void* source = nullptr;
+  uint32_t source = 0;
 
   if (wantController) {
     // The player's pad, not the first one SDL lists: that can be another pad
@@ -286,7 +308,7 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
           SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
         }
         if (SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, gyro, 3)) {
-          source = pad;
+          source = static_cast< uint32_t >(SDL_GetGamepadID(pad));
           sGyroStatus = "controller";
           if (SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL)) {
             if (!SDL_GamepadSensorEnabled(pad, SDL_SENSOR_ACCEL)) {
@@ -299,9 +321,10 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
     }
   }
 
-  if (source == nullptr && wantPhone) {
-    if (sPhoneGyro == nullptr && !sPhoneGyroSearched) {
-      sPhoneGyroSearched = true;
+  if (source == 0 && wantPhone) {
+    const uint64_t searchNow = SDL_GetTicksNS();
+    if (sPhoneGyro == nullptr && searchNow >= sPhoneNextSearchNs) {
+      sPhoneNextSearchNs = searchNow + 1000000000ull;
       int count = 0;
       if (SDL_SensorID* ids = SDL_GetSensors(&count)) {
         for (int i = 0; i < count; ++i) {
@@ -316,7 +339,7 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
       }
     }
     if (sPhoneGyro != nullptr && SDL_GetSensorData(sPhoneGyro, gyro, 3)) {
-      source = sPhoneGyro;
+      source = kPhoneSource;
       sGyroStatus = "phone";
       haveAccel = sPhoneAccel != nullptr && SDL_GetSensorData(sPhoneAccel, accel, 3);
       // The phone reports its own axes (x right, y up in its natural
@@ -354,7 +377,7 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
     }
   }
 
-  if (source == nullptr) {
+  if (source == 0) {
     return false;
   }
   if (source != sGyroMotionSource || haveAccel != sGyroHasAccel) {
@@ -456,7 +479,8 @@ void PollGyro() {
   const float scale = sInput.gyroSensitivity * dt / perPixel;
   const float ySense = sInput.gyroSplit ? sInput.gyroSensitivityY : sInput.gyroSensitivity;
   const float scaleY = ySense * dt / perPixel;
-  if (!PointerAim()) {
+  // A lock-on free aim pointer is a pointer too, with or without pointer aim (issue #188).
+  if (!PointerAim() && !sPointerAimLocked) {
     sGyroPendingX += sx * yaw * scale;
     sGyroPendingY -= sy * pitch * scaleY;
     return;
@@ -482,6 +506,9 @@ void ResetMouseAim() {
   sMouseAimState.Reset();
   sPointerAim.Center();
   sPointerAimFree = false;
+  sPointerAimLocked = false;
+  sPointerAimLockStays = false;
+  sPointerAimHeld = false;
   sMouseGameplayActive = false;
   sMouseButtonGate.Reset();
   sMousePendingX = sMousePendingY = sMouseFrameX = sMouseFrameY = 0.f;
@@ -513,20 +540,20 @@ void SetMouseGameplayActive(bool active) {
 }
 bool MouseInvertX() { EnsureInitialized(); return sInput.mouseInvertX; }
 bool MouseInvertY() { EnsureInitialized(); return sInput.mouseInvertY; }
+bool MapInvertX() { EnsureInitialized(); return sInput.mapInvertX; }
+bool MapInvertY() { EnsureInitialized(); return sInput.mapInvertY; }
 bool MouseButtons() { EnsureInitialized(); return sInput.mouseButtons; }
 bool MouseCrosshair() { EnsureInitialized(); return sInput.mouseCrosshair; }
-// Window travel (pixels) to pointer units (-1..1 of the half view). At the default
-// sensitivity the pointer follows the cursor's speed; the sensitivity slider scales it.
+// Window travel (pixels) to pointer units (-1..1 of the half view). At a sensitivity of
+// kAimPixelRadians the pointer follows the cursor's speed; the sensitivity slider scales it.
 static void PointerAimScale(float& sx, float& sy) {
-  constexpr float kReferenceSensitivity = 0.0035f;
   int width = 0, height = 0;
   if (!WindowSize(width, height)) {
     width = 640;
     height = 480;
   }
-  const float speed = MouseSensitivity() / kReferenceSensitivity;
-  sx = 2.f / static_cast<float>(width) * speed;
-  sy = 2.f / static_cast<float>(height) * speed;
+  sx = PortMouse::PointerUnitsPerCount(static_cast<float>(width), MouseSensitivity());
+  sy = PortMouse::PointerUnitsPerCount(static_cast<float>(height), MouseSensitivity());
 }
 
 bool AimCrosshair() { return MouseCrosshair() || PointerAim(); }
@@ -543,6 +570,14 @@ void SetPointerAim(bool on) {
 }
 int PointerAimBox() { EnsureInitialized(); return sInput.pointerAimBox; }
 int PointerAimTurn() { EnsureInitialized(); return sInput.pointerAimTurn; }
+bool LockOnFreeAim() {
+  EnsureInitialized();
+  return sInput.lockOnFreeAim && DirectAim() && !sOriginalExperience;
+}
+bool HandOnCannon() {
+  EnsureInitialized();
+  return sInput.handOnCannon && DirectAim() && !sOriginalExperience;
+}
 void SetPointerAimPosition(float x, float y) {
   sPointerAim.Center();
   sPointerAim.Move(x, y);
@@ -554,6 +589,9 @@ bool PointerAimPosition(float& x, float& y) {
 }
 bool PresentedPointerAimPosition(float fraction, float& x, float& y) {
   if (!PointerAimPosition(x, y)) return false;
+  // Held, the pointer stays put: travel since the tick does not move it.
+  // So does it under an open radial menu, which takes the travel.
+  if (sPointerAimHeld || PortRadial::Capturing()) return true;
   // The travel since the tick, so the drawn pointer moves every frame, and the
   // last tick's stick travel drawn after its tick (PresentedAimDelta).
   float touchX = 0.f, touchY = 0.f;
@@ -597,11 +635,25 @@ void NoteMouseButton(bool synthetic, unsigned mask, bool down) {
 void ClearMouseButtons() { sMouseHeldButtons.Clear(); }
 unsigned MouseHeldButtons() { return sMouseHeldButtons.Held(); }
 
-bool UpdateMouseAim(bool active, bool locked, float x, float y, float z) {
+bool UpdateMouseAim(bool active, bool locked, float x, float y, float z, bool pointerLock,
+                    bool pointerHold, bool pointerStays) {
   SetMouseGameplayActive(active);
   const PortMouse::AimState lastAim = sMouseAimState;
   const PortMouse::PointerAim lastPointer = sPointerAim;
-  const bool pointer = PointerAim();
+  // Lock-on free aim: the lock owns the view and a pointer moves over it, pointer aim's
+  // or, without pointer aim, one for the lock only. It starts and ends a lock at the
+  // centre, where the target is. Under pointer aim an empty lock frees it too (CPlayer
+  // decides which locks through pointerLock); having no target, it leaves the pointer put.
+  const bool lockFree = active && locked && pointerLock && (LockOnFreeAim() || PointerAim());
+  const bool pointer = PointerAim() || lockFree;
+  // A held pointer stays where the lock found it, and neither moves nor turns the view.
+  const bool held = active && locked && !lockFree && pointerHold && PointerAim();
+  sPointerAimHeld = held;
+  if (lockFree != sPointerAimLocked) {
+    if (!(lockFree ? pointerStays : sPointerAimLockStays)) sPointerAim.Center();
+    sPointerAimLocked = lockFree;
+  }
+  sPointerAimLockStays = lockFree && pointerStays;
   // Reset aim: under pointer aim recentre the pointer, otherwise look level
   // (pitch 0; yaw stays). reset_aim_both does both either way.
   if (sResetAimRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -613,16 +665,25 @@ bool UpdateMouseAim(bool active, bool locked, float x, float y, float z) {
       sMouseAimState.lagPitch = 0.f;
     }
   }
+  // An open Trilogy radial menu takes the aim travel as its selection (the Wii pointed at
+  // it), and the view holds still meanwhile.
+  if (PortRadial::Capturing()) {
+    PortRadial::AddTravel(sMouseFrameX + sStickFrameX + sGyroCameraFrameX,
+                          sMouseFrameY + sStickFrameY + sGyroCameraFrameY);
+    sMouseFrameX = sMouseFrameY = sStickFrameX = sStickFrameY = 0.f;
+    sGyroCameraFrameX = sGyroCameraFrameY = 0.f;
+  }
   // Under pointer aim the stick moves the pointer, unless the gyro does: then the
   // stick (and the keyboard look keys) turn the camera as they do without
-  // pointer aim.
-  const bool stickTurns = pointer && sGyroDrivesAim;
+  // pointer aim. A lock leaves the view nothing to turn, so they move the pointer too.
+  const bool stickTurns = pointer && sGyroDrivesAim && !lockFree;
   float dx = sMouseFrameX;
   float dy = sMouseFrameY;
   if (pointer) {
     // The travel moves the pointer, not the view. A lock (or anything that stops free
-    // look) re-centres it: lock-on, scan and grapple still aim through the centre.
-    if (active && !locked) {
+    // look) re-centres it: lock-on (without lock-on free aim), scan and grapple still aim
+    // through the centre.
+    if (active && (!locked || lockFree)) {
       float sx = 0.f, sy = 0.f;
       PointerAimScale(sx, sy);
       if (stickTurns) {
@@ -630,6 +691,8 @@ bool UpdateMouseAim(bool active, bool locked, float x, float y, float z) {
       } else {
         sPointerAim.MoveLagged(dx * sx, dy * sy, sStickFrameX * sx, sStickFrameY * sy);
       }
+    } else if (held) {
+      sPointerAim.lagX = sPointerAim.lagY = 0.f;
     } else {
       sPointerAim.Center();
     }
@@ -648,16 +711,43 @@ bool UpdateMouseAim(bool active, bool locked, float x, float y, float z) {
                                   dpitch);
     sMouseAimState.Turn(dyaw, dpitch);
   }
-  sPointerAimFree = pointer && applied;
+  sPointerAimFree = pointer && (applied || lockFree || held);
   if (!sPointerAimFree) sPointerAim.Center();
   if (applied) {
     sAimTick.Applied(sMouseAimState, lastAim, sPointerAim, lastPointer, sPointerAimFree);
+  } else if (lockFree) {
+    // As TickAim keeps the pointer's lag from the tick's first update, but apart from it:
+    // a lock that ends between the two updates leaves the second its lag and edge turn.
+    if (sLockPointerRecorded) {
+      sPointerAim.lagX = lastPointer.lagX;
+      sPointerAim.lagY = lastPointer.lagY;
+    }
+    sLockPointerRecorded = true;
+  }
+  // The second update of a tick must not move the pointer by the same travel again.
+  if (applied || lockFree) {
     sMouseFrameX = sMouseFrameY = sStickFrameX = sStickFrameY = 0.f;
     sGyroCameraFrameX = sGyroCameraFrameY = 0.f;
   }
   sAimAppliedLastTick = applied;
   return applied;
 }
+bool FlickStickTurn(float x, float y, float dt, float& yaw) {
+  static PortFlickStick::State sFlick;
+  // On from the start: the first tick that reads a pad (it may come tilted) flicks.
+  static bool sFlickOn = true;
+  // Under pointer aim the stick moves the pointer unless the gyro drives the aim; a radial
+  // menu or a lock with free aim takes the stick's travel as it is.
+  const bool on = FlickStick() && !Visible() && !PortRadial::Capturing() && !sPointerAimLocked &&
+                  (!PointerAim() || sGyroDrivesAim);
+  // Off and back on, a stick still tilted must be let go before it flicks.
+  if (on != sFlickOn) sFlick.Reset();
+  sFlickOn = on;
+  if (!on) return false;
+  yaw = sFlick.Update(x, y, dt);
+  return true;
+}
+
 void SynchronizeMouseAim(float x, float y, float z) { sMouseAimState.Synchronize(x, y, z); }
 void TurnMouseAim(float dyaw) { sMouseAimState.Turn(dyaw, 0.f); }
 
@@ -854,6 +944,34 @@ void RequestSpringBall() { sSpringRequestUntilNs.store(SDL_GetTicksNS() + kWheel
 
 bool SpringBallRequested() { return SDL_GetTicksNS() < sSpringRequestUntilNs.load(); }
 
+void RequestDodge() { sDodgeRequestUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs); }
+
+bool TakeDodgeRequest() {
+  const uint64_t until = sDodgeRequestUntilNs.exchange(0);
+  return SDL_GetTicksNS() < until && !OriginalExperience();
+}
+
+void RequestTargetCycle(int dir) {
+  sTargetCycleDir.store(dir > 0 ? 1 : -1);
+  sTargetCycleUntilNs.store(SDL_GetTicksNS() + kWheelRequestNs);
+}
+
+int TakeTargetCycle() {
+  const uint64_t until = sTargetCycleUntilNs.exchange(0);
+  if (SDL_GetTicksNS() >= until || OriginalExperience()) return 0;
+  return sTargetCycleDir.load();
+}
+
+void SetGrappleHeld(bool held) { sGrappleHeld.store(held, std::memory_order_relaxed); }
+
+void HoldGrapple(float seconds) {
+  sGrappleHoldUntilNs.store(SDL_GetTicksNS() + static_cast<uint64_t>(seconds * 1e9f));
+}
+
+bool GrappleHeld() {
+  return sGrappleHeld.load(std::memory_order_relaxed) || SDL_GetTicksNS() < sGrappleHoldUntilNs.load();
+}
+
 void RequestSaveStateHotkey(int which) {
   if (which == 1 || which == 2) {
     sSaveStateHotkey.store(which, std::memory_order_release);
@@ -861,15 +979,26 @@ void RequestSaveStateHotkey(int which) {
 }
 
 // Game thread, once per HUD draw (valid=false when the minimap isn't shown).
+void BeginMinimapFrame() {
+  sMinimapPendingValid = false;
+  sMinimapPendingDrawn = false;
+}
+
 void SetMinimapRect(bool valid, bool drawn, float x0, float y0, float x1, float y1) {
+  sMinimapPendingDrawn = drawn;
+  sMinimapPendingValid = valid && std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) &&
+                         std::isfinite(y1);
+  sMinimapPendingRect[0] = x0;
+  sMinimapPendingRect[1] = y0;
+  sMinimapPendingRect[2] = x1;
+  sMinimapPendingRect[3] = y1;
+}
+
+void EndMinimapFrame() {
   std::lock_guard lock(sMinimapMutex);
-  sMinimapDrawn = drawn;
-  sMinimapValid = valid && std::isfinite(x0) && std::isfinite(y0) && std::isfinite(x1) &&
-                  std::isfinite(y1);
-  sMinimapRect[0] = x0;
-  sMinimapRect[1] = y0;
-  sMinimapRect[2] = x1;
-  sMinimapRect[3] = y1;
+  sMinimapValid = sMinimapPendingValid;
+  sMinimapDrawn = sMinimapPendingDrawn;
+  std::copy(sMinimapPendingRect, sMinimapPendingRect + 4, sMinimapRect);
   sMinimapStamp = std::chrono::steady_clock::now();
 }
 
@@ -1006,9 +1135,12 @@ void AddTouchAim(float dxDp, float dyDp) {
       !std::isfinite(dyDp)) {
     return;
   }
+  // As stick aim: a touch pixel turns kAimPixelRadians whatever the mouse sensitivity.
+  const float sensitivity = MouseSensitivity();
   std::lock_guard lock(sTouchAimMutex);
-  sTouchAimPendingX += dxDp * sInput.touchAimSpeed;
-  sTouchAimPendingY += dyDp * (sInput.touchAimSplit ? sInput.touchAimSpeedY : sInput.touchAimSpeed);
+  sTouchAimPendingX += PortMouse::AimPixelsAsCounts(dxDp * sInput.touchAimSpeed, sensitivity);
+  sTouchAimPendingY += PortMouse::AimPixelsAsCounts(
+      dyDp * (sInput.touchAimSplit ? sInput.touchAimSpeedY : sInput.touchAimSpeed), sensitivity);
 }
 
 void BeginFrameMouse() {
@@ -1022,8 +1154,9 @@ void BeginFrameMouse() {
   }
   // On the direct aim path (mouse aim, twin stick, or the modern touch layout) the
   // touch travel joins the mouse's; in the classic GameCube scheme
-  // CPlayer::UpdateTouchLook takes it instead (TakeTouchLook).
-  const bool directAim = DirectAim();
+  // CPlayer::UpdateTouchLook takes it instead (TakeTouchLook). While a radial menu
+  // captures input it joins the mouse's either way, so a look drag points the menu.
+  const bool directAim = DirectAim() || PortRadial::Capturing();
   sTouchLookFrameX = directAim ? 0.f : touchX;
   sTouchLookFrameY = directAim ? 0.f : touchY;
   sMouseFrameX = sMousePendingX + sGyroPendingX + (directAim ? touchX : 0.f);
@@ -1037,6 +1170,7 @@ void BeginFrameMouse() {
   sStickFrameX = sStickFrameY = 0.f;
   sAimAppliedLastTick = false;
   sAimTick.BeginTick();
+  sLockPointerRecorded = false;
 }
 
 void SetSpringBallSwipe(bool enabled) { StoreSetting(sInput.springSwipe, enabled); }
@@ -1072,8 +1206,10 @@ bool TakeTouchLook(float& dyaw, float& dpitch) {
 
 bool PresentedAimDelta(float fraction, float& dyaw, float& dpitch) {
   dyaw = dpitch = 0.f;
+  // An open radial menu takes the travel as its selection (UpdateMouseAim), so the view
+  // must not show it turning before the tick, then snap back.
   if (!FrameInterpolation() || !sMouseGameplayActive || !sAimAppliedLastTick ||
-      !std::isfinite(fraction) || fraction < 0.f) {
+      PortRadial::Capturing() || !std::isfinite(fraction) || fraction < 0.f) {
     return false;
   }
   // What the next tick will consume: the mouse, gyro and touch travel so far,

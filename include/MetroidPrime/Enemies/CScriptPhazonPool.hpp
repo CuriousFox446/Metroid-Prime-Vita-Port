@@ -13,6 +13,7 @@
 class CElementGen;
 
 class CScriptPhazonPool : public CScriptTrigger {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   CScriptPhazonPool(TUniqueId uid, const rstl::string& name, const CEntityInfo& info,
                     const CTransform4f& xf, const CVector3f& scale, bool active, const CAssetId& w1,
@@ -29,6 +30,9 @@ public:
 
   // CActor
   void AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const override;
+#ifdef TARGET_PC
+  void PortAddThermalColdNode(const CFrustumPlanes&, const CStateManager&) const override;
+#endif
   void Render(const CStateManager& mgr) const override;
   rstl::optional_object< CAABox > GetTouchBounds() const override;
   void Touch(CActor& actor, CStateManager& mgr) override;

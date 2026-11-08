@@ -107,9 +107,18 @@ void CWaveBeam::Fire(const bool underwater, const float dt,
           GetDamageInfo(mgr, chargeState, chargeFactor1), mgr.AllocateUniqueId(), kInvalidAreaId,
           GetPlayerId(), homingTarget, CWeapon::kPA_ArmCannon, underwater, CVector3f(1.f, 1.f, 1.f),
           rstl::optional_object_null(), CSfxManager::kInternalInvalidSfxId, false);
+#ifdef TARGET_PC
+      proj->Projectile().PortSetBeamTint(CPlayerState::kBI_Wave);
+#endif
       mgr.AddObject(proj);
       proj->Think(dt, mgr);
     }
+#ifdef TARGET_PC
+    // CWaveBeamMP1::Fire starts the normal-shot muzzle module here too.
+    if (PortRemasteredMuzzle()) {
+      PortStartMuzzleFlash();
+    }
+#endif
   }
 
   if (chargeState != CPlayerState::kCS_Normal)
@@ -146,6 +155,7 @@ void CWaveBeam::PortFireStackedProjectile(const bool underwater, const float dt,
         GetDamageInfo(mgr, chargeState, chargeFactor1), mgr.AllocateUniqueId(), kInvalidAreaId,
         GetPlayerId(), homingTarget, CWeapon::kPA_ArmCannon, underwater, CVector3f(1.f, 1.f, 1.f),
         rstl::optional_object_null(), CSfxManager::kInternalInvalidSfxId, false);
+    proj->Projectile().PortSetBeamTint(CPlayerState::kBI_Wave);
     mgr.AddObject(proj);
     proj->Think(dt, mgr);
   }

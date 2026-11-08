@@ -1,3 +1,4 @@
+#include "port_anim_tile.h"
 #include "port_fx_debug.h"
 #include "port_room_env.h"
 #include "port_vfx_opacity.h"
@@ -5,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "Kyoto/Graphics/CColor.hpp"
@@ -63,6 +65,129 @@ float EvalReal(CRealElement* e, int frame, float def) {
     e->GetValue(frame, v);
   }
   return v;
+}
+
+// The header MTRL's TEXR as perm 048's VS places it (sprites and planar squares alike): the corner
+// q goes into the ATEX tile rect, q = mix(rect.xy, rect.zw, corner), then through TRST,
+// uv = 0.5 + R(rot) (diag(sx, sy) q + (x, y) - 0.5). An ATFB (shader 9d1a1432) leaves the UV
+// alone and picks the array layer instead.
+struct HeaderTexr {
+  const float* rect = nullptr;
+  bool trs = false;
+  bool hasLayer = false;
+  float layer = 0.f;
+  float x = 0.f, y = 0.f, sx = 1.f, sy = 1.f, cosR = 1.f, sinR = 0.f;
+  // VTRT, an ANTH's TRST (shader 31c6b110): the thresholding map's UV (set 1) is the corner q through
+  // it, with no tile rect.
+  bool thr = false;
+  float thrX = 0.f, thrY = 0.f, thrSx = 1.f, thrSy = 1.f, thrCos = 1.f, thrSin = 0.f;
+
+  void Apply(float qx, float qy, float& tu, float& tv) const {
+    tu = qx;
+    tv = qy;
+    if (rect != nullptr) {
+      tu = rect[0] + (rect[2] - rect[0]) * qx;
+      tv = rect[1] + (rect[3] - rect[1]) * qy;
+    }
+    if (trs) {
+      const float du = sx * tu + x - 0.5f;
+      const float dv = sy * tv + y - 0.5f;
+      tu = 0.5f + cosR * du - sinR * dv;
+      tv = 0.5f + sinR * du + cosR * dv;
+    }
+  }
+
+  void ApplyThreshold(float qx, float qy, float& tu, float& tv) const {
+    const float du = thrSx * qx + thrX - 0.5f;
+    const float dv = thrSy * qy + thrY - 0.5f;
+    tu = 0.5f + thrCos * du - thrSin * dv;
+    tv = 0.5f + thrSin * du + thrCos * dv;
+  }
+};
+
+// Element trees read the current particle's lifetime globals, which the caller has set to
+// particleLifetime; the ATX2 cycle alone runs on systemLifetime.
+HeaderTexr EvalHeaderTexr(const CPortVfxData& vfx, int partFrame, int systemLifetime, int particleLifetime) {
+  HeaderTexr h;
+  // VTRS, TEXR TRST: rot goes to radians when the instance is written (0x2b4a04).
+  if (vfx.vtrs[0] != nullptr) {
+    h.trs = true;
+    h.x = EvalReal(vfx.vtrs[0], partFrame, 0.f);
+    h.y = EvalReal(vfx.vtrs[1], partFrame, 0.f);
+    h.sx = EvalReal(vfx.vtrs[2], partFrame, 1.f);
+    h.sy = EvalReal(vfx.vtrs[3], partFrame, 1.f);
+    const float rot = EvalReal(vfx.vtrs[4], partFrame, 0.f) * 0.017453292f;
+    h.cosR = std::cos(rot);
+    h.sinR = std::sin(rot);
+  }
+  // VATX, TEXR ATEX. VAT2's cycle (an ATX2's, TEXR tag 1) reads the time context's slot 0, the
+  // system's PSLT (CElementGen ctor 0x244cfc), so it runs on the system's lifetime as PortEvalSys does.
+  // VTP2, TEXR TXP2 (CUVETexturePalette::GetValue 0x2cda3c): the index alone picks the tile;
+  // fcvtzs takes a NaN to tile 0.
+  if (vfx.txp2Index != nullptr && !vfx.atexRects.empty()) {
+    const int count = int(vfx.atexRects.size() / 4);
+    const float v = EvalReal(vfx.txp2Index, partFrame, 0.f) * float(count);
+    const int tile = v >= float(count - 1) ? count - 1 : v > 0.f ? int(v) : 0;
+    h.rect = &vfx.atexRects[tile * 4];
+  } else if (!vfx.atexRects.empty()) {
+    float cycle = vfx.atexCycle;
+    if (vfx.atexCycleElem != nullptr) {
+      CParticleGlobals::SetParticleLifetime(systemLifetime);
+      CParticleGlobals::UpdateParticleLifetimeTweenValues(partFrame);
+      int value = 1;
+      vfx.atexCycleElem->GetValue(partFrame, value);
+      cycle = float(value);
+      CParticleGlobals::SetParticleLifetime(particleLifetime);
+      CParticleGlobals::UpdateParticleLifetimeTweenValues(partFrame);
+    }
+    const int count = int(vfx.atexRects.size() / 4);
+    h.rect = &vfx.atexRects[PortAnimTile(count, vfx.atexLoop, cycle, partFrame) * 4];
+  }
+  // VATF, TEXR ATFB (CUVEAnimFlipBookTexture::GetValue 0x2cde08): the duration element runs on
+  // the particle's frame like the TRST terms; its entries hold only the layer index.
+  if (vfx.atfbLayers > 0) {
+    h.hasLayer = true;
+    int cycle = 1;
+    if (vfx.atfbCycle != nullptr) {
+      vfx.atfbCycle->GetValue(partFrame, cycle);
+    }
+    h.layer = float(PortAnimTile(vfx.atfbLayers, vfx.atfbLoop, float(cycle), partFrame));
+  }
+  // VTFB, TEXR TXFB (CUVEFlipBookTexture::GetValue 0x2ce114): layer trunc(clamp(index·layers, 0,
+  // layers - 1)), a NaN layer 0.
+  if (vfx.txfbLayers > 0 && vfx.txfbIndex != nullptr) {
+    h.hasLayer = true;
+    const float v = EvalReal(vfx.txfbIndex, partFrame, 0.f) * float(vfx.txfbLayers);
+    const int last = int(vfx.txfbLayers) - 1;
+    h.layer = float(v >= float(last) ? last : v > 0.f ? int(v) : 0);
+  }
+  if (vfx.vtrt[0] != nullptr) {
+    h.thr = true;
+    h.thrX = EvalReal(vfx.vtrt[0], partFrame, 0.f);
+    h.thrY = EvalReal(vfx.vtrt[1], partFrame, 0.f);
+    h.thrSx = EvalReal(vfx.vtrt[2], partFrame, 1.f);
+    h.thrSy = EvalReal(vfx.vtrt[3], partFrame, 1.f);
+    const float rot = EvalReal(vfx.vtrt[4], partFrame, 0.f) * 0.017453292f;
+    h.thrCos = std::cos(rot);
+    h.thrSin = std::sin(rot);
+  }
+  return h;
+}
+
+// One TMTR TRSS(A..F) as the shipped vertex shaders see it: GetValue 0x2de7dc packs it with
+// pack_texture_transform 0x20e8f0 (A, B and E as 16-bit fields), and the VS unpacks them.
+Tm EvalTrss(CRealElement* const* r, int frame) {
+  Tm t;
+  t.a = PortVfxTrssOffset(EvalReal(r[0], frame, 0.f));
+  t.b = PortVfxTrssOffset(EvalReal(r[1], frame, 0.f));
+  t.c = EvalReal(r[2], frame, 1.f);
+  t.d = EvalReal(r[3], frame, 1.f);
+  const float e = PortVfxTrssAngle(EvalReal(r[4], frame, 0.f));
+  // cos(0) = 1 and sin(0) = 0 exactly.
+  t.cosE = e == 0.f ? 1.f : std::cos(e);
+  t.sinE = e == 0.f ? 0.f : std::sin(e);
+  t.f = EvalReal(r[5], frame, 0.f);
+  return t;
 }
 
 // Evaluates a VPMT/VSMT element into up to four floats; returns the count.
@@ -216,14 +341,22 @@ CPortVfxData::~CPortVfxData() {
     delete e.integer;
     delete e.color;
   }
-  delete ssze;
+  for (CRealElement* e : vtrs) {
+    delete e;
+  }
+  for (CRealElement* e : vtrt) {
+    delete e;
+  }
+  delete txfbIndex;
+  delete atexCycleElem;
+  delete txp2Index;
+  delete atfbCycle;
   delete iten;
 }
 
 void PortVfxEvalParticle(const CGenDescription& desc, CElementGen::CParticle& particle,
                          int frame) {
   const CPortVfxData& vfx = *desc.xPortVfx;
-  particle.xPortSsze = EvalReal(vfx.ssze, frame, particle.x2c_lineLengthOrSize);
   particle.xPortIten = EvalReal(vfx.iten, frame, 1.f);
   for (const CPortVfxElem& e : vfx.vpmt) {
     if (e.a >= 4) {
@@ -241,6 +374,23 @@ void PortVfxSetLaunchDir(CElementGen::CParticle& particle) {
   float m = particle.x1c_vel.MagSquared();
   particle.xPortLaunchDir =
       m > kEps ? particle.x1c_vel * (1.f / std::sqrt(m)) : CVector3f::Zero();
+}
+
+void PortVfxInitOvec(const CGenDescription& desc, CElementGen::CParticle& particle,
+                     const CQuaternion& systemRotation) {
+  if (desc.xPortOvec == nullptr) {
+    return;
+  }
+  desc.xPortOvec->GetValue(0, particle.xPortOvec);
+  // CreateNewParticles 0x24aad4, after _Init_Particle (0x24a4cc): ORNT 1 overwrites the OVEC var with
+  // the unit launch velocity, or the system rotation's forward (CQuaternion::GetForwardVector 0xd31a8,
+  // Remastered's +Z, the port's +Y) when it launched at rest; _Update_Particle evaluates OVEC again
+  // from the next tick.
+  if (desc.xPortVfx != nullptr && desc.xPortVfx->vorn == 1) {
+    particle.xPortOvec = particle.xPortLaunchDir.MagSquared() > kEps
+                             ? particle.xPortLaunchDir
+                             : systemRotation.Transform(CVector3f(0.f, 1.f, 0.f));
+  }
 }
 
 uint PortVfxEvalVsmt(const CPortVfxData& vfx, int frame, float vsmt[kPortVfxVsmtCount]) {
@@ -277,6 +427,14 @@ void PortVfxEvalParams(const CPortVfxData& vfx, int frame, float params[7][4]) {
 
 void PortVfxEvalPoint(const CPortVfxData& vfx, int frame, float& iten, float vpmt[4][4]) {
   iten = EvalReal(vfx.iten, frame, 1.f);
+  PortVfxEvalVpmt(vfx, frame, vpmt);
+}
+
+void PortVfxEvalIten(const CPortVfxData& vfx, int frame, float& iten) {
+  iten = EvalReal(vfx.iten, frame, iten);
+}
+
+void PortVfxEvalVpmt(const CPortVfxData& vfx, int frame, float vpmt[4][4]) {
   for (const CPortVfxElem& e : vfx.vpmt) {
     if (e.a >= 4) {
       continue;
@@ -292,14 +450,14 @@ void PortVfxEvalPoint(const CPortVfxData& vfx, int frame, float& iten, float vpm
 void CPortVfxUvXf::Eval(const CPortVfxData& vfx, int frame) {
   for (u32 s = 0; s < 3 && s < vfx.vtmtCount; ++s) {
     CRealElement* const* r = &vfx.vtmt[s * 6];
-    a[s] = EvalReal(r[0], frame, 0.f);
-    b[s] = EvalReal(r[1], frame, 0.f);
-    c[s] = EvalReal(r[2], frame, 1.f);
-    d[s] = EvalReal(r[3], frame, 1.f);
-    const float e = EvalReal(r[4], frame, 0.f);
-    cosE[s] = std::cos(e);
-    sinE[s] = std::sin(e);
-    f[s] = EvalReal(r[5], frame, 0.f);
+    const Tm t = EvalTrss(r, frame);
+    a[s] = t.a;
+    b[s] = t.b;
+    c[s] = t.c;
+    d[s] = t.d;
+    cosE[s] = t.cosE;
+    sinE[s] = t.sinE;
+    f[s] = t.f;
   }
 }
 
@@ -307,14 +465,58 @@ void CPortVfxUvXf::Apply(float qx, float qy, float uv[3][3]) const {
   for (int s = 0; s < 3; ++s) {
     const float dx = (qx - 0.5f) * c[s];
     const float dy = (qy - 0.5f) * d[s];
-    uv[s][0] = a[s] + 0.5f + cosE[s] * dx - sinE[s] * dy;
-    uv[s][1] = b[s] + 0.5f + sinE[s] * dx + cosE[s] * dy;
+    uv[s][0] = a[s] + 0.5f + cosE[s] * dx + sinE[s] * dy;
+    uv[s][1] = b[s] + 0.5f - sinE[s] * dx + cosE[s] * dy;
     uv[s][2] = f[s];
   }
 }
 
 void CElementGen::PortVfxUpdateSystem() {
   xPortVsmtMask = PortVfxEvalVsmt(*x28_loadedGenDesc->xPortVfx, x74_curFrame, xPortVsmt);
+}
+
+float PortVfxExposureGain(const CGenDescription& desc, bool model) {
+  if (!desc.xPortExposurePolicy || !desc.xPortInverseExposure || !desc.xPortVfx ||
+      (!model && (desc.xPortVfx->mat.features & aurora::gfx::vfx::ParticleLit) != 0)) {
+    return 1.f;
+  }
+  return PortRoomEnv::ParticleInverseExposure(
+      desc.xPortVfx->mat.blend != uint32_t(aurora::gfx::vfx::Blend::Opaque));
+}
+
+std::optional<float> PortVfxModelExposureOverride(const CGenDescription& desc) {
+  if (!desc.xPortExposurePolicy || !desc.xPortInverseExposure || !desc.xPortVfx ||
+      desc.xPortVfx->mat.blend == uint32_t(aurora::gfx::vfx::Blend::Opaque)) {
+    return std::nullopt;
+  }
+  return PortVfxFrameExposureOverride();
+}
+
+// Lit sprites too: 20e149b2's lit perms (084_0/088_0) apply no exposure, and their VS (084_1/088_1) passes
+// COLR through without the writers' ITEN x inverse-exposure scalar (FUN_002b4634/002b44c0, component 0xe),
+// so the sprite is bare and nets E from the tonemap (kb topic/lit-sprite-exposure.md).
+std::optional<float> PortVfxSpriteExposureOverride(const CGenDescription& desc) {
+  if (!desc.xPortExposurePolicy || !desc.xPortVfx) {
+    return std::nullopt;
+  }
+  return PortVfxFrameExposureOverride();
+}
+
+std::optional<float> PortVfxFrameExposureOverride() {
+  if (!PortRoomEnv::Enabled()) {
+    return std::nullopt;
+  }
+  float tone[3][4];
+  if (!PortRoomEnv::Tone(tone)) {
+    return std::nullopt;
+  }
+  // Same sFrame.exposure as ParticleInverseExposure(true); both return 1 in pause lighting.
+  // Do not recover this from ITEN or an aggregate gain.
+  const float exposure = PortRoomEnv::FrameExposure();
+  if (!(exposure > 0.f) || !std::isfinite(exposure) || !std::isfinite(1.f / exposure)) {
+    return std::nullopt;
+  }
+  return exposure;
 }
 
 bool PortVfxBuildDesc(const CPortVfxData& vfx, const float* vsmt, uint vsmtMask,
@@ -334,6 +536,8 @@ bool PortVfxBuildDesc(const CPortVfxData& vfx, const float* vsmt, uint vsmtMask,
   desc.depthSoften = mat.depthSoften;
   desc.opacityGain = (vsmtMask & (1u << kPortVfxOpacityGainTarget)) ? vsmt[kPortVfxOpacityGainTarget] : mat.opacityGain;
   desc.opacityBias = (vsmtMask & (1u << kPortVfxOpacityBiasTarget)) ? vsmt[kPortVfxOpacityBiasTarget] : mat.opacityBias;
+  desc.alphaGamma = mat.alphaGamma;
+  desc.litPerVertex = mat.litPerVertex;
   desc.rampRow[0] = static_cast< int8_t >(mat.rampRow[0]);
   desc.rampRow[1] = static_cast< int8_t >(mat.rampRow[1]);
   desc.addRow = static_cast< int8_t >(mat.addRow);
@@ -380,6 +584,94 @@ namespace {
 void PortVfxClusterView(const float* pos, aurora::gfx::vfx::DrawDesc& desc);
 } // namespace
 
+// Primitive 2: UpdateRenderData_PlanarSquareModel 0x2ba3f8 serializes the
+// SolveParticleTransform matrix, and Render 0x2b23e8 uses the sprite material.
+// Unlike a billboard, SIZE is not multiplied into this matrix (0x246f14).
+void CElementGen::PortRenderPlanarVfx(const CParticle& particle, int frame) {
+  const CPortVfxData& vfx = *x28_loadedGenDesc->xPortVfx;
+  aurora::gfx::vfx::DrawDesc desc;
+  if (!PortVfxBuildDesc(vfx, xPortVsmt, xPortVsmtMask, desc)) return;
+  PortVfxEvalParams(vfx, x74_curFrame, desc.params);
+  if (x28_loadedGenDesc->xPortExposurePolicy) desc.alreadyExposed = false;
+  desc.exposureOverride = PortVfxSpriteExposureOverride(*x28_loadedGenDesc);
+  const bool lit = (desc.features & aurora::gfx::vfx::ParticleLit) != 0;
+  const CTransform4f& model = CGraphics::GetModelMatrix();
+  if (lit) {
+    const CVector3f pos = model.GetTranslation();
+    const float probe[3] = {pos.GetX(), pos.GetY(), pos.GetZ()};
+    PortVfxClusterView(x28_loadedGenDesc->xPortBakedLighting ? probe : nullptr, desc);
+    if (x28_loadedGenDesc->xPortBakedLighting) PortRoomEnv::BakedLightModulation(desc.lit.modulate);
+  }
+  CGraphics::SetCullMode(kCM_None);
+  CGraphics::SetDepthWriteMode(x26c_28_zTest, kE_LEqual, x26c_26_AAPH ? false : x26c_27_ZBUF);
+  CPortVfxUvXf uv;
+  uv.Eval(vfx, frame);
+  // A header MTRL square (4ba0aadc): its 048_1 reads the same ATEX rect and TRST as the sprite's.
+  const HeaderTexr header =
+      EvalHeaderTexr(vfx, frame, x268_PSLT, particle.x0_endFrame - particle.x28_startFrame);
+  const float gain = lit ? 1.f : particle.xPortIten * PortVfxExposureGain(*x28_loadedGenDesc);
+  const float modulation[4] = {x338_moduColor.GetRed(), x338_moduColor.GetGreen(),
+                                x338_moduColor.GetBlue(), x338_moduColor.GetAlpha()};
+  const CVector3f normal = Normalised(CGraphics::GetViewMatrix().TransposeRotate(
+      CVector3f::Cross(model.Rotate(CVector3f(-1.f, 0.f, 0.f)),
+                       model.Rotate(CVector3f(0.f, 0.f, 1.f)))), CVector3f::Zero());
+  float splatInv[4] = {};
+  if ((desc.features & aurora::gfx::vfx::VisorSplat) != 0) {
+    const auto viewAxis = [&](const CVector3f& axis) {
+      const CVector3f v = CGraphics::GetViewMatrix().TransposeRotate(model.Rotate(axis));
+      return CVector3f(v.GetX(), v.GetZ(), -v.GetY());
+    };
+    const CVector3f a = viewAxis(CVector3f(-1.f, 0.f, 0.f));
+    const CVector3f b = viewAxis(CVector3f(0.f, 0.f, 1.f));
+    const CVector3f c = CVector3f::Cross(a, b);
+    const CVector3f bc = CVector3f::Cross(b, c);
+    const CVector3f ca = CVector3f::Cross(c, a);
+    const float determinant = CVector3f::Dot(a, bc);
+    if (determinant != 0.f) {
+      splatInv[0] = bc.GetX() / determinant;
+      splatInv[1] = bc.GetY() / determinant;
+      splatInv[2] = ca.GetX() / determinant;
+      splatInv[3] = ca.GetY() / determinant;
+    }
+  }
+  aurora::gfx::vfx::Vertex vertices[4]{};
+  for (int i = 0; i < 4; ++i) {
+    auto& vertex = vertices[i];
+    const float u = kCorner[i][0], v = kCorner[i][1];
+    const CVector3f corner = PortParticleMath::PlanarSquareCorner(u, v);
+    vertex.pos[0] = corner.GetX();
+    vertex.pos[2] = corner.GetZ();
+    float tu, tv;
+    header.Apply(u, v, tu, tv);
+    uv.Apply(tu, tv, vertex.uv);
+    if (header.hasLayer) {
+      vertex.uv[0][2] = header.layer;
+    }
+    if (header.thr) {
+      header.ApplyThreshold(u, v, vertex.uv[1][0], vertex.uv[1][1]);
+      vertex.uv[1][2] = 0.f;
+    }
+    for (int c = 0; c < 4; ++c) {
+      vertex.color[c] = particle.xPortColor[c] * modulation[c] * (c == 3 ? 1.f : gain);
+      for (int j = 0; j < 4; ++j) vertex.extra[c][j] = particle.xPortVpmt[c][j];
+    }
+    if ((desc.features & aurora::gfx::vfx::VisorSplat) != 0) {
+      const CVector3f world = model * corner;
+      vertex.extra[2][0] = world.GetX();
+      vertex.extra[2][1] = world.GetY();
+      vertex.extra[2][2] = world.GetZ();
+      vertex.extra[2][3] = 0.f;
+      for (int j = 0; j < 4; ++j) vertex.extra[3][j] = splatInv[j];
+    }
+    vertex.vec[0] = normal.GetX();
+    vertex.vec[1] = normal.GetZ();
+    vertex.vec[2] = normal.GetY();
+  }
+  aurora::gfx::vfx::draw_quads(desc, vertices, 1);
+  ++PortFx::gQuads;
+  ++PortFx::gDraws;
+}
+
 void CElementGen::PortRenderParticlesVfx() {
   const CPortVfxData& vfx = *x28_loadedGenDesc->xPortVfx;
   const CPortVfxMat& mat = vfx.mat;
@@ -392,9 +684,19 @@ void CElementGen::PortRenderParticlesVfx() {
   if (!PortVfxBuildDesc(vfx, xPortVsmt, xPortVsmtMask, desc)) {
     return; // a texture is not streamed in yet
   }
+  if (x28_loadedGenDesc->xPortExposurePolicy) {
+    desc.alreadyExposed = false;
+  }
+  const float inverseExposure = PortVfxExposureGain(*x28_loadedGenDesc);
+  desc.exposureOverride = PortVfxSpriteExposureOverride(*x28_loadedGenDesc);
   // VisorRunOff is a PMDL model particle (the mesh path below), but a sprite generator sharing its
-  // material still reads CCH0..4: evaluate them rather than draw from zeroed uniforms.
-  if ((desc.features & (aurora::gfx::vfx::VisorRunOff | aurora::gfx::vfx::VisorRunOffLit)) != 0) {
+  // material still reads CCH0..4: evaluate them rather than draw from zeroed uniforms. VisorRain is a
+  // sprite whose CCH0 is the drop mask's scale (SMTR-animated), so it needs the same rows, as does
+  // FrameBufferColorErosion's (the warp scale and lod). Pyro's CCH0 is its light direction and Light map weight.
+  const bool pyro = (desc.features & aurora::gfx::vfx::Pyro) != 0;
+  if ((desc.features & (aurora::gfx::vfx::VisorRunOff | aurora::gfx::vfx::VisorRunOffLit |
+                        aurora::gfx::vfx::VisorRain | aurora::gfx::vfx::FrameBufferColorErosion |
+                        aurora::gfx::vfx::VisorSteam | aurora::gfx::vfx::Pyro)) != 0) {
     PortVfxEvalParams(vfx, x74_curFrame, desc.params);
   }
   // A VFX_*_Lit shader under LIT_ 1 (ParticleLit): AMBS and the clustered gather, and with BLIT 1 (PBLT)
@@ -413,6 +715,12 @@ void CElementGen::PortRenderParticlesVfx() {
     if (x28_loadedGenDesc->xPortBakedLighting) {
       PortRoomEnv::BakedLightModulation(desc.lit.modulate);
     }
+  }
+  // VFX_Pyro lights every vertex with AMBS and the clustered gather (VS 038_1/040_1: no probe, whatever
+  // BLIT says) and reads its Light map (TCH1) per fragment.
+  if (pyro) {
+    PortVfxClusterView(nullptr, desc);
+    desc.normalSlot = static_cast< int8_t >(vfx.normalSlot);
   }
 
   // The retail frame: the same model matrix as the non-ORNT path. Particles are placed in a
@@ -441,7 +749,8 @@ void CElementGen::PortRenderParticlesVfx() {
   const float* pivot = kPivot[std::min< u32 >(mat.spriteCenter, 8)];
 
   // Retail's SORT: farthest first (view y descending).
-  std::vector< CParticleListItem > order;
+  static thread_local std::vector< CParticleListItem > order;
+  order.clear();
   order.reserve(particleCount);
   for (int i = 0; i < particleCount; ++i) {
     const CParticle& p = x30_particles[i];
@@ -460,7 +769,8 @@ void CElementGen::PortRenderParticlesVfx() {
   CParticleGlobals::SetEmitterTime(x74_curFrame);
   CParticle* savedParticle = CParticleGlobals::mCurrentParticle;
 
-  std::vector< aurora::gfx::vfx::Vertex > verts;
+  static thread_local std::vector< aurora::gfx::vfx::Vertex > verts;
+  verts.clear();
   verts.reserve(static_cast< size_t >(std::min< uint >(particleCount, kMaxQuadsPerDraw)) * 4);
   auto flush = [&]() {
     if (!verts.empty()) {
@@ -487,22 +797,17 @@ void CElementGen::PortRenderParticlesVfx() {
       CParticleGlobals::mParticleAccessParameters = x60_advValues[item.x0_partIdx].values;
     }
 
-    // VTMT, one 6-element row per UV set: uv = (A, B) + 0.5 + R(E) diag(C, D) (q - 0.5), layer F.
+    // VTMT, one 6-element row per UV set: uv = (A, B) + 0.5 + R(-E) diag(C, D) (q - 0.5), layer F.
     Tm tm[3];
     for (u32 s = 0; s < 3 && s < vfx.vtmtCount; ++s) {
       CRealElement* const* r = &vfx.vtmt[s * 6];
-      tm[s].a = EvalReal(r[0], partFrame, 0.f);
-      tm[s].b = EvalReal(r[1], partFrame, 0.f);
-      tm[s].c = EvalReal(r[2], partFrame, 1.f);
-      tm[s].d = EvalReal(r[3], partFrame, 1.f);
-      const float e = EvalReal(r[4], partFrame, 0.f);
-      tm[s].cosE = std::cos(e);
-      tm[s].sinE = std::sin(e);
-      tm[s].f = EvalReal(r[5], partFrame, 0.f);
+      tm[s] = EvalTrss(r, partFrame);
     }
+    const HeaderTexr header = EvalHeaderTexr(vfx, partFrame, x268_PSLT, p.x0_endFrame - p.x28_startFrame);
 
     // A lit perm (ParticleLit) reads no ITEN: Remastered's 080_1 passes the colour through without it.
-    const float iten = lit ? 1.f : p.xPortIten;
+    // 52d26efe's per-vertex lighting (040_1) still scales its texel by v1.x, the ITEN.
+    const float iten = lit && !desc.litPerVertex ? 1.f : p.xPortIten * inverseExposure;
     float color[4] = {p.xPortColor[0] * iten, p.xPortColor[1] * iten, p.xPortColor[2] * iten, p.xPortColor[3]};
     if (hasModu) {
       for (int i = 0; i < 4; ++i) {
@@ -514,8 +819,16 @@ void CElementGen::PortRenderParticlesVfx() {
     const float sy = p.xPortSsze;
     // Oriented quads keep their direction: a spin would turn velocity streaks into random lines
     // (Plasma2nd_1's sparks have ROTA -360..360), and retail's ORNT path never rotates either.
+    // An OVEC makes a sprite vector-oriented whatever its ORNT (CParticleStaticRenderState 0x28c4f0
+    // sets word0 bit0 when desc+0x395 or the OVEC var bit is set), with the OVEC value as the axis.
+    const bool ovec = x28_loadedGenDesc->xPortOvec != nullptr;
+    if (ovec && p.xPortOvec.MagSquared() == 0.f) {
+      // Shader 7498e54a (064_1) normalises the axis unguarded: a zero OVEC is NaN, nothing drawn.
+      continue;
+    }
+    const bool oriented = vfx.vorn != 0 || ovec;
     const float theta =
-        hasRota && vfx.vorn == 0 ? p.x30_lineWidthOrRota * (3.14159265358979f / 180.f) : 0.f;
+        hasRota && !oriented ? p.x30_lineWidthOrRota * (3.14159265358979f / 180.f) : 0.f;
     const float cosT = std::cos(theta);
     const float sinT = std::sin(theta);
 
@@ -526,9 +839,11 @@ void CElementGen::PortRenderParticlesVfx() {
     // [I] view-space quad normal, depth component in z: toward the eye (camera-local -y), as the
     // vector-oriented normal below is; the fresnel reads only |z|, ParticleLit the direction.
     float vec[3] = {0.f, 0.f, -1.f};
-    if (vfx.vorn != 0) {
+    if (oriented) {
       CVector3f dir;
-      if (vfx.vorn == 1) {
+      if (ovec) {
+        dir = Normalised(p.xPortOvec, CVector3f::Zero());
+      } else if (vfx.vorn == 1) {
         dir = p.xPortLaunchDir;
       } else {
         dir = Normalised(p.x1c_vel, CVector3f::Zero());
@@ -580,6 +895,40 @@ void CElementGen::PortRenderParticlesVfx() {
     const u8 shapeId = x28_loadedGenDesc->xPortSpriteShape;
     const PortSpriteShape* const shape = shapeId >= 3 && shapeId <= 6 ? &kShapes[shapeId - 3] : nullptr;
     const int polyQuads = shape != nullptr ? shape->triangles : 1;
+    // Everything but pos and uv (and the VisorSplat world position) is the particle's.
+    aurora::gfx::vfx::Vertex tmpl{};
+    for (int i = 0; i < 4; ++i) {
+      tmpl.color[i] = color[i];
+      for (int j = 0; j < 4; ++j) {
+        tmpl.extra[i][j] = p.xPortVpmt[i][j];
+      }
+    }
+    const bool visorSplat = (desc.features & aurora::gfx::vfx::VisorSplat) != 0;
+    if (visorSplat) {
+      for (int j = 0; j < 4; ++j) {
+        tmpl.extra[3][j] = splatInv[j];
+      }
+    }
+    if (pyro) {
+      // VS 038_1/040_1's o7: CCH0.xyz in the quad's basis, inv(M3 [A, B, C]) CCH0, with M3 the model
+      // matrix's 3x3, A and B the corner extents' axes and C toward the eye: frame -y for a sprite, the
+      // unnormalised eye - p (040_1's d) for an oriented quad. The FS normalises it.
+      const CVector3f a = systemModelMatrix.Rotate((axisU * cosT + axisW * sinT) * sx);
+      const CVector3f b = systemModelMatrix.Rotate((axisW * cosT - axisU * sinT) * sy);
+      const CVector3f c = systemModelMatrix.Rotate(oriented ? camFrame - vp : CVector3f(0.f, -1.f, 0.f));
+      const CVector3f bc = CVector3f::Cross(b, c);
+      const CVector3f ca = CVector3f::Cross(c, a);
+      const CVector3f ab = CVector3f::Cross(a, b);
+      const float det = CVector3f::Dot(a, bc);
+      const CVector3f l(desc.params[0][0], desc.params[0][1], desc.params[0][2]);
+      const float inv = det != 0.f ? 1.f / det : 0.f;
+      vec[0] = CVector3f::Dot(bc, l) * inv;
+      vec[1] = CVector3f::Dot(ca, l) * inv;
+      vec[2] = CVector3f::Dot(ab, l) * inv;
+    }
+    tmpl.vec[0] = vec[0];
+    tmpl.vec[1] = vec[1];
+    tmpl.vec[2] = vec[2];
     for (int pq = 0; pq < polyQuads * 4; ++pq) {
       float qx, qy;
       if (shape != nullptr) {
@@ -599,38 +948,35 @@ void CElementGen::PortRenderParticlesVfx() {
       const float w = ox * sinT + oy * cosT;
       const CVector3f pos = center + axisU * u + axisW * w;
 
-      aurora::gfx::vfx::Vertex v{};
+      aurora::gfx::vfx::Vertex v = tmpl;
       v.pos[0] = pos.GetX();
       v.pos[1] = pos.GetY();
       v.pos[2] = pos.GetZ();
+      float tu, tv;
+      header.Apply(qx, qy, tu, tv);
       for (int s = 0; s < 3; ++s) {
         const Tm& t = tm[s];
-        const float dx = (qx - 0.5f) * t.c;
-        const float dy = (qy - 0.5f) * t.d;
-        v.uv[s][0] = t.a + 0.5f + t.cosE * dx - t.sinE * dy;
-        v.uv[s][1] = t.b + 0.5f + t.sinE * dx + t.cosE * dy;
+        const float dx = (tu - 0.5f) * t.c;
+        const float dy = (tv - 0.5f) * t.d;
+        v.uv[s][0] = t.a + 0.5f + t.cosE * dx + t.sinE * dy;
+        v.uv[s][1] = t.b + 0.5f - t.sinE * dx + t.cosE * dy;
         v.uv[s][2] = t.f;
       }
-      for (int i = 0; i < 4; ++i) {
-        v.color[i] = color[i];
-        for (int j = 0; j < 4; ++j) {
-          v.extra[i][j] = p.xPortVpmt[i][j];
-        }
+      if (header.hasLayer) {
+        v.uv[0][2] = header.layer; // the header TEXR is the colour slot; it has no VTMT
       }
-      if ((desc.features & aurora::gfx::vfx::VisorSplat) != 0) {
+      if (header.thr) {
+        header.ApplyThreshold(qx, qy, v.uv[1][0], v.uv[1][1]);
+        v.uv[1][2] = 0.f;
+      }
+      if (visorSplat) {
         // The shader reads PMTR rows 0 and 1 only; rows 2 and 3 carry the world position and the axes.
         const CVector3f world = systemModelMatrix * pos;
         v.extra[2][0] = world.GetX();
         v.extra[2][1] = world.GetY();
         v.extra[2][2] = world.GetZ();
         v.extra[2][3] = 0.f;
-        for (int j = 0; j < 4; ++j) {
-          v.extra[3][j] = splatInv[j];
-        }
       }
-      v.vec[0] = vec[0];
-      v.vec[1] = vec[1];
-      v.vec[2] = vec[2];
       verts.push_back(v);
     }
     if (verts.size() >= static_cast< size_t >(kMaxQuadsPerDraw - 8) * 4) {
@@ -705,8 +1051,8 @@ static void AddIce(const CPortVfxData& vfx, const CTransform4f& model, const CEl
       const Tm& t = tm[st];
       const float dx = (m[6] - 0.5f) * t.c;
       const float dy = (m[7] - 0.5f) * t.d;
-      v.uv[st][0] = t.a + 0.5f + t.cosE * dx - t.sinE * dy;
-      v.uv[st][1] = t.b + 0.5f + t.sinE * dx + t.cosE * dy;
+      v.uv[st][0] = t.a + 0.5f + t.cosE * dx + t.sinE * dy;
+      v.uv[st][1] = t.b + 0.5f - t.sinE * dx + t.cosE * dy;
       v.uv[st][2] = t.f;
     }
     v.uv[1][0] = m[14];
@@ -770,8 +1116,8 @@ static void AddIceCollision(const CPortVfxData& vfx, const CTransform4f& model, 
       const Tm& t = tm[st];
       const float dx = (m[6] - 0.5f) * t.c;
       const float dy = (m[7] - 0.5f) * t.d;
-      v.uv[st][0] = t.a + 0.5f + t.cosE * dx - t.sinE * dy;
-      v.uv[st][1] = t.b + 0.5f + t.sinE * dx + t.cosE * dy;
+      v.uv[st][0] = t.a + 0.5f + t.cosE * dx + t.sinE * dy;
+      v.uv[st][1] = t.b + 0.5f - t.sinE * dx + t.cosE * dy;
       v.uv[st][2] = t.f;
     }
     for (int k = 0; k < 4; ++k) {
@@ -790,9 +1136,115 @@ static void AddIceCollision(const CPortVfxData& vfx, const CTransform4f& model, 
   }
 }
 
+// VFX_BarrierShield's vertices into `world`: its VS (f197ec38's refraction perm, the MFC0 one) folds to
+// a plain model-view transform of the mesh — that perm has no vertex displacement — so the position is
+// the model's and the view normal is the model's inverse transpose times the mesh normal: a non-uniform
+// particle scale must not slide the normal, whose fresnel is a dot of unit vectors in the fragment. The
+// mesh's own vertex colour (VMSH v2 words 12..15) rides in Vertex::mesh, apart from the instance colour
+// in Vertex::color: the alpha gain and the breakup amplitude read one, only the instance colour scales
+// the result. The tangent is unused by this recipe.
+static void AddBarrierShield(const CPortVfxData& vfx, const CTransform4f& model, const CElementGen::CParticle& p,
+                             const Tm (&tm)[3], const float (&color)[4],
+                             std::vector< aurora::gfx::vfx::Vertex >& world) {
+  const CTransform4f view(CGraphics::GetViewMatrix());
+  const CVector3f cols[3] = {model.Rotate(CVector3f(1.f, 0.f, 0.f)), model.Rotate(CVector3f(0.f, 1.f, 0.f)),
+                             model.Rotate(CVector3f(0.f, 0.f, 1.f))};
+  Mat3 m3;
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      m3.m[r][c] = r == 0 ? cols[c].GetX() : r == 1 ? cols[c].GetY() : cols[c].GetZ();
+    }
+  }
+  // Cofactors alone reverse normals for negative determinants. Keep the true inverse transpose;
+  // degenerate transforms have no defined normal, so feed zero rather than infinities.
+  const Mat3 invT = std::fabs(m3.Det()) > 1e-12f ? m3.InverseTranspose() : Mat3{};
+  for (u32 i = 0; i < vfx.meshVerts; ++i) {
+    const float* m = &vfx.meshV[size_t(i) * 16];
+    const CVector3f pos = model * CVector3f(m[0], m[1], m[2]);
+    const CVector3f nl = view.TransposeRotate(invT * CVector3f(m[3], m[4], m[5]));
+    aurora::gfx::vfx::Vertex& v = world[i];
+    v.pos[0] = pos.GetX();
+    v.pos[1] = pos.GetY();
+    v.pos[2] = pos.GetZ();
+    for (int st = 0; st < 3; ++st) {
+      const Tm& t = tm[st];
+      const float dx = (m[6] - 0.5f) * t.c;
+      const float dy = (m[7] - 0.5f) * t.d;
+      v.uv[st][0] = t.a + 0.5f + t.cosE * dx + t.sinE * dy;
+      v.uv[st][1] = t.b + 0.5f - t.sinE * dx + t.cosE * dy;
+      v.uv[st][2] = t.f;
+    }
+    for (int k = 0; k < 4; ++k) {
+      v.color[k] = color[k];
+      for (int j = 0; j < 4; ++j) {
+        v.extra[k][j] = p.xPortVpmt[k][j];
+      }
+      v.mesh[k] = m[12 + k];
+    }
+    // Same convention as the sprites' vec: (x, z, y) of the camera-local normal.
+    v.vec[0] = nl.GetX();
+    v.vec[1] = nl.GetZ();
+    v.vec[2] = nl.GetY();
+  }
+}
+
+// VFX_BarrierGlow's vertices into `world`: BarrierShield's feed (the mesh's own colour in Vertex::mesh
+// apart from the instance colour, the undisplaced normal through the inverse transpose) plus the
+// b1eb2b67 VS's displacement, applied in the Remastered model coordinates before the instance
+// transform: along the normal by amp = .065 (1 + 3 mc.r) max(sin(20 phase), -.33) with
+// phase = time - 10 mc.b (mc is the mesh's own vertex colour: the VS reads it, not the instance's), and
+// by .035 max(sin(20 (phase + 114)), -.33) on Remastered +Y. The port's model data is R2G, so that +Y is
+// the port's model Z. The normal itself is not displaced, and the displaced position feeds both the
+// projected position and the view position. The literal values are the folded VS's (b1eb-vs.txt,
+// pool0xe00: -.33 and .065), not a guessed +-1 clamp.
+static void AddBarrierGlow(const CPortVfxData& vfx, const CTransform4f& model, const CElementGen::CParticle& p,
+                           const Tm (&tm)[3], const float (&color)[4],
+                           std::vector< aurora::gfx::vfx::Vertex >& world) {
+  AddBarrierShield(vfx, model, p, tm, color, world);
+  const float time = CGraphics::GetSimTime();
+  for (u32 i = 0; i < vfx.meshVerts; ++i) {
+    // m[12..15] is the mesh's own colour (VMSH v2): its r lifts the amplitude, its b shifts the phase.
+    const float* m = &vfx.meshV[size_t(i) * vfx.meshStride];
+    const float phase = time - 10.f * m[14];
+    const float amp = 0.0649999976f * (1.f + 3.f * m[12]) * std::max(std::sin(20.f * phase), -0.33f);
+    const float liftY = 0.0350000001f * std::max(std::sin(20.f * (phase + 114.f)), -0.33f);
+    const CVector3f pos = model * CVector3f(m[0] + m[3] * amp, m[1] + m[4] * amp, m[2] + m[5] * amp + liftY);
+    aurora::gfx::vfx::Vertex& v = world[i];
+    v.pos[0] = pos.GetX();
+    v.pos[1] = pos.GetY();
+    v.pos[2] = pos.GetZ();
+  }
+}
+
+// VFX_BarrierShield's exterior shader (b46bb66d, MATI flag MFC1)'s vertices into `world`: BarrierShield's
+// feed plus the 000_1 VS's band, in the model coordinates. With mc the mesh's own vertex colour, the band
+// w = 1 - .2 min(|255 mc.g + mod(75 time, 60) - 44|, 5) sweeps the mesh by its green; it pushes the
+// vertex out along the (unnormalised, undisplaced) normal by s = .4 w, and on Remastered +Y (the port's
+// model Z: R2G) by .05 s, except where 0 < mc.r < .5, which stays put. The fragment reads w in place
+// of the mesh alpha (the VS's o4.w; the raw alpha is never read). The literals are the folded VS's
+// (vp_c1[0].x = -.2 from the pool before the 000_1 header).
+static void AddBarrierExterior(const CPortVfxData& vfx, const CTransform4f& model, const CElementGen::CParticle& p,
+                               const Tm (&tm)[3], const float (&color)[4],
+                               std::vector< aurora::gfx::vfx::Vertex >& world) {
+  AddBarrierShield(vfx, model, p, tm, color, world);
+  const float t75 = CGraphics::GetSimTime() * 75.f;
+  const float sweep = t75 - std::floor(t75 * 0.0166666675f) * 60.f;
+  for (u32 i = 0; i < vfx.meshVerts; ++i) {
+    const float* m = &vfx.meshV[size_t(i) * vfx.meshStride];
+    const float band = 1.f - 0.2f * std::min(std::fabs(m[13] * 255.f + sweep - 44.f), 5.f);
+    const float s = m[12] > 0.f && m[12] < 0.5f ? 0.f : band * 0.400000006f;
+    const CVector3f pos = model * CVector3f(m[0] + m[3] * s, m[1] + m[4] * s, m[2] + m[5] * s + s * 0.0500000007f);
+    aurora::gfx::vfx::Vertex& v = world[i];
+    v.pos[0] = pos.GetX();
+    v.pos[1] = pos.GetY();
+    v.pos[2] = pos.GetZ();
+    v.mesh[3] = band;
+  }
+}
+
 void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
                             const CElementGen::CParticle& p, int partFrame,
-                            const CColor& modulate) {
+                            const CColor& modulate, float inverseExposure) {
   const u32 nv = vfx.meshVerts;
   const bool wide = !vfx.meshIdx32.empty();
   const CTransform4f view(CGraphics::GetViewMatrix());
@@ -807,17 +1259,11 @@ void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
   Tm tm[3];
   for (u32 s = 0; s < 3 && s < vfx.vtmtCount; ++s) {
     CRealElement* const* r = &vfx.vtmt[s * 6];
-    tm[s].a = EvalReal(r[0], partFrame, 0.f);
-    tm[s].b = EvalReal(r[1], partFrame, 0.f);
-    tm[s].c = EvalReal(r[2], partFrame, 1.f);
-    tm[s].d = EvalReal(r[3], partFrame, 1.f);
-    const float e = EvalReal(r[4], partFrame, 0.f);
-    tm[s].cosE = std::cos(e);
-    tm[s].sinE = std::sin(e);
-    tm[s].f = EvalReal(r[5], partFrame, 0.f);
+    tm[s] = EvalTrss(r, partFrame);
   }
-  // ParticleLit reads no ITEN (see the sprite path).
-  const float iten = (vfx.mat.features & aurora::gfx::vfx::ParticleLit) != 0 ? 1.f : p.xPortIten;
+  // Model instance writers 0x2bfd08/0x2bfe4c multiply ITEN * inverse exposure into RGB,
+  // leaving alpha alone. The lit-sprite shader's ITEN exception does not apply to models.
+  const float iten = p.xPortIten * inverseExposure;
   const float color[4] = {p.xPortColor[0] * iten * modulate.GetRed(),
                           p.xPortColor[1] * iten * modulate.GetGreen(),
                           p.xPortColor[2] * iten * modulate.GetBlue(),
@@ -829,12 +1275,27 @@ void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
   world.resize(nv);
   const bool collision = (vfx.mat.features & aurora::gfx::vfx::IceChargeCollision) != 0;
   const bool ice = collision || (vfx.mat.features & aurora::gfx::vfx::IceChargeBeam) != 0;
+  const bool barrier = (vfx.mat.features & aurora::gfx::vfx::BarrierShield) != 0;
+  const bool glow = (vfx.mat.features & aurora::gfx::vfx::BarrierGlow) != 0;
   if (collision) {
     AddIceCollision(vfx, model, p, tm, color, world);
   } else if (ice) {
     AddIce(vfx, model, p, tm, color, world);
+  } else if (barrier && glow) {
+    AddBarrierExterior(vfx, model, p, tm, color, world);
+  } else if (barrier) {
+    AddBarrierShield(vfx, model, p, tm, color, world);
+  } else if (glow) {
+    AddBarrierGlow(vfx, model, p, tm, color, world);
   }
-  for (u32 i = 0; !ice && i < nv; ++i) {
+  // VMSH flag 4: the mesh's colour tints the draw, as the shader's COLOR perm does (2 x c^2.2, alpha c.a).
+  const bool tint = vfx.meshStride == 16 && (vfx.meshFlags & 4) != 0;
+  // VFX_VisorRunOff (b5e12668, d85d4169) perm 000 binds the mesh's COLOR to v2 (layout comp 9 -> location 2)
+  // and reads only its w: the fade is x v2.w and the alpha sat(v2.w x the instance alpha), discarded at
+  // <= 0. So the colour's alpha scales the whole draw and fades the sheet out toward its rim.
+  const bool runOffAlpha = vfx.meshStride == 16 && (vfx.meshFlags & 2) != 0 &&
+                           (vfx.mat.features & (aurora::gfx::vfx::VisorRunOff | aurora::gfx::vfx::VisorRunOffLit)) != 0;
+  for (u32 i = 0; !ice && !barrier && !glow && i < nv; ++i) {
     const float* m = &vfx.meshV[size_t(i) * vfx.meshStride];
     const CVector3f pos = model * CVector3f(m[0], m[1], m[2]);
     const CVector3f nw = Normalised(model.Rotate(CVector3f(m[3], m[4], m[5])), CVector3f(0.f, 0.f, 1.f));
@@ -847,12 +1308,17 @@ void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
       const Tm& t = tm[s];
       const float dx = (m[6] - 0.5f) * t.c;
       const float dy = (m[7] - 0.5f) * t.d;
-      v.uv[s][0] = t.a + 0.5f + t.cosE * dx - t.sinE * dy;
-      v.uv[s][1] = t.b + 0.5f + t.sinE * dx + t.cosE * dy;
+      v.uv[s][0] = t.a + 0.5f + t.cosE * dx + t.sinE * dy;
+      v.uv[s][1] = t.b + 0.5f - t.sinE * dx + t.cosE * dy;
       v.uv[s][2] = t.f;
     }
     for (int k = 0; k < 4; ++k) {
       v.color[k] = color[k];
+      if (tint) {
+        v.color[k] *= k < 3 ? 2.f * std::pow(std::abs(m[12 + k]), 2.2f) : m[15];
+      } else if (runOffAlpha) {
+        v.color[k] *= m[15];
+      }
       for (int j = 0; j < 4; ++j) {
         v.extra[k][j] = p.xPortVpmt[k][j];
       }
@@ -862,9 +1328,11 @@ void CPortVfxMeshBatch::Add(const CPortVfxData& vfx, const CTransform4f& model,
     v.vec[1] = nv3.GetZ();
     v.vec[2] = nv3.GetY();
   }
+  const uint32_t base = static_cast< uint32_t >(verts.size());
+  verts.insert(verts.end(), world.begin(), world.end());
   const size_t count = size_t(vfx.meshTris) * 3;
   for (size_t k = 0; k < count; ++k) {
-    verts.push_back(world[wide ? vfx.meshIdx32[k] : vfx.meshIdx16[k]]);
+    indices.push_back(base + (wide ? vfx.meshIdx32[k] : vfx.meshIdx16[k]));
   }
 }
 
@@ -931,9 +1399,13 @@ void PortVfxClusterView(const float* pos, aurora::gfx::vfx::DrawDesc& desc) {
   for (const PortClusteredLights::LightSource& source : sources) {
     lights.push_back(PortClusteredLights::MakeLight(source, camera.worldToView));
   }
-  const PortClusteredLights::Frame& frame = PortClusteredLights::Update(
-      camera, uint32_t(CGraphics::GetViewportWidth()), uint32_t(CGraphics::GetViewportHeight()), lights.data(),
-      int(lights.size()));
+  // The grid is sized from the target the draw lands in: the shader picks a fragment's tile from its
+  // position in that target's pixels, not the 640x480 GX viewport.
+  uint32_t width = 0;
+  uint32_t height = 0;
+  aurora::gfx::vfx::render_target_size(width, height);
+  const PortClusteredLights::Frame& frame =
+      PortClusteredLights::Update(camera, width, height, lights.data(), int(lights.size()));
   desc.cluster.block = frame.header;
   if (!frame.mask.empty() && frame.grid.tilesX > 0 && frame.grid.tilesY > 0) {
     desc.cluster.mask = frame.mask.data();
@@ -957,18 +1429,29 @@ void CElementGen::PortRenderMeshesVfx(CPortVfxMeshBatch& batch) {
   aurora::gfx::vfx::DrawDesc desc;
   if (!PortVfxBuildDesc(*x28_loadedGenDesc->xPortVfx, xPortVsmt, xPortVsmtMask, desc)) {
     batch.verts.clear();
+    batch.indices.clear();
     return;
   }
   const CPortVfxData& vfx = *x28_loadedGenDesc->xPortVfx;
   const uint32_t features = vfx.mat.features;
+  if (x28_loadedGenDesc->xPortExposurePolicy) {
+    desc.alreadyExposed = false;
+  }
   if ((features & (aurora::gfx::vfx::IceChargeBeam | aurora::gfx::vfx::IceChargeCollision)) != 0) {
     desc.normalSlot = static_cast< int8_t >(vfx.normalSlot);
     desc.envSlot = static_cast< int8_t >(vfx.envSlot);
     desc.time = CGraphics::GetSimTime();
+  } else if ((features & (aurora::gfx::vfx::BarrierShield | aurora::gfx::vfx::BarrierGlow)) != 0) {
+    // BarrierShield: the pattern's four scroll reads and the sawtooth motion are driven by the modular
+    // simulation time (the shader's c3[0]); the recipe reads no NMAP or env map. BarrierGlow: the same
+    // time, for the sawtooth phase and the third pattern read's v.
+    desc.time = CGraphics::GetSimTime();
   }
   // VPRM's CCHn rows, with the VSMT overrides, at this frame: IceCharge* and VisorRunOff's 5 rows.
   if ((features & (aurora::gfx::vfx::IceChargeBeam | aurora::gfx::vfx::IceChargeCollision |
-                   aurora::gfx::vfx::VisorRunOff | aurora::gfx::vfx::VisorRunOffLit)) != 0) {
+                   aurora::gfx::vfx::VisorRunOff | aurora::gfx::vfx::VisorRunOffLit |
+                   aurora::gfx::vfx::VisorRain | aurora::gfx::vfx::BarrierShield |
+                   aurora::gfx::vfx::BarrierGlow | aurora::gfx::vfx::VisorSteam)) != 0) {
     PortVfxEvalParams(vfx, x74_curFrame, desc.params);
   }
   // VFX_IceChargeCollision_Lit's lighting: the clustered gather (block and mask) and the baked probe.
@@ -985,9 +1468,23 @@ void CElementGen::PortRenderMeshesVfx(CPortVfxMeshBatch& batch) {
   const aurora::gfx::vfx::DepthSelection depth =
       aurora::gfx::vfx::select_model_depth(desc.blend, x26c_28_zTest, x26c_26_AAPH, x26c_27_ZBUF);
   CGraphics::SetDepthWriteMode(depth.compare, kE_LEqual, depth.write);
-  PortFx::gTriangles += static_cast< uint32_t >(batch.verts.size() / 3);
+  PortFx::gTriangles += static_cast< uint32_t >(batch.indices.size() / 3);
   ++PortFx::gDraws;
-  aurora::gfx::vfx::draw_triangles(desc, batch.verts.data(), static_cast< uint32_t >(batch.verts.size() / 3));
+  // Model-only: Aurora copies this submission's value into its queued uniform payload.
+  desc.exposureOverride = PortVfxModelExposureOverride(*x28_loadedGenDesc);
+  if (batch.verts.size() <= aurora::gfx::vfx::MaxIndexedVertices) {
+    aurora::gfx::vfx::draw_indexed_triangles(desc, batch.verts.data(), static_cast< uint32_t >(batch.verts.size()),
+                                             batch.indices.data(), static_cast< uint32_t >(batch.indices.size()));
+  } else {
+    // One particle whose mesh alone is past an indexed draw: its triangles, unshared, in split draws.
+    static std::vector< aurora::gfx::vfx::Vertex > tris;
+    tris.clear();
+    for (const uint32_t i : batch.indices) {
+      tris.push_back(batch.verts[i]);
+    }
+    aurora::gfx::vfx::draw_triangles(desc, tris.data(), static_cast< uint32_t >(tris.size() / 3));
+  }
   batch.verts.clear();
+  batch.indices.clear();
   batch.probePosSet = false;
 }

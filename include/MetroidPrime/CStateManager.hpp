@@ -38,7 +38,9 @@ extern const int gkPVSEnabled;
 
 #ifdef TARGET_PC
 #include "Kyoto/Particles/CPortParticleVars.hpp"
+#include "MetroidPrime/PortFaceReflection.hpp"
 #include "MetroidPrime/PortVisorGoo.hpp"
+#include "MetroidPrime/PortVisorOverrides.hpp"
 #endif
 
 class CAABox;
@@ -78,7 +80,7 @@ namespace SL {
 class CSortedListManager;
 } // namespace SL
 
-#define kMaxEntities 1024
+#define kMaxEntities kMaxObjects
 typedef rstl::reserved_vector< TUniqueId, kMaxEntities > TEntityList;
 
 enum EStateManagerTransition {
@@ -246,6 +248,10 @@ public:
   void SetGameState(EGameState state);
 
   CRandom16* Random() const { return x900_random; }
+#ifdef TARGET_PC
+  // The manager's own random (Remastered stateMgr +0x379c), whether or not Random() is available.
+  CRandom16& PortRandom16() { return x8fc_random; }
+#endif
   rstl::list< TUniqueId >& ActiveParasites() { return xf54_activeParasites; }
   void SetRandomAvailable(bool available) { x900_random = available ? &x8fc_random : nullptr; }
   uint GetUpdateFrameIndex() const { return static_cast< uint >(x8d8_updateFrameIdx); }
@@ -315,16 +321,31 @@ public:
   void DrawWorld() const;
 #ifdef TARGET_PC
   void PortCaptureProbeFace() const;
+  // Remastered's RenderVisorEffects (0xfa0b30, from RenderAfterPostFX after the camera filters): the
+  // Remastered visor effects the last HDR world pass left out (not thermal), over the post output.
+  void PortDrawVisorEffects() const;
+  void PortUpdateIceDarkeners(float dt);
+  // Whether `layer` of `area` was active when the area's script objects last loaded, for the
+  // Remastered room components on it. Remastered's layer controller only sets an environment
+  // variable (0xd969c8 -> SetValue 0x3df484); load units follow it at the next room load
+  // (EvaluateLoadUnits 0x3fb2d8) or unload (ContinueUnload), as retail's script objects do.
+  bool PortLayerLoaded(TAreaId area, int layer) const;
   // CMFGame snapshots this per-world-pass policy; DrawWorld consumes and clears it before
   // recording the LDR probe capture or beginning the real scene.
   static bool sPortSceneHdrRequest;
+  // Remastered draws every visor inside the HDR scene pipeline (kb topic/visor-hdr-pipeline.md):
+  // thermal and X-ray push their own reduced-size target over the scene and blend it back into it,
+  // then take the same UberPost as combat.
   static constexpr bool PortIsSceneHdrVisorSupported(bool combat, bool scan, bool thermal,
                                                      bool xray) noexcept {
-    return (combat || scan) && !thermal && !xray;
+    return combat || scan || thermal || xray;
   }
-  static constexpr bool PortShouldUseSceneHdr(bool enabled, bool roomEnvEnabled, bool hasRoomTone,
-                                             bool supportedVisor, bool visorTransitioning) noexcept {
-    return enabled && roomEnvEnabled && hasRoomTone && supportedVisor && !visorTransitioning;
+  // No transition-specific path: each frame renders exactly one visor's pipeline, which switches
+  // when the transition timer crosses zero, so a visor transition keeps the HDR scene.
+  // The HDR scene is the only Remastered path: a room without tone data still draws in it, through
+  // the identity tone (STonemapParams::BuildLinear(3.0)). Retail (no room environment) never does.
+  static constexpr bool PortShouldUseSceneHdr(bool roomEnvActive, bool supportedVisor) noexcept {
+    return roomEnvActive && supportedVisor;
   }
   // Port (sharp scan window): above 1, DrawWorld draws a magnified view through a camera
   // zoomed by this much, without the gun and the frame's one-off captures.
@@ -333,6 +354,14 @@ public:
   static float PortZoomedFov(float fov);
 #endif
   void RenderCamerasAndAreaLights() const;
+  void DrawCameraFilters() const;
+#ifdef TARGET_PC
+  // The pass index of a fullscreen Multiply filter the HDR composite can take (no pass before it
+  // draws), its colour in rgb; -1 for none.
+  int PortCameraFilterMultiply(float rgb[3]) const;
+  // DrawCameraFilters leaving out pass `skip` (-1: none).
+  void PortDrawCameraFilters(int skip) const;
+#endif
   void DrawE3DeathEffect() const;
   void DrawAdditionalFilters() const;
   void GetCharacterRenderMaskAndTarget(bool, int&, int&);
@@ -416,7 +445,7 @@ private:
   enum EInitPhase { kIP_LoadWorld, kIP_LoadFirstArea, kIP_Done };
 
   ushort x0_nextFreeIndex;
-  rstl::reserved_vector< ushort, 1024 > x4_objectIndexArray;
+  rstl::reserved_vector< ushort, kMaxObjects > x4_objectIndexArray;
   rstl::reserved_vector< rstl::auto_ptr< CObjectList >, 8 > x808_objectLists;
   CPlayer* x84c_player;
   rstl::single_ptr< CWorld > x850_world;
@@ -541,10 +570,18 @@ public:
     u16 sizeHandle = kPortNoVar;
   };
   PortVisorGooState& PortVisorGooManager() { return xPortVisorGoo; }
+  // Port: the same manager's visor effect overrides (the radial damage tint's colours).
+  PortVisorOverrides::State& PortVisorOverrideManager() { return xPortVisorOverrides; }
+  const PortVisorOverrides::State& PortVisorOverrideManager() const { return xPortVisorOverrides; }
+  // Port: and its explosion-lit face reflection (FRMD).
+  PortFaceReflection::State& PortFaceReflectionManager() { return xPortFaceReflection; }
+  const PortFaceReflection::State& PortFaceReflectionManager() const { return xPortFaceReflection; }
 
 private:
   uint xPortSimTick = 0;
   PortVisorGooState xPortVisorGoo;
+  PortVisorOverrides::State xPortVisorOverrides;
+  PortFaceReflection::State xPortFaceReflection;
 #endif
 };
 CHECK_SIZEOF(CStateManager, 0xf98)

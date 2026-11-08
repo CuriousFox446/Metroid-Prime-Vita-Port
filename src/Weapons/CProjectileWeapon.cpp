@@ -2,7 +2,6 @@
 #include "Kyoto/Graphics/CLight.hpp"
 #include "Kyoto/Math/CVector3f.hpp"
 #include "Weapons/IWeaponRenderer.hpp"
-#include "port_debug.h"
 #include "rstl/optional_object.hpp"
 
 #include <Kyoto/Alloc/CMemory.hpp>
@@ -20,9 +19,15 @@
 #include <MetaRender/CCubeRenderer.hpp>
 #include <Weapons/CCollisionResponseData.hpp>
 
+#ifdef TARGET_PC
+#include "port_beam_colours.h"
+#endif
+
 uint CProjectileWeapon::skGlobalSeed = 99;
 
-float CProjectileWeapon::GetTickPeriod() { return PortDebug::SimPeriod(); }
+// Weapon descriptions give velocity and gravity per 1/60 s frame, and Update
+// steps the projectile in those frames by elapsed time, at any sim rate.
+float CProjectileWeapon::GetTickPeriod() { return 1.f / 60.f; }
 
 CProjectileWeapon::CProjectileWeapon(const TToken< CWeaponDescription >& description,
                                      const CVector3f& worldOffset, const CTransform4f& localToWorld,
@@ -379,7 +384,13 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
       if (xf4_curFrame > xe8_lifetime) {
         x120_swoosh3->SetParticleEmission(false);
       } else {
-        if (x124_30_AS13) {
+#ifdef TARGET_PC
+        // Remastered's UpdateChildTransforms (0xb7ba54) reads AS12 for swoosh 3 too.
+        const bool portGlobal = PortIsRemastered() ? x124_29_AS12 : x124_30_AS13;
+#else
+        const bool portGlobal = x124_30_AS13;
+#endif
+        if (portGlobal) {
           x120_swoosh3->SetGlobalTranslation(GetTranslation());
         } else {
           x120_swoosh3->SetTranslation(GetTranslation());
@@ -440,10 +451,26 @@ void CProjectileWeapon::Render() const {
         CTransform4f::Scale(x98_scale.GetX(), x98_scale.GetY(), x98_scale.GetZ());
     CGraphics::SetModelMatrix(worldXf * x14_localToWorldXf * localXf * scaleXf * x44_localXf);
     CLight light = CLight::BuildLocalAmbient(CVector3f::Zero(), xc8_ambientLightColor);
+#ifdef TARGET_PC
+    PortBeamColours::Scope beamScope(mPortBeamTint);
+#endif
     (*x108_model)->Draw(CModelFlags(CModelFlags::kT_Opaque, 1.f));
   }
 }
 
+#ifdef TARGET_PC
+void CProjectileWeapon::PortSetBeamTint(int beam) {
+  mPortBeamTint = beam;
+  CParticleGen* gens[] = {xfc_APSMGen, x100_APS2Gen, x104_, x118_swoosh1, x11c_swoosh2,
+                          x120_swoosh3};
+  for (CParticleGen* gen : gens) {
+    if (gen != nullptr) {
+      gen->PortSetBeamTint(beam);
+    }
+  }
+}
+
+#endif
 void CProjectileWeapon::AddToRenderer() const {
   if (xfc_APSMGen)
     IWeaponRenderer::GetRenderer()->AddParticleGen(*xfc_APSMGen);
@@ -572,6 +599,17 @@ void CProjectileWeapon::SetGravity(const CVector3f& gravity) { xbc_gravity = gra
 const CVector3f& CProjectileWeapon::GetGravity() const { return xbc_gravity; }
 
 void CProjectileWeapon::SetGlobalSeed(const uint seed) { skGlobalSeed = seed; }
+
+#ifdef TARGET_PC
+bool CProjectileWeapon::PortIsRemastered() const {
+  return (xfc_APSMGen && xfc_APSMGen->PortIsRemastered()) ||
+         (x100_APS2Gen && x100_APS2Gen->PortIsRemastered()) ||
+         (x104_ && x104_->PortIsRemastered()) ||
+         (x118_swoosh1 && x118_swoosh1->PortIsRemastered()) ||
+         (x11c_swoosh2 && x11c_swoosh2->PortIsRemastered()) ||
+         (x120_swoosh3 && x120_swoosh3->PortIsRemastered());
+}
+#endif
 
 rstl::optional_object< CAABox > CProjectileWeapon::GetBounds() const {
   CAABox ret = CAABox::MakeMaxInvertedBox();

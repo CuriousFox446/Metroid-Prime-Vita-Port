@@ -11,6 +11,7 @@
 class CFinalInput;
 
 class CGameCamera : public CActor {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   CGameCamera(const TUniqueId uid, const bool active, const rstl::string& name,
               const CEntityInfo& info, const CTransform4f& xf, const float fov, const float nearZ,
@@ -55,8 +56,9 @@ public:
   // cameras already derive their vertical FOV from a horizontal one and the live aspect.
   static float VertPlusFov(float fov, float aspect);
   // How far, per unit of view depth, the first-person arm cannon moves down so it stays on the
-  // screen's bottom edge as at 4:3 when the view is Vert+ widened (0 at 4:3 and wider).
-  static float VertPlusGunDrop(float aspect);
+  // screen's bottom edge as at 4:3 when the view is Vert+ widened (0 at 4:3 and wider), for a
+  // gun drawn at the (unwidened) vertical FOV gunFov.
+  static float VertPlusGunDrop(float gunFov, float aspect);
   // FOV before the Vert+ widening, for blending into cameras that get widened.
   float GetUnwidenedFov() const;
   float GetRenderFov() const {

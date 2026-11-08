@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <type_traits>
+#include <unordered_set>
 
 namespace PortInput {
 
@@ -32,14 +33,15 @@ constexpr std::string_view kPadAxisNames[] = {"leftx", "lefty", "rightx", "right
                                               "righttrigger"};
 constexpr std::string_view kGyroNames[] = {"pitch", "yaw", "roll"};
 // Touch codes: the overlay's control ids (TouchControlsView.CONTROL_IDS, the names
-// its saved layout uses), then the overlay's own signals at 32..34, then the
-// buttons added in its layout editor at 64..127 (their layout ids, k0..k63).
+// its saved layout uses), then the overlay's own signals at 32..35, its Morph Ball
+// page's buttons at 40..44, then the buttons added in its layout editor at 64..127
+// (their layout ids, k0..k63).
 constexpr std::string_view kTouchNames[] = {
     "lstick", "cstick", "dpad",    "a",     "b",    "x",   "y",          "l",          "r",
     "z",      "visor",  "beam",    "start", "menu", "map", "eye",        "rstick",     "jump",
     "fire",   "morph",  "missile", "lt",    "lb",   "rt",  "rb",         "tz",         "tr",
     "turbo",  "tturbo", "",        "",      "",     "beam_shift", "turbo_held", "map_tap",
-    "", "", "", "", "", "", "", "", "", "",
+    "menu_back", "", "", "", "", "bbomb", "bboost", "bpbomb", "bspider", "bunmorph",
     "", "", "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "", "", "k0",
     "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10",
@@ -55,7 +57,7 @@ constexpr std::string_view kTouchNames[] = {
 constexpr int kMouseAim = 0, kMouseState = 8, kMouseMenu = 16, kMouseHeld = 24;
 
 constexpr std::string_view kContextNames[16] = {
-    "gameplay", "morphball", "map", "menu", "scan", "", "", "",
+    "gameplay", "morphball", "map", "menu", "scan", "lockon", "", "",
     "layer1",   "layer2",    "layer3", "layer4", "", "", "", "",
 };
 
@@ -328,7 +330,7 @@ std::string FloatText(float f) {
 }
 
 std::string UnbindText(const Unbind& u) {
-  return std::string(Info(u.action).key) + "@" + std::string(kFamilyNames[int(u.family)]);
+  return ActionKey(u.action) + "@" + std::string(kFamilyNames[int(u.family)]);
 }
 
 bool UnbindFromText(std::string_view s, Unbind& out) {
@@ -531,13 +533,16 @@ bool ContextFromText(std::string_view text, uint16_t& out) {
 
 bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* error, int* dropped) {
   UserBindings result;
-  enum class Table { None, Profile, Bind } table = Table::None;
+  enum class Table { None, Profile, Bind, Custom } table = Table::None;
   // Per bind: whether inputs was given (required).
   bool bindHasInputs = false;
   bool bindHasAction = false;
   bool bindLegacy = false; // beam_shift: dropped when the bind closes
   int legacyDropped = 0;
   int bindLine = 0;
+  // Per custom action: whether id was given (required).
+  bool customHasId = false;
+  int customLine = 0;
   int lineNo = 0;
   std::string err;
 
@@ -560,6 +565,13 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
       return fail(bindLine, "bind without inputs");
     return true;
   };
+  auto closeCustom = [&]() {
+    if (table != Table::Custom)
+      return true;
+    if (!customHasId)
+      return fail(customLine, "custom_action without an id");
+    return true;
+  };
 
   if (StartsWith(text, "\xEF\xBB\xBF")) // a UTF-8 BOM (Windows editors)
     text.remove_prefix(3);
@@ -580,7 +592,14 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
           header = Trim(header.substr(0, hash));
         if (!closeBind())
           return false;
-        if (header == "[[profile]]") {
+        if (!closeCustom())
+          return false;
+        if (header == "[[custom_action]]") {
+          result.customActions.emplace_back();
+          table = Table::Custom;
+          customHasId = false;
+          customLine = lineNo;
+        } else if (header == "[[profile]]") {
           result.profiles.emplace_back();
           table = Table::Profile;
         } else if (header == "[[profile.bind]]") {
@@ -604,7 +623,7 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
       if (!ParseValue(line.substr(eq + 1), v))
         return fail(lineNo, "bad value for " + key);
       if (table == Table::None)
-        return fail(lineNo, key + " outside a [[profile]]");
+        return fail(lineNo, key + " outside a table");
 
       auto wantKind = [&](Value::Kind k) {
         if (v.kind == k)
@@ -624,6 +643,50 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
         field = static_cast<std::remove_reference_t<decltype(field)>>(v.i);
         return true;
       };
+
+      if (table == Table::Custom) {
+        CustomActionDef& c = result.customActions.back();
+        if (key == "id") {
+          if (!wantKind(Value::Int))
+            return false;
+          if (v.i < 1 || v.i > kMaxCustomId)
+            return fail(lineNo, "id out of range");
+          const uint16_t id = uint16_t(v.i);
+          for (const CustomActionDef& other : result.customActions) {
+            if (other.id == id)
+              return fail(lineNo, "duplicate custom action id " + std::to_string(id));
+          }
+          c.id = id;
+          customHasId = true;
+        } else if (key == "name") {
+          if (!wantKind(Value::String))
+            return false;
+          c.name = v.str;
+        } else if (key == "renamed") {
+          if (!wantKind(Value::Bool))
+            return false;
+          c.renamed = v.b;
+        } else if (key == "preset") {
+          if (!wantKind(Value::String))
+            return false;
+          c.preset = v.str;
+        } else if (key == "arg") {
+          if (!wantKind(Value::String))
+            return false;
+          c.arg = v.str;
+        } else if (key == "mode") {
+          if (!wantKind(Value::String))
+            return false;
+          c.mode = v.str;
+        } else if (key == "command") {
+          if (!wantKind(Value::String))
+            return false;
+          c.command = v.str;
+        } else {
+          return fail(lineNo, "unknown custom_action field " + key);
+        }
+        continue;
+      }
 
       if (table == Table::Profile) {
         UserProfile& p = result.profiles.back();
@@ -740,7 +803,7 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
         return fail(lineNo, "unknown bind field " + key);
       }
     }
-    return closeBind();
+    return closeBind() && closeCustom();
   };
 
   if (!run()) {
@@ -757,6 +820,21 @@ bool ParseUserBindings(std::string_view text, UserBindings& out, std::string* er
 std::string SerializeUserBindings(const UserBindings& bindings) {
   std::string s = "# Metroid Prime Port controls (F1 > Controls > Remap). See docs/NATIVE_PORT.md.\n";
   const Binding def;
+  for (const CustomActionDef& c : bindings.customActions) {
+    s += "\n[[custom_action]]\n";
+    s += "id = " + std::to_string(c.id) + "\n";
+    s += "name = " + Quote(c.name) + "\n";
+    if (c.renamed)
+      s += "renamed = true\n";
+    if (!c.preset.empty())
+      s += "preset = " + Quote(c.preset) + "\n";
+    if (!c.arg.empty())
+      s += "arg = " + Quote(c.arg) + "\n";
+    if (!c.mode.empty())
+      s += "mode = " + Quote(c.mode) + "\n";
+    if (!c.command.empty())
+      s += "command = " + Quote(c.command) + "\n";
+  }
   for (const UserProfile& p : bindings.profiles) {
     s += "\n[[profile]]\n";
     s += "name = " + Quote(p.name) + "\n";
@@ -773,7 +851,7 @@ std::string SerializeUserBindings(const UserBindings& bindings) {
     }
     for (const Binding& b : p.bindings) {
       s += "\n[[profile.bind]]\n";
-      s += "action = " + Quote(Info(b.action).key) + "\n";
+      s += "action = " + Quote(ActionKey(b.action)) + "\n";
       s += "inputs = [";
       for (int i = 0; i < b.count; ++i)
         s += (i ? ", " : "") + Quote(InputToText(b.inputs[i]));
@@ -810,6 +888,24 @@ std::string SerializeUserBindings(const UserBindings& bindings) {
   return s;
 }
 
+uint16_t NextCustomId(const UserBindings& bindings) {
+  uint16_t max = 0;
+  for (const CustomActionDef& c : bindings.customActions) {
+    max = std::max(max, c.id);
+  }
+  // At least 1; never past the last id a custom action can have.
+  return max < kMaxCustomId ? uint16_t(max + 1) : uint16_t(kMaxCustomId);
+}
+
+void RemoveCustomAction(UserBindings& bindings, uint16_t id) {
+  const Action action = CustomAction(id);
+  std::erase_if(bindings.customActions, [id](const CustomActionDef& def) { return def.id == id; });
+  for (UserProfile& profile : bindings.profiles) {
+    std::erase_if(profile.bindings, [action](const Binding& b) { return b.action == action; });
+    std::erase_if(profile.unbind, [action](const Unbind& u) { return u.action == action; });
+  }
+}
+
 Selection Select(const UserBindings& bindings, std::string_view guid, std::string_view type) {
   Selection sel;
   const UserProfile* byType = nullptr;
@@ -836,16 +932,16 @@ void Overlay(Profile& profile, const UserProfile& user) {
     profile.bindings.clear();
   if (user.chordWindowMs != 0)
     profile.chordWindowMs = user.chordWindowMs;
-  constexpr int kFamilies = int(std::size(kFamilyNames));
-  std::vector<bool> drop(size_t(kActionCount) * kFamilies, false);
-  auto slot = [](Action a, Family f) { return size_t(a) * kFamilies + size_t(f); };
+  // (action, family) pairs: a custom action's value doesn't index a kActionCount row.
+  std::unordered_set<uint32_t> drop;
+  auto slot = [](Action a, Family f) { return (uint32_t(uint16_t(a)) << 8) | uint32_t(f); };
   for (const Binding& b : user.bindings)
     if (b.count > 0)
-      drop[slot(b.action, FamilyOf(b.inputs[b.count - 1].device))] = true;
+      drop.insert(slot(b.action, FamilyOf(b.inputs[b.count - 1].device)));
   for (const Unbind& u : user.unbind)
-    drop[slot(u.action, u.family)] = true;
+    drop.insert(slot(u.action, u.family));
   std::erase_if(profile.bindings, [&](const Binding& b) {
-    return b.count > 0 && drop[slot(b.action, FamilyOf(b.inputs[b.count - 1].device))];
+    return b.count > 0 && drop.contains(slot(b.action, FamilyOf(b.inputs[b.count - 1].device)));
   });
   profile.bindings.insert(profile.bindings.end(), user.bindings.begin(), user.bindings.end());
 }
@@ -909,12 +1005,139 @@ void Revert(UserProfile& user, Action action, Family family) {
                 [&](const Binding& b) { return b.count > 0 && b.action == action && BindingFamily(b) == family; });
 }
 
+bool IsFamilyRow(const Binding& b, Family family) { return b.count > 0 && BindingFamily(b) == family; }
+
 void ClearFamily(UserProfile& user, Family family) {
   std::erase_if(user.unbind, [&](const Unbind& u) { return u.family == family; });
-  std::erase_if(user.bindings, [&](const Binding& b) { return b.count > 0 && BindingFamily(b) == family; });
+  std::erase_if(user.bindings, [&](const Binding& b) { return IsFamilyRow(b, family); });
+}
+
+bool SamePhysicalInput(const Input& a, const Input& b) {
+  if (a.device != b.device || a.dir != b.dir)
+    return false;
+  // Each run of mouse codes holds the five buttons (port_input_devices.h).
+  if (a.device == Device::MouseButton)
+    return a.code % 8 == b.code % 8;
+  return a.code == b.code;
+}
+
+void BlockRowInputs(Profile& profile, bool (*isRow)(const Binding&), uint16_t ctx, bool everywhereOnly) {
+  std::vector<const Binding*> rows;
+  for (const Binding& b : profile.bindings)
+    if (b.count > 0 && isRow(b))
+      rows.push_back(&b);
+  const auto covered = [&](const Binding& b) {
+    for (const Binding* r : rows) {
+      if (r->count != b.count)
+        continue;
+      bool all = true;
+      for (int k = 0; k < b.count && all; ++k)
+        all = std::any_of(r->inputs.begin(), r->inputs.begin() + r->count,
+                          [&](const Input& in) { return SamePhysicalInput(in, b.inputs[k]); });
+      if (all)
+        return true;
+    }
+    return false;
+  };
+  std::vector<size_t> hit;
+  for (size_t i = 0; i < profile.bindings.size(); ++i) {
+    const Binding& b = profile.bindings[i];
+    if (b.count == 0 || isRow(b) || (everywhereOnly && b.contexts != kCtxAll))
+      continue;
+    if (covered(b))
+      hit.push_back(i);
+  }
+  for (size_t i : hit)
+    profile.bindings[i].blocked |= ctx;
+}
+
+const BallRow* FindBallRow(Action a) {
+  for (const BallRow& r : kBallRows)
+    if (r.row == a)
+      return &r;
+  return nullptr;
+}
+
+const MapRow* FindMapRow(Action a) {
+  for (const MapRow& r : kMapRows)
+    if (r.row == a)
+      return &r;
+  return nullptr;
+}
+
+void ApplyMapRows(Profile& profile) {
+  for (Binding& b : profile.bindings) {
+    if (FindMapRow(b.action) == nullptr)
+      continue;
+    b.contexts = kCtxMap;
+    b.blocked = 0;
+  }
+  // Every binding, scoped or not: an input bound to a map row does only that on the map.
+  BlockRowInputs(
+      profile, [](const Binding& b) { return FindMapRow(b.action) != nullptr && BindingFamily(b) != Family::Touch; },
+      kCtxMap, false);
+}
+
+bool IsTargetRow(Action a) { return a == Action::TargetNext || a == Action::TargetPrev; }
+
+void ApplyTargetRows(Profile& profile) {
+  for (Binding& b : profile.bindings) {
+    if (!IsTargetRow(b.action))
+      continue;
+    b.contexts = kCtxLockOn;
+    b.blocked = 0;
+  }
+  BlockRowInputs(
+      profile, [](const Binding& b) { return IsTargetRow(b.action) && BindingFamily(b) != Family::Touch; },
+      kCtxLockOn, false);
+}
+
+const BallRow* BallRowForGame(Action game) {
+  for (const BallRow& r : kBallRows)
+    if (r.game == game)
+      return &r;
+  return nullptr;
+}
+
+void ApplyBallButtons(Profile& profile) {
+  for (Binding& b : profile.bindings) {
+    if (FindBallRow(b.action) == nullptr)
+      continue;
+    // Contexts match any bit, so a row with layers keeps them and blocks every
+    // context but the ball: Morph Ball while a layer is held, ranked as a layer's.
+    const uint16_t layers = b.contexts == kCtxAll ? 0 : uint16_t(b.contexts & kCtxLayers);
+    b.contexts = layers != 0 ? layers : uint16_t(kCtxMorphBall);
+    b.blocked = layers != 0 ? uint16_t(kCtxAll & ~(kCtxMorphBall | kCtxLayers)) : 0;
+  }
+  // A row with layers outranks the input's other bindings while one is held, and
+  // blocking them would leave the input dead in the ball without the layer.
+  BlockRowInputs(
+      profile,
+      [](const Binding& b) {
+        return FindBallRow(b.action) != nullptr && b.contexts == kCtxMorphBall && BindingFamily(b) != Family::Touch;
+      },
+      kCtxMorphBall, false);
+  // A row bound in a family replaces its game button there in the ball: that
+  // family's inputs for the button stop pressing it. A row with layers adds to it,
+  // and touch only replaces the overlay's own controls (TouchControlBound), so the
+  // turbo button and the layout's added buttons keep pressing theirs.
+  bool replaced[std::size(kBallRows)][size_t(Family::Touch)] = {};
+  for (const Binding& b : profile.bindings) {
+    const BallRow* row = FindBallRow(b.action);
+    const Family family = BindingFamily(b);
+    if (row != nullptr && b.count > 0 && b.contexts == kCtxMorphBall && family != Family::Touch)
+      replaced[size_t(row - kBallRows)][size_t(family)] = true;
+  }
+  for (Binding& b : profile.bindings) {
+    const BallRow* row = BallRowForGame(b.action);
+    const Family family = BindingFamily(b);
+    if (row != nullptr && b.count > 0 && family != Family::Touch && replaced[size_t(row - kBallRows)][size_t(family)])
+      b.blocked |= kCtxMorphBall;
+  }
 }
 
 bool TouchButtonAction(Action a) {
+  // A custom action is Digital, so a button can take it like any other.
   if (a == Action::None || Info(a).kind != ActionKind::Digital)
     return false;
   if (a >= Action::Layer1 && a <= Action::Layer4)
@@ -944,19 +1167,20 @@ std::vector<TouchButton> ParseTouchButtons(std::string_view layout) {
     if (!digits || slot >= kTouchButtonSlots || (id.size() == 3 && id[1] == '0'))
       continue;
     std::string_view fields = entry.substr(colon + 1);
-    std::string_view last;
+    std::string_view key;
     int count = 0;
     while (true) {
       const size_t comma = fields.find(',');
-      last = fields.substr(0, comma);
-      ++count;
+      if (++count == 6)
+        key = fields.substr(0, comma);
       if (comma == std::string_view::npos)
         break;
       fields = fields.substr(comma + 1);
     }
-    if (count != 6)
+    // The 7th, the page the button shows on, is the overlay's alone.
+    if (count != 6 && count != 7)
       continue;
-    const Action a = ActionFromKey(Trim(last));
+    const Action a = ActionFromKey(Trim(key));
     if (TouchButtonAction(a))
       slots[slot] = a;
   }
@@ -966,6 +1190,36 @@ std::vector<TouchButton> ParseTouchButtons(std::string_view layout) {
       out.push_back({slot, slots[slot]});
   }
   return out;
+}
+
+bool StockTouchInput(const Input& in) {
+  if (in.device != Device::Touch) return false;
+  if (in.code == kTouchTurboCode) return true;
+  return std::any_of(std::begin(kTouchStockControls), std::end(kTouchStockControls),
+                     [&](const TouchStockControl& c) { return c.control == in.code; });
+}
+
+UserProfile WithoutStockTouch(const UserProfile& user) {
+  UserProfile out = user;
+  std::erase_if(out.bindings, [](const Binding& b) {
+    return std::any_of(b.inputs.begin(), b.inputs.begin() + b.count, StockTouchInput);
+  });
+  return out;
+}
+
+void BindStockTouch(Profile& profile, uint16_t turboHz) {
+  auto bind = [&](Action action, int code, uint16_t contexts, uint16_t hz) {
+    Binding b;
+    b.action = action;
+    b.inputs[0] = Input{Device::Touch, 0, 50, uint16_t(code)};
+    b.count = 1;
+    b.contexts = contexts;
+    b.turboHz = hz;
+    profile.bindings.push_back(b);
+  };
+  for (const TouchStockControl& c : kTouchStockControls)
+    bind(c.action, c.control, c.contexts, 0);
+  bind(Action::PadA, kTouchTurboCode, kCtxAll, turboHz);
 }
 
 void BindTouchButtons(Profile& profile, std::string_view layout) {

@@ -9,6 +9,8 @@
 // port_remastered_room_scripts.cpp, shared through port_remastered_room_internal.h.
 
 #include "port_remastered_room_internal.h"
+#include "port_gunship_scenery.h"
+#include "port_remastered_table.h"
 
 namespace PortRemastered {
 namespace RoomDetail {
@@ -102,18 +104,35 @@ struct FogTransitionData {
   std::vector<PortRoomGeo::Link> links;
 };
 
+// A LightDynamic's links and timeline (see PortRoomEnv::LightTimeline): show/hide and the timeline's
+// actions (LightAct); the timeline flags, its falloff, whether its end deactivates it (its finished
+// event -> ICMP/ICTV on itself), the entity's scale x and y (for near and far), the static colour and
+// intensity (for a timeline that lacks a spline) and the splines' bytes (PortRoomEnv::kLightSplines;
+// empty: absent).
+struct LightTimelineData {
+  std::vector<PortRoomGeo::Link> links;
+  bool animated = false, playing = false, loop = false, offAtStart = false;
+  uint8_t animFalloff = 3;
+  float length = 0.f;
+  float scale[2] = {1.f, 1.f};
+  float intensity = 0.f;
+  float rgb[3] = {};
+  std::vector<uint8_t> splines[PortRoomEnv::kLightSplines];
+};
+
 // A directional LightDynamic (see PortRoomEnv::Sun).
-struct SunData {
+struct SunData : LightTimelineData {
   int32_t layer = -1;
   bool on = false;
   float toSun[3] = {}; // retail world, unit length
   float color[3] = {}; // linear colour times intensity
   uint32_t group = PortRoomGeo::kNoGroup; // the script group that shows and hides it
+  bool casts = false; // LightFlags a103d675 (SLdrLightFlags byte 0): the light builds a shadow map
 };
 
 // A point or spot LightDynamic (see PortRoomEnv::RoomLights), as SLdrLightDynamic::Load and
 // NLightLoaders::build_light read it (kb func/light-dynamic.md).
-struct PointLightData {
+struct PointLightData : LightTimelineData {
   int32_t layer = -1;
   bool on = false;
   bool spot = false;
@@ -124,22 +143,36 @@ struct PointLightData {
   float nearFar[2] = {0.25f, 1.f};  // times the entity's scale x and y
   float cone[2] = {0.f, 45.f}; // inner, outer full angles in degrees
   uint32_t group = PortRoomGeo::kNoGroup;
-  std::vector<PortRoomGeo::Link> links;  // show/hide and the timeline's actions (LightAct)
-  // The animated path: timeline flags, its falloff, whether its end deactivates it (its
-  // finished event -> ICMP/ICTV on itself), the entity's scale x and y (for near and far),
-  // and the splines' bytes (PortRoomEnv::kLightSplines; empty: absent).
-  bool animated = false, playing = false, loop = false, offAtStart = false;
-  uint8_t animFalloff = 3;
-  float length = 0.f;
-  float scale[2] = {1.f, 1.f};
-  float intensity = 0.f; // the static colour and intensity, for a timeline that lacks a spline
-  float rgb[3] = {};
-  std::vector<uint8_t> splines[PortRoomEnv::kLightSplines];
 };
 
 struct Placement {
   Vec3 pos{};  // GameCube world coordinates, once the world shift is added
 };
+
+// A world master room's Skybox (see PortRoomGeo::Instance::worldSky): its model, turn and
+// scale (Remastered axes; the master and its rooms share them) and its radiance.
+struct WorldSky {
+  Id16 model{};
+  Vec3 rot{}, scale{};
+  float radiance[3] = {};
+};
+
+// A Skybox's colour times its intensity (PortRoomGeo::Instance::skyRadiance).
+void SkyRadiance(const Room& room, const Component& c, float out[3]) {
+  const auto f = room.Flat(c);
+  const auto intensity = f.find(kPropSkyboxIntensity);
+  const float level =
+      intensity != f.end() && intensity->second.size == 4 ? ReadLEFloat(room.Bytes(intensity->second)) : 1.f;
+  const auto colour = f.find(kPropSkyboxColor);
+  for (int i = 0; i < 3; ++i) {
+    Span s;
+    const float channel = colour != f.end() && colour->second.size >= 12 ? ReadLEFloat(room.Bytes(colour->second) + 4 * i)
+                          : room.Nested(c, {kPropSkyboxColor, kPropColorChannel[i]}, s) && s.size == 4
+                              ? ReadLEFloat(room.Bytes(s))
+                              : 1.f;
+    out[i] = std::isfinite(channel * level) ? std::max(channel * level, 0.f) : 0.f;
+  }
+}
 
 class Writer {
 public:
@@ -190,7 +223,8 @@ private:
   };
   bool MatchRoom(const RoomData& r, const std::map<std::string, Placement>& placed, Match& out) const;
   void Tonemap(const RoomData& r, float out[5]) const;
-  void Exposure(const RoomData& r, float out[5], std::vector<PortRoomEnv::FluidHint>* fluid = nullptr) const;
+  void Exposure(const RoomData& r, const Area* area, float out[5],
+                std::vector<PortRoomEnv::FluidHint>* fluid = nullptr) const;
   void ReadBloom(const RoomData& r, BloomData& out) const;
   // The room's global ColorGrades in component order; `area` gives their retail layers.
   void ReadGrades(const RoomData& r, const Area* area, std::vector<GradeData>& out,
@@ -207,23 +241,36 @@ private:
   void ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf, std::vector<SunData>& out) const;
   void ReadPointLights(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
                        std::vector<PointLightData>& out) const;
-  bool Grid(const RoomPak& rp, const Vec3& shift, const std::vector<Vec3>& check, std::vector<uint8_t>& out,
-            std::string& note) const;
+  bool Grid(const RoomPak& rp, const Id16& id, const Vec3& shift, const std::vector<Vec3>& check,
+            std::vector<uint8_t>& out, std::string& note) const;
+  // Tells RoomIO::retailModel where the room's retail models stand (RetailPlacement), and
+  // keeps the entities that placed one in m_retailEntities, for WriteGeometry to leave out.
+  void PairRetailModels(const RoomData& r, const Area& area);
+  std::set<int> m_retailEntities;
+  // Entities carrying a model under a retail-style id (10000000-...-XXXXXXXX) that no retail
+  // object of the area names: Remastered's own models standing in for retail objects (Central
+  // Dynamo's floor grates). WriteGeometry draws them, though they lack kPropActorAdded.
+  std::set<int> m_syntheticEntities;
+  // The retail ids the room's entities carry (models it keeps), and where its entities stand
+  // (GC world space): what WriteGeometry checks before hiding a retail object.
+  std::set<uint32_t> m_roomRetailIds;
+  std::vector<Vec3> m_entityPositions;
   // The room's static geometry (its ModCon components), as "<MREA id>.roomgeo".
   void WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area);
   // The room's liquid surfaces (its water and lava render volumes), as "<MREA id>.roomliquid".
-  void WriteLiquids(const RoomData& r, uint32_t mrea);
+  void WriteLiquids(const RoomData& r, uint32_t mrea, const Area& area);
   std::string WriteRoom(const RoomData& r, const std::map<std::string, Placement>& placed, const Vec3& shift,
                         const float tonemap[5], const BloomData& bloom, const std::vector<GradeData>& worldGrades,
                         const std::vector<BacklightData>& worldBacklights, const std::vector<FogData>& worldFogs,
-                        const std::vector<PortRoomEnv::WorldVolume>& worldVolumes, const Match& m, int& written,
-                        std::string& matched);
+                        const std::vector<PortRoomEnv::WorldVolume>& worldVolumes, const SceneryScripts& master,
+                        const Match& m, int& written, std::string& matched);
 
   const RoomPak& m_master;
   const std::vector<RoomPak>& m_rooms;
   const std::vector<RoomPak>& m_others;
   const RoomIO& m_io;
   std::vector<Area> m_areas;
+  std::vector<WorldSky> m_worldSkies;  // the master's (Run), for rooms with no Skybox of their own
 };
 
 double Spread(const std::vector<Vec3>& a, const std::vector<Vec3>& b) {
@@ -254,7 +301,7 @@ bool Writer::ReadRoomFile(const RoomPak& rp, RoomData& out, std::string& error) 
   out.name = rp.name;
   out.pak = rp.pak;
   out.id = SwapUuid(asset->id.data());
-  return out.room.Parse(out.bytes, error);
+  return out.room.Parse(out.bytes, error, m_io.neverLoads);
 }
 
 bool Writer::LoadAreas(uint32_t mlvl, std::string& error) {
@@ -421,18 +468,65 @@ void Writer::Tonemap(const RoomData& r, float out[5]) const {
   }
 }
 
-// The range of exposure values the room's auto exposure is held to, the bias it adds, the
-// sigma it eases by and where in the range the static exposure sits, or 0, 0, 0, 32, 0.5
-// for a room without auto exposure. A room can have several hints: the plain
-// one for the whole room is wanted, not those with a mode (they are for a state of the
-// room, such as a cutscene) or a volume of their own. Hints with mode 1 or 2 (active while
-// the camera is inside a fluid / once it has left one) go to `fluid` with their mode. A value the hint leaves out is
-// SLdrAutoExposureHint's default.
-void Writer::Exposure(const RoomData& r, float out[5], std::vector<PortRoomEnv::FluidHint>* fluid) const {
+// Version 27 stores all exposure hints in the registration list, including plain
+// mode 0 hints. The legacy header is left at the no-hint default. Priority and
+// fluid visibility are independent fields (SLdrAutoExposureHint::Load 0x538b54).
+// No transform/volume ranking occurs in UpdateTonemapping 0xaffb18.
+//
+// The two hints a CAutoExposureHintMP1 swaps between (role 1 for the one its 0x9ea1739d link
+// reaches, 2 for its 0x4ff221ac link; which is the normal view and which the thermal one is
+// inferred from the data (unverified)) go to `fluid` whatever their mode, with the
+// instance's number in `pair`, and out of the plain-hint pick.
+void Writer::Exposure(const RoomData& r, const Area* area, float out[5],
+                      std::vector<PortRoomEnv::FluidHint>* fluid) const {
   out[0] = out[1] = out[2] = 0.f;
   out[3] = 32.f;
   out[4] = 0.5f;
-  int best = 0;
+  // The hints' entities are (de)activated by the area's scripts (the hangar's intro camera,
+  // say), which registers and unregisters them.
+  SceneryScripts scripts;
+  if (fluid != nullptr && area != nullptr && !r.room.Of(kAutoExposureHint).empty()) {
+    scripts = MatchScripts(r.room, *area);
+  }
+  std::map<const Component*, std::pair<uint8_t, uint8_t>> paired;  // hint -> role, pair
+  {
+    const auto& comps = r.room.Components();
+    int instances = 0, unresolved = 0;
+    for (const Component* m : r.room.Of(kAutoExposureHintMP1)) {
+      bool ok = true;
+      for (const auto& l : ReadEntityLinkIds(r.room, size_t(m - comps.data()))) {
+        if (l.first != kLinkExposureHintA && l.first != kLinkExposureHintB) {
+          continue;
+        }
+        if (l.second < 0 || comps[size_t(l.second)].type != kAutoExposureHint || instances >= 255) {
+          ok = false;
+          continue;
+        }
+        paired[&comps[size_t(l.second)]] = {uint8_t(l.first == kLinkExposureHintA ? 1 : 2), uint8_t(instances)};
+      }
+      ++instances;
+      unresolved += ok ? 0 : 1;
+    }
+    std::string modes;  // "A modes / B modes", for the import log
+    for (int role = 1; role <= 2; ++role) {
+      modes += role == 1 ? " (A modes" : "; B modes";
+      for (const auto& [hint, rp] : paired) {
+        if (rp.first == role) {
+          const auto hf = r.room.Flat(*hint);
+          const auto mi = hf.find(kPropHintMode);
+          modes += " " + std::to_string(mi != hf.end() && mi->second.size >= 4
+                                            ? int(ExposureHintMode(ReadLE32(r.room.Bytes(mi->second))))
+                                            : 0);
+        }
+      }
+    }
+    modes += ")";
+    if (instances > 0) {
+      Log("  " + r.name + ": exposure hint swap: " + std::to_string(instances) + " instance(s), " +
+          std::to_string(paired.size()) + " hints" + modes +
+          (unresolved > 0 ? ", WARNING " + std::to_string(unresolved) + " with an unresolved link" : ""));
+    }
+  }
   for (const Component* c : r.room.Of(kAutoExposureHint)) {
     const auto f = r.room.Flat(*c);
     const auto value = [&](uint32_t prop, float fallback) {
@@ -446,33 +540,59 @@ void Writer::Exposure(const RoomData& r, float out[5], std::vector<PortRoomEnv::
     if (!std::isfinite(range[0]) || !std::isfinite(range[1]) || range[1] < range[0]) {
       continue;
     }
-    Vec3 pos, rot, scale;
-    const bool whole = !r.room.Xform(*c, pos, rot, scale) ||
-                       (std::fabs(scale[0] - 1.0) < 1e-3 && std::fabs(scale[1] - 1.0) < 1e-3 &&
-                        std::fabs(scale[2] - 1.0) < 1e-3);
     const auto modeIt = f.find(kPropHintMode);
-    const int mode = modeIt != f.end() && modeIt->second.size >= 4 ? int(ReadLE32(r.room.Bytes(modeIt->second))) : 0;
-    if (mode == 1 || mode == 2) {
-      if (fluid != nullptr) {
-        PortRoomEnv::FluidHint h;
-        h.mode = uint8_t(mode);
-        h.exposure[0] = range[0];
-        h.exposure[1] = range[1];
-        h.bias = std::isfinite(bias) ? bias : 0.f;
-        h.sigma = sigma >= 0.f && sigma < 10000.f ? sigma : 32.f;
-        h.staticLerp = lerp >= 0.f && lerp <= 1.f ? lerp : 0.5f;
-        fluid->push_back(h);
+    const uint8_t mode = modeIt != f.end() && modeIt->second.size >= 4
+                             ? ExposureHintMode(ReadLE32(r.room.Bytes(modeIt->second)))
+                             : 0;
+    const auto pairIt = paired.find(c);
+    // All hints participate in the same priority-ordered registration list. The
+    // old importer mistook priority (0x590d6843) for a fluid mode and picked one
+    // plain hint by transform scale, neither of which the shipped loader does.
+    if (fluid != nullptr) {
+      PortRoomEnv::FluidHint h;
+      h.mode = mode;
+      h.on = r.room.Active(*c);
+      const auto priority = f.find(kPropExposureHintPriority);
+      if (priority != f.end() && priority->second.size >= 4) {
+        h.priority = int32_t(ReadLE32(r.room.Bytes(priority->second)));
       }
-      continue;
-    }
-    const int rank = modeIt != f.end() ? 1 : whole ? 3 : 2;
-    if (rank > best) {
-      best = rank;
-      out[0] = range[0];
-      out[1] = range[1];
-      out[2] = std::isfinite(bias) ? bias : 0.f;
-      out[3] = sigma >= 0.f && sigma < 10000.f ? sigma : 32.f;
-      out[4] = lerp >= 0.f && lerp <= 1.f ? lerp : 0.5f;
+      if (pairIt != paired.end()) {
+        h.role = pairIt->second.first;
+        h.pair = pairIt->second.second;
+      }
+      h.exposure[0] = range[0];
+      h.exposure[1] = range[1];
+      h.bias = std::isfinite(bias) ? bias : 0.f;
+      h.sigma = sigma >= 0.f && sigma < 10000.f ? sigma : 32.f;
+      h.staticLerp = lerp >= 0.f && lerp <= 1.f ? lerp : 0.5f;
+      if (const auto linked = scripts.links.find(c->entity); c->entity >= 0 && linked != scripts.links.end()) {
+        for (PortRoomGeo::Link link : linked->second) {
+          if (link.action != PortRoomGeo::kShow && link.action != PortRoomGeo::kHide &&
+              link.action != PortRoomGeo::kToggle) {
+            continue;
+          }
+          if (!PortRoomEnv::PseudoSender(link.sender)) {
+            link.sender &= 0x3ffffff;  // as CEntity sends it: no layer bits
+          }
+          h.links.push_back({link.sender, link.state, link.action});
+        }
+      }
+      if (const auto unresolved = scripts.unresolved.find(c->entity); unresolved != scripts.unresolved.end()) {
+        Log("  " + r.name + ": exposure hint with " + std::to_string(unresolved->second) +
+            " connection(s) not followed (sender type/event/action:" +
+            (scripts.unresolvedHow.count(c->entity) != 0 ? scripts.unresolvedHow.at(c->entity) : std::string()) +
+            "), " + std::to_string(h.links.size()) + " followed");
+      } else if (!h.links.empty()) {
+        std::string how;
+        for (const auto& l : h.links) {
+          char buf[48];
+          std::snprintf(buf, sizeof(buf), " %08X/%d/%d", l.sender, l.state, l.action);
+          how += buf;
+        }
+        Log("  " + r.name + ": exposure hint (priority " + std::to_string(h.priority) + (h.on ? ", on" : ", off") +
+            ") driven by" + how);
+      }
+      fluid->push_back(h);
     }
   }
 }
@@ -495,6 +615,11 @@ void Writer::ReadBloom(const RoomData& r, BloomData& out) const {
           out.tints[i] = ReadLEFloat(p + 4 + i * 4);
         }
       }
+    }
+    // UberPost accumulates five tints from the list with no length check
+    // (FUN_006b5310; kb topic/bloom-no-bloomeffect.md): missing ones add black (inferred).
+    if (out.tints.size() < 20) {
+      out.tints.resize(20, 0.f);
     }
     out.present = true;
     break;
@@ -825,8 +950,110 @@ void Writer::ReadFogs(const RoomData& r, const Area* area, std::vector<FogData>&
   }
 }
 
+// Version 19's links, animation block and splines (port_room_env.h).
+static void AppendLightTimeline(std::vector<uint8_t>& out, const LightTimelineData& l) {
+  AppendLE32(out, uint32_t(l.links.size()));
+  for (const PortRoomGeo::Link& link : l.links) {
+    AppendLE32(out, link.sender);
+    out.push_back(link.state);
+    out.push_back(link.action);
+    out.insert(out.end(), 2, 0);
+  }
+  out.push_back(l.animated ? 1 : 0);
+  out.push_back(l.playing ? 1 : 0);
+  out.push_back(l.loop ? 1 : 0);
+  out.push_back(l.offAtStart ? 1 : 0);
+  out.push_back(l.animFalloff);
+  out.insert(out.end(), 3, 0);
+  AppendLEFloat(out, l.length);
+  AppendLEFloat(out, l.scale[0]);
+  AppendLEFloat(out, l.scale[1]);
+  AppendLEFloat(out, l.intensity);
+  for (const float c : l.rgb) {
+    AppendLEFloat(out, c);
+  }
+  for (const std::vector<uint8_t>& spline : l.splines) {
+    AppendLE32(out, uint32_t(spline.size()));
+    out.insert(out.end(), spline.begin(), spline.end());
+    out.insert(out.end(), (4 - spline.size() % 4) % 4, 0);
+  }
+}
+
+// A LightDynamic's links and timeline (SLdrLightDynamic's Attributes and splines; kb
+// func/light-dynamic.md), whatever its kind. `l.scale`, `l.intensity` and `l.rgb` are the caller's.
+static void ReadLightTimeline(const RoomData& r, const Component& c, const std::vector<Connection>& conns,
+                              const SceneryScripts& scripts, LightTimelineData& l) {
+  Span sp;
+  const auto byte = [&](uint32_t a, uint32_t b) {
+    return r.room.Nested(c, {a, b}, sp) && sp.size >= 1 && r.room.Bytes(sp)[0] != 0;
+  };
+  l.animated = byte(kPropLightAttributes, kPropLightAnimated);
+  if (l.animated) {
+    l.playing = byte(kPropLightAttributes, kPropLightPlaying);
+    l.loop = byte(kPropLightAttributes, kPropLightLoop);
+    if (r.room.Nested(c, {kPropLightAttributes, kPropLightLength}, sp) && sp.size >= 4) {
+      const float length = ReadLEFloat(r.room.Bytes(sp));
+      l.length = std::isfinite(length) ? std::clamp(length, 0.f, 3600.f) : 0.f;
+    }
+    if (r.room.Nested(c, {kPropLightDistanceDynamic, kPropLightDistanceDynamicKind}, sp) && sp.size >= 4) {
+      const uint32_t falloff = ReadLE32(r.room.Bytes(sp));
+      l.animFalloff = falloff == kLightFalloffSquared ? 2 : falloff == kLightFalloffLinear ? 1 : 3;
+    }
+    // One spline, checked; the gradient's four follow one another.
+    const auto take = [&](uint32_t a, uint32_t b, std::vector<uint8_t>& to) {
+      PortMayaSpline check;
+      if (r.room.Nested(c, {a, b}, sp) && check.Load(r.room.Bytes(sp), sp.size)) {
+        to.assign(r.room.Bytes(sp), r.room.Bytes(sp) + sp.size);
+      }
+    };
+    take(kPropLightIntensitySpline[0], kPropLightIntensitySpline[1], l.splines[PortRoomEnv::kLightSplineIntensity]);
+    take(kPropLightDistanceDynamic, kPropLightDistanceDynamicNear, l.splines[PortRoomEnv::kLightSplineNear]);
+    take(kPropLightDistanceDynamic, kPropLightDistanceDynamicFar, l.splines[PortRoomEnv::kLightSplineFar]);
+    take(kPropLightConeDynamic, kPropLightConeDynamicInner, l.splines[PortRoomEnv::kLightSplineInner]);
+    take(kPropLightConeDynamic, kPropLightConeDynamicOuter, l.splines[PortRoomEnv::kLightSplineOuter]);
+    take(kPropLightColorDynamic, kPropLightColorDynamicSpline, l.splines[PortRoomEnv::kLightSplineColor]);
+    if (r.room.Nested(c, {kPropLightColorDynamic, kPropLightColorDynamicGradient}, sp) && sp.size >= 4 &&
+        ReadLE32(r.room.Bytes(sp)) == 4) {
+      const uint8_t* d = r.room.Bytes(sp) + 4;
+      size_t left = sp.size - 4;
+      for (int i = 0; i < 4; ++i) {
+        PortMayaSpline check;
+        size_t used = 0;
+        if (!check.Load(d, left, &used)) {
+          break;
+        }
+        l.splines[PortRoomEnv::kLightSplineGradient + i].assign(d, d + used);
+        d += used;
+        left -= used;
+      }
+    }
+    for (const Connection& conn : conns) {
+      const int target = r.room.ByGuid(conn.target);
+      if (r.room.Components()[conn.sender].entity == c.entity && target >= 0 &&
+          r.room.Components()[size_t(target)].entity == c.entity && conn.event == kEventLightReachedStart &&
+          (conn.action == kActionComponentDeactivate || conn.action == kActionEntityDeactivate)) {
+        l.offAtStart = true;
+      }
+    }
+  }
+  if (const auto linked = scripts.links.find(c.entity); linked != scripts.links.end()) {
+    for (PortRoomGeo::Link link : linked->second) {
+      if (link.action != PortRoomGeo::kShow && link.action != PortRoomGeo::kHide &&
+          link.action != PortRoomGeo::kToggle &&
+          (link.action < PortRoomEnv::kLightStart || link.action > PortRoomEnv::kLightReverse)) {
+        continue;
+      }
+      if (!PortRoomEnv::PseudoSender(link.sender)) {
+        link.sender &= 0x3ffffff;
+      }
+      l.links.push_back(link);
+    }
+  }
+}
+
 void Writer::ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Mat34& xf,
                       std::vector<SunData>& out) const {
+  const std::vector<Connection> conns = ReadConnections(r.room);
   for (const Component* c : r.room.Of(kLightDynamic)) {
     const auto f = r.room.Flat(*c);
     const auto type = f.find(kPropLightType);
@@ -867,6 +1094,16 @@ void Writer::ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Ma
     for (int i = 0; i < 3; ++i) {
       s.toSun[i] = float(-d[size_t(i)] / len);
       s.color[i] = std::isfinite(color[i] * intensity) ? std::max(0.f, color[i] * intensity) : 0.f;
+      s.rgb[i] = std::isfinite(color[i]) ? std::max(0.f, color[i]) : 0.f;
+    }
+    s.intensity = std::isfinite(intensity) ? intensity : 0.f;
+    s.scale[0] = float(std::max(scale[0], 0.0));
+    s.scale[1] = float(std::max(scale[1], 0.0));
+    ReadLightTimeline(r, *c, conns, scripts, s);
+    // LightFlags (35b27754) byte 0, a103d675: RebuildLightProxy gates the shadow map on it
+    // (build_directional_shadow_map_data 0x89da60); absent (the struct's count 0) is 0.
+    if (r.room.Nested(*c, {kPropLightFlags[0], kPropLightFlags[1]}, sp) && sp.size >= 1) {
+      s.casts = r.room.Bytes(sp)[0] != 0;
     }
     const auto layer = scripts.layer.find(c->entity);
     s.layer = layer != scripts.layer.end() ? int32_t(layer->second) : -1;
@@ -878,11 +1115,13 @@ void Writer::ReadSuns(const RoomData& r, const SceneryScripts& scripts, const Ma
     if (group != scripts.group.end()) {
       s.group = group->second;
     }
-    char line[200];
-    std::snprintf(line, sizeof line, "  %s: sun (%.3f, %.3f, %.3f) colour (%.2f, %.2f, %.2f) layer %d%s%s",
+    char line[240];
+    std::snprintf(line, sizeof line, "  %s: sun (%.3f, %.3f, %.3f) colour (%.2f, %.2f, %.2f) layer %d%s%s%s, %zu link(s)",
                   r.name.c_str(), s.toSun[0], s.toSun[1], s.toSun[2], s.color[0], s.color[1], s.color[2],
                   int(s.layer), s.on ? "" : " (off)",
-                  s.group != PortRoomGeo::kNoGroup ? (" group " + std::to_string(s.group)).c_str() : "");
+                  s.group != PortRoomGeo::kNoGroup ? (" group " + std::to_string(s.group)).c_str() : "",
+                  s.animated ? (" animated " + std::to_string(s.length) + " s" + (s.playing ? " playing" : "")).c_str() : "",
+                  s.links.size());
     Log(line);
     out.push_back(s);
   }
@@ -966,71 +1205,7 @@ void Writer::ReadPointLights(const RoomData& r, const SceneryScripts& scripts, c
     }
     l.scale[0] = float(std::max(scale[0], 0.0));
     l.scale[1] = float(std::max(scale[1], 0.0));
-    const auto byte = [&](uint32_t a, uint32_t b) {
-      return r.room.Nested(*c, {a, b}, sp) && sp.size >= 1 && r.room.Bytes(sp)[0] != 0;
-    };
-    l.animated = byte(kPropLightAttributes, kPropLightAnimated);
-    if (l.animated) {
-      l.playing = byte(kPropLightAttributes, kPropLightPlaying);
-      l.loop = byte(kPropLightAttributes, kPropLightLoop);
-      if (r.room.Nested(*c, {kPropLightAttributes, kPropLightLength}, sp) && sp.size >= 4) {
-        const float length = ReadLEFloat(r.room.Bytes(sp));
-        l.length = std::isfinite(length) ? std::clamp(length, 0.f, 3600.f) : 0.f;
-      }
-      if (r.room.Nested(*c, {kPropLightDistanceDynamic, kPropLightDistanceDynamicKind}, sp) && sp.size >= 4) {
-        const uint32_t falloff = ReadLE32(r.room.Bytes(sp));
-        l.animFalloff = falloff == kLightFalloffSquared ? 2 : falloff == kLightFalloffLinear ? 1 : 3;
-      }
-      // One spline, checked; the gradient's four follow one another.
-      const auto take = [&](uint32_t a, uint32_t b, std::vector<uint8_t>& to) {
-        PortMayaSpline check;
-        if (r.room.Nested(*c, {a, b}, sp) && check.Load(r.room.Bytes(sp), sp.size)) {
-          to.assign(r.room.Bytes(sp), r.room.Bytes(sp) + sp.size);
-        }
-      };
-      take(kPropLightIntensitySpline[0], kPropLightIntensitySpline[1], l.splines[PortRoomEnv::kLightSplineIntensity]);
-      take(kPropLightDistanceDynamic, kPropLightDistanceDynamicNear, l.splines[PortRoomEnv::kLightSplineNear]);
-      take(kPropLightDistanceDynamic, kPropLightDistanceDynamicFar, l.splines[PortRoomEnv::kLightSplineFar]);
-      take(kPropLightConeDynamic, kPropLightConeDynamicInner, l.splines[PortRoomEnv::kLightSplineInner]);
-      take(kPropLightConeDynamic, kPropLightConeDynamicOuter, l.splines[PortRoomEnv::kLightSplineOuter]);
-      take(kPropLightColorDynamic, kPropLightColorDynamicSpline, l.splines[PortRoomEnv::kLightSplineColor]);
-      if (r.room.Nested(*c, {kPropLightColorDynamic, kPropLightColorDynamicGradient}, sp) && sp.size >= 4 &&
-          ReadLE32(r.room.Bytes(sp)) == 4) {
-        const uint8_t* d = r.room.Bytes(sp) + 4;
-        size_t left = sp.size - 4;
-        for (int i = 0; i < 4; ++i) {
-          PortMayaSpline check;
-          size_t used = 0;
-          if (!check.Load(d, left, &used)) {
-            break;
-          }
-          l.splines[PortRoomEnv::kLightSplineGradient + i].assign(d, d + used);
-          d += used;
-          left -= used;
-        }
-      }
-      for (const Connection& conn : conns) {
-        const int target = r.room.ByGuid(conn.target);
-        if (r.room.Components()[conn.sender].entity == c->entity && target >= 0 &&
-            r.room.Components()[size_t(target)].entity == c->entity && conn.event == kEventLightReachedStart &&
-            (conn.action == kActionComponentDeactivate || conn.action == kActionEntityDeactivate)) {
-          l.offAtStart = true;
-        }
-      }
-    }
-    if (const auto linked = scripts.links.find(c->entity); linked != scripts.links.end()) {
-      for (PortRoomGeo::Link link : linked->second) {
-        if (link.action != PortRoomGeo::kShow && link.action != PortRoomGeo::kHide &&
-            link.action != PortRoomGeo::kToggle &&
-            (link.action < PortRoomEnv::kLightStart || link.action > PortRoomEnv::kLightReverse)) {
-          continue;
-        }
-        if (!PortRoomEnv::PseudoSender(link.sender)) {
-          link.sender &= 0x3ffffff;
-        }
-        l.links.push_back(link);
-      }
-    }
+    ReadLightTimeline(r, *c, conns, scripts, l);
     const auto shown = f.find(kPropLightShown);
     l.on = r.room.Active(*c) && (shown == f.end() || shown->second.size < 1 || r.room.Bytes(shown->second)[0] != 0);
     const auto layer = scripts.layer.find(c->entity);
@@ -1353,18 +1528,17 @@ bool ReadGridTextures(const std::vector<uint8_t>& d, const std::function<bool(co
 // of such tiles: each loaded area registers its own copy of every tile it bakes, and which
 // copy is mapped depends on the load order (see port_room_env_tiles.h), so the runtime
 // decides that, and nothing here borrows from a neighbour.
-bool Writer::Grid(const RoomPak& rp, const Vec3& shift, const std::vector<Vec3>& check, std::vector<uint8_t>& out,
-                  std::string& note) const {
+// The LTPB is the one the ROOM's BLIT names: 25 rooms keep theirs in the world's master pak.
+bool Writer::Grid(const RoomPak& rp, const Id16& id, const Vec3& shift, const std::vector<Vec3>& check,
+                  std::vector<uint8_t>& out, std::string& note) const {
   out.clear();
   std::vector<uint8_t> d;
-  const PakAsset* asset = rp.pak != nullptr ? FirstOfType(*rp.pak, FourCC("LTPB")) : nullptr;
-  if (asset == nullptr) {
+  if (id == Id16{}) {
     note = "no grid";
     return false;
   }
-  std::string error;
-  if (!rp.pak->ReadAsset(*asset, d, error)) {
-    note = "grid not decoded";
+  if (!FindResource(id.data(), FourCC("LTPB"), rp, d, nullptr, nullptr)) {
+    note = "grid not found";
     return false;
   }
   size_t phdr = std::string::npos;
@@ -1637,6 +1811,8 @@ bool ReadMcon(const std::vector<uint8_t>& d, Mcon& out) {
   }
   return false;
 }
+
+static void EditorBasis(const Vec3& rot, const Vec3& scale, double out[3][3]);
 
 void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
   if (!m_io.model || (m_io.wantsGeometry && !m_io.wantsGeometry(r.name))) {
@@ -2195,8 +2371,8 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
         " retail objects hidden");
     return made != 0;
   };
-  // Whether a static model's bounds hold its origin, give or take half a metre.
-  auto aroundOrigin = [&](const uint8_t* id) {
+  // A static model's bounds in its own (Remastered) axes; false when it does not read.
+  auto modelBounds = [&](const uint8_t* id, Vec3& lo, Vec3& hi) {
     std::vector<uint8_t> data;
     PortRemastered::Model cmdl;
     std::string error;
@@ -2204,7 +2380,8 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
         !PortRemastered::ParseModel(data.data(), data.size(), cmdl, error)) {
       return false;
     }
-    Vec3 lo{HUGE_VAL, HUGE_VAL, HUGE_VAL}, hi{-HUGE_VAL, -HUGE_VAL, -HUGE_VAL};
+    lo = Vec3{HUGE_VAL, HUGE_VAL, HUGE_VAL};
+    hi = Vec3{-HUGE_VAL, -HUGE_VAL, -HUGE_VAL};
     for (const PortRemastered::ModelVertexBuffer& vb : cmdl.vertexBuffers) {
       for (size_t v = 0; v + 2 < vb.positions.size(); v += 3) {
         for (size_t k = 0; k < 3; ++k) {
@@ -2212,6 +2389,38 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
           hi[k] = std::max(hi[k], double(vb.positions[v + k]));
         }
       }
+    }
+    return lo[0] <= hi[0];
+  };
+  // Whether a model draws a Chozo Lore sheet (9D53CF06, ChozoLore_Mat_B): the glow over the lore
+  // statues, which Remastered places as an actor of its own model where retail has its "Chozo Lore
+  // Glow" actor, unmarked as added. It stands in for that actor like a synthetic-model one.
+  std::map<Id16, bool> loreSheets;
+  auto loreSheet = [&](const uint8_t* id) {
+    const Id16 key = SwapUuid(id);
+    if (const auto found = loreSheets.find(key); found != loreSheets.end()) {
+      return found->second;
+    }
+    std::vector<uint8_t> data;
+    PortRemastered::Model cmdl;
+    std::string error;
+    bool lore = false;
+    if (FindResource(id, FourCC("CMDL"), home, data, nullptr, nullptr) &&
+        PortRemastered::ParseModel(data.data(), data.size(), cmdl, error)) {
+      lore = std::any_of(cmdl.materials.begin(), cmdl.materials.end(), [](const PortRemastered::ModelMaterial& m) {
+        uint8_t sid[4];
+        std::memcpy(sid, &m.shaderId, 4);
+        return ReadBE32(sid) == kShaderChozoLoreSheet;
+      });
+    }
+    loreSheets.emplace(key, lore);
+    return lore;
+  };
+  // Whether a static model's bounds hold its origin, give or take half a metre.
+  auto aroundOrigin = [&](const uint8_t* id) {
+    Vec3 lo, hi;
+    if (!modelBounds(id, lo, hi)) {
+      return false;
     }
     for (size_t k = 0; k < 3; ++k) {
       if (!(lo[k] <= 0.5 && hi[k] >= -0.5)) {
@@ -2255,17 +2464,104 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
     return true;
   };
   size_t posed = 0, drivenActors = 0;
-  for (const Component* c : r.room.Of(kActorMP1)) {
+  // The synthetic-model actors written (m_syntheticEntities): their instance and the world
+  // box (GC axes) their model covers, for the retail objects they stand in for.
+  struct Standin {
+    uint32_t instance;
+    Vec3 pos, lo, hi;
+    bool lore;
+    bool covers;  // hides the dropped retail actors whose origin its box holds
+    bool own;     // the room's own model on a carried-over actor: hides only that actor
+  };
+  std::vector<Standin> standins;
+  // The retail Actors whose model the table replaces by its carried-over copy (a Remastered id
+  // 10000000-0000-f000-f000-0000XXXXXXXX), which only some rooms place: Research Lab Hydra's
+  // force field 982D9D75 is the Frigate hangar's carried-over pane in the table, but Remastered's
+  // Research_A puts its own (603d908b) on the same spot, unmarked as added. Such an actor stands
+  // in for the retail one, so the room draws the model Remastered gives it there.
+  std::vector<const ScriptObject*> carriedActors;
+  {
+    static constexpr uint8_t kCarried[12] = {0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0xf0, 0x00, 0x00, 0x00};
+    size_t count = 0;
+    const TableEntry* table = Table(count);
+    std::vector<uint32_t> carried;
+    for (size_t i = 0; i < count; ++i) {
+      // A save station's room carries its retail model over as well (m_roomRetailIds), so its own
+      // model there is another object at the same spot, not this one's replacement.
+      if (std::memcmp(table[i].rem, kCarried, 12) == 0 && m_roomRetailIds.count(table[i].retail) == 0) {
+        carried.push_back(table[i].retail);
+      }
+    }
+    for (const ScriptObject& o : area.objects) {
+      if (o.type == kRetailActor && o.hasPos && std::any_of(carried.begin(), carried.end(), [&](uint32_t id) {
+            const uint8_t be[4] = {uint8_t(id >> 24), uint8_t(id >> 16), uint8_t(id >> 8), uint8_t(id)};
+            return std::search(o.props.begin(), o.props.end(), be, be + 4) != o.props.end();
+          })) {
+        carriedActors.push_back(&o);
+      }
+    }
+  }
+  size_t ownModels = 0;
+  std::vector<const Component*> renderActors = r.room.Of(kActorMP1);
+  const auto renderPlatforms = r.room.Of(kPlatformComponent);
+  renderActors.insert(renderActors.end(), renderPlatforms.begin(), renderPlatforms.end());
+  for (const Component* c : renderActors) {
+    const bool isPlatform = c->type == kPlatformComponent;
     const auto f = r.room.Flat(*c);
-    const auto prop = f.find(kPropActorModel);
+    const auto prop = f.find(isPlatform ? kPropPlatformModel : kPropActorModel);
     const bool hasModel = prop != f.end() && prop->second.size == 16;
     Span chprProp, nameProp;
-    const bool hasAnim = !hasModel && r.room.Nested(*c, {kPropActorAnim, kPropAnimCharacter}, chprProp) &&
-                         chprProp.size == 16 && r.room.Nested(*c, {kPropActorAnim, kPropAnimName}, nameProp) &&
+    const uint32_t animProperty = isPlatform ? kPropPlatformAnim : kPropActorAnim;
+    const bool hasAnim = !hasModel && r.room.Nested(*c, {animProperty, kPropAnimCharacter}, chprProp) &&
+                         chprProp.size == 16 && r.room.Nested(*c, {animProperty, kPropAnimName}, nameProp) &&
                          nameProp.size == 8;
     Vec3 pos, rot, scale;
-    if (f.find(kPropActorAdded) == f.end() || (!hasModel && !hasAnim) || !r.room.Xform(*c, pos, rot, scale)) {
+    const bool synthetic = hasModel && (m_syntheticEntities.count(c->entity) != 0 ||
+                                        (!isPlatform && std::memcmp(r.room.Bytes(prop->second), kRetailIdPrefix, 12) != 0 &&
+                                         loreSheet(r.room.Bytes(prop->second))));
+    const bool added = f.find(kPropActorAdded) != f.end();
+    const bool ownModel = !isPlatform && !added && !synthetic && hasModel && !carriedActors.empty() &&
+                          std::memcmp(r.room.Bytes(prop->second), kRetailIdPrefix, 12) != 0;
+    if ((!isPlatform && !added && !synthetic && !ownModel) || (!hasModel && !hasAnim) ||
+        !r.room.Xform(*c, pos, rot, scale)) {
       continue;
+    }
+    if (ownModel) {
+      const Vec3 w = Apply(area.xf, MulR2G(pos));
+      const auto carried = std::find_if(carriedActors.begin(), carriedActors.end(),
+                                        [&](const ScriptObject* o) { return MaxAbs(o->pos, w) < kRetailActorNear; });
+      if (carried == carriedActors.end()) {
+        continue;
+      }
+      const uint8_t* model = r.room.Bytes(prop->second);
+      char line[160];
+      std::snprintf(line, sizeof line, "  %s: retail actor %08X at (%.1f, %.1f, %.1f) draws the room's own %02x%02x%02x%02x",
+                    r.name.c_str(), (*carried)->id, w[0], w[1], w[2], model[3], model[2], model[1], model[0]);
+      Log(line);
+      ++ownModels;
+    }
+    const bool standsIn = synthetic || ownModel;
+    if (isPlatform) {
+      // A platform is a retail Platform that moves and collides as its script drives it.
+      // Its Remastered model is drawn only riding that Platform (`platformTransform`) or one it
+      // is attached to (`platform`); unbound, it would stand frozen at its placed pose while
+      // retail's moves. One that plays an animation (Monitor Station's spinner bridge) is left
+      // to retail too: drawn here it would loop the clip from area load, unbound to that state
+      // and without collision.
+      Span character;
+      const bool animates = r.room.Nested(*c, {animProperty, kPropAnimCharacter}, character) && character.size == 16 &&
+                            std::any_of(r.room.Bytes(character), r.room.Bytes(character) + 16, [](uint8_t b) { return b != 0; });
+      const auto bound = scripts.platformTransform.find(c->entity);
+      const bool rides = (bound != scripts.platformTransform.end() && bound->second->hasXf) ||
+                         scripts.platform.count(c->entity) != 0;
+      if (animates || !rides) {
+        if (hasModel) {
+          Log("  " + r.name + (animates ? ": a platform with a model plays an animation"
+                                        : ": a platform matched no retail Platform") + "; retail draws it");
+        }
+        ++retailDrawn;
+        continue;
+      }
     }
     const bool active = r.room.Active(*c);
     PortRoomGeo::Instance::Driver driver;
@@ -2282,6 +2578,25 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
     Id16 model{};
     if (hasModel) {
       model = SwapUuid(r.room.Bytes(prop->second));
+      if (!isPlatform && !synthetic && f.find(kPropActorAdded) != f.end() &&
+          PortGunshipScenery::ExcludeSource(mrea, model)) {
+        // Retail already draws the animated ship; these unposed cinematic hulls would
+        // add a second static copy. Keep supported bindings eligible, including a model
+        // carrying an animation property (hasAnim above ignores it when hasModel is true).
+        const auto bindings = scripts.links.find(c->entity);
+        Span characterBinding;
+        const bool bound = driven ||
+            r.room.Nested(*c, {animProperty, kPropAnimCharacter}, characterBinding) ||
+            scripts.platform.count(c->entity) != 0 || scripts.platformTransform.count(c->entity) != 0 ||
+            (bindings != scripts.links.end() &&
+             std::any_of(bindings->second.begin(), bindings->second.end(), [](const PortRoomGeo::Link& link) {
+               return link.action == PortRoomGeo::kFollow || link.action == PortRoomGeo::kActorTransform;
+             }));
+        if (PortGunshipScenery::ExcludeSource(mrea, model, bound)) {
+          ++posed;
+          continue;
+        }
+      }
     } else {
       const Id16 key = SwapUuid(r.room.Bytes(chprProp));
       auto ch = characters.find(key);
@@ -2331,7 +2646,7 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
     // Frigate hangar's landing cutscene, shown by retail's links, would stand whole on the
     // dock. One whose model lies off its origin is room geometry placed at the origin (the
     // Frigate reactor's fallen pieces), and stays.
-    if (hasModel && !active && MaxAbs(pos, Vec3{}) < 0.01 && aroundOrigin(r.room.Bytes(prop->second))) {
+    if (!isPlatform && hasModel && !active && MaxAbs(pos, Vec3{}) < 0.01 && aroundOrigin(r.room.Bytes(prop->second))) {
       ++posed;
       continue;
     }
@@ -2343,10 +2658,10 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
         id != nullptr && std::memcmp(id, kRetailIdPrefix, 12) == 0) {
       const Vec3 w = Apply(area.xf, MulR2G(pos));
       const bool standing = std::any_of(area.objects.begin(), area.objects.end(), [&](const ScriptObject& o) {
-        return o.type == kRetailActor && o.hasPos && MaxAbs(o.pos, w) < kRetailActorNear &&
+        return o.type == (isPlatform ? kRetailPlatform : kRetailActor) && o.hasPos && MaxAbs(o.pos, w) < kRetailActorNear &&
                std::search(o.props.begin(), o.props.end(), id + 12, id + 16) != o.props.end();
       });
-      if (standing) {
+      if (standing || m_retailEntities.count(c->entity) != 0) {
         ++retailDrawn;
         continue;
       }
@@ -2366,6 +2681,29 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
     PortRoomGeo::Instance& inst = instances.emplace_back();
     inst.model = known->second;
     place(inst, pos, rot, scale);
+    if (Vec3 lo, hi; standsIn && modelBounds(r.room.Bytes(prop->second), lo, hi)) {
+      Standin& s = standins.emplace_back();
+      s.instance = uint32_t(instances.size() - 1);
+      s.lore = loreSheet(r.room.Bytes(prop->second));
+      s.covers = synthetic;
+      s.own = ownModel;
+      s.pos = Apply(area.xf, MulR2G(pos));
+      s.lo = Vec3{HUGE_VAL, HUGE_VAL, HUGE_VAL};
+      s.hi = Vec3{-HUGE_VAL, -HUGE_VAL, -HUGE_VAL};
+      for (int corner = 0; corner < 8; ++corner) {
+        const Vec3 v = MulR2G(Vec3{(corner & 1) ? hi[0] : lo[0], (corner & 2) ? hi[1] : lo[1], (corner & 4) ? hi[2] : lo[2]});
+        Vec3 local;
+        for (size_t row = 0; row < 3; ++row) {
+          local[row] = inst.transform[4 * row] * v[0] + inst.transform[4 * row + 1] * v[1] +
+                       inst.transform[4 * row + 2] * v[2] + inst.transform[4 * row + 3];
+        }
+        const Vec3 w = Apply(area.xf, local);
+        for (size_t k = 0; k < 3; ++k) {
+          s.lo[k] = std::min(s.lo[k], w[k]);
+          s.hi[k] = std::max(s.hi[k], w[k]);
+        }
+      }
+    }
     if (anim != nullptr) {
       // The bone's pose in GC axes: the axis change is a rotation, so a quaternion's
       // vector part and a translation change the same way a position does.
@@ -2384,6 +2722,37 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
       ++animated;
     }
     script(inst, c->entity, active);
+    if (isPlatform) {
+      const auto bound = scripts.platformTransform.find(c->entity);
+      if (bound != scripts.platformTransform.end() && bound->second->hasXf) {
+        const ScriptObject& carrier = *bound->second;
+        // Model scale is separate from the retail actor's rigid transform.
+        // local = inverse(retail initial rigid) * area * placed model.
+        double rotation[3][3];
+        EditorBasis(carrier.rot, Vec3{1, 1, 1}, rotation);
+        float local[12]{};
+        for (int row = 0; row < 3; ++row) {
+          for (int col = 0; col < 4; ++col) {
+            double v = 0;
+            for (int k = 0; k < 3; ++k) {
+              double world = col == 3 ? area.xf[k][3] - carrier.pos[k] : 0.;
+              for (int j = 0; j < 3; ++j) world += area.xf[k][j] * inst.transform[j * 4 + col];
+              v += rotation[k][row] * world;
+            }
+            local[row * 4 + col] = float(v);
+          }
+        }
+        std::copy(local, local + 12, inst.transform);
+        inst.links.push_back({carrier.id, 0, PortRoomGeo::kActorTransform});
+        // A directly matched model replaces the retail platform's visual;
+        // a co-driven sibling supplements it and must not hide the carrier.
+        const auto own = scripts.retail.find(c->entity);
+        if (own != scripts.retail.end() && &area.objects[own->second] == &carrier) {
+          scripts.script.hidden.push_back({carrier.id & 0x3ffffffu, uint32_t(instances.size() - 1)});
+        }
+        ++riding;
+      }
+    }
     if (driven) {
       inst.drivers.push_back(driver);
       ++drivenActors;
@@ -2409,6 +2778,76 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
       ++riding;
     }
     ++actors;
+  }
+  // The retail Actors the synthetic-model actors stand in for, hidden while those are drawn:
+  // one standing where such an actor does, and one Remastered dropped whose origin its model
+  // covers (Central Dynamo's three grates under the wider centre one). Neither may draw a model
+  // the room keeps under its retail id, nor (the dropped one) stand where any entity does.
+  size_t standinHidden = 0;
+  auto inside = [](const Vec3& p, const Vec3& lo, const Vec3& hi, double margin) {
+    for (size_t k = 0; k < 3; ++k) {
+      if (!(p[k] >= lo[k] - margin && p[k] <= hi[k] + margin)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!standins.empty()) {
+    for (const ScriptObject& o : area.objects) {
+      if (o.type != kRetailActor || !o.hasPos ||
+          std::any_of(m_roomRetailIds.begin(), m_roomRetailIds.end(), [&](uint32_t id) {
+            const uint8_t be[4] = {uint8_t(id >> 24), uint8_t(id >> 16), uint8_t(id >> 8), uint8_t(id)};
+            return std::search(o.props.begin(), o.props.end(), be, be + 4) != o.props.end();
+          })) {
+        continue;
+      }
+      // A lore sheet's actor stands in for the retail "Chozo Lore Glow" actor (model 600D500E)
+      // over the same statue: the sheet is flat and set a little off retail's actor (a third of a
+      // metre in the Ruined Nursery), so the glow's origin need only lie by the sheet's box.
+      static constexpr uint8_t kLoreGlow[4] = {0x60, 0x0D, 0x50, 0x0E};
+      const bool loreGlow = std::search(o.props.begin(), o.props.end(), kLoreGlow, kLoreGlow + 4) != o.props.end();
+      const Standin* by = nullptr;
+      for (const Standin& s : standins) {
+        if (s.lore && loreGlow && inside(o.pos, s.lo, s.hi, kRetailActorNear)) {
+          by = &s;
+          break;
+        }
+      }
+      for (const Standin& s : standins) {
+        if (by != nullptr) {
+          break;
+        }
+        // Other retail actors may stand at the carried-over one's origin: only that one goes.
+        if (MaxAbs(s.pos, o.pos) < kRetailActorNear &&
+            (!s.own || std::find(carriedActors.begin(), carriedActors.end(), &o) != carriedActors.end())) {
+          by = &s;
+          break;
+        }
+      }
+      if (by == nullptr && std::none_of(m_entityPositions.begin(), m_entityPositions.end(), [&](const Vec3& p) {
+            return MaxAbs(p, o.pos) < kRetailActorNear;
+          })) {
+        for (const Standin& s : standins) {
+          if (s.covers && inside(o.pos, s.lo, s.hi, kStandinMargin)) {
+            by = &s;
+            break;
+          }
+        }
+      }
+      if (by != nullptr) {
+        scripts.script.hidden.push_back({o.id & 0x3FFFFFFu, by->instance});
+        ++standinHidden;
+      }
+    }
+  }
+  if (!m_syntheticEntities.empty() || !standins.empty()) {
+    const size_t synthetics = size_t(std::count_if(standins.begin(), standins.end(), [](const Standin& s) { return !s.own; }));
+    Log("  " + r.name + ": " + std::to_string(synthetics) + " of " + std::to_string(m_syntheticEntities.size()) +
+        " Remastered stand-in actors drawn, " + std::to_string(standinHidden) + " retail actors hidden");
+  }
+  if (ownModels != 0) {
+    Log("  " + r.name + ": " + std::to_string(ownModels) +
+        " actors draw the room's own model where the table carries a retail one over");
   }
   // The room's skies, drawn in place of the world's: retail has one per world, Remastered
   // one per room, each turned and scaled to suit it (and two in the Frigate's hangar, one
@@ -2438,21 +2877,33 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
     PortRoomGeo::Instance& inst = instances.emplace_back();
     inst.model = id;
     inst.sky = true;
-    const auto intensity = f.find(kPropSkyboxIntensity);
-    const float level =
-        intensity != f.end() && intensity->second.size == 4 ? ReadLEFloat(r.room.Bytes(intensity->second)) : 1.f;
-    const auto colour = f.find(kPropSkyboxColor);
-    for (int i = 0; i < 3; ++i) {
-      Span s;
-      const float channel = colour != f.end() && colour->second.size >= 12 ? ReadLEFloat(r.room.Bytes(colour->second) + 4 * i)
-                            : r.room.Nested(*c, {kPropSkyboxColor, kPropColorChannel[i]}, s) && s.size == 4
-                                ? ReadLEFloat(r.room.Bytes(s))
-                                : 1.f;
-      inst.skyRadiance[i] = std::isfinite(channel * level) ? std::max(channel * level, 0.f) : 0.f;
-    }
+    SkyRadiance(r.room, *c, inst.skyRadiance);
     place(inst, Vec3{}, rot, scale);
     script(inst, c->entity, active);
     ++skies;
+  }
+  // A room with no Skybox of its own (not even one on a layer) carries the world master's,
+  // which Remastered draws there (Phendrana's: !IceWorld's). It stands in for retail's world
+  // sky only where retail draws that. The master's triggers that switch it are not followed.
+  size_t worldSkies = 0;
+  if (r.room.Of(kSkybox).empty()) {
+    for (const WorldSky& sky : m_worldSkies) {
+      if (m_io.cancelled && m_io.cancelled()) {
+        return;
+      }
+      uint32_t id = 0;
+      if (!m_io.model(sky.model, id)) {
+        ++dropped;
+        continue;
+      }
+      PortRoomGeo::Instance& inst = instances.emplace_back();
+      inst.model = id;
+      inst.sky = true;
+      inst.worldSky = true;
+      std::copy(sky.radiance, sky.radiance + 3, inst.skyRadiance);
+      place(inst, Vec3{}, sky.rot, sky.scale);
+      ++worldSkies;
+    }
   }
   if (instances.empty()) {
     return;
@@ -2483,22 +2934,65 @@ void Writer::WriteGeometry(const RoomData& r, uint32_t mrea, const Area& area) {
   }
   char line[512];
   std::snprintf(line, sizeof line,
-                "  %s (%08X): %u instances (%zu from MCON, %zu actors, %zu skies, %zu inactive objects left out; %zu on a layer, "
+                "  %s (%08X): %u instances (%zu from MCON, %zu actors, %zu skies, %zu world skies, %zu inactive objects left out; %zu on a layer, "
                 "%zu scripted, %zu in %zu groups of %zu script objects and %zu connections (%zu untraced), %zu on a "
                 "platform, %zu with untraced links, %zu glowing, %zu animated, %zu left to retail actors, %zu left to "
                 "cinematics; %zu of %zu entities matched; %zu with a material driver), %zu dropped",
-                r.name.c_str(), mrea, count, modcons, actors, skies, inactive, gated, linked, grouped, scripts.group.size(),
+                r.name.c_str(), mrea, count, modcons, actors, skies, worldSkies, inactive, gated, linked, grouped, scripts.group.size(),
                 scripts.script.nodes.size(), scripts.script.edges.size(), scripts.scriptUnresolved, riding, unresolved,
                 glowing, animated, retailDrawn, posed, scripts.matched, scripts.entities, drivenActors, dropped);
   Log(line);
 }
 
-void Writer::WriteLiquids(const RoomData& r, uint32_t mrea) {
+void Writer::WriteLiquids(const RoomData& r, uint32_t mrea, const Area& area) {
   // Liquids are room geometry: they come with it, so a models-only import keeps the
   // retail planes (and the small arena its mod starts with).
   if (!m_io.liquid || (m_io.wantsGeometry && !m_io.wantsGeometry(r.name))) {
     return;
   }
+  // The retail Water (0x20) each render volume's entity matched: the object that draws it.
+  const SceneryScripts scripts = MatchScripts(r.room, area);
+  // A water entity Remastered moved beyond the match's reach: when it is the room's only
+  // unmatched one and the area has one Water no entity matched, that Water is its own (as an
+  // unplaced relay is the area's only relay).
+  int soleEntity = -1;
+  size_t soleWater = area.objects.size();
+  {
+    std::set<size_t> claimed;
+    for (const auto& [entity, index] : scripts.retail) {
+      claimed.insert(index);
+    }
+    std::set<int> unmatched;
+    for (const Component* c : r.room.Of(kWaterMP1)) {
+      if (c->entity >= 0 && scripts.retail.count(c->entity) == 0) {
+        unmatched.insert(c->entity);
+      }
+    }
+    size_t free = 0;
+    for (size_t j = 0; j < area.objects.size(); ++j) {
+      if (area.objects[j].type == 0x20 && claimed.count(j) == 0) {
+        soleWater = j;
+        ++free;
+      }
+    }
+    if (unmatched.size() == 1 && free == 1) {
+      soleEntity = *unmatched.begin();
+    } else {
+      soleWater = area.objects.size();
+    }
+  }
+  auto owner = [&](int entity) -> uint32_t {
+    if (entity >= 0 && entity == soleEntity) {
+      return area.objects[soleWater].id & 0x3FFFFFFu;
+    }
+    const auto matched = entity >= 0 ? scripts.retail.find(entity) : scripts.retail.end();
+    if (matched == scripts.retail.end() || matched->second >= area.objects.size() ||
+        area.objects[matched->second].type != 0x20) {
+      return 0;
+    }
+    return area.objects[matched->second].id & 0x3FFFFFFu;  // as TEditorId::Value, without the layer
+  };
+  size_t owned = 0;
   static const int kAxis[3] = {0, 2, 1};
   static const double kSign[3] = {-1, 1, 1};
   // What each entity's retail water object is filled with, and every water object's camera
@@ -2626,6 +3120,9 @@ void Writer::WriteLiquids(const RoomData& r, uint32_t mrea) {
       };
       AppendLE32(body, uint32_t(liquid.type));
       AppendLE32(body, id);
+      const uint32_t own = owner(c->entity);
+      owned += own != 0;
+      AppendLE32(body, own);
       for (int row = 0; row < 3; ++row) {
         // A lava pool is converted into the area's axes. A water mesh is not: it stays in
         // Remastered's model space and the transform takes it there, (x, y, z) -> (-x, z, y).
@@ -2697,7 +3194,7 @@ void Writer::WriteLiquids(const RoomData& r, uint32_t mrea) {
   }
   std::vector<uint8_t> out;
   AppendLE32(out, 0x4C52504D);  // 'MPRL'
-  AppendLE32(out, 4);
+  AppendLE32(out, 5);
   AppendLE32(out, count);
   out.insert(out.end(), body.begin(), body.end());
   AppendLE32(out, filterCount);
@@ -2709,21 +3206,173 @@ void Writer::WriteLiquids(const RoomData& r, uint32_t mrea) {
     return;
   }
   char line[160];
-  std::snprintf(line, sizeof line, "  %s: %u liquid surfaces, %zu dropped, %u water filters", r.name.c_str(),
-                count, dropped, filterCount);
+  std::snprintf(line, sizeof line, "  %s: %u liquid surfaces (%zu with a matched Water), %zu dropped, %u water filters",
+                r.name.c_str(), count, owned, dropped, filterCount);
   Log(line);
+}
+
+// Rz * Ry * Rx of `rot` (degrees), then `scale`, column by column: an editor transform.
+static void EditorBasis(const Vec3& rot, const Vec3& scale, double out[3][3]) {
+  double s[3], k[3];
+  for (int i = 0; i < 3; ++i) {
+    s[i] = std::sin(rot[size_t(i)] * (3.14159265358979323846 / 180.0));
+    k[i] = std::cos(rot[size_t(i)] * (3.14159265358979323846 / 180.0));
+  }
+  const double m[3][3] = {
+      {k[2] * k[1], k[2] * s[1] * s[0] - s[2] * k[0], k[2] * s[1] * k[0] + s[2] * s[0]},
+      {s[2] * k[1], s[2] * s[1] * s[0] + k[2] * k[0], s[2] * s[1] * k[0] - k[2] * s[0]},
+      {-s[1], k[1] * s[0], k[1] * k[0]},
+  };
+  for (int row = 0; row < 3; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      out[row][col] = m[row][col] * scale[size_t(col)];
+    }
+  }
+}
+
+// Remastered keeps many retail models under their retail ids and places them with entities of
+// its own. The ROOM keeps no retail editor id (an entity's IDTA is a guid of its own), but its
+// entities stand in the retail area's script order: the objects of a layer in turn, each in its
+// SCLY order. So the n-th object of the area naming a model is the n-th entity of the room
+// carrying it, when the two counts are equal. The retail object draws the model, so the model's
+// transform in its own space is where the entity puts it as the object sees it: the object's
+// inverse transform times the entity's (orient) and applied to the entity's position (offset).
+void Writer::PairRetailModels(const RoomData& r, const Area& area) {
+  m_retailEntities.clear();
+  m_syntheticEntities.clear();
+  m_roomRetailIds.clear();
+  m_entityPositions.clear();
+  if (!m_io.retailModel) {
+    return;
+  }
+  // kR2G as a signed permutation, as WriteGeometry places an entity.
+  static const int kAxis[3] = {0, 2, 1};
+  static const double kSign[3] = {-1, 1, 1};
+  struct Placed {
+    int entity;
+    double basis[3][3];  // in GC axes, the area's rotation included
+    Vec3 pos;            // in GC world space
+  };
+  std::map<uint32_t, std::pair<Id16, std::vector<Placed>>> byRetail;
+  std::vector<int> seenEntities;
+  for (const Component& c : r.room.Components()) {
+    Vec3 pos, rot, scale;
+    if (c.entity < 0 || c.raw.size < 16 || !r.room.Xform(c, pos, rot, scale)) {
+      continue;
+    }
+    if (std::find(seenEntities.begin(), seenEntities.end(), c.entity) == seenEntities.end()) {
+      seenEntities.push_back(c.entity);
+      m_entityPositions.push_back(Apply(area.xf, MulR2G(pos)));
+    }
+    const uint8_t* b = r.room.Bytes(c.raw);
+    for (size_t at = 0; at + 16 <= c.raw.size; ++at) {
+      if (std::memcmp(b + at, kRetailIdPrefix, 12) != 0) {
+        continue;
+      }
+      auto& [model, placed] = byRetail[ReadBE32(b + at + 12)];
+      model = SwapUuid(b + at);
+      at += 15;
+      if (std::any_of(placed.begin(), placed.end(), [&](const Placed& p) { return p.entity == c.entity; })) {
+        continue;
+      }
+      Placed& p = placed.emplace_back();
+      p.entity = c.entity;
+      p.pos = Apply(area.xf, MulR2G(pos));
+      double rem[3][3], gc[3][3];
+      EditorBasis(rot, scale, rem);
+      for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+          gc[row][col] = kSign[row] * kSign[col] * rem[kAxis[row]][kAxis[col]];
+        }
+      }
+      for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+          p.basis[row][col] = area.xf[size_t(row)][0] * gc[0][col] + area.xf[size_t(row)][1] * gc[1][col] +
+                              area.xf[size_t(row)][2] * gc[2][col];
+        }
+      }
+    }
+  }
+  for (auto& [retail, entry] : byRetail) {
+    auto& [model, placed] = entry;
+    std::sort(placed.begin(), placed.end(), [](const Placed& a, const Placed& b) { return a.entity < b.entity; });
+    const uint8_t be[4] = {uint8_t(retail >> 24), uint8_t(retail >> 16), uint8_t(retail >> 8), uint8_t(retail)};
+    std::vector<const ScriptObject*> named;
+    for (const ScriptObject& o : area.objects) {
+      if (o.hasXf && std::search(o.props.begin(), o.props.end(), be, be + 4) != o.props.end()) {
+        named.push_back(&o);
+      }
+    }
+    if (named.empty()) {
+      for (const Placed& p : placed) {
+        m_syntheticEntities.insert(p.entity);
+      }
+      continue;
+    }
+    m_roomRetailIds.insert(retail);
+    for (size_t n = 0; n < named.size(); ++n) {
+      const ScriptObject& o = *named[n];
+      RetailPlacement out;
+      std::copy(model.begin(), model.end(), out.model.begin());
+      out.retail = retail;
+      out.mrea = area.mrea;
+      out.object = o.id;
+      out.room = r.name;
+      if (o.type == 0x00 || o.type == 0x08) {
+        const auto at = std::search(o.props.begin(), o.props.end(), be, be + 4);
+        if (o.props.end() - at >= 8) {
+          const uint32_t ancs = ReadBE32(&*(at + 4));
+          out.animated = ancs != 0 && ancs != 0xffffffffu;
+        }
+      }
+      // When the counts differ (Remastered added or dropped some, or keeps one entity for a
+      // retail Platform and Actor on the same spot), the entity is the one standing where the
+      // object does, within kRetailActorNear as WriteGeometry leaves such entities to the
+      // retail object; an object with none keeps the retail model.
+      const Placed* found = nullptr;
+      if (named.size() == placed.size()) {
+        found = &placed[n];
+      } else {
+        double nearest = kRetailActorNear;
+        for (const Placed& p : placed) {
+          if (const double d = MaxAbs(p.pos, o.pos); d < nearest) {
+            nearest = d;
+            found = &p;
+          }
+        }
+      }
+      double basis[3][3], inverse[3][3];
+      EditorBasis(o.rot, o.scale, basis);
+      if (found != nullptr && Invert3(basis, inverse)) {
+        const Placed& p = *found;
+        out.ok = true;
+        out.entity = p.entity;
+        for (int i = 0; i < 3; ++i) {
+          for (int j = 0; j < 3; ++j) {
+            out.orient[i][j] =
+                inverse[i][0] * p.basis[0][j] + inverse[i][1] * p.basis[1][j] + inverse[i][2] * p.basis[2][j];
+          }
+          out.offset[i] = inverse[i][0] * (p.pos[0] - o.pos[0]) + inverse[i][1] * (p.pos[1] - o.pos[1]) +
+                          inverse[i][2] * (p.pos[2] - o.pos[2]);
+        }
+        m_retailEntities.insert(p.entity);
+      }
+      m_io.retailModel(out);
+    }
+  }
 }
 
 std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Placement>& placed, const Vec3& shift,
                               const float tonemap[5], const BloomData& worldBloom,
                               const std::vector<GradeData>& worldGrades,
                               const std::vector<BacklightData>& worldBacklights, const std::vector<FogData>& worldFogs,
-                              const std::vector<PortRoomEnv::WorldVolume>& worldVolumes, const Match& m, int& written,
-                              std::string& matched) {
+                              const std::vector<PortRoomEnv::WorldVolume>& worldVolumes,
+                              const SceneryScripts& master, const Match& m, int& written, std::string& matched) {
   matched.clear();
   char head[96];
+  PairRetailModels(r, *m.area);
   WriteGeometry(r, m.mrea, *m.area);
-  WriteLiquids(r, m.mrea);
+  WriteLiquids(r, m.mrea, *m.area);
   const std::vector<Vec3>& gdoors = m.area->doors;
   double rot[3][3], trans[3];
   for (int i = 0; i < 3; ++i) {
@@ -2870,7 +3519,7 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   std::string gnote = "grid not placed";
   const auto it = placed.find(r.name);
   if (it != placed.end() && Distance(it->second.pos, {trans[0], trans[1], trans[2]}) < 0.5) {
-    Grid(RoomPak{r.name, r.pak}, shift, gdoors, grid, gnote);
+    Grid(RoomPak{r.name, r.pak}, r.room.Lighting().grid, shift, gdoors, grid, gnote);
   }
   const LightmapData& lightmap = Lightmap(r);
   const bool withLightmap = lightmap.ok && lightmap.lit != 0;
@@ -2879,7 +3528,7 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   }
 
   std::vector<uint8_t> out = {'M', 'P', 'E', 'V'};
-  AppendLE32(out, 22);
+  AppendLE32(out, 34);
   float tone[5];
   std::copy(tonemap, tonemap + 5, tone);
   Tonemap(r, tone);
@@ -2896,7 +3545,7 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
   out.insert(out.end(), grid.begin(), grid.end());
   float exposure[5];
   std::vector<PortRoomEnv::FluidHint> fluidHints;
-  Exposure(r, exposure, &fluidHints);
+  Exposure(r, m.area, exposure, &fluidHints);
   AppendLEFloat(out, exposure[0]);
   AppendLEFloat(out, exposure[1]);
   AppendLEFloat(out, exposure[2]);
@@ -3088,6 +3737,9 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
       AppendLEFloat(out, v);
     }
     AppendLE32(out, s.group);
+    out.push_back(s.casts ? 1 : 0);
+    out.insert(out.end(), 3, 0);
+    AppendLightTimeline(out, s);
   }
   // The lightmap the room geometry's lookups index, or a width of 0.
   if (withLightmap) {
@@ -3132,41 +3784,27 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
       AppendLEFloat(out, v);
     }
     AppendLE32(out, l.group);
-    AppendLE32(out, uint32_t(l.links.size()));
-    for (const PortRoomGeo::Link& link : l.links) {
-      AppendLE32(out, link.sender);
-      out.push_back(link.state);
-      out.push_back(link.action);
-      out.insert(out.end(), 2, 0);
-    }
-    out.push_back(l.animated ? 1 : 0);
-    out.push_back(l.playing ? 1 : 0);
-    out.push_back(l.loop ? 1 : 0);
-    out.push_back(l.offAtStart ? 1 : 0);
-    out.push_back(l.animFalloff);
-    out.insert(out.end(), 3, 0);
-    AppendLEFloat(out, l.length);
-    AppendLEFloat(out, l.scale[0]);
-    AppendLEFloat(out, l.scale[1]);
-    AppendLEFloat(out, l.intensity);
-    for (const float c : l.rgb) {
-      AppendLEFloat(out, c);
-    }
-    for (const std::vector<uint8_t>& spline : l.splines) {
-      AppendLE32(out, uint32_t(spline.size()));
-      out.insert(out.end(), spline.begin(), spline.end());
-      out.insert(out.end(), (4 - spline.size() % 4) % 4, 0);
-    }
+    AppendLightTimeline(out, l);
   }
   AppendLE32(out, uint32_t(fluidHints.size()));
   for (const PortRoomEnv::FluidHint& h : fluidHints) {
     out.push_back(h.mode);
-    out.insert(out.end(), 3, 0);
+    out.push_back(h.role);
+    out.push_back(h.pair);
+    out.push_back(h.on ? 1 : 0);
     AppendLEFloat(out, h.exposure[0]);
     AppendLEFloat(out, h.exposure[1]);
     AppendLEFloat(out, h.bias);
     AppendLEFloat(out, h.sigma);
     AppendLEFloat(out, h.staticLerp);
+    AppendLE32(out, uint32_t(h.priority));
+    AppendLE32(out, uint32_t(h.links.size()));
+    for (const PortRoomEnv::GradeLink& link : h.links) {
+      AppendLE32(out, link.sender);
+      out.push_back(link.state);
+      out.push_back(link.action);
+      out.insert(out.end(), 2, 0);
+    }
   }
   AppendLE32(out, uint32_t(worldVolumes.size()));
   for (const PortRoomEnv::WorldVolume& v : worldVolumes) {
@@ -3178,6 +3816,169 @@ std::string Writer::WriteRoom(const RoomData& r, const std::map<std::string, Pla
     for (float a : v.axes) {
       AppendLEFloat(out, a);
     }
+  }
+  for (int i = 0; i < 3; ++i) {
+    AppendLEFloat(out, float(shift[size_t(i)]));
+  }
+  {
+    std::vector<std::string> notes;
+    const float intensity = EnvFxIntensity(r.room, notes);
+    AppendLEFloat(out, intensity);
+    if (intensity != 1.f) {
+      char text[96];
+      std::snprintf(text, sizeof text, "EnvironmentFX colour intensity %g set at load", intensity);
+      Log("  " + r.name + ": " + text);
+    }
+    for (const std::string& n : notes) {
+      Log("  " + r.name + ": " + n);
+    }
+  }
+  AppendLE32(out, uint32_t(scripts.roomVolumes.size()));
+  for (const PortRoomEnv::RoomVolume& v : scripts.roomVolumes) {
+    for (const float* field : {v.centre, v.half}) {
+      for (int i = 0; i < 3; ++i) {
+        AppendLEFloat(out, field[i]);
+      }
+    }
+    for (float a : v.axes) {
+      AppendLEFloat(out, a);
+    }
+    out.push_back(v.detect);
+    out.insert(out.end(), 3, 0);
+    // Version 31: whether the trigger is active at load, and the script that switches it.
+    out.push_back(v.on ? 1 : 0);
+    out.insert(out.end(), 3, 0);
+    AppendLE32(out, uint32_t(v.links.size()));
+    for (const PortRoomEnv::GradeLink& link : v.links) {
+      // As CEntity sends it, no layer bits; a volume's own pseudo-sender is kept whole.
+      AppendLE32(out, PortRoomEnv::PseudoSender(link.sender) ? link.sender : link.sender & 0x3ffffff);
+      out.push_back(link.state);
+      out.push_back(link.action);
+      out.insert(out.end(), 2, 0);
+    }
+  }
+  if (!scripts.roomVolumes.empty()) {
+    std::string note = std::to_string(scripts.roomVolumes.size()) + " room trigger volume(s) switch hints";
+    for (size_t k = 0; k < scripts.roomVolumes.size(); ++k) {
+      const PortRoomEnv::RoomVolume& v = scripts.roomVolumes[k];
+      if (!v.on || !v.links.empty()) {
+        note += "; volume " + std::to_string(k) + (v.on ? " on" : " off at load");
+        for (const PortRoomEnv::GradeLink& link : v.links) {
+          char text[48];
+          std::snprintf(text, sizeof text, ", %s by %08X state %d",
+                        link.action == PortRoomGeo::kShow       ? "on"
+                        : link.action == PortRoomGeo::kHide     ? "off"
+                        : link.action == PortRoomGeo::kToggle   ? "toggle"
+                                                                : "?",
+                        PortRoomEnv::PseudoSender(link.sender) ? link.sender : link.sender & 0x3ffffff, link.state);
+          note += text;
+        }
+      }
+    }
+    Log("  " + r.name + ": " + note);
+  }
+  // Version 31: what each world volume detects, the world's variables, the modifiers the world's
+  // and this room's triggers fire, and the master's query branches.
+  AppendLE32(out, uint32_t(worldVolumes.size()));
+  for (const PortRoomEnv::WorldVolume& v : worldVolumes) {
+    out.push_back(v.detect);
+  }
+  AppendLE32(out, uint32_t(master.envVars.size()));
+  for (const PortRoomEnv::EnvVar& v : master.envVars) {
+    out.insert(out.end(), v.guid.begin(), v.guid.end());
+    AppendLE32(out, uint32_t(v.name.size()));
+    out.insert(out.end(), v.name.begin(), v.name.end());
+    AppendLE32(out, uint32_t(v.value));
+    AppendLE32(out, v.flags);
+    AppendLE32(out, uint32_t(v.min));
+    AppendLE32(out, uint32_t(v.max));
+  }
+  AppendLE32(out, uint32_t(master.envOps.size() + scripts.envOps.size()));
+  for (const std::vector<PortRoomEnv::EnvOp>* ops : {&master.envOps, &scripts.envOps}) {
+    for (const PortRoomEnv::EnvOp& op : *ops) {
+      AppendLE32(out, op.sender);
+      out.push_back(op.state);
+      out.push_back(op.op);
+      out.insert(out.end(), 2, 0);
+      AppendLE32(out, uint32_t(op.value));
+      out.insert(out.end(), op.var.begin(), op.var.end());
+    }
+  }
+  AppendLE32(out, uint32_t(master.envBranches.size()));
+  for (const PortRoomEnv::EnvBranch& b : master.envBranches) {
+    out.insert(out.end(), b.var.begin(), b.var.end());
+    out.push_back(b.relop);
+    out.push_back(b.flags);
+    out.insert(out.end(), 2, 0);
+    AppendLE32(out, uint32_t(b.value));
+    AppendLE32(out, b.query);
+  }
+  {
+    std::vector<std::string> notes;
+    const std::vector<IceDarkenerAtLoad> darkeners = IceDarkeners(r.room, notes);
+    AppendLE32(out, uint32_t(darkeners.size()));
+    for (const IceDarkenerAtLoad& d : darkeners) {
+      AppendLEFloat(out, d.factor);
+      AppendLEFloat(out, d.delay);
+    }
+    for (const std::string& n : notes) {
+      Log("  " + r.name + ": " + n);
+    }
+  }
+  {
+    // The LightHints (version 34): each one's entity +Z, turned Rz * Ry * Rx as a spot's, is the
+    // direction CLightHintManager::BeforeThink 0x598054 gives the dominant light once its hint
+    // owns it.
+    struct Hint {
+      int32_t layer;
+      bool on;
+      float dir[3];
+    };
+    std::vector<Hint> hints;
+    for (const Component* c : r.room.Of(kLightHint)) {
+      Vec3 pos, euler, scale;
+      if (!r.room.Xform(*c, pos, euler, scale)) {
+        continue;
+      }
+      constexpr double kDegToRad = 3.14159265358979323846 / 180;
+      const double x = euler[0] * kDegToRad, y = euler[1] * kDegToRad, z = euler[2] * kDegToRad;
+      const double cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y), cz = std::cos(z),
+                   sz = std::sin(z);
+      const Vec3 fwd = MulR2G({cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx});
+      Vec3 d{};
+      for (size_t i = 0; i < 3; ++i) {
+        d[i] = m.a[i][0] * fwd[0] + m.a[i][1] * fwd[1] + m.a[i][2] * fwd[2];
+      }
+      const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      if (!(len > 1e-6)) {
+        continue;
+      }
+      Hint h{};
+      for (size_t i = 0; i < 3; ++i) {
+        h.dir[i] = float(d[i] / len);
+      }
+      const auto layer = scripts.layer.find(c->entity);
+      h.layer = layer != scripts.layer.end() ? int32_t(layer->second) : -1;
+      h.on = r.room.Active(*c);
+      char line[160];
+      std::snprintf(line, sizeof line, "  %s: light hint (%.3f, %.3f, %.3f) layer %d%s", r.name.c_str(), h.dir[0],
+                    h.dir[1], h.dir[2], int(h.layer), h.on ? "" : " (off)");
+      Log(line);
+      hints.push_back(h);
+    }
+    AppendLE32(out, uint32_t(hints.size()));
+    for (const Hint& h : hints) {
+      AppendLE32(out, uint32_t(h.layer));
+      out.push_back(h.on ? 1 : 0);
+      out.insert(out.end(), 3, 0);
+      for (float v : h.dir) {
+        AppendLEFloat(out, v);
+      }
+    }
+  }
+  if (!scripts.envOps.empty() || scripts.envUnresolved != 0) {
+    Log("  " + r.name + ": " + std::to_string(scripts.envOps.size()) + " environment variable op(s), " +
+        std::to_string(scripts.envUnresolved) + " modifier connection(s) not followed");
   }
   if (!fogs.empty() || !regions.empty()) {
     Log("  " + r.name + ": " + std::to_string(fogs.size()) + " fog hint(s), " + std::to_string(regions.size()) +
@@ -3324,15 +4125,42 @@ bool Writer::Run(uint32_t mlvl, int& written, std::string& error) {
                   v.centre[0], v.centre[1], v.centre[2], v.half[0], v.half[1], v.half[2], best, bestArea);
     Log(line);
   }
+  // The world's skies: the master's Skyboxes, one per model (!IceWorld's two are the same
+  // sky, switched by its triggers), an active one's transform first.
+  m_worldSkies.clear();
+  for (const bool wantActive : {true, false}) {
+    for (const Component* c : master.room.Of(kSkybox)) {
+      const auto f = master.room.Flat(*c);
+      const auto prop = f.find(kPropSkyboxModel);
+      Vec3 pos, rot, scale;
+      if (master.room.Active(*c) != wantActive || prop == f.end() || prop->second.size != 16 ||
+          !master.room.Xform(*c, pos, rot, scale)) {
+        continue;
+      }
+      const Id16 model = SwapUuid(master.room.Bytes(prop->second));
+      if (model == Id16{} || std::any_of(m_worldSkies.begin(), m_worldSkies.end(),
+                                         [&](const WorldSky& s) { return s.model == model; })) {
+        continue;
+      }
+      WorldSky& sky = m_worldSkies.emplace_back();
+      sky.model = model;
+      sky.rot = rot;
+      sky.scale = scale;
+      SkyRadiance(master.room, *c, sky.radiance);
+    }
+  }
   std::vector<GradeData> grades;
   ReadGrades(master, nullptr, grades, &masterScripts);
   std::vector<BacklightData> backlights;
   ReadBacklights(master, nullptr, backlights, &masterScripts);
   std::vector<FogData> fogs;
   ReadFogs(master, nullptr, fogs, &masterScripts);
-  Log("world: " + std::to_string(grades.size()) + " grade(s), " + std::to_string(backlights.size()) +
+  Log("world: " + std::to_string(m_worldSkies.size()) + " sky model(s), " + std::to_string(grades.size()) + " grade(s), " + std::to_string(backlights.size()) +
       " backlight(s), " + std::to_string(fogs.size()) + " fog hint(s), " + std::to_string(volumes.size()) +
       " camera volume(s)");
+  Log("world: " + std::to_string(masterScripts.envVars.size()) + " environment variable(s), " +
+      std::to_string(masterScripts.envOps.size()) + " op(s), " + std::to_string(masterScripts.envBranches.size()) +
+      " query branch(es), " + std::to_string(masterScripts.envUnresolved) + " modifier connection(s) not followed");
   // Every room is matched before any is written: two rooms matching one area
   // would write the same files, so only the closer match (the first, on a tie)
   // is written and the other is logged as a clash.
@@ -3376,7 +4204,8 @@ bool Writer::Run(uint32_t mlvl, int& written, std::string& error) {
       continue;
     }
     std::string matched;
-    Log(WriteRoom(r, placed, shift, tonemap, bloom, grades, backlights, fogs, volumes, m, written, matched));
+    Log(WriteRoom(r, placed, shift, tonemap, bloom, grades, backlights, fogs, volumes, masterScripts, m, written,
+                  matched));
     if (!matched.empty()) {
       seen[matched] = r.name;
     }

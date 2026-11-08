@@ -12,6 +12,7 @@
 #include "port_mods.h"
 #include "port_remastered_import.h"
 #include "port_tracker.h"
+#include "port_world_holders.h"
 
 #include "Kyoto/CResFactory.hpp"
 #include "Kyoto/Streams/CMemoryInStream.hpp"
@@ -27,6 +28,7 @@
 #include "MetroidPrime/Player/CWorldTransManager.hpp"
 #include "MetroidPrime/Player/CWorldState.hpp"
 
+#include "port_disc.h"
 #include "port_discord.h"
 
 #include <SDL3/SDL_events.h>
@@ -52,6 +54,7 @@ namespace fs = std::filesystem;
 // area's once Samus is placed.
 void PortKeepMusicForStateLoad(bool sameWorld);
 void PortStartStateLoadMusic(CStateManager& mgr);
+void PortEndStateLoadMusic();
 
 namespace PortSaveState {
 namespace {
@@ -88,7 +91,15 @@ std::vector< uint8_t > sPendingBlob;
 // up. Areas that load later than kRoomApplyFrames ticks after the place keep
 // the memory card load's fresh objects (the player may have left and come back).
 constexpr int kRoomApplyFrames = 600;
+constexpr int kRoomLateFrames = 3600;
 bool sRoomPending = false;
+// The primary restore is over (the log line is out) but neighbour areas that were
+// resident at the save are still streaming in; each takes its state when it finishes.
+// Ends when all have, when Samus leaves the saved room, or after kRoomLateFrames.
+bool sRoomLate = false;
+// The room state names the music that was playing: the room restore plays it, and
+// the area-music guess (PortStartStateLoadMusic) only runs if none of it could be.
+bool sRoomMusic = false;
 int sRoomFrames = 0;
 std::vector< int32_t > sRoomDone;
 RoomApplyStats sRoomStats;
@@ -164,6 +175,13 @@ bool Loadable(const Header& header, const std::vector< uint8_t >& blob) {
   return false;
 }
 
+const char* CurrentDiscName() { return PortDisc::Name(PortDisc::Current()); }
+
+// A state made with another disc (PAL, Trilogy, another USA revision): its
+// blob is laid out from that disc's world save data, so this one misreads it.
+bool OtherDisc(const Header& header) { return !header.disc.empty() && header.disc != CurrentDiscName(); }
+
+// Reads a state made with another disc too: the caller checks OtherDisc.
 bool ReadSlot(int slot, Header& header, std::vector< uint8_t >& blob) {
   const fs::path path = SlotPath(slot);
   if (path.empty())
@@ -187,8 +205,13 @@ bool WriteSlot(int slot, const Header& header, const std::vector< uint8_t >& blo
     if (!file)
       return false;
     file.write(data.data(), static_cast< std::streamsize >(data.size()));
-    if (!file)
+    file.flush();
+    file.close();
+    if (!file) {
+      std::error_code ignored;
+      fs::remove(temp, ignored);
       return false;
+    }
   }
   std::error_code ec;
   fs::rename(temp, path, ec);
@@ -282,6 +305,7 @@ bool Capture(CStateManager& mgr, Header& header, std::vector< uint8_t >& blob) {
   header.savedAt = static_cast< int64_t >(std::time(nullptr));
   header.world = WorldName(world.IGetWorldAssetId());
   header.room = RoomName(mgr, area.Value());
+  header.disc = CurrentDiscName();
   if (PortDebug::SaveStateRoomState())
     CaptureRoomState(mgr, header.roomState);
   return true;
@@ -308,6 +332,8 @@ void QuitToPending(CStateManager& mgr) {
   sInstallPending = true;
   sPlacePending = false;
   sRoomPending = false;
+  sRoomLate = false;
+  sRoomMusic = false;
 
   // As the debug world warp: stop the outgoing world's loads, retire its PAKs
   // and quit to CMainFlow, which starts the next game (InstallPending).
@@ -346,6 +372,11 @@ bool DoLoad(CStateManager& mgr, int slot) {
   std::vector< uint8_t > blob;
   if (!ReadSlot(slot, header, blob)) {
     SetMessage(SlotName(slot) + " is empty or unreadable");
+    return false;
+  }
+  if (OtherDisc(header)) {
+    SetMessage("Can't load " + SlotName(slot) + ": it was made with the " + header.disc + " disc (this one is " +
+               CurrentDiscName() + ")");
     return false;
   }
   std::string why;
@@ -492,6 +523,9 @@ void Place(CStateManager& mgr) {
     look = CVector3f(0.f, 1.f, 0.f);
   player.Teleport(CTransform4f::LookAt(pos, pos + look, CVector3f(0.f, 0.f, 1.f)), mgr, true);
   player.SetVelocityWR(CVector3f(0.f, 0.f, 0.f));
+  // The rebuilt player has no area until its own first Update, which runs after the
+  // enemies' (a Metroid whose target is the player loses interest while it reads -1).
+  mgr.SetActorAreaId(player, mgr.GetWorld()->GetCurrentAreaId());
   const bool morphed = player.GetMorphballTransitionState() == CPlayer::kMS_Morphed;
   if (h.morphed != morphed) {
     player.SetSpawnedMorphBallState(h.morphed ? CPlayer::kMS_Morphed : CPlayer::kMS_Unmorphed,
@@ -502,24 +536,57 @@ void Place(CStateManager& mgr) {
   sRoomPending = PortDebug::SaveStateRoomState() && !h.roomState.empty();
   if (!sRoomPending)
     DisarmSpawnLayers();  // no restore will run to the end that disarms them
+  sRoomLate = false;
   sRoomFrames = 0;
   sRoomDone.clear();
   sRoomStats = {};
 }
 
+void EndRoomState() {
+  sRoomPending = false;
+  sRoomLate = false;
+  DisarmSpawnLayers();
+}
+
 // Puts the saved room objects on the rebuilt areas as each one finishes loading.
 void TickRoomState(CStateManager& mgr) {
-  if (!sRoomPending || mgr.GetWantsToQuit())
+  if (!(sRoomPending || sRoomLate) || mgr.GetWantsToQuit())
     return;
   const int waiting = ApplyRoomState(mgr, sPendingHeader.roomState, sRoomDone, sRoomStats);
+  if (sRoomLate) {
+    ++sRoomFrames;
+    if (sRoomStats.late == 0 || sRoomFrames >= kRoomLateFrames ||
+        mgr.GetWorld()->GetCurrentAreaId().Value() != static_cast< int >(sPendingHeader.areaId)) {
+      PortLog::Write("[savestate] room state, neighbour areas: %d applied in total, %d areas %s\n",
+                     sRoomStats.applied, sRoomStats.late,
+                     sRoomStats.late == 0 ? "all loaded" : "never loaded; left as loaded");
+      EndRoomState();
+    }
+    return;
+  }
   if (waiting > 0 && ++sRoomFrames < kRoomApplyFrames)
     return;
-  sRoomPending = false;
-  DisarmSpawnLayers();
+  const bool late = sRoomStats.late > 0;
   PortLog::Write("[savestate] room state: %d applied, %d generated, %d removed, %d unmatched, "
-                 "%d areas skipped, %d script messages replayed\n",
+                 "%d areas skipped, %d script messages replayed, %d fields changed%s\n",
                  sRoomStats.applied, sRoomStats.generated, sRoomStats.removed, sRoomStats.unmatched,
-                 sRoomStats.skipped, sRoomStats.replayed);
+                 sRoomStats.skipped, sRoomStats.replayed, sRoomStats.fields,
+                 late ? ", neighbour areas still streaming" : "");
+  sRoomPending = false;
+  if (sRoomMusic) {
+    sRoomMusic = false;
+    if (sRoomStats.music > 0)
+      PortEndStateLoadMusic();
+    else
+      PortStartStateLoadMusic(mgr);
+  }
+  if (late) {
+    // The armed spawn layers stay: those areas spawn with the bits they had at the save.
+    sRoomLate = true;
+    sRoomFrames = 0;
+  } else {
+    EndRoomState();
+  }
 }
 
 
@@ -569,6 +636,13 @@ void WriteMarker() {
     return;
   std::ofstream file(path, std::ios::binary | std::ios::trunc);
   file << sMarker;
+  file.flush();
+  file.close();
+  if (!file) {
+    // Without the marker a crash goes undetected, so the user is told once per
+    // failure.
+    PortLog::Write("[savestate] cannot write the crash marker %s\n", PortGci::PathString(path).c_str());
+  }
 }
 
 void RemoveMarker() {
@@ -590,7 +664,8 @@ bool ReadResume(ResumeMeta& meta, Header& header, std::vector< uint8_t >& blob) 
     return false;
   const std::string data = port::ReadAllText(file);
   std::string state;
-  return DecodeResume(data, meta, state) && Decode(state, header, blob) && Loadable(header, blob);
+  return DecodeResume(data, meta, state) && Decode(state, header, blob) && Loadable(header, blob) &&
+         !OtherDisc(header);
 }
 
 ResumeContext GatherResumeContext() {
@@ -671,7 +746,7 @@ Info SlotInfo(int slot) {
     return info;
   info.exists = true;
   info.world = header.world;
-  info.room = header.room;
+  info.room = OtherDisc(header) ? header.room + " (" + header.disc + " disc)" : header.room;
   info.playTime = header.playTime;
   info.savedAt = header.savedAt;
   info.morphed = header.morphed;
@@ -739,6 +814,14 @@ bool RequestModReload() {
 
 std::string LastMessage() { return sMessage; }
 
+bool RoomRestoreOwnsArea(CStateManager& mgr, int area) {
+  if (!(sPlacePending || sRoomPending || sRoomLate) || !PortDebug::SaveStateRoomState() ||
+      mgr.GetWorld() == nullptr ||
+      static_cast< uint32_t >(mgr.GetWorld()->IGetWorldAssetId()) != sPendingHeader.worldId)
+    return false;
+  return RoomAreaAwaitsRestore(mgr, sPendingHeader.roomState, sRoomDone, area);
+}
+
 bool Tick(CStateManager& mgr) {
   if (sPlacePending && !mgr.GetWantsToQuit() && mgr.GetWorld() != nullptr &&
       mgr.GetGameState() == CStateManager::kGS_Running) {
@@ -756,7 +839,9 @@ bool Tick(CStateManager& mgr) {
       WriteMarker();
       SetMessage("Resumed");
     }
-    PortStartStateLoadMusic(mgr);
+    sRoomMusic = sRoomPending && RoomStateHasMusic(sPendingHeader.roomState);
+    if (!sRoomMusic)
+      PortStartStateLoadMusic(mgr);
   }
   TickRoomState(mgr);
   if (sInstallPending) {
@@ -789,7 +874,11 @@ bool Tick(CStateManager& mgr) {
 
 void ReloadModsNow() {
   sReloadMods = false;
-  gpResourceFactory->PortReopenPaks(ReloadModFiles);
+  // In game the world that held them is already gone (CStateManager's destructor); a reload made
+  // in the front end has no world, so this is the only place its holders can go. Their tokens
+  // would otherwise pin the outgoing mods' models in gpSimplePool.
+  PortWorldHolders::ReloadMods(&PortWorldHolders::Release,
+                               [] { gpResourceFactory->PortReopenPaks(ReloadModFiles); });
   const PortMods::Status& status = PortMods::CurrentStatus();
   SetMessage("Mods reloaded: " + std::to_string(status.overlays) + " disc file(s), " +
              std::to_string(PortMods::NativeTextureCount()) + " native texture(s)");
@@ -801,6 +890,13 @@ void SetInFrontEnd(bool inFrontEnd) {
     // Back at the title: the snapshot, a room restore still running and the layers
     // armed for it belong to a game that was left.
     sRoomPending = false;
+    sRoomLate = false;
+    if (sRoomMusic) {
+      // The restore that was to play the music never finished: the next world
+      // destroyed must not keep the track as a state load would.
+      sRoomMusic = false;
+      PortEndStateLoadMusic();
+    }
     DisarmSpawnLayers();
     std::lock_guard< std::mutex > lock(sSnapMutex);
     sSnap.valid = false;
@@ -856,6 +952,8 @@ void InstallPending() {
   sPlacePending = true;
 }
 
+bool LoadPlacing() { return sPlacePending; }
+
 namespace {
 
 // Logs why quick resume is (not) taking snapshots, once per change of reason.
@@ -896,15 +994,21 @@ ResumeMeta CurrentMeta() {
 // Builds the snapshot from the live game (caller checked SafeNow).
 bool TakeSnapshot(CStateManager& mgr) {
   const auto start = Clock::now();
-  Header header;
-  std::vector< uint8_t > blob;
-  Capture(mgr, header, blob);
   ResumeSnapshot snap;
   snap.meta = CurrentMeta();
   if (snap.meta.fileIdx > 2) {
     ResumeNote("blocked: no card file selected (file " + std::to_string(snap.meta.fileIdx) + ")");
     return false;
   }
+  // No card serial: a save state loaded from the title, or "continue without
+  // saving". No card file can take such a state at the title, so it isn't kept.
+  if (snap.meta.cardSerial == 0) {
+    ResumeNote("blocked: the game has no memory card");
+    return false;
+  }
+  Header header;
+  std::vector< uint8_t > blob;
+  Capture(mgr, header, blob);
   snap.path = ResumePath();
   if (snap.path.empty()) {
     ResumeNote("blocked: no resume path (no user folder)");

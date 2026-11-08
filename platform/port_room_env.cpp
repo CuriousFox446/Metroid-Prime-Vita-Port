@@ -2,6 +2,8 @@
 // cube and ambient for a model. See port_room_env.h.
 #include "port_room_env_internal.h"
 
+#include "port_pause_lighting.h"
+
 namespace PortRoomEnv {
 namespace EnvDetail {
 
@@ -63,7 +65,6 @@ uint32_t sHintArea = 0;
 float sHintCentre[3];
 float sHintLightmap[3] = {}; // SetLightmapHint; PortRoomGeo::HasLightmapLookup
 int sEnabled = -1;
-int sExposure = -1;
 int sBloom = -1;
 uint32_t sViewArea = 0;
 int sGrade = -1;
@@ -80,11 +81,15 @@ uint64_t sRegionOrder = 0;
 int sVolFog = -1;
 // Console `roomenv fogregions on|off`: drop the fog regions to see what they add.
 bool sFogRegions = true;
+uint64_t sFogRegionsHidden = 0; // the view area's, by index (debug)
 bool sPlayerFluid = false;
 bool sCameraWater = false;
+uint8_t sExposureSwap = 1;
 uint64_t sItems = 0;
 std::vector<WorldVolume> sWorldVolumes;
 WorldVolumeState sWorldVolumeState;
+std::vector<EnvVarLive> sEnvVars;
+std::vector<EnvOp> sWorldEnvOps;
 float sCameraPoint[3] = {};
 // LUTs handed to Aurora already; they are kept there for the run.
 std::unordered_set<uint32_t> sGradeLuts;
@@ -338,45 +343,11 @@ float CubeAverage(const File& file, const Cube& cube, float& peak) {
   return float((0.2126 * sum[0] + 0.7152 * sum[1] + 0.0722 * sum[2]) / count);
 }
 
-// What Remastered multiplies the room's radiance by before its tone curve: 2^(3 - EV).
-// Without auto exposure EV is the Tonemap's own. With it (CPostFXManager::
-// UpdateTonemapping), EV = log2(L / grey) + 3 + bias, held to the hint's range, where L is
-// the largest channel of the last frame's average colour and grey is sRGB 128. The port
-// has no HDR frame to average, so L is the middle one of the room's probes instead; over
-// the 275 rooms that lands inside the hint's range for most.
+// What Remastered multiplies the room's radiance by before its tone curve: 2^(3 - EV). Before
+// a frame is measured (and without auto exposure) EV is the tonemap's own (UpdateTonemapping
+// 0xaffb18 with L < 0); UpdateFrame moves it from there.
 float RoomExposure(const Area& area) {
-  constexpr float kGrey = 0.2158605f; // sRGB 128, linear
-  const File& file = area.file;
-  float ev = file.tonemap[0];
-  if (file.exposure[0] != 0.f || file.exposure[1] != 0.f) {
-    std::vector<float> levels;
-    for (const Probe& probe : file.probes) {
-      const float level = area.cubes[probe.cube].peak * probe.scale;
-      if (level > 0.f && std::isfinite(level)) {
-        levels.push_back(level);
-      }
-    }
-    float level = 0.f;
-    if (!levels.empty()) {
-      std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
-      level = levels[levels.size() / 2];
-    } else {
-      // The grid's points are the same radiance (a version 21 area's own tiles before its
-      // grid is composed from the mapped ones).
-      for (const Grid& grid : Grids(area)) {
-        level = std::max(level, grid.average);
-      }
-      level = std::max(level, area.ownAverage);
-      if (area.file.tiles != nullptr && level <= 0.f) {
-        level = sWorld.grid.average;
-      }
-    }
-    if (!(level > 0.f)) {
-      return 0.f;
-    }
-    ev = std::log2(level / kGrey) + 3.f + file.exposureBias;
-    ev = std::min(std::max(ev, file.exposure[0]), file.exposure[1]);
-  }
+  const float ev = area.file.tonemap[0];
   if (!std::isfinite(ev)) {
     return 0.f;
   }
@@ -390,6 +361,13 @@ float FrameExposure(const Area& area) {
   return sFrame.exposure > 0.f ? sFrame.exposure : area.exposure;
 }
 
+// The exposure baked light is read at: the frame's, or 1 with no tone data, where Remastered draws
+// through STonemapParams::BuildLinear(3.0) (E = 1) and uses the baked values as they are.
+float ProbeExposure(const Area& area) {
+  const float exposure = FrameExposure(area);
+  return exposure > 0.f ? exposure : 1.f;
+}
+
 // MP_ROOM_ENV_GAIN: scales the room's baked and sun light alike.
 float LightGain() {
   static const float gain = port::EnvFloat("MP_ROOM_ENV_GAIN", 1.f);
@@ -397,8 +375,11 @@ float LightGain() {
 }
 
 
-// A probe's GPU cube; null when it is black or the worker has not made it yet.
+// A probe's GPU cube; null when it has none, is black or the worker has not made it yet.
 GpuCube* ProbeCube(Area& area, const Probe& probe) {
+  if (probe.cube == kProbeNoCube) {
+    return nullptr;
+  }
   GpuCube& gpu = area.cubes[probe.cube];
   return gpu.id != 0 ? &gpu : nullptr;
 }
@@ -537,7 +518,11 @@ void BuildTone(float mid, float contrast, float toe, float shoulder, float rows[
 }
 
 bool Tone(float rows[3][4]) {
-  if (!Enabled() || !RoomExposed()) {
+  if (PortPauseLighting::active) {
+    BuildTone(0.18f, 0.f, 0.6f, 0.15f, rows);
+    return true;
+  }
+  if (!Enabled()) {
     return false;
   }
   if (!sFrame.hasTone) {
@@ -576,7 +561,11 @@ static bool XRayPostEnabled() {
   return sEnv && !PortDebug::OriginalExperience();
 }
 
-void UpdateFrame(bool roomGeoDrawing) {
+static ExposureAverage sAverage;
+
+void ResetExposure() { sAverage.Reset(); }
+
+void UpdateFrame() {
   if (!sBrdfSent) {
     SendBrdfLut();
   }
@@ -591,8 +580,6 @@ void UpdateFrame(bool roomGeoDrawing) {
     sBakedLight[0] = sBakedLight[1] = sBakedLight[2] = kXRayShadowMod;
   }
   GXSetPBRBakedLightModulation(sBakedLight);
-  constexpr float kGrey = 0.2158605f; // sRGB 128, linear
-  constexpr uint32_t kInFlight = 3;   // readbacks Aurora may have queued
   using Clock = std::chrono::steady_clock;
   FinishLoads();
   TakeResults();
@@ -630,7 +617,7 @@ void UpdateFrame(bool roomGeoDrawing) {
     const FluidHint& h = file.fluidHints[size_t(fluidPick)];
     eff = {{h.exposure[0], h.exposure[1]}, h.bias, h.sigma, h.staticLerp};
   }
-  const bool hint = eff.exposure[0] != 0.f || eff.exposure[1] != 0.f;
+  const bool hint = fluidPick >= 0 || eff.exposure[0] != 0.f || eff.exposure[1] != 0.f;
   // A hint that registered this frame is type 1: SetValue instead of the Gaussian's easing. The
   // types are cleared after every frame, wherever the view was.
   const bool hintSnap = fluidPick >= 0 && area.hintSnap;
@@ -657,8 +644,6 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.moving = false;
     f.progress = 0.f;
     f.carry = 0.f;
-    f.measured = false;
-    f.ignoreUntil = serial + kInFlight;
   } else {
     std::memcpy(f.to, target, sizeof(target));
   }
@@ -684,48 +669,27 @@ void UpdateFrame(bool roomGeoDrawing) {
     f.progress = tr.progress;
     f.moving = tr.moving;
   }
-  if (f.sigma != eff.sigma) {
-    f.sigma = eff.sigma;
-    f.ev.SetSigma(f.sigma);
-  }
-  // Measuring settles only where the picture follows the exposure: room geometry, lit by
-  // the room's own light. The retail world keeps its level whatever the exposure, and
-  // measuring it would push the exposure to an end of the hint's range.
-  f.measuring = hint && roomGeoDrawing && area.hasGeo && AutoExposure() && Enabled() && RoomExposed();
-  if (hasRadiance && serial != f.serial) {
-    f.serial = serial;
-    const float peak = std::max(std::max(radiance[0], radiance[1]), radiance[2]);
-    if (f.measuring && int32_t(serial - f.ignoreUntil) > 0 && peak > 0.f && std::isfinite(peak)) {
-      const float ev = std::log2(peak / kGrey) + 3.f + eff.bias;
-      f.measuredEv = std::min(std::max(ev, eff.exposure[0]), eff.exposure[1]);
-      f.measured = true;
+  // UpdateTonemapping 0xaffb18 measures every frame in a room with a hint, whatever is drawn.
+  f.measuring = hint && AutoExposure() && Enabled();
+  if (hasRadiance && serial != sAverage.serial) {
+    sAverage.serial = serial;
+    if (f.measuring) {
+      sAverage.Take(radiance);
     }
   }
-  if (!f.measuring) {
-    f.measured = false;
-  }
-  if (!hint) {
-    f.targetEv = f.shown[0];
-  } else if (f.measured) {
-    f.targetEv = f.measuredEv;
-  } else {
-    f.targetEv = area.exposure > 0.f ? 3.f - std::log2(area.exposure) : f.shown[0];
-  }
-  // Without a hint the exposure is the tonemap's, moving linearly with it; with one it eases
-  // through the Gaussian, a step every 60th of a second.
+  // The Gaussian steps every 60th of a second.
   f.carry += std::chrono::duration<float>(now - f.last).count();
   f.last = now;
-  if (jump || !hint || hintSnap) {
-    f.ev.SetValue(f.targetEv);
+  int steps = 0;
+  if (!f.measuring || hintSnap) {
     f.carry = 0.f;
   } else {
-    const int steps = int(f.carry * 60.f);
+    steps = int(f.carry * 60.f);
     f.carry -= float(steps) / 60.f;
-    for (int i = std::min(steps, 30); i > 0; --i) {
-      f.ev.Step(f.targetEv);
-    }
   }
-  const float exposure = std::exp2(3.f - f.ev.value);
+  f.ev = sAverage.Update(f.measuring, f.shown[0], eff.exposure[0], eff.exposure[1], eff.bias, eff.sigma, hintSnap,
+                          std::min(steps, 30), &f.targetEv);
+  const float exposure = std::exp2(3.f - f.ev);
   f.exposure = std::isfinite(exposure) && exposure > 0.f ? exposure : 0.f;
   f.hasTone = f.exposure > 0.f && f.shown[1] > 0.f && f.shown[1] < 1.f;
   if (f.hasTone) {
@@ -733,26 +697,38 @@ void UpdateFrame(bool roomGeoDrawing) {
   }
   static const bool sLog = port::EnvFlag("MP_ROOM_ENV_EXPOSURE_LOG");
   if (sLog) {
-    PortLog::Write("room env exposure: area %08X jump %d shown %g %g %g %g %g %g ev %g target %g fluid %d snap %d\n",
-                   sViewArea, int(jump), f.shown[0], f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.shown[5],
-                   f.ev.value, f.targetEv, fluidPick, int(hintSnap));
+    PortLog::Write("room env exposure: area %08X jump %d shown %g %g %g %g %g %g ev %g target %g L %g fluid %d "
+                   "snap %d swap %d\n",
+                   sViewArea, int(jump), f.shown[0], f.shown[1], f.shown[2], f.shown[3], f.shown[4], f.shown[5], f.ev,
+                   f.targetEv, sAverage.L, fluidPick, int(hintSnap), int(sExposureSwap));
   }
 }
 
 float MeasureExposure() { return sFrame.measuring ? sFrame.exposure : 0.f; }
 
-float FrameExposure() { return sFrame.exposure; }
+float FrameExposure() { return PortPauseLighting::active ? 1.f : sFrame.exposure; }
+
+float ParticleInverseExposure(bool blended) {
+  if (PortPauseLighting::active) return 1.f;
+  if (!sFrame.hasTone || !Enabled() || (blended && sFrame.exposure <= 0.f)) {
+    return 1.f;
+  }
+  // The same frame/tonemap values used by FrameExposure and GlowScale, before material shading.
+  const float inverse = blended ? 1.f / sFrame.exposure : std::exp2(sFrame.shown[5] - 3.f);
+  return std::isfinite(inverse) && inverse > 0.f ? inverse : 1.f;
+}
 
 float GlowScale() {
+  if (PortPauseLighting::active) return 1.f;
   if (sStatic < 0) {
     sStatic = port::EnvFlag("MP_ROOM_ENV_STATIC_EXPOSURE", true) ? 1 : 0;
   }
-  if (sStatic == 0 || !sFrame.hasTone || !Enabled() || !RoomExposed()) {
+  if (sStatic == 0 || !sFrame.hasTone || !Enabled()) {
     return 1.f;
   }
   // The light is divided by the static exposure and the frame then multiplied by its own:
   // 2^(3 - EV) / 2^(3 - static EV).
-  const float scale = std::exp2(sFrame.shown[5] - sFrame.ev.value);
+  const float scale = std::exp2(sFrame.shown[5] - sFrame.ev);
   return std::isfinite(scale) && scale > 0.f ? scale : 1.f;
 }
 
@@ -837,7 +813,8 @@ bool XRayPass(bool distortion) {
 }
 
 float SkyGain() {
-  if (GlowScale() <= 0.f || sStatic == 0 || !sFrame.hasTone || !Enabled() || !RoomExposed()) {
+  if (PortPauseLighting::active) return 1.f;
+  if (GlowScale() <= 0.f || sStatic == 0 || !sFrame.hasTone || !Enabled()) {
     return 0.f;
   }
   // The shader multiplies an unlit surface by GlowScale, 2^(static EV - EV); this makes the
@@ -846,24 +823,32 @@ float SkyGain() {
   return std::isfinite(gain) && gain > 0.f ? gain : 0.f;
 }
 
+// The gain both GlowGain and UnlitGain apply: the frame's exposure, or the sky's where one is set.
+float ExposedGain(bool frameExposed, float fallback) {
+  const float sky = SkyGain();
+  const float gain = frameExposed || sky <= 0.f ? sFrame.exposure : sky;
+  return std::isfinite(gain) && gain > 0.f ? gain : fallback;
+}
+
 float GlowGain(bool frameExposed) {
-  // Before Remastered's exposure was applied the converter folded 0.10 into the glow.
-  constexpr float kFallback = 0.10f;
+  if (PortPauseLighting::active) return 1.f;
+  // Without tone data Remastered draws through STonemapParams::BuildLinear(3.0) (0x211ab0):
+  // exposure 1, so the glow is left as authored (kb topic/post-output.md "No tonemap data").
+  constexpr float kFallback = 1.f;
   static const bool sOff = !port::EnvFlag("MP_REMASTERED_GLOW_EXPOSURE", true);
-  if (sOff || !sFrame.hasTone || !Enabled() || !RoomExposed()) {
+  if (sOff || !sFrame.hasTone || !Enabled()) {
     return kFallback;
   }
   // The shader multiplies the glow by GlowScale, 2^(static EV - EV), where the static
   // exposure is in use; this is the rest of Remastered's 2^(3 - EV).
-  const float gain = frameExposed || SkyGain() <= 0.f ? sFrame.exposure : SkyGain();
-  return std::isfinite(gain) && gain > 0.f ? gain : kFallback;
+  return ExposedGain(frameExposed, kFallback);
 }
 
 float ParticleLightGain(bool inverseExposed) {
   // MP_PARTICLE_LIGHT_SCALE multiplies it (debug).
   static const float sScale = std::max(port::EnvFloat("MP_PARTICLE_LIGHT_SCALE", 1.f), 0.f);
   const float invPi = sScale / 3.14159265f;
-  const float exposure = Enabled() && RoomExposed() ? sFrame.exposure : 0.f;
+  const float exposure = Enabled() ? sFrame.exposure : 0.f;
   if (!(exposure > 0.f) || !std::isfinite(exposure)) {
     return invPi;
   }
@@ -872,13 +857,12 @@ float ParticleLightGain(bool inverseExposed) {
 }
 
 float UnlitGain(bool frameExposed) {
+  if (PortPauseLighting::active) return 1.f;
   // Outside an exposed room Remastered's static default (exposure 1) applies: nothing to add.
-  if (!sFrame.hasTone || !Enabled() || !RoomExposed()) {
+  if (!sFrame.hasTone || !Enabled()) {
     return 1.f;
   }
-  const float sky = SkyGain();
-  const float gain = frameExposed || sky <= 0.f ? sFrame.exposure : sky;
-  return std::isfinite(gain) && gain > 0.f ? gain : 1.f;
+  return ExposedGain(frameExposed, 1.f);
 }
 
 void SetStaticExposure(bool on) { sStatic = on ? 1 : 0; }
@@ -916,11 +900,14 @@ bool BloomEnabled() {
 void SetBloomEnabled(bool on) { sBloom = on ? 1 : 0; }
 
 bool Bloom(float& threshold, float tints[5][3]) {
-  if (!Enabled() || !RoomExposed() || !BloomEnabled()) {
+  if (!Enabled() || !BloomEnabled()) {
     return false;
   }
+  // Bloom runs where the room (or its world) has a BloomEffect, tone curve or not
+  // (NPostFX::get_bloom_data 0xb4b7f0; kb topic/bloom-no-bloomeffect.md). The importer pads a
+  // BloomEffect's tints to five, so fewer means none.
   const auto view = sAreas.find(sViewArea);
-  if (view == sAreas.end() || !(view->second.tone[1][0] > 0.f) || view->second.file.bloomTints.size() < 20) {
+  if (view == sAreas.end() || view->second.file.bloomTints.size() < 20) {
     return false;
   }
   const std::vector<float>& rgba = view->second.file.bloomTints;
@@ -931,6 +918,45 @@ bool Bloom(float& threshold, float tints[5][3]) {
   }
   threshold = view->second.file.bloomThreshold;
   return true;
+}
+
+const std::vector<IceDarkener>* IceDarkeners(uint32_t mrea) {
+  const auto it = sAreas.find(mrea);
+  return it == sAreas.end() ? nullptr : &it->second.file.iceDarkeners;
+}
+
+namespace {
+float sDominantLight[3] = {0.f, 0.f, -1.f}; // skDownVector, retail's -Z
+} // namespace
+
+void UpdateLightHints() {
+  // Areas in the order they loaded, as their entities came in.
+  std::vector<Area*> order;
+  for (auto& [mrea, area] : sAreas) {
+    if (area.hasFile && !area.file.lightHints.empty()) {
+      order.push_back(&area);
+    }
+  }
+  std::sort(order.begin(), order.end(), [](const Area* a, const Area* b) { return a->loadSeq < b->loadSeq; });
+  for (Area* area : order) {
+    const std::vector<LightHint>& hints = area->file.lightHints;
+    area->lightHints.resize(hints.size(), 0);
+    for (size_t i = 0; i < hints.size(); ++i) {
+      const LightHint& h = hints[i];
+      const bool on = h.on && (h.layer < 0 || h.layer >= 64 || ((area->layers >> h.layer) & 1) != 0);
+      if (on && area->lightHints[i] == 0) {
+        std::copy(h.dir, h.dir + 3, sDominantLight);
+      }
+      area->lightHints[i] = on ? 1 : 0;
+    }
+  }
+}
+
+void DominantLight(float out[3]) { std::copy(sDominantLight, sDominantLight + 3, out); }
+
+float EnvFxIntensity() {
+  const auto view = sAreas.find(sViewArea);
+  return view == sAreas.end() ? 1.f : view->second.file.envFxIntensity;
 }
 
 bool ColorGradeEnabled() {
@@ -1101,50 +1127,108 @@ void UpdateBacklight(LayerActive layerActive, void* context) {
 
 namespace {
 // What the last Sun call made of each of the camera area's suns, for SunInfo.
-enum class SunWhy : char { Picked, Weaker, Off, Below, Layer };
+enum class SunWhy : char { Picked, Weaker, Off, Layer, Lit };
 std::vector< SunWhy > sSunWhy;
-}
 
-bool Sun(LayerActive layerActive, void* context, bool cinematic, float toSun[3], float color[3]) {
-  sSunWhy.clear();
+// The room's Remastered lighting: the camera area's file, at the frame's exposure (0: none).
+const Area* SunArea(float& exposure) {
+  exposure = 0.f;
   if (!Enabled()) {
-    return false;
+    return nullptr;
   }
   const auto view = sAreas.find(sViewArea);
   if (view == sAreas.end() || !view->second.hasFile) {
-    return false;
+    return nullptr;
   }
   // Remastered's light units only mean something at its exposure.
-  const float exposure = RoomExposed() ? FrameExposure(view->second) : 0.f;
-  if (exposure <= 0.f) {
+  exposure = FrameExposure(view->second);
+  return exposure > 0.f ? &view->second : nullptr;
+}
+
+// A light's colour times intensity now: its timeline's splines at the state's time when animated
+// (intensity, and the gradient at the colour spline), else the stored colour.
+void TimelineColor(const LightTimeline& l, const float stored[3], const Area::Light* state, float out[3]) {
+  if (!l.animated || state == nullptr) {
+    std::copy(stored, stored + 3, out);
+    return;
+  }
+  const float t = float(state->time);
+  const auto at = [&](LightSpline s, float fallback) {
+    return l.hasSpline[s] ? l.splines[s].Eval(t) : fallback;
+  };
+  const float intensity = at(kLightSplineIntensity, l.intensity);
+  float rgb[3] = {l.rgb[0], l.rgb[1], l.rgb[2]};
+  if (l.hasSpline[kLightSplineGradient] && l.hasSpline[kLightSplineGradient + 1] &&
+      l.hasSpline[kLightSplineGradient + 2]) {
+    const float x = std::clamp(at(kLightSplineColor, 0.f), 0.f, 1.f);
+    for (int c = 0; c < 3; ++c) {
+      rgb[c] = l.splines[kLightSplineGradient + c].Eval(x);
+    }
+  }
+  for (int c = 0; c < 3; ++c) {
+    out[c] = rgb[c] * intensity;
+  }
+}
+
+// Sun `i`'s state, once the area's script has started.
+const Area::Light* SunStateOf(const Area& area, size_t i) {
+  return i < area.suns.size() ? &area.suns[i] : nullptr;
+}
+
+// Whether a sun shines now: active (as the room geometry's script and its links last set it, else as it
+// starts) and, on a story layer, only for its cinematic. The intro's suns are its shots' lighting: the next
+// shot hides them, but a skipped intro (randomprime's patches) never plays it, and they'd light the hangar
+// from overhead.
+SunWhy SunState(const SunLight& s, const Area::Light* state, LayerActive layerActive, void* context,
+                bool cinematic) {
+  bool on = s.on;
+  if (state != nullptr) {
+    on = state->active;
+  } else if (s.group != PortRoomGeo::kNoGroup) {
+    const int shown = PortRoomGeo::GroupShown(sViewArea, s.group);
+    on = shown >= 0 ? shown == 1 : s.on;
+  }
+  if (!on) {
+    return SunWhy::Off;
+  }
+  if (s.layer >= 0 && (!cinematic || (layerActive != nullptr && !layerActive(s.layer, context)))) {
+    return SunWhy::Layer;
+  }
+  return SunWhy::Lit;
+}
+} // namespace
+
+bool Sun(LayerActive layerActive, void* context, bool cinematic, float toSun[3], float color[3]) {
+  sSunWhy.clear();
+  float exposure = 0.f;
+  const Area* area = SunArea(exposure);
+  if (area == nullptr) {
     return false;
   }
-  const std::vector< SunLight >& suns = view->second.file.suns;
-  sSunWhy.assign(suns.size(), SunWhy::Weaker);
+  const std::vector< SunLight >& suns = area->file.suns;
+  sSunWhy.assign(suns.size(), SunWhy::Lit);
   const SunLight* pick = nullptr;
+  float pickColor[3] = {};
   float pickStrength = 0.f;
   for (size_t i = 0; i < suns.size(); ++i) {
     const SunLight& s = suns[i];
-    // The room geometry's script switches the hangar's suns as it does its geometry.
-    const int shown = s.group != PortRoomGeo::kNoGroup ? PortRoomGeo::GroupShown(sViewArea, s.group) : -1;
-    // A light from below the floor is a bounce fill (the hangar has warm ones), not a sun.
-    // The intro's suns are its shots' lighting: the next shot hides them, but a skipped intro
-    // (randomprime's patches) never plays it, and they'd light the hangar from overhead.
-    if (!(shown >= 0 ? shown == 1 : s.on)) {
-      sSunWhy[i] = SunWhy::Off;
+    const SunWhy state = SunState(s, SunStateOf(*area, i), layerActive, context, cinematic);
+    if (state != SunWhy::Lit) {
+      sSunWhy[i] = state;
       continue;
     }
-    if (s.toSun[2] <= 0.f) {
-      sSunWhy[i] = SunWhy::Below;
+    // Every directional LightDynamic is a scene light (SunLights); only one with the cast bit builds
+    // a shadow map (RebuildLightProxy), and the sun that casts is lit through the shadow's own slot.
+    if (!s.casts) {
       continue;
     }
-    if (s.layer >= 0 && (!cinematic || (layerActive != nullptr && !layerActive(s.layer, context)))) {
-      sSunWhy[i] = SunWhy::Layer;
-      continue;
-    }
-    const float strength = s.color[0] + s.color[1] + s.color[2];
+    sSunWhy[i] = SunWhy::Weaker;
+    float now[3];
+    TimelineColor(s, s.color, SunStateOf(*area, i), now);
+    const float strength = now[0] + now[1] + now[2];
     if (std::isfinite(strength) && strength > pickStrength) {
       pick = &s;
+      std::copy(now, now + 3, pickColor);
       pickStrength = strength;
     }
   }
@@ -1158,9 +1242,55 @@ bool Sun(LayerActive layerActive, void* context, bool cinematic, float toSun[3],
   const float scale = exposure * LightGain() / 3.14159265f;
   for (int i = 0; i < 3; ++i) {
     toSun[i] = pick->toSun[i];
-    color[i] = pick->color[i] * scale;
+    color[i] = pickColor[i] * scale;
   }
   return true;
+}
+
+bool SunOwnsLighting() {
+  float exposure = 0.f;
+  return SunArea(exposure) != nullptr;
+}
+
+void SunLights(LayerActive layerActive, void* context, bool cinematic, const float worldToView[3][4],
+               std::vector<float>& out) {
+  static const bool sOn = port::EnvFlag("MP_ROOM_LIGHTS", true);
+  float exposure = 0.f;
+  const Area* area = sOn ? SunArea(exposure) : nullptr;
+  if (area == nullptr) {
+    return;
+  }
+  const float scale = exposure * LightGain() / 3.14159265f;
+  for (size_t i = 0; i < area->file.suns.size(); ++i) {
+    const SunLight& s = area->file.suns[i];
+    const Area::Light* state = SunStateOf(*area, i);
+    // A cast-bit sun is the shadow's (Sun).
+    if (s.casts || SunState(s, state, layerActive, context, cinematic) != SunWhy::Lit) {
+      continue;
+    }
+    float now[3];
+    TimelineColor(s, s.color, state, now);
+    float color[3];
+    bool lit = false;
+    for (int c = 0; c < 3; ++c) {
+      color[c] = std::isfinite(now[c]) ? std::max(now[c], 0.f) * scale : 0.f;
+      lit = lit || color[c] > 0.f;
+    }
+    // Kind 2 of GXPortSetRoomLights' records: a direction, no position or falloff.
+    float axis[3];
+    for (int r = 0; r < 3; ++r) {
+      const float* m = worldToView[r];
+      axis[r] = m[0] * s.toSun[0] + m[1] * s.toSun[1] + m[2] * s.toSun[2];
+    }
+    const float record[16] = {0.f,     0.f,     0.f,     0.f,   color[0], color[1], color[2], 0.f,
+                              axis[0], axis[1], axis[2], 0.f,   0.f,      0.f,      2.f,      0.f};
+    constexpr size_t kMaxRoomLights = 64;
+    if (!lit || out.size() >= kMaxRoomLights * 16 ||
+        !std::all_of(std::begin(record), std::end(record), [](float v) { return std::isfinite(v); })) {
+      continue;
+    }
+    out.insert(out.end(), std::begin(record), std::end(record));
+  }
 }
 
 std::string SunInfo() {
@@ -1172,15 +1302,24 @@ std::string SunInfo() {
   if (suns.empty()) {
     return "the camera area's room file has no suns";
   }
-  static const char* const kWhy[] = {"PICKED", "weaker", "off", "from below", "story layer"};
+  static const char* const kWhy[] = {"PICKED (casts)", "casts, weaker", "off", "story layer", "lit, no shadow"};
   std::string out;
   for (size_t i = 0; i < suns.size(); ++i) {
     const SunLight& s = suns[i];
-    char line[256];
-    std::snprintf(line, sizeof(line), "sun %zu: to sun %.3f %.3f %.3f colour %.3f %.3f %.3f layer %d group %s%s: %s\n",
-                  i, s.toSun[0], s.toSun[1], s.toSun[2], s.color[0], s.color[1], s.color[2], int(s.layer),
+    const Area::Light* state = SunStateOf(view->second, i);
+    float now[3];
+    TimelineColor(s, s.color, state, now);
+    char timeline[64] = "";
+    if (s.animated && state != nullptr) {
+      std::snprintf(timeline, sizeof(timeline), " t %.2f/%.2f%s", state->time, double(s.length),
+                    state->playing ? "" : " (stopped)");
+    }
+    char line[320];
+    std::snprintf(line, sizeof(line),
+                  "sun %zu: to sun %.3f %.3f %.3f colour %.3f %.3f %.3f layer %d group %s%s%s: %s\n", i, s.toSun[0],
+                  s.toSun[1], s.toSun[2], now[0], now[1], now[2], int(s.layer),
                   s.group != PortRoomGeo::kNoGroup ? std::to_string(s.group).c_str() : "-", s.on ? "" : " (starts off)",
-                  i < sSunWhy.size() ? kWhy[int(sSunWhy[i])] : "not looked at");
+                  timeline, i < sSunWhy.size() ? kWhy[int(sSunWhy[i])] : "not looked at");
     out += line;
   }
   out.pop_back();
@@ -1201,21 +1340,7 @@ LightNow EvalLight(const PointLight& l, const Area::Light& state) {
     return n;
   }
   const float t = float(state.time);
-  const auto at = [&](LightSpline s, float fallback) {
-    return l.hasSpline[s] ? l.splines[s].Eval(t) : fallback;
-  };
-  const float intensity = at(kLightSplineIntensity, l.intensity);
-  float rgb[3] = {l.rgb[0], l.rgb[1], l.rgb[2]};
-  if (l.hasSpline[kLightSplineGradient] && l.hasSpline[kLightSplineGradient + 1] &&
-      l.hasSpline[kLightSplineGradient + 2]) {
-    const float x = std::clamp(at(kLightSplineColor, 0.f), 0.f, 1.f);
-    for (int c = 0; c < 3; ++c) {
-      rgb[c] = l.splines[kLightSplineGradient + c].Eval(x);
-    }
-  }
-  for (int c = 0; c < 3; ++c) {
-    n.color[c] = rgb[c] * intensity;
-  }
+  TimelineColor(l, l.color, &state, n.color);
   // The stored near and far already have the entity's scale; the splines' don't.
   if (l.hasSpline[kLightSplineNear] && l.hasSpline[kLightSplineFar]) {
     n.nearFar[0] = l.scale[0] * l.splines[kLightSplineNear].Eval(t);
@@ -1233,10 +1358,12 @@ LightNow EvalLight(const PointLight& l, const Area::Light& state) {
 namespace {
 // The walk both RoomLights forms take: a light that is active, on an active layer and not black, with its
 // timeline evaluated. `fn(l, n)` gets the file's light and its state now (n.color is colour x intensity).
+// A light's proxy lives in its area's scene proxy (CLightDynamicGOC::RebuildLightProxy 0x78a748,
+// NGOCUtils::get_render_scene 0x47c0e0), which is inactive while the area is occluded.
 template <typename F>
 void ForEachRoomLight(F&& fn) {
   for (const auto& [mrea, area] : sAreas) {
-    if (!area.hasFile) {
+    if (!area.hasFile || !area.visible) {
       continue;
     }
     for (size_t i = 0; i < area.lights.size() && i < area.file.lights.size(); ++i) {
@@ -1267,13 +1394,12 @@ void RoomLights(const float worldToView[3][4], std::vector<float>& out) {
   if (view == sAreas.end() || !view->second.hasFile) {
     return;
   }
-  const float exposure = RoomExposed() ? FrameExposure(view->second) : 0.f;
+  const float exposure = FrameExposure(view->second);
   if (exposure <= 0.f) {
     return;
   }
   // As the sun's (see Sun).
   const float scale = exposure * LightGain() / 3.14159265f;
-  constexpr float kDegrees = 3.14159265f / 180.f;
   ForEachRoomLight([&](const PointLight& l, const LightNow& n) {
     float color[3];
     for (int c = 0; c < 3; ++c) {
@@ -1289,18 +1415,7 @@ void RoomLights(const float worldToView[3][4], std::vector<float>& out) {
     const float b = -near * a;
     float coneScale = 0.f;
     float coneBias = 1.f;
-    if (l.spot) {
-      const float cosIn = std::cos(n.cone[0] * 0.5f * kDegrees);
-      const float cosOut = std::cos(n.cone[1] * 0.5f * kDegrees);
-      const float span = cosIn - cosOut;
-      if (std::fabs(span) > 1e-6f) {
-        coneScale = 1.f / span;
-        coneBias = -cosOut / span;
-      } else {
-        coneScale = 0.f;
-        coneBias = 0.f;
-      }
-    }
+    PortClusteredLights::ConeAttenuation(l.spot, n.cone[0], n.cone[1], coneScale, coneBias);
     float pos[3];
     float axis[3];
     for (int r = 0; r < 3; ++r) {
@@ -1334,7 +1449,7 @@ void RoomLights(std::vector< PortClusteredLights::LightSource >& out) {
   }
   // The same gate as the PBR form: without the room's exposure there is no Remastered lighting to gather
   // (the probe's AmbientAt is empty then too), and the port's own room lighting is what the effect sees.
-  if (!RoomExposed() || FrameExposure(view->second) <= 0.f) {
+  if (FrameExposure(view->second) <= 0.f) {
     return;
   }
   // The clustered gather's own cap; it reads the first kMaxLights records, so more would never be seen.
@@ -1421,6 +1536,7 @@ FogCore FogOf(const FogHint& h) {
   c.lightCap = h.lightCap;
   for (int i = 0; i < 3; ++i) {
     c.wind[i] = h.useScriptWind ? h.wind[i] : 0.f;
+    c.worldShift[i] = h.worldShift[i];
     c.colorB[i] = h.colorB[i];
     c.colorA[i] = h.colorA[i];
   }
@@ -1455,6 +1571,7 @@ FogCore BlendFog(const FogCore& a, const FogCore& b, float t) {
   o.lightCap = mix(a.lightCap, b.lightCap);
   for (int i = 0; i < 3; ++i) {
     o.wind[i] = b.wind[i]; // snaps
+    o.worldShift[i] = b.worldShift[i];
     o.colorB[i] = mix(a.colorB[i], b.colorB[i]);
     o.colorA[i] = mix(a.colorA[i], b.colorA[i]);
   }
@@ -1488,6 +1605,11 @@ bool FogOwnsRoom() {
 }
 
 void SetFogRegionsEnabled(bool on) { sFogRegions = on; }
+void SetFogRegionEnabled(uint32_t index, bool on) {
+  if (index < 64) {
+    sFogRegionsHidden = on ? sFogRegionsHidden & ~(uint64_t(1) << index) : sFogRegionsHidden | uint64_t(1) << index;
+  }
+}
 
 void UpdateFog(LayerActive layerActive, void* context, float dt) {
   FogFade& f = sFog;
@@ -1585,20 +1707,27 @@ void FogRegions(std::vector<const FogRegion*>& out) {
   }
   // The proxies' add order: the areas in the order they loaded, each in file order.
   std::vector<const Area*> areas;
+  const Area* view = nullptr;
   for (const auto& [mrea, area] : sAreas) {
     if (area.hasFile && !area.live.empty()) {
       areas.push_back(&area);
+      view = mrea == sViewArea ? &area : view;
     }
   }
   std::sort(areas.begin(), areas.end(), [](const Area* a, const Area* b) { return a->serial < b->serial; });
   for (const Area* area : areas) {
+    // ShouldRegionBeActive's area gate: the area's scene proxy is active.
+    if (!area->visible) {
+      continue;
+    }
     for (size_t i = 0; i < area->live.size(); ++i) {
       const FogRegion& region = area->live[i];
       const bool on = i < area->regions.size() ? area->regions[i].on : region.on;
       const bool layer = region.layer < 0 || region.layer >= 64 || (area->layers >> region.layer & 1) != 0;
       // UpdateRenderState's fluid gate.
       const bool fluid = region.fluid == 1 ? sCameraWater : region.fluid == 2 ? !sCameraWater : true;
-      if (on && layer && fluid) {
+      const bool hidden = area == view && i < 64 && (sFogRegionsHidden >> i & 1) != 0;
+      if (on && layer && fluid && !hidden) {
         out.push_back(&region);
       }
     }
@@ -1631,8 +1760,13 @@ bool VolumetricFog(Fog& out) {
   out.noiseFreq = c.noiseFreq;
   out.noiseStrength = c.noiseStrength;
   out.lightCap = c.lightCap;
+  // Remastered's m3 (minus the wind's travel) plus its world's origin, in its axes (-x, z, y).
+  const float travel[3] = {c.worldShift[0] + c.wind[0] * sFog.time, c.worldShift[1] + c.wind[1] * sFog.time,
+                           c.worldShift[2] + c.wind[2] * sFog.time};
+  out.noiseOffset[0] = travel[0];
+  out.noiseOffset[1] = -travel[2];
+  out.noiseOffset[2] = -travel[1];
   for (int i = 0; i < 3; ++i) {
-    out.noiseOffset[i] = c.wind[i] * sFog.time;
     out.colorB[i] = c.colorB[i];
     out.colorA[i] = c.colorA[i];
   }
@@ -1702,6 +1836,21 @@ std::string FogInfo() {
   }
   std::snprintf(line, sizeof(line), "regions on in loaded areas: %zu\n", on.size());
   out += line;
+  for (const auto& [mrea, other] : sAreas) {
+    if (mrea == sViewArea) {
+      continue;
+    }
+    for (size_t i = 0; i < other.live.size(); ++i) {
+      const FogRegion& r = other.live[i];
+      if (std::find(on.begin(), on.end(), &r) == on.end()) {
+        continue;
+      }
+      std::snprintf(line, sizeof(line), "%08X region %zu: on layer %d fluid %d density %g box %g %g %g .. %g %g %g\n",
+                    mrea, i, int(r.layer), int(r.fluid), r.density, r.box[0], r.box[1], r.box[2], r.box[3], r.box[4],
+                    r.box[5]);
+      out += line;
+    }
+  }
   if (!sWorldVolumes.empty()) {
     std::snprintf(line, sizeof(line), "world volumes: %zu, camera %.1f %.1f %.1f\n", sWorldVolumes.size(),
                   sCameraPoint[0], sCameraPoint[1], sCameraPoint[2]);
@@ -1715,6 +1864,35 @@ std::string FogInfo() {
                   i, inside ? "inside " : "outside", v.centre[0], v.centre[1], v.centre[2], v.half[0], v.half[1],
                   v.half[2], (unsigned long long)entered);
     out += line;
+  }
+  for (const EnvVarLive& v : sEnvVars) {
+    std::snprintf(line, sizeof(line), "env var %s = %d (default %d, flags %u, min %d, max %d)\n", v.var.name.c_str(),
+                  int(v.value), int(v.var.value), unsigned(v.var.flags), int(v.var.min), int(v.var.max));
+    out += line;
+  }
+  if (!sWorldEnvOps.empty()) {
+    std::snprintf(line, sizeof(line), "env world ops: %zu\n", sWorldEnvOps.size());
+    out += line;
+  }
+  if (const auto view = sAreas.find(sViewArea); view != sAreas.end()) {
+    const Area& area = view->second;
+    if (!area.file.envOps.empty() || !area.file.envBranches.empty()) {
+      std::snprintf(line, sizeof(line), "%08X env ops %zu, branches %zu\n", sViewArea, area.file.envOps.size(),
+                    area.file.envBranches.size());
+      out += line;
+    }
+    for (size_t i = 0; i < area.file.roomVolumes.size(); ++i) {
+      const RoomVolume& v = area.file.roomVolumes[i];
+      const bool inside = i < area.roomInside.size() && area.roomInside[i] != 0;
+      const bool active = i < area.roomActive.size() ? area.roomActive[i] != 0 : v.on;
+      std::snprintf(line, sizeof(line),
+                    "%08X room volume %zu: %s%s%s detect %s%s centre %.1f %.1f %.1f half %.1f %.1f %.1f\n",
+                    sViewArea, i, active ? "on " : "off ", inside ? "inside " : "outside",
+                    v.links.empty() ? "" : " (script-switched)", (v.detect & kRoomVolumePlayer) != 0 ? "player" : "",
+                    (v.detect & kRoomVolumeCamera) != 0 ? "+camera" : "", v.centre[0], v.centre[1], v.centre[2],
+                    v.half[0], v.half[1], v.half[2]);
+      out += line;
+    }
   }
   return out;
 }
@@ -1768,14 +1946,31 @@ void SetFluid(bool player, bool camera, uint64_t items) {
   }
 }
 
-void SetCameraPoint(const float pos[3]) {
+void SetExposureState(bool unmorphed, bool thermal, bool cinematic) {
+  const uint8_t state = ExposureHints::SwapState(unmorphed, thermal, cinematic);
+  if (state == sExposureSwap) {
+    return;
+  }
+  sExposureSwap = state;
+  for (auto& [mrea, area] : sAreas) {
+    if (area.hasFile && area.hints.SetPair(area.file.fluidHints, state)) {
+      area.hintSnap = true;
+    }
+  }
+}
+
+void SetCameraPoint(const float pos[3], const float playerMin[3], const float playerMax[3], bool hasPlayer) {
   if (!std::isfinite(pos[0]) || !std::isfinite(pos[1]) || !std::isfinite(pos[2])) {
     return;
+  }
+  bool playerOk = hasPlayer;
+  for (int i = 0; i < 3 && playerOk; ++i) {
+    playerOk = std::isfinite(playerMin[i]) && std::isfinite(playerMax[i]);
   }
   std::memcpy(sCameraPoint, pos, sizeof(sCameraPoint));
   static std::vector<WorldVolumeState::Event> events;
   events.clear();
-  sWorldVolumeState.Update(sWorldVolumes, pos, events);
+  sWorldVolumeState.Update(sWorldVolumes, pos, playerMin, playerMax, playerOk, events);
   for (const WorldVolumeState::Event& e : events) {
     PortLog::Write("room env: camera %s world volume %u at %.1f %.1f %.1f\n", e.state == 0 ? "entered" : "left",
                    e.volume, pos[0], pos[1], pos[2]);
@@ -1785,6 +1980,52 @@ void SetCameraPoint(const float pos[3]) {
         DriveGrades(mrea, area, kSenderWorldVolume + e.volume, e.state);
       }
     }
+    // Live only: a replay (ReplayWorldVolumes) changes no variable again.
+    RunEnvOps(sWorldEnvOps, kSenderWorldVolume + e.volume, e.state);
+  }
+}
+
+void SetAreaPoints(uint32_t mrea, const float camera[3], const float playerMin[3], const float playerMax[3],
+                   bool hasPlayer) {
+  const auto found = sAreas.find(mrea);
+  if (found == sAreas.end()) {
+    return;
+  }
+  Area& area = found->second;
+  if (area.pending.valid() || !area.hasFile || area.file.roomVolumes.empty()) {
+    return;
+  }
+  bool cameraOk = true, playerOk = hasPlayer;
+  for (int i = 0; i < 3; ++i) {
+    cameraOk = cameraOk && std::isfinite(camera[i]);
+    playerOk = playerOk && std::isfinite(playerMin[i]) && std::isfinite(playerMax[i]);
+  }
+  if (area.roomInside.size() != area.file.roomVolumes.size()) {
+    area.roomInside.assign(area.file.roomVolumes.size(), 0);
+  }
+  if (area.roomActive.size() != area.file.roomVolumes.size()) {
+    area.roomActive.assign(area.file.roomVolumes.size(), 0);
+    for (size_t k = 0; k < area.roomActive.size(); ++k) {
+      area.roomActive[k] = area.file.roomVolumes[k].on ? 1 : 0;
+    }
+  }
+  for (size_t k = 0; k < area.file.roomVolumes.size(); ++k) {
+    // A trigger that is off tests nothing, and keeps no side of its box (DriveRoomVolumes).
+    if (area.roomActive[k] == 0) {
+      continue;
+    }
+    const uint8_t inside = InsideRoomVolume(area.file.roomVolumes[k], cameraOk ? camera : nullptr, playerMin,
+                                            playerMax, playerOk)
+                               ? 1
+                               : 0;
+    if (inside == area.roomInside[k]) {
+      continue;
+    }
+    area.roomInside[k] = inside;
+    PortLog::Write("room env: %08X room volume %zu %s at camera %.1f %.1f %.1f\n", mrea, k,
+                   inside != 0 ? "entered" : "left", camera[0], camera[1], camera[2]);
+    DriveGrades(mrea, area, kSenderRoomVolume + uint32_t(k), inside != 0 ? 0 : 1);
+    RunEnvOps(area.file.envOps, kSenderRoomVolume + uint32_t(k), inside != 0 ? 0 : 1);
   }
 }
 
@@ -1792,6 +2033,7 @@ void ResetGrades() {
   sPlayerFluid = false;
   sCameraWater = false;
   sWorldVolumeState.Clear();
+  sEnvVars.clear();
   sGradeIndex = -1;
   sBacklight = {};
   sFog = {};
@@ -1799,6 +2041,7 @@ void ResetGrades() {
     // A load still waiting for its file starts its grades when it finishes.
     if (!area.pending.valid()) {
       StartGrades(mrea, area, false, false);
+      LoadEnvVars(mrea, area);
     } else {
       area.pendingFluid = area.pendingWater = false;
       area.queued.clear();
@@ -1962,18 +2205,6 @@ bool Enabled() {
   return sEnabled != 0;
 }
 
-bool RoomExposed() {
-  if (sExposure < 0) {
-    sExposure = port::EnvFlag("MP_ROOM_ENV_EXPOSURE", true) ? 1 : 0;
-  }
-  return sExposure != 0;
-}
-
-void SetRoomExposed(bool on) {
-  sExposure = on ? 1 : 0;
-  sLastValid = false;
-}
-
 void SetEnabled(bool enabled) {
   sEnabled = enabled ? 1 : 0;
   Invalidate();
@@ -2034,6 +2265,26 @@ bool HasVolume(uint32_t mrea) {
     }
   }
   return lit;
+}
+
+namespace {
+
+// What an area's lightmap is multiplied by. Like the volume's level (see Compose): the
+// lightmap holds irradiance as the grid does, read at the frame's exposure (1 with no tone data).
+float LightmapLevel(const Area& area) { return ProbeExposure(area) * LightGain(); }
+
+} // namespace
+
+bool HasLightmapOnly(uint32_t mrea) {
+  if (!Enabled() || !VolumesEnabled()) {
+    return false;
+  }
+  const auto found = sAreas.find(mrea);
+  if (found == sAreas.end()) {
+    return false;
+  }
+  const Area& area = found->second;
+  return area.file.tiles == nullptr && area.file.grids.empty() && area.lightmap != 0 && LightmapLevel(area) > 0.f;
 }
 
 namespace {
@@ -2116,6 +2367,8 @@ void Reset() {
   sFog = {};
   sWorldVolumes.clear();
   sWorldVolumeState.Clear();
+  sEnvVars.clear();
+  sWorldEnvOps.clear();
 }
 
 void SetLoadedAreas(const uint32_t* mreas, size_t count) {
@@ -2156,6 +2409,13 @@ void SetAreaLayers(uint32_t mrea, uint64_t active) {
   if (found != sAreas.end() && found->second.layers != active) {
     found->second.layers = active;
     Invalidate(); // the probes Locate may pick
+  }
+}
+
+void SetAreaVisible(uint32_t mrea, bool visible) {
+  const auto found = sAreas.find(mrea);
+  if (found != sAreas.end()) {
+    found->second.visible = visible;
   }
 }
 
@@ -2221,11 +2481,10 @@ void Locate(const float pos[3], Located& out) {
   }
   if (bestArea != nullptr) {
     const Probe& probe = bestArea->file.probes[best.probe];
-    const GpuCube& gpu = bestArea->cubes[probe.cube];
-    if (gpu.id != 0) {
+    if (const GpuCube* gpu = ProbeCube(*bestArea, probe)) {
       out.cubeArea = bestArea;
       out.probe = &probe;
-      out.cube = &gpu;
+      out.cube = gpu;
     }
   }
   if (VolumesEnabled() && !sHint && sWorld.has() && !sAreas.empty() && sAreas.begin()->second.file.tiles != nullptr) {
@@ -2289,73 +2548,70 @@ void Locate(const float pos[3], Located& out) {
   }
 }
 
+// Remastered's blend around the camera: every model reflects the same cube, scaled by the
+// blended intensity (a lone probe's cube by its share of it, the rest being black).
+void ComposeBlend(const BlendSource* sources, size_t sourceCount, float gain, float lod, Selection& out) {
+  const Blend& blend = sBlend.blend;
+  const BlendSource* heaviest = &sources[0];
+  uint32_t mips = sources[0].gpu->mipCount;
+  for (size_t i = 0; i < sourceCount; ++i) {
+    heaviest = sources[i].weight > heaviest->weight ? &sources[i] : heaviest;
+    mips = std::min(mips, sources[i].gpu->mipCount);
+  }
+  float share = 1.f;
+  const ProbeBlendState& s = sBlend;
+  if (sourceCount == 1) {
+    out.cube = sources[0].gpu->id;
+    share = sources[0].weight;
+  } else if (s.shown >= 0) {
+    // The last blend drawn, which is this one but for a frame where Aurora could not draw.
+    out.cube = s.dst[s.shown];
+  } else {
+    out.cube = heaviest->gpu->id;
+    mips = heaviest->gpu->mipCount;
+  }
+  const float exposure = ProbeExposure(*heaviest->area);
+  out.params[0] = exposure * blend.intensity * share * gain;
+  out.cubeIntensity = blend.intensity * share;
+  out.params[1] = PortRoomEnvLod::CubeLod(mips, lod);
+  out.params[2] = float(mips > 2 ? mips - 2 : 0);
+  // Each probe's cube may be turned its own way; the blend takes the heaviest one's.
+  std::memcpy(out.worldToCube, heaviest->probe->worldToCube, sizeof(out.worldToCube));
+  if (blend.max > 1e-6f && std::fabs(blend.intensity) >= 1e-5f) {
+    out.occlusionMin = blend.min / blend.intensity;
+    out.occlusionInvMax = 1.f / blend.max;
+  }
+}
+
+// The mip a reflection is read from is the cube's own top one, as Remastered's is; the
+// variable only lowers it (PortRoomEnvLod::CubeLod).
+float ReflectionLod() {
+  static const float lod = port::EnvFloat("MP_ROOM_ENV_LOD", PortRoomEnvLod::kNoCap);
+  return lod;
+}
+
 // The Selection for what Locate found, at the frame's exposure and the settings now.
 bool Compose(const Located& located, Selection& out) {
   const float gain = LightGain();
-  // The mip a reflection is read from is the cube's own top one, as Remastered's is; the
-  // variable only lowers it (PortRoomEnvLod::CubeLod).
-  static const float lod = port::EnvFloat("MP_ROOM_ENV_LOD", PortRoomEnvLod::kNoCap);
+  const float lod = ReflectionLod();
   static const float volumeBias = port::EnvFloat("MP_ROOM_ENV_VOLUME_BIAS", 0.f);
   const float ambient = AmbientScale();
-  const float grey = 0.18f * gain;
   out = {};
   BlendSource sources[kMaxBlend];
   const size_t sourceCount = ProbeBlend() ? BlendSources(sources) : 0;
   if (sourceCount != 0) {
-    // Remastered's blend around the camera: every model reflects the same cube, scaled by
-    // the blended intensity (a lone probe's cube by its share of it, the rest being black).
-    const Blend& blend = sBlend.blend;
-    const BlendSource* heaviest = &sources[0];
-    float average = 0.f;
-    uint32_t mips = sources[0].gpu->mipCount;
-    for (size_t i = 0; i < sourceCount; ++i) {
-      heaviest = sources[i].weight > heaviest->weight ? &sources[i] : heaviest;
-      average += sources[i].weight * sources[i].gpu->average;
-      mips = std::min(mips, sources[i].gpu->mipCount);
-    }
-    float share = 1.f;
-    const ProbeBlendState& s = sBlend;
-    if (sourceCount == 1) {
-      out.cube = sources[0].gpu->id;
-      share = sources[0].weight;
-      average = sources[0].gpu->average;
-    } else if (s.shown >= 0) {
-      // The last blend drawn, which is this one but for a frame where Aurora could not draw.
-      out.cube = s.dst[s.shown];
-    } else {
-      out.cube = heaviest->gpu->id;
-      average = heaviest->gpu->average;
-      mips = heaviest->gpu->mipCount;
-    }
-    const float exposure = RoomExposed() ? FrameExposure(*heaviest->area) : 0.f;
-    const bool room = exposure > 0.f;
-    out.params[0] = room ? exposure * blend.intensity * share * gain : grey / average;
-    out.cubeIntensity = room ? blend.intensity * share : 1.f;
-    out.params[1] = PortRoomEnvLod::CubeLod(mips, lod);
-    out.params[2] = float(mips > 2 ? mips - 2 : 0);
-    out.params[3] = ambient > 0.f ? 1.f / (room ? average * out.params[0] : grey) : 0.f;
-    // Each probe's cube may be turned its own way; the blend takes the heaviest one's.
-    std::memcpy(out.worldToCube, heaviest->probe->worldToCube, sizeof(out.worldToCube));
-    if (room && blend.max > 1e-6f && std::fabs(blend.intensity) >= 1e-5f) {
-      out.occlusionMin = blend.min / blend.intensity;
-      out.occlusionInvMax = 1.f / blend.max;
-    }
+    ComposeBlend(sources, sourceCount, gain, lod, out);
   } else if (located.cube != nullptr) {
     const Probe& probe = *located.probe;
     const GpuCube& gpu = *located.cube;
-    // The cube is exposed so that its average direction is middle grey, which is what
-    // Remastered's auto exposure aims for (its Tonemap's key is 0.18 too); the lamps in
-    // it then come out many times brighter than white, as they should.
-    // With the room's exposure the cube keeps its level instead: a probe in a dark
+    // The cube keeps its level at the frame's exposure (1 with no tone data): a probe in a dark
     // corner reflects a dark corner.
-    const float exposure = RoomExposed() ? FrameExposure(*located.cubeArea) : 0.f;
-    const bool room = exposure > 0.f;
+    const float exposure = ProbeExposure(*located.cubeArea);
     out.cube = gpu.id;
-    out.params[0] = room ? exposure * probe.scale * gain : grey / gpu.average;
-    out.cubeIntensity = room ? probe.scale : 1.f;
+    out.params[0] = exposure * probe.scale * gain;
+    out.cubeIntensity = probe.scale;
     out.params[1] = PortRoomEnvLod::CubeLod(gpu.mipCount, lod);
     out.params[2] = float(gpu.mipCount > 2 ? gpu.mipCount - 2 : 0);
-    out.params[3] = ambient > 0.f ? 1.f / (room ? gpu.average * out.params[0] : grey) : 0.f;
     std::memcpy(out.worldToCube, probe.worldToCube, sizeof(out.worldToCube));
   }
   if (located.volume != 0) {
@@ -2373,34 +2629,21 @@ bool Compose(const Located& located, Selection& out) {
         out.worldToAxes[row * 3 + col] = m[row * 4 + col] / scale;
       }
     }
-    // The baked light is the level, at the frame's exposure; without one, the grid's
-    // average comes out at the key. The grid holds irradiance, and a diffuse surface
-    // sends 1/pi of that back.
-    const float exposure = RoomExposed() ? FrameExposure(*located.volumeArea) : 0.f;
-    out.volumeLevel = (exposure > 0.f ? exposure * gain : 0.18f / grid.average) / 3.14159265f;
+    // The baked light is the level, at the frame's exposure (1 with no tone data). The grid
+    // holds irradiance, and a diffuse surface sends 1/pi of that back.
+    out.volumeLevel = ProbeExposure(*located.volumeArea) * gain / 3.14159265f;
     out.volumeBias = volumeBias;
     out.volumeDiagnostic = static_cast<float>(VolumeView());
   }
   if (located.ambientArea != nullptr) {
     const Ambient& sample = located.sample;
-    const float average = located.average;
-    const float roomExposure = FrameExposure(*located.ambientArea);
+    // The baked level itself, at the frame's exposure (1 with no tone data): Remastered adds no
+    // ambient constant in a shipped room (kb topic/ambient-constant.md Round 3), so the retail
+    // area ambient takes no part. The grid holds irradiance, of which a diffuse surface sends 1/pi
+    // back, as the volume's level has it.
+    const float exposure = ProbeExposure(*located.ambientArea) * ambient * gain / 3.14159265f;
     out.hasAmbient = true;
-    // The grid gives the light's colour and direction; how bright it is stays the game's
-    // ambient, which the shader multiplies in. The baked levels are HDR that Remastered
-    // exposes by what is on screen (one room spans 0.0001 to 100), and the world around
-    // the model is still lit the retail way. Of the level only this is kept: a spot
-    // darker or brighter than its room is, within a factor of two.
-    const float luminance = 0.2126f * sample.mean[0] + 0.7152f * sample.mean[1] + 0.0722f * sample.mean[2];
-    const float level = std::min(std::max(std::sqrt(luminance / average), 0.5f), 2.f);
-    float exposure = luminance > 0.f ? level / luminance * ambient : 0.f;
-    if (RoomExposed() && roomExposure > 0.f) {
-      // Or the baked level itself, at the room's exposure: the game's ambient is left out.
-      // The grid holds irradiance, of which a diffuse surface sends 1/pi back, as the
-      // volume's level has it.
-      exposure = roomExposure * ambient * gain / 3.14159265f;
-      out.ambientAbsolute = true;
-    }
+    out.ambientAbsolute = true;
     for (int i = 0; i < 3; ++i) {
       out.ambient[0][i] = (sample.mean[i] - sample.lobe[i]) * exposure;
       out.ambient[1][i] = 2.f * sample.lobe[i] * (1.f + sample.sharpness[i]) * exposure;
@@ -2409,13 +2652,12 @@ bool Compose(const Located& located, Selection& out) {
     }
     if (out.volume == 0 && out.occlusionInvMax > 0.f) {
       // The shader occludes the reflection by the grid at each pixel; without the grid on
-      // the GPU, the model's spot stands for all of it. The ambient the cube shapes stays.
+      // the GPU, the model's spot stands for all of it.
       const float brightest = std::max(std::max(sample.mean[0], sample.mean[1]), sample.mean[2]);
       const float seen = std::min(std::max(brightest * out.occlusionInvMax, 0.f), 1.f);
       // Not 0: the shader takes an exposure of 0 for a cube that is not HDR.
       const float factor = std::max(out.occlusionMin + (1.f - out.occlusionMin) * seen, 1e-4f);
       out.params[0] *= factor;
-      out.params[3] /= factor;
       out.occlusionMin = 0.f;
       out.occlusionInvMax = 0.f;
     }
@@ -2434,24 +2676,13 @@ bool AddLightmap(Selection& out) {
   if (found == sAreas.end() || found->second.lightmap == 0) {
     return false;
   }
-  const Area& area = found->second;
-  // Like the volume's level (see Compose): the lightmap holds irradiance as the grid does.
-  // Without the room's exposure, the grid's average comes out at the key.
-  float level;
-  const float exposure = RoomExposed() ? FrameExposure(area) : 0.f;
-  if (exposure > 0.f) {
-    level = exposure * LightGain();
-  } else if (!area.file.grids.empty() && area.file.grids[0].average > 0.f) {
-    level = 0.18f / area.file.grids[0].average;
-  } else {
-    return false;
-  }
+  const float level = LightmapLevel(found->second);
   static const float scale = port::EnvFloat("MP_ROOM_ENV_LIGHTMAP_SCALE", 1.f);
   // The shader takes a level of 0 for no lightmap (a scale of 0 is a one-texel lookup).
   if (!(level * scale > 0.f)) {
     return false;
   }
-  out.lightmap = area.lightmap;
+  out.lightmap = found->second.lightmap;
   out.lightmapRect[0] = sHintLightmap[0];
   out.lightmapRect[1] = sHintLightmap[1];
   out.lightmapRect[2] = sHintLightmap[2];
@@ -2508,6 +2739,26 @@ bool Select(const float origin[3], Selection& out) {
   return AddLightmap(out) || sLastFound;
 }
 
+CameraCube CameraProbe(const float pos[3], Selection& out) {
+  out = {};
+  if (!Enabled()) {
+    return CameraCube::Black;
+  }
+  if (!ProbeBlend()) {
+    Select(pos, out);
+    return out.cube != 0 ? CameraCube::Probe : CameraCube::NoOverride;
+  }
+  const CameraCube state = CameraCubeState(sBlend.blend);
+  if (state == CameraCube::Probe) {
+    BlendSource sources[kMaxBlend];
+    const size_t sourceCount = BlendSources(sources);
+    if (sourceCount != 0) {
+      ComposeBlend(sources, sourceCount, LightGain(), ReflectionLod(), out);
+    }
+  }
+  return state;
+}
+
 bool AmbientAt(const float pos[3], Ambient& out) {
   if (!Enabled() || AmbientScale() <= 0.f) {
     return false;
@@ -2549,13 +2800,15 @@ void Stats(int& areas, int& probes, int& cubes, int& grids) {
 
 std::string Info(const float pos[3]) {
   std::string out;
-  char line[320];
+  char line[400];
   if (sFrame.started) {
     const FrameState& f = sFrame;
     std::snprintf(line, sizeof(line),
-                  "frame: EV %g towards %g (%s), exposure %g, sigma %g, measurement %u%s, tone EV %g mid %g "
-                  "contrast %g toe %g shoulder %g, static EV %g (glow x%g)\n",
-                  f.ev.value, f.targetEv, f.measured ? "measured" : "probes", f.exposure, f.sigma, f.serial,
+                  "frame: EV %g towards %g (L %g of %g %g %g, %s), exposure %g, sigma %g, measurement %u%s, tone EV "
+                  "%g mid %g contrast %g toe %g shoulder %g, static EV %g (glow x%g)\n",
+                  f.ev, f.targetEv, sAverage.L, sAverage.rgb[0], sAverage.rgb[1], sAverage.rgb[2],
+                  sAverage.created ? "Gaussian" : "tonemap EV", f.exposure,
+                  sAverage.sigma, sAverage.serial,
                   f.measuring ? " (measuring)" : "", f.shown[0], f.shown[1], f.shown[2], f.shown[3], f.shown[4],
                   f.shown[5], GlowScale());
     out += line;
@@ -2610,7 +2863,10 @@ std::string Info(const float pos[3]) {
     const Pick pick = PickProbe(file, pos, area.layers);
     for (size_t i = 0; i < file.probes.size(); ++i) {
       const Probe& probe = file.probes[i];
-      const GpuCube& cube = area.cubes[probe.cube];
+      const bool hasCube = probe.cube != kProbeNoCube;
+      const float average = hasCube ? area.cubes[probe.cube].average : 0.f;
+      const float peak = hasCube ? area.cubes[probe.cube].peak : 0.f;
+      const bool black = !hasCube || area.cubes[probe.cube].failed;
       // The box's centre solves worldToBox * p = 0.
       const float* const m = probe.worldToBox;
       const float a[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]};
@@ -2634,8 +2890,8 @@ std::string Info(const float pos[3]) {
                     i, int(i) == pick.probe ? " (picked)" : "", probe.layer,
                     ProbeOn(probe, area.layers) ? "" : " (off)", centre[0], centre[1], centre[2],
                     fade, probe.cube, probe.scale, probe.padding, probe.priority,
-                    probe.intensityMin, probe.intensityMax, cube.average * probe.scale, cube.peak * probe.scale,
-                    cube.failed ? ", black" : "");
+                    probe.intensityMin, probe.intensityMax, average * probe.scale, peak * probe.scale,
+                    !hasCube ? ", no cube" : black ? ", black" : "");
       out += line;
     }
     for (size_t i = 0; i < file.grids.size(); ++i) {

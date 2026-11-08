@@ -4,6 +4,7 @@
 #include "debug_ui_internal.h"
 
 #include "port_debug.h"
+#include "port_custom_actions.h"
 #include "port_photo.h"
 #include "port_pointer.h"
 #include "port_log.h"
@@ -11,6 +12,7 @@
 #include "port_input_bindings.h"
 #include "port_input_devices.h"
 #include "port_prompts.h"
+#include "port_radial.h"
 #include "port_savestate.h"
 #include "port_textures.h"
 
@@ -89,10 +91,29 @@ Java_org_metroidprime_port_TouchControlsView_nativeTouchControl(JNIEnv*, jclass,
   PortInputDevices::SetTouchControl(static_cast< int >(control), down == JNI_TRUE);
 }
 
+// A Beam menu or Visor menu button's drag from its press point, as the radial selection.
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeRadialPoint(JNIEnv*, jclass, jfloat x, jfloat y) {
+  PortRadial::SetPoint(x, y);
+}
+
 // Whether a binding takes over the control, so the overlay skips its own button.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeTouchControlBound(JNIEnv*, jclass, jint control) {
   return PortInputDevices::TouchControlBound(static_cast< int >(control)) ? JNI_TRUE : JNI_FALSE;
+}
+
+// What a stock control does in the ball, for its label: its Morph Ball row's
+// name, "" for a ball button left without one, null for any other control.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchBallLabel(JNIEnv* env, jclass, jint control) {
+  if (const PortInput::BallRow* row = PortInput::FindBallRow(PortInputDevices::TouchBallRow(control))) {
+    return env->NewStringUTF(row->touch);
+  }
+  for (const PortInput::TouchBallControl& c : PortInput::kTouchBallControls) {
+    if (c.control == control) return env->NewStringUTF("");
+  }
+  return nullptr;
 }
 
 // The actions a layout editor button can take, as key, label, key, label... in
@@ -108,6 +129,19 @@ Java_org_metroidprime_port_TouchControlsView_nativeTouchButtonActions(JNIEnv* en
     const PortInput::ActionInfo& info = PortInput::Info(a);
     items.emplace_back(info.key);
     items.emplace_back(info.label);
+    if (a == PortInput::Action::VisorPrev) {
+      items.insert(items.end(), std::begin(PortDebug::kTouchWheelActions),
+                   std::end(PortDebug::kTouchWheelActions));
+    }
+  }
+  // The player's own actions (controls.toml [[custom_action]]), named as the Remap page does.
+  for (const PortInput::CustomActionDef& def : PortInputDevices::UserBindings()->customActions) {
+    const PortInput::Action a = PortInput::CustomAction(def.id);
+    if (!PortInput::TouchButtonAction(a)) {
+      continue;
+    }
+    items.emplace_back(PortInput::ActionKey(a));
+    items.emplace_back(PortCustomActions::DisplayName(def));
   }
   jclass stringClass = env->FindClass("java/lang/String");
   if (stringClass == nullptr) {
@@ -121,6 +155,12 @@ Java_org_metroidprime_port_TouchControlsView_nativeTouchButtonActions(JNIEnv* en
   }
   env->DeleteLocalRef(stringClass);
   return out;
+}
+
+// Changes when nativeTouchButtonActions' list may have (controls.toml loaded or edited).
+extern "C" JNIEXPORT jlong JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeTouchButtonActionsVersion(JNIEnv*, jclass) {
+  return static_cast< jlong >(PortInputDevices::UserBindingsVersion());
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -165,6 +205,12 @@ Java_org_metroidprime_port_TouchControlsView_nativeTouchTwinStick(JNIEnv*, jclas
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_metroidprime_port_TouchControlsView_nativeTouchWheelsEnabled(JNIEnv*, jclass) {
   return PortDebug::TouchWheels() ? JNI_TRUE : JNI_FALSE;
+}
+
+// The view has moved the retired setting's wheels into the layout as added buttons.
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_TouchControlsView_nativeRetireTouchWheels(JNIEnv*, jclass) {
+  PortDebug::SetTouchWheels(false);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -382,6 +428,32 @@ Java_org_metroidprime_port_TouchControlsView_nativeToggleDebugOverlay(JNIEnv*, j
   PortDebug::RequestToggle();
 }
 
+// SDL's safe area also keeps clear of the gesture zones, which Android still
+// reports in immersive mode (the swipe-down band at the top, the back-gesture
+// edges). Right for touch controls, too strict for a window that only has to
+// stay clear of the cutout and any bar on screen; the activity sends those.
+namespace {
+std::atomic< int > sDrawInsets[4] = {-1, -1, -1, -1};
+} // namespace
+
+bool PortDebug::DrawInsetsPx(int& left, int& top, int& right, int& bottom) {
+  left = sDrawInsets[0].load(std::memory_order_relaxed);
+  top = sDrawInsets[1].load(std::memory_order_relaxed);
+  right = sDrawInsets[2].load(std::memory_order_relaxed);
+  bottom = sDrawInsets[3].load(std::memory_order_relaxed);
+  return left >= 0 && top >= 0 && right >= 0 && bottom >= 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_metroidprime_port_MetroidPrimeActivity_nativeDrawInsets(JNIEnv*, jclass, jint left,
+                                                                 jint top, jint right,
+                                                                 jint bottom) {
+  sDrawInsets[0].store(left, std::memory_order_relaxed);
+  sDrawInsets[1].store(top, std::memory_order_relaxed);
+  sDrawInsets[2].store(right, std::memory_order_relaxed);
+  sDrawInsets[3].store(bottom, std::memory_order_relaxed);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_org_metroidprime_port_MetroidPrimeActivity_nativeTexturePackStatus(JNIEnv* env, jclass,
                                                                        jstring status) {
@@ -410,6 +482,10 @@ Java_org_metroidprime_port_MetroidPrimeActivity_nativeRemasteredPicked(JNIEnv* e
       PortDebug::sPalLanguagesPick = chars;
     } else if (which == PortDebug::kFlaahgraPick) {
       PortDebug::sFlaahgraPick = chars;
+    } else if (which == PortDebug::kDreadPick) {
+      PortDebug::sDreadPick = chars;
+    } else if (which == PortDebug::kEchoesPick) {
+      PortDebug::sEchoesPick = chars;
     } else {
       PortDebug::sRemasteredPicks.emplace_back(int(which), chars);
     }

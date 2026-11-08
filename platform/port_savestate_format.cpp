@@ -11,7 +11,11 @@ namespace PortSaveState {
 namespace {
 
 constexpr char kMagic[4] = {'M', 'P', 'S', 'S'};
-constexpr uint32_t kVersion = 1;
+// 2: the disc's name follows the room label. CGameState's stream is laid out
+// from the disc's world save data (PAL's differs), so another disc's state
+// misreads; version 1 carries no name and loads as before.
+constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersionNoDisc = 1;
 // Game-state blobs are a few hundred bytes; anything past this is not ours.
 constexpr uint32_t kMaxBlob = 1u << 20;
 constexpr uint32_t kMaxLabel = 256;
@@ -24,6 +28,8 @@ constexpr char kRoomMagic[4] = {'R', 'M', 'S', 'T'};
 constexpr uint32_t kRoomVersionLegacy = 1;
 constexpr uint32_t kRoomVersion = 2;
 constexpr uint32_t kRoomVersionLayers = 3;  // version 2 plus the spawn layer section
+// Version 3 with 16-bit block lengths (an enemy's kTagFields block runs to kilobytes).
+constexpr uint32_t kRoomVersionWide = 4;
 constexpr uint32_t kMaxRoomBytes = 8u << 20;
 constexpr uint32_t kMaxRoomCount = 1u << 16;
 constexpr uint32_t kMaxBlocks = 64;
@@ -187,7 +193,9 @@ std::string EncodeRoom(const RoomState& room) {
     // The present set is the objects' ids; a block count byte carries the active flag.
     AppendDelta(body, last, obj.editorId);
     // At most kMaxBlocks, the most DecodeRoom accepts (the count byte has 7 bits).
-    auto fits = [](const RoomBlock& block) { return block.tag < 256 && block.data.size() < 256; };
+    auto fits = [layers](const RoomBlock& block) {
+      return block.tag < 256 && block.data.size() < (layers ? kMaxBlockBytes : 256u);
+    };
     size_t count = 0;
     for (const RoomBlock& block : obj.blocks)
       count += fits(block) ? 1 : 0;
@@ -201,11 +209,13 @@ std::string EncodeRoom(const RoomState& room) {
         break;
       body += static_cast< char >(block.tag);
       body += static_cast< char >(block.data.size());
+      if (layers)
+        body += static_cast< char >(block.data.size() >> 8);
       body += block.data;
     }
   }
   std::string out(kRoomMagic, 4);
-  AppendLE32(out, layers ? kRoomVersionLayers : (recorded ? kRoomVersion : kRoomVersionLegacy));
+  AppendLE32(out, layers ? kRoomVersionWide : (recorded ? kRoomVersion : kRoomVersionLegacy));
   AppendLE32(out, static_cast< uint32_t >(body.size()));
   return out + body;
 }
@@ -223,8 +233,10 @@ bool DecodeRoom(Reader& in, RoomState& room) {
   const uint32_t size = in.U32();
   if (size > kMaxRoomBytes || !in.Need(size) || in.pos + size != in.data.size())
     return false;
-  if (version != kRoomVersionLegacy && version != kRoomVersion && version != kRoomVersionLayers)
+  if (version != kRoomVersionLegacy && version != kRoomVersion && version != kRoomVersionLayers &&
+      version != kRoomVersionWide)
     return true;
+  const bool wide = version >= kRoomVersionWide;
   RoomState r;
   const uint32_t areaCount = in.U32();
   if (areaCount > kMaxRoomCount)
@@ -307,10 +319,12 @@ bool DecodeRoom(Reader& in, RoomState& room) {
       return false;
     for (uint32_t b = 0; b < blockCount && in.ok; ++b) {
       RoomBlock block;
-      if (!in.Need(2))
+      if (!in.Need(wide ? 3 : 2))
         return false;
       block.tag = static_cast< uint8_t >(in.data[in.pos++]);
-      const uint32_t len = static_cast< uint8_t >(in.data[in.pos++]);
+      uint32_t len = static_cast< uint8_t >(in.data[in.pos++]);
+      if (wide)
+        len |= static_cast< uint32_t >(static_cast< uint8_t >(in.data[in.pos++])) << 8;
       if (!in.Need(len))
         return false;
       block.data = in.data.substr(in.pos, len);
@@ -377,6 +391,7 @@ std::string EncodeDoorSaveState(const DoorSaveState& state) {
     flags |= 0x2;
   if (state.doClose)
     flags |= 0x4;
+  flags |= static_cast< uint8_t >(state.partner << kDoorSavePartnerShift);
   std::string out;
   out.push_back(static_cast< char >(state.open ? 1 : 0));
   out.push_back(static_cast< char >(flags));
@@ -401,10 +416,13 @@ bool DecodeDoorSaveState(const std::string& data, DoorSaveState& out) {
     parsed.pendingClose = (flags & 0x1) != 0;
     parsed.refusedClosePending = (flags & 0x2) != 0;
     parsed.doClose = (flags & 0x4) != 0;
-    // A door that is open has no close in flight, and the two close paths are
-    // different branches of Think that cannot both be owed.
+    parsed.partner = static_cast< DoorSaveState::Partner >((flags >> kDoorSavePartnerShift) & 0x3);
+    // A door that is open has no close in flight, the two close paths are
+    // different branches of Think that cannot both be owed, and only an open door
+    // has a side of a door pair.
     if ((parsed.open && (parsed.pendingClose || parsed.refusedClosePending)) ||
-        (parsed.pendingClose && parsed.refusedClosePending))
+        (parsed.pendingClose && parsed.refusedClosePending) ||
+        (!parsed.open && parsed.partner != DoorSaveState::kPartnerUnknown))
       return false;
   }
   out = parsed;
@@ -568,6 +586,7 @@ std::string Encode(const Header& header, const std::vector< uint8_t >& blob) {
   AppendLE64(out, static_cast< uint64_t >(header.savedAt));
   PutString(out, header.world);
   PutString(out, header.room);
+  PutString(out, header.disc);
   AppendLE32(out, static_cast< uint32_t >(blob.size()));
   out.append(reinterpret_cast< const char* >(blob.data()), blob.size());
   if (!header.roomState.empty())
@@ -579,7 +598,8 @@ bool Decode(const std::string& data, Header& header, std::vector< uint8_t >& blo
   if (data.size() < 8 || std::memcmp(data.data(), kMagic, 4) != 0)
     return false;
   Reader in{data, 4};
-  if (in.U32() != kVersion)
+  const uint32_t version = in.U32();
+  if (version != kVersion && version != kVersionNoDisc)
     return false;
   Header h;
   h.worldId = in.U32();
@@ -593,6 +613,8 @@ bool Decode(const std::string& data, Header& header, std::vector< uint8_t >& blo
   h.savedAt = static_cast< int64_t >(in.U64());
   h.world = in.String();
   h.room = in.String();
+  if (version >= kVersion)
+    h.disc = in.String();
   const uint32_t size = in.U32();
   if (!in.ok || size == 0 || size > kMaxBlob || !in.Need(size))
     return false;
@@ -649,7 +671,8 @@ bool DecodeResume(const std::string& data, ResumeMeta& meta, std::string& stateF
 }
 
 bool ResumeMatches(const ResumeMeta& stored, const ResumeMeta& current) {
-  return stored.cardSerial == current.cardSerial && stored.identity == current.identity &&
+  // Serial 0 is no card: a resume written without one is never offered.
+  return stored.cardSerial != 0 && stored.cardSerial == current.cardSerial && stored.identity == current.identity &&
          stored.fileIdx <= 2;
 }
 

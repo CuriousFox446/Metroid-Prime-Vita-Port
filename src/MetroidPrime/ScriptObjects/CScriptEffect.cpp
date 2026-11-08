@@ -17,9 +17,16 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/Player/CPlayerState.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptTrigger.hpp"
+#include "MetaRender/CCubeRenderer.hpp"
 #include "MetroidPrime/TCastTo.hpp"
 
 #include "rstl/math.hpp"
+#ifdef TARGET_PC
+#include <cmath>
+#include "MetroidPrime/ScriptObjects/CScriptSpecialFunction.hpp"
+#include "port_mods.h"
+#include "port_room_env.h"
+#endif
 uint CScriptEffect::mNumParticlesDrawing = 0;
 uint CScriptEffect::mNumParticlesUpdating = 0;
 
@@ -93,6 +100,13 @@ CScriptEffect::CScriptEffect(const TUniqueId uid, const rstl::string& name, cons
 }
 
 void CScriptEffect::Think(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  if (xPortBarrierPlatform != kInvalidUniqueId) {
+    if (const CActor* source = TCastToConstPtr<CActor>(mgr.GetObjectById(xPortBarrierPlatform))) {
+      if (source->GetActive()) PortFollowBarrier(*source);
+    }
+  }
+#endif
   if (GetTransformDirtySpare()) {
     if (x104_particleSystem.get()) {
       x104_particleSystem->SetOrientation(ClearTrans(GetTransform()));
@@ -142,13 +156,22 @@ void CScriptEffect::Think(float dt, CStateManager& mgr) {
       }
     }
 #ifdef TARGET_PC
-    xPortNestedLights.Update(mgr, x104_particleSystem.get(), GetActive(), GetUniqueId(),
-                             GetCurrentAreaId(), rstl::string_l("EffectPHDR_") + GetDebugName(),
-                             x10c_partId, 1);
+    if (!xPortHidden) {
+      xPortNestedLights.Update(mgr, x104_particleSystem.get(), GetActive(), GetUniqueId(),
+                               GetCurrentAreaId(), rstl::string_l("EffectPHDR_") + GetDebugName(),
+                               x10c_partId, 1);
+    }
 #endif
     if (x111_25_dieWhenSystemsDone) {
       x140_destroyDelayTimer += dt;
-      if (x140_destroyDelayTimer > 15.f) {
+#ifdef TARGET_PC
+      // Remastered's CScriptEffectMP1::Think (0xd9a8b8) waits 30 s, retail 15 s.
+      const float destroyDelay =
+          PortRoomEnv::Enabled() && PortMods::RoomEnvLoaded() ? 30.f : 15.f;
+#else
+      const float destroyDelay = 15.f;
+#endif
+      if (x140_destroyDelayTimer > destroyDelay) {
         mgr.DeleteObjectRequest(GetUniqueId());
         return;
       }
@@ -187,6 +210,11 @@ void CScriptEffect::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid, CSt
     }
     break;
   case kSM_Registered:
+#ifdef TARGET_PC
+    if (xPortHidden) {
+      break;
+    }
+#endif
     if (x104_particleSystem.get() && x104_particleSystem->SystemHasLight()) {
       x108_lightId = mgr.AllocateUniqueId();
       const CAssetId sourceId = x10c_partId;
@@ -277,12 +305,25 @@ void CScriptEffect::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid, CSt
 }
 
 void CScriptEffect::AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  if (xPortBarrierController != kInvalidUniqueId) {
+    const CScriptSpecialFunction* owner =
+        TCastToConstPtr<CScriptSpecialFunction>(mgr.GetObjectById(xPortBarrierController));
+    if (!owner || !owner->PortBarrierVisible(mgr)) return;
+  }
+#endif
   if (!x111_26_canRender) {
     x12c_remTime = rstl::max_val(x134_durationResetWhileVisible, x12c_remTime);
     return;
   }
   const CAABox& bounds = GetRenderBoundsCached();
-  if (!frustum.BoxInFrustumPlanes(bounds)) {
+#ifdef TARGET_PC
+  // A barrier mesh rises well above its platform's model bounds: never cull it by them.
+  const bool cull = xPortBarrierController == kInvalidUniqueId;
+#else
+  const bool cull = true;
+#endif
+  if (cull && !frustum.BoxInFrustumPlanes(bounds)) {
     return;
   }
   x12c_remTime = rstl::max_val(x134_durationResetWhileVisible, x12c_remTime);
@@ -301,6 +342,9 @@ void CScriptEffect::AddToRenderer(const CFrustumPlanes& frustum, const CStateMan
       break;
     }
   }
+#ifdef TARGET_PC
+  visible = visible && !xPortHidden;
+#endif
   if (visible) {
     if (x138_actorLights.get()) {
       const CVector3f center = bounds.GetCenterPoint();
@@ -308,11 +352,27 @@ void CScriptEffect::AddToRenderer(const CFrustumPlanes& frustum, const CStateMan
                                            CAABox(center, center));
       x138_actorLights->BuildDynamicLightList(mgr, bounds);
     }
+#ifdef TARGET_PC
+    // Remastered sorts the whole effect against water by its root generator's WSTP (0xd9bc88).
+    if (x104_particleSystem.get() != nullptr) {
+      gpRender->PortSetNextWaterSort(x104_particleSystem->PortWaterSort());
+    }
     EnsureRendered(mgr);
+    gpRender->PortSetNextWaterSort(0);
+#else
+    EnsureRendered(mgr);
+#endif
   }
 }
 
 void CScriptEffect::Render(const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  if (xPortBarrierController != kInvalidUniqueId) {
+    const CScriptSpecialFunction* owner =
+        TCastToConstPtr<CScriptSpecialFunction>(mgr.GetObjectById(xPortBarrierController));
+    if (!owner || !owner->PortBarrierVisible(mgr)) return;
+  }
+#endif
   if (x138_actorLights.get()) {
     x138_actorLights->ActivateLights();
   }
@@ -367,6 +427,37 @@ void CScriptEffect::PortSetExternalVars(const std::vector< SPortExternalVar >& v
     }
   }
 }
+
+bool CScriptEffect::PortSetExternalReal(const PortGuid& guid, float value) {
+  if (!std::isfinite(value) || !x104_particleSystem.get() ||
+      x104_particleSystem->PortGetRealHandle(guid) == kPortNoVar) {
+    return false;
+  }
+  for (SPortExternalVar& var : xPortExternalVars) {
+    if (var.guid == guid) {
+      var.real = value;
+      x104_particleSystem->PortBindReal(guid, value);
+      return true;
+    }
+  }
+  SPortExternalVar var;
+  var.guid = guid;
+  var.real = value;
+  xPortExternalVars.push_back(var);
+  x104_particleSystem->PortBindReal(guid, value);
+  return true;
+}
+
+void CScriptEffect::PortFollowBarrier(const CActor& source) {
+  SetTransform(source.GetTransform());
+  if (x104_particleSystem.get()) {
+    x104_particleSystem->SetOrientation(ClearTrans(GetTransform()));
+    x104_particleSystem->SetGlobalTranslation(GetTranslation());
+  }
+  xPortHasBarrierBounds = source.HasModelData();
+  if (xPortHasBarrierBounds) xPortBarrierBounds = source.GetModelData()->GetBounds(source.GetTransform());
+  CalculateRenderBounds();
+}
 #endif
 
 void CScriptEffect::ResetParticleCounts() {
@@ -395,6 +486,9 @@ void CScriptEffect::CalculateRenderBounds() {
     if (electricBounds.valid()) {
       bounds.Include(*electricBounds);
     }
+#ifdef TARGET_PC
+    if (xPortHasBarrierBounds) bounds = xPortBarrierBounds;
+#endif
     SetRenderBounds(bounds);
     x111_26_canRender = true;
   } else {

@@ -15,6 +15,8 @@
 
 #ifdef TARGET_PC
 #include "port_beam_doors.h"
+#include "port_mods.h"
+#include "port_room_env.h"
 
 #include <new>
 #endif
@@ -227,8 +229,26 @@ void CScriptDamageableTrigger::AddToRenderer(const CFrustumPlanes&,
   EnsureRendered(mgr, GetTranslation() - x244_faceTranslate, GetSortingBounds(mgr));
 }
 
+#ifdef TARGET_PC
+void CScriptDamageableTrigger::PortAddThermalColdNode(const CFrustumPlanes&,
+                                                      const CStateManager&) const {
+  if (x300_26_outOfFrustum) {
+    return;
+  }
+  PortThermalColdNode();
+}
+#endif
+
 void CScriptDamageableTrigger::Render(const CStateManager& mgr) const {
-  if (GetActive() && x1dc_faceFlag != 0 && !close_enough(x1e0_alpha, 0.f)) {
+  bool drawFace = true;
+#ifdef TARGET_PC
+  // Remastered's CScriptDamageableTriggerMP1::Render (0xf823fc) only renders the actor: it has
+  // no fluid plane. The visible face is the linked door-shield ScriptActor, faded through
+  // SetLinkedObjectAlpha (kb topic/damageable-trigger-render.md). Skip the plane wherever the
+  // Remastered room environment renders the frame (the same test as CRainSplashGenerator::Draw).
+  drawFace = !(PortRoomEnv::Enabled() && PortMods::RoomEnvLoaded());
+#endif
+  if (drawFace && GetActive() && x1dc_faceFlag != 0 && !close_enough(x1e0_alpha, 0.f)) {
     const CAABox bounds(
         CVector3f(x14c_bounds.GetMinPoint().GetX(), x14c_bounds.GetMinPoint().GetY(),
                   x14c_bounds.GetMinPoint().GetZ()),

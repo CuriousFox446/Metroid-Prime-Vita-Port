@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(metroid_prime_port LANGUAGES C CXX)
+if(IOS)
+    # platform/port_ios.mm. Enabled here: enabled where the target is made, it
+    # comes after the subdirectories and leaves CMake without its compile rules.
+    enable_language(OBJCXX)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type" FORCE)
@@ -100,7 +105,11 @@ endif()
 # threads) experimental; the flag unlocks them and links libc++experimental.
 if(APPLE)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-fexperimental-library>)
-    add_link_options(-fexperimental-library)
+    # The iOS Simulator SDK ships no libc++experimental; jthread and stop_token
+    # are header-only, so its build compiles with the flag and links without it.
+    if(NOT CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        add_link_options(-fexperimental-library)
+    endif()
 endif()
 
 # Aurora provides the GameCube/Wii compatibility layer (MIT): GX, OS, PAD, DVD,
@@ -146,11 +155,17 @@ list(APPEND MP_GAME_SOURCES
     platform/port_automapper.cpp
     platform/port_particle_vfx_read.cpp
     platform/port_element_gen.cpp
+    platform/port_entity_schema.cpp
     src/MetroidPrime/CPortNestedLights.cpp)
 # The port has an explicit source manifest, including registration-only and
 # shim-dependent translation units. Link those objects directly on both ELF and
 # COFF rather than relying on archive extraction or suppressing duplicate symbols.
 add_library(mp_game OBJECT ${MP_GAME_SOURCES})
+# The entity schema table holds a few thousand accessor lambdas, each its own COMDAT
+# section on COFF: past the 65k sections an object holds without /bigobj.
+if(MSVC)
+    set_source_files_properties(platform/port_entity_schema.cpp PROPERTIES COMPILE_OPTIONS /bigobj)
+endif()
 mp_signed_char(mp_game)
 target_include_directories(mp_game PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/include
@@ -204,6 +219,7 @@ set(MP_PORT_SOURCES
     platform/debug_ui/search.cpp
     platform/debug_ui/settings.cpp
     platform/debug_ui/tabs.cpp
+    platform/debug_ui/touch_overlay.cpp
     platform/debug_ui/tracker.cpp
     platform/debug_ui/ui_common.cpp
     platform/debug_ui/video.cpp
@@ -215,12 +231,16 @@ set(MP_PORT_SOURCES
     platform/sdk_stubs.cpp
     platform/port_embedded.cpp
     platform/port_textures.cpp
+    platform/port_zip.cpp
     platform/port_prompts.cpp
     platform/port_controls.cpp
     platform/input/port_input_devices.cpp
     platform/input/port_input_engine.cpp
     platform/input/port_input_bindings.cpp
     platform/input/port_input_remap_ui.cpp
+    platform/input/port_input_user_presets.cpp
+    platform/input/port_input_user_presets_store.cpp
+    platform/input/port_custom_actions.cpp
     platform/port_randomizer.cpp
     platform/port_ap_metroidprime.cpp
     platform/port_ap_protocol.cpp
@@ -246,18 +266,25 @@ set(MP_PORT_SOURCES
     platform/port_map_pickups_index.cpp
     platform/port_viewmodel.cpp
     platform/port_actor_shadow.cpp
+    platform/port_projected_decal.cpp
     platform/port_freecam.cpp
+    platform/port_third_person.cpp
+    platform/port_third_person_body.cpp
+    platform/port_world_holders.cpp
     platform/port_photo.cpp
+    platform/port_radial.cpp
     platform/port_console.cpp
     platform/port_log_file.cpp
     platform/port_crash.cpp
     platform/port_memory_log.cpp
     platform/port_watchdog.cpp
+    platform/port_motion_watch.cpp
     platform/port_savestate.cpp
     platform/port_savestate_format.cpp
     platform/port_dynamic_res.cpp
     platform/port_savestate_room.cpp
     platform/port_savestate_boss.cpp
+    platform/port_savestate_fields.cpp
     platform/port_statedump.cpp
     platform/port_boss_flaahgra.cpp
     platform/port_boss_prime.cpp
@@ -302,11 +329,22 @@ set(MP_PORT_SOURCES
     platform/port_room_env_load.cpp
     platform/port_room_env_file.cpp
     platform/port_room_env_tiles.cpp
+    platform/port_envfx_assets.cpp
+    platform/port_envfx_file.cpp
+    platform/port_shell.cpp
+    platform/port_shell_assets.cpp
+    platform/port_shell_file.cpp
+    platform/port_icy_assets.cpp
+    platform/port_icy_file.cpp
     platform/port_room_geo.cpp
     platform/port_room_geo_file.cpp
     platform/port_room_liquid.cpp
     platform/port_room_effects.cpp
+    platform/port_queen_barrier.cpp
+    platform/port_queen_barrier_validate.cpp
     platform/port_room_effects_file.cpp
+    platform/port_retail_placement.cpp
+    platform/port_retail_placement_file.cpp
     platform/port_collision_view.cpp
     platform/port_pointer.cpp
     platform/port_pointer_menu.cpp
@@ -330,6 +368,16 @@ set(MP_PORT_SOURCES
     platform/port_storage_report.cpp
     platform/port_remastered_import_retail.cpp
     platform/port_remastered_import_remastered.cpp
+    platform/port_dread_samus_import.cpp
+    platform/port_dread_samus.cpp
+    platform/port_echoes_suits_import.cpp
+    platform/port_echoes_suits.cpp
+    platform/port_dread_pkg.cpp
+    platform/port_dread_bcmdl.cpp
+    platform/port_dread_bsmat.cpp
+    platform/port_dread_bctex.cpp
+    platform/port_dread_reskin.cpp
+    platform/port_dread_material.cpp
     platform/port_remastered_jpeg.cpp
     platform/port_gallery.cpp
     platform/port_remastered_room.cpp
@@ -343,6 +391,7 @@ set(MP_PORT_SOURCES
     platform/port_ball_looks.cpp
     platform/port_ball_looks_disc.cpp
     platform/port_disc_reader.cpp
+    platform/port_beam_colours.cpp
     platform/port_suit_colours.cpp
     platform/port_suit_colours_disc.cpp
     platform/port_hints.cpp
@@ -390,8 +439,39 @@ if(ANDROID)
         set_target_properties(mport_vkshim PROPERTIES C_VISIBILITY_PRESET hidden)
         target_link_libraries(metroid_prime_port PRIVATE adrenotools z)
     endif()
+elseif(IOS)
+    # An iOS app is a flat bundle: the executable, Info.plist and the icons side
+    # by side. Nothing signs it here; tools/ios_package.sh finishes the bundle
+    # (icons, an ad hoc signature) and players re-sign the .ipa with their own
+    # Apple ID when they sideload it.
+    add_executable(metroid_prime_port MACOSX_BUNDLE ${MP_PORT_SOURCES} platform/port_ios.mm)
+    set_source_files_properties(platform/port_ios.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(metroid_prime_port PRIVATE "-framework UIKit" "-framework UniformTypeIdentifiers")
+    file(STRINGS android/app/build.gradle _mp_version_line REGEX "versionName \"[^\"]+\"")
+    string(REGEX REPLACE ".*versionName \"([^\"]+)\".*" "\\1" MP_IOS_VERSION "${_mp_version_line}")
+    set_target_properties(metroid_prime_port PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ios/Info.plist.in"
+        MACOSX_BUNDLE_GUI_IDENTIFIER io.github.odrannnn.metroidprimeport
+        MACOSX_BUNDLE_BUNDLE_NAME "Metroid Prime"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${MP_IOS_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${MP_IOS_VERSION}")
 else()
     add_executable(metroid_prime_port ${MP_PORT_SOURCES})
+endif()
+# Touch settings and the virtual pad on phones and tablets. Android draws the
+# controls in Java (TouchControlsView); iOS draws them in C++ (touch_overlay.cpp).
+# The desktop switch builds the C++ overlay on a host build so its drawing and
+# event handling can be tried without a device; the console's `finger` command
+# sends the touches.
+option(MP_TOUCH_OVERLAY_DESKTOP "Draw the touch controls on a desktop build (testing)" OFF)
+if(ANDROID OR IOS)
+    target_compile_definitions(metroid_prime_port PRIVATE PORT_TOUCH_CONTROLS)
+endif()
+if(IOS)
+    target_compile_definitions(metroid_prime_port PRIVATE PORT_TOUCH_OVERLAY)
+endif()
+if(MP_TOUCH_OVERLAY_DESKTOP AND NOT ANDROID)
+    target_compile_definitions(metroid_prime_port PRIVATE PORT_TOUCH_CONTROLS PORT_TOUCH_OVERLAY)
 endif()
 # disc.cpp and port_pal_languages.cpp inflate compressed images and fonts. Aurora
 # provides ZLIB::ZLIB everywhere (its zlib-ng on Windows).
@@ -427,6 +507,16 @@ if(NOT ANDROID)
     target_compile_definitions(remastered_effect_tool PRIVATE TARGET_PC VERSION=0)
     target_link_libraries(remastered_effect_tool PRIVATE astcenc ${CMAKE_THREAD_LIBS_INIT})
     set_target_properties(remastered_effect_tool PROPERTIES EXCLUDE_FROM_ALL ON)
+endif()
+# Which GX pipeline-cache key fields never change the pipeline, and the seed rewrite
+# (tools/pipeline_key_audit.cpp). Not built by default: --target pipeline_key_audit.
+if(NOT ANDROID AND NOT IOS)
+    add_executable(pipeline_key_audit EXCLUDE_FROM_ALL tools/pipeline_key_audit.cpp)
+    target_include_directories(pipeline_key_audit PRIVATE extern/aurora/lib)
+    target_compile_definitions(pipeline_key_audit PRIVATE WEBGPU_DAWN)
+    target_link_libraries(pipeline_key_audit PRIVATE aurora::core aurora::gx aurora::gd aurora::si aurora::vi
+        aurora::pad aurora::mtx aurora::os aurora::dvd aurora::card absl::btree absl::flat_hash_map sqlite3
+        Tracy::TracyClient PNG::PNG)
 endif()
 if(NOT ANDROID)
     # Developer tool too: flattens real models' ANUV programs (tools/anuv_check.py).
@@ -506,6 +596,11 @@ if(MP_EMBED_RESOURCES)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     file(GLOB_RECURSE MP_EMBED_INPUTS CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/textures/*")
+    # A deleted texture leaves every remaining input older than the output, so the
+    # file list itself is an input; file(CONFIGURE) rewrites it only when it changes.
+    string(JOIN "\n" MP_EMBED_LIST ${MP_EMBED_INPUTS})
+    set(MP_EMBED_LIST_FILE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_embedded_inputs.txt")
+    file(CONFIGURE OUTPUT "${MP_EMBED_LIST_FILE}" CONTENT "${MP_EMBED_LIST}\n" @ONLY)
     set(MP_EMBED_SEED "${CMAKE_CURRENT_SOURCE_DIR}/assets/initial_pipeline_cache.db")
     set(MP_EMBED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_embedded_data.cpp")
     add_custom_command(
@@ -515,19 +610,22 @@ if(MP_EMBED_RESOURCES)
             "${MP_EMBED_SOURCE}"
             --dir "${CMAKE_CURRENT_SOURCE_DIR}/textures" textures
             --file "${MP_EMBED_SEED}" initial_pipeline_cache.db
-        DEPENDS ${MP_EMBED_INPUTS} "${MP_EMBED_SEED}"
+        DEPENDS ${MP_EMBED_INPUTS} "${MP_EMBED_LIST_FILE}" "${MP_EMBED_SEED}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_resources.py"
         COMMENT "Embedding textures and the pipeline cache seed"
         VERBATIM)
     target_sources(metroid_prime_port PRIVATE "${MP_EMBED_SOURCE}")
     target_compile_definitions(metroid_prime_port PRIVATE MP_EMBED_RESOURCES)
 else()
-    # Keep the HD texture replacements next to the executable, which is where the
-    # port looks for them by default, so a built binary picks them up without a
-    # manual copy. Regenerate them with tools/make_prompt_glyphs.py. The generated
-    # sets are cleared first: copy_directory only adds, and an icon the generator
-    # no longer writes would otherwise keep replacing a texture it no longer claims
-    # (two retired legend hashes kept drawing L/R over the map's [M] and [S] icons).
+    # Keep the prompt icons next to the executable, which is where the port looks
+    # for them by default, so a built binary picks them up without a manual copy.
+    # Regenerate them with tools/make_prompt_glyphs.py. The folders are cleared
+    # first: copy_directory only adds, and a file an older build or generator left
+    # would otherwise keep replacing a texture it no longer claims (two retired
+    # legend hashes kept drawing L/R over the map's [M] and [S] icons). The old
+    # per-device sets (keyboard, playstation, switch, xbox) are in the list for the
+    # same reason: a stale copy beside the executable would still register by
+    # filename and replace the prompts the port now serves itself.
     set(PORT_TEXTURE_SETS bindings keyboard playstation switch xbox)
     list(TRANSFORM PORT_TEXTURE_SETS PREPEND "$<TARGET_FILE_DIR:metroid_prime_port>/textures/")
     add_custom_command(TARGET metroid_prime_port POST_BUILD
@@ -586,7 +684,9 @@ endif()
 # <SDL_GetBasePath()> + "textures", and Aurora's pipeline cache is opened by name
 # beside the binary. They are installed to bin/ for that reason, not by accident.
 include(GNUInstallDirs)
-install(TARGETS metroid_prime_port RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS metroid_prime_port
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    BUNDLE DESTINATION .)
 if(NOT MP_EMBED_RESOURCES)
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/textures/
         DESTINATION ${CMAKE_INSTALL_BINDIR}/textures)
@@ -679,7 +779,7 @@ if(MP_BUILD_TESTS)
         platform/port_remastered_anuv.cpp
         platform/port_remastered_image.cpp
         platform/port_remastered_pak.cpp)
-    target_include_directories(mp_test_remastered_convert PUBLIC platform/include)
+    target_include_directories(mp_test_remastered_convert PUBLIC platform/include extern/aurora/include)
     target_link_libraries(mp_test_remastered_convert PUBLIC astcenc)
     mp_port_test(port_buffer_tests
         SOURCES tests/port_buffers.cpp tests/port_forward_owner.cpp
@@ -762,7 +862,15 @@ if(MP_BUILD_TESTS)
         SOURCES tests/port_disc_verify.cpp platform/port_disc_verify_core.cpp
         INCLUDES platform/include platform
         LIBRARIES ZLIB::ZLIB)
+    mp_port_test(port_zip_tests
+        SOURCES tests/port_zip.cpp platform/port_zip.cpp
+        INCLUDES platform/include
+        LIBRARIES ZLIB::ZLIB)
     mp_port_test(port_mouse_tests SOURCES tests/port_mouse.cpp INCLUDES platform/include)
+    # Header-only (port_flick_stick.h): Flick Stick's flicks, rotation and smoothing.
+    mp_port_test(port_flick_stick_tests SOURCES tests/port_flick_stick.cpp INCLUDES platform/include)
+    # Header-only (port_input_gate.h): pad 0's neutral-while-F1-is-open gate.
+    mp_port_test(port_input_gate_tests SOURCES tests/port_input_gate.cpp INCLUDES platform/include)
     # Drives a real SDL virtual gamepad through the touch overlay's own code.
     # That code was Android-only and untested, so a wrong button mapping could
     # not fail anywhere except on a phone.
@@ -777,6 +885,19 @@ if(MP_BUILD_TESTS)
         DEFINITIONS TARGET_PC)
     # The `status --json` physics components: a non-finite value must be JSON null,
     # checked by parsing the production helper's output with the strict reader above.
+    # The generated entity field schema (tools/gen_entity_schema.py): it compiles the
+    # accessors against every entity header as mp_game does, forced include and all.
+    mp_port_test(port_entity_schema_tests
+        SOURCES tests/port_entity_schema.cpp platform/port_entity_schema.cpp
+        INCLUDES platform/include include extern/aurora/include extern/musyx/include
+        DEFINITIONS TARGET_PC AURORA AURORA_ENABLE_GX MUSY_TARGET=MUSY_TARGET_PC)
+    mp_signed_char(port_entity_schema_tests)
+    if(MSVC)
+        target_compile_options(port_entity_schema_tests PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/platform/compat.h)
+    else()
+        target_compile_options(port_entity_schema_tests PRIVATE -Wno-narrowing -Wno-multichar
+            -Wno-write-strings -include ${CMAKE_CURRENT_SOURCE_DIR}/platform/compat.h)
+    endif()
     mp_port_test(port_console_physics_tests
         SOURCES tests/port_console_physics.cpp platform/port_json.cpp
         INCLUDES platform/include
@@ -805,6 +926,12 @@ if(MP_BUILD_TESTS)
     mp_port_test(port_mods_tests
         SOURCES tests/port_mods.cpp platform/port_mods_pak.cpp
         INCLUDES platform/include)
+    mp_port_test(port_mods_restart_tests
+        SOURCES tests/port_mods_restart.cpp platform/port_mods.cpp platform/port_mods_pak.cpp
+            platform/port_room_geo_file.cpp
+        INCLUDES platform/include include extern/aurora/include
+        DEFINITIONS TARGET_PC AURORA AURORA_ENABLE_GX
+        LIBRARIES ${AURORA_SDL3_TARGET})
     # The collision-box reader indexes PAK tables and inflates them; a test
     # drives it over synthetic PAKs instead of a disc, so the DVD calls the
     # production source is built from are stubbed out.
@@ -826,8 +953,17 @@ if(MP_BUILD_TESTS)
     mp_port_test(port_room_geo_tests
         SOURCES tests/port_room_geo.cpp platform/port_room_geo_file.cpp
         INCLUDES platform/include)
+    mp_port_test(port_room_geometry_handedness_tests
+        SOURCES tests/port_room_geometry_handedness.cpp
+        INCLUDES platform/include extern/aurora/include)
+    mp_port_test(port_gunship_scenery_tests
+        SOURCES tests/port_gunship_scenery.cpp
+        INCLUDES platform/include)
     mp_port_test(port_room_effects_tests
         SOURCES tests/port_room_effects.cpp platform/port_room_effects_file.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_retail_placement_tests
+        SOURCES tests/port_retail_placement_tests.cpp platform/port_retail_placement_file.cpp
         INCLUDES platform/include)
     mp_port_test(port_hd_font_tests
         SOURCES tests/port_hd_font.cpp platform/port_hd_font_file.cpp
@@ -1052,12 +1188,30 @@ if(MP_BUILD_TESTS)
     mp_port_test(port_remastered_import_tests
         SOURCES tests/port_remastered_import.cpp platform/port_remastered_effect.cpp
         INCLUDES platform/include)
+    mp_port_test(port_queen_barrier_validate_tests
+        SOURCES tests/port_queen_barrier_validate.cpp
+            platform/port_queen_barrier_validate.cpp
+            platform/port_remastered_effect_convert.cpp platform/port_remastered_effect.cpp
+        INCLUDES platform/include include extern/aurora/include
+        DEFINITIONS TARGET_PC VERSION=0)
     # Where the built-in Remastered import lives and how a scan picks it up
     # (port_remastered_storage.h): policy plus the folder walk, so it gets a scratch folder of its own.
     mp_port_test(port_remastered_storage_tests
         SOURCES tests/port_remastered_storage.cpp
         INCLUDES platform/include
         ARGS "${CMAKE_CURRENT_BINARY_DIR}/remastered-storage-test")
+    mp_port_test(port_envfx_file_tests
+        SOURCES tests/port_envfx_file.cpp platform/port_envfx_file.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_pause_lighting_tests
+        SOURCES tests/port_pause_lighting.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_shell_file_tests
+        SOURCES tests/port_shell_file.cpp platform/port_shell_file.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_icy_file_tests
+        SOURCES tests/port_icy_file.cpp platform/port_icy_file.cpp
+        INCLUDES platform/include)
     mp_port_test(port_hud_bars_tests
         SOURCES tests/port_hud_bars.cpp platform/port_hud_bars_file.cpp
         INCLUDES platform/include)
@@ -1108,6 +1262,9 @@ if(MP_BUILD_TESTS)
     mp_port_test(port_remastered_lits_tests
         SOURCES tests/port_remastered_lits_tests.cpp
         LIBRARIES mp_test_remastered_convert)
+    mp_port_test(port_remastered_orient_normal_tests
+        SOURCES tests/port_remastered_orient_normal_tests.cpp
+        LIBRARIES mp_test_remastered_convert)
     mp_port_test(port_remastered_ice_tests
         SOURCES tests/port_remastered_ice_tests.cpp
         LIBRARIES mp_test_remastered_convert)
@@ -1121,6 +1278,7 @@ if(MP_BUILD_TESTS)
             platform/port_remastered_tegra_swizzle.cpp platform/port_remastered_bcdec.cpp
             platform/port_remastered_astc_decode.cpp
             platform/port_room_env_tiles.cpp platform/port_room_geo_file.cpp
+            platform/port_remastered_table.cpp
         INCLUDES platform/include include extern/aurora/include
         DEFINITIONS TARGET_PC VERSION=0
         LIBRARIES mp_test_remastered_convert)
@@ -1148,6 +1306,8 @@ if(MP_BUILD_TESTS)
         LIBRARIES mp_test_remastered_convert)
     mp_port_test(port_remastered_astc_tests
         SOURCES tests/port_remastered_astc.cpp platform/port_remastered_image.cpp
+            platform/port_remastered_txtr.cpp platform/port_remastered_tegra_swizzle.cpp
+            platform/port_remastered_bcdec.cpp platform/port_remastered_astc_decode.cpp
         INCLUDES platform/include
         LIBRARIES astcenc)
     mp_port_test(port_remastered_image_tests
@@ -1236,6 +1396,7 @@ if(MP_BUILD_TESTS)
         INCLUDES include extern/aurora/include
         DEFINITIONS TARGET_PC VERSION=0)
     mp_port_test(port_actor_shadow_tests SOURCES tests/port_actor_shadow.cpp INCLUDES platform/include)
+    mp_port_test(port_projected_decal_tests SOURCES tests/port_projected_decal.cpp INCLUDES platform/include)
     mp_port_test(port_visor_mesh_tests SOURCES tests/port_visor_mesh.cpp INCLUDES platform/include)
     mp_port_test(port_hold_toggle_tests SOURCES tests/port_hold_toggle.cpp INCLUDES platform/include)
     mp_port_test(port_pointer_tests SOURCES tests/port_pointer.cpp INCLUDES platform/include)
@@ -1244,6 +1405,11 @@ if(MP_BUILD_TESTS)
         INCLUDES platform/include)
     mp_port_test(port_input_bindings_tests
         SOURCES tests/port_input_bindings.cpp
+            platform/input/port_input_bindings.cpp platform/input/port_input_engine.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_input_user_presets_tests
+        SOURCES tests/port_input_user_presets.cpp
+            platform/input/port_input_user_presets.cpp
             platform/input/port_input_bindings.cpp platform/input/port_input_engine.cpp
         INCLUDES platform/include)
     mp_port_test(port_tick_pair_tests SOURCES tests/port_tick_pair.cpp INCLUDES platform/include)
@@ -1317,6 +1483,12 @@ if(MP_BUILD_TESTS)
         INCLUDES platform/include
         ARGS "${PORT_SAVE_FIXTURES}"
         TIMEOUT 120)
+    mp_port_test(port_tri_orbit_tests
+        SOURCES tests/port_tri_orbit.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_tri_reticle_tests
+        SOURCES tests/port_tri_reticle.cpp
+        INCLUDES platform/include)
     mp_port_test(port_charge_locator_tests
         SOURCES tests/port_charge_locator.cpp
         INCLUDES include extern/aurora/include
@@ -1337,6 +1509,12 @@ if(MP_BUILD_TESTS)
         SOURCES tests/port_vfx_opacity.cpp
         INCLUDES platform/include extern/aurora/include
         DEFINITIONS TARGET_PC VERSION=0)
+    # VFX_BarrierShield's fragment maths: a scalar golden reference for the breakup, the motion, the
+    # .45 sawtooth boundary and the chromatic scene samples (header-only: the maths is the shader's).
+    mp_port_test(port_vfx_barrier_tests
+        SOURCES tests/port_vfx_barrier.cpp
+        INCLUDES platform/include extern/aurora/include
+        DEFINITIONS TARGET_PC VERSION=0)
     mp_port_test(port_vfx_material_tests
         SOURCES tests/port_vfx_material.cpp
             src/Kyoto/Particles/CPortVfxMat.cpp platform/port_vfx_particles.cpp
@@ -1354,6 +1532,81 @@ if(MP_BUILD_TESTS)
         INCLUDES include extern/aurora/include
         DEFINITIONS TARGET_PC VERSION=0
         GC_SECTIONS)
+    mp_port_test(port_face_reflection_tests
+        SOURCES tests/port_face_reflection_tests.cpp
+        INCLUDES include extern/aurora/include
+        DEFINITIONS TARGET_PC VERSION=0)
+    # --- Dread readers A (PKG, BCTEX, title check) ---
+    # CRC-64, .pkg table, .bctex (gzip, block-linear, BC1/3/5) and the opened image's title id,
+    # over synthetic files; real-data checks are opt-in (PORT_DREAD_ROMFS, PORT_DREAD_NSP).
+    mp_port_test(port_dread_readers_a_tests
+        SOURCES tests/port_dread_readers_a.cpp
+            platform/port_dread_pkg.cpp platform/port_dread_bctex.cpp
+            platform/port_remastered_tegra_swizzle.cpp platform/port_remastered_bcdec.cpp
+            platform/port_remastered_nsp.cpp platform/port_remastered_nso.cpp
+        INCLUDES platform/include tests
+        LIBRARIES ZLIB::ZLIB ${CMAKE_THREAD_LIBS_INIT}
+        TIMEOUT 120)
+    mp_websocket_tls(port_dread_readers_a_tests)
+    # --- end Dread readers A ---
+    # --- Dread readers B (BCMDL, BSMAT) ---
+    mp_port_test(port_dread_readers_b_tests
+        SOURCES tests/port_dread_readers_b.cpp platform/port_dread_bcmdl.cpp
+            platform/port_dread_bsmat.cpp
+        INCLUDES platform/include
+        LIBRARIES ZLIB::ZLIB)
+    # --- end Dread readers B ---
+    # --- Dread re-skin (step 4: Dread Samus onto Prime's skeletons) ---
+    # CINF parse, frame/scale fit, repose and weight mapping over synthetic stick figures;
+    # the real-data run is opt-in (PORT_DREAD_SAMUS_PKG_DIR + PORT_PRIME_SAMUS_DIR).
+    mp_port_test(port_dread_reskin_tests
+        SOURCES tests/port_dread_reskin.cpp platform/port_dread_reskin.cpp platform/port_dread_bcmdl.cpp
+        INCLUDES platform/include
+        LIBRARIES ZLIB::ZLIB)
+    # --- end Dread re-skin ---
+    # --- Dread suit material (step 5: mp_samuspbr -> synthetic Remastered PBR material) ---
+    # Channel remap, emissive and ids over synthetic fixtures, then through the converter's
+    # ReadMaterial; the real-data run is opt-in (PORT_DREAD_SAMUS_PKG_DIR).
+    mp_port_test(port_dread_material_tests
+        SOURCES tests/port_dread_material.cpp platform/port_dread_material.cpp platform/port_dread_bctex.cpp
+            platform/port_dread_bsmat.cpp platform/port_remastered_tegra_swizzle.cpp
+            platform/port_remastered_bcdec.cpp
+        INCLUDES platform platform/include
+        LIBRARIES mp_test_remastered_convert ZLIB::ZLIB ${CMAKE_THREAD_LIBS_INIT}
+        TIMEOUT 120)
+    # --- end Dread suit material ---
+    # Third-person camera: eye placement and wall pull-in maths (header-only, no game state).
+    mp_port_test(port_third_person_tests
+        SOURCES tests/port_third_person.cpp
+        INCLUDES platform/include)
+    mp_port_test(port_third_person_body_tests
+        SOURCES tests/port_third_person_body.cpp
+        INCLUDES platform/include)
+    # The order a mod reload runs in: the port's own model holders go before the PAKs reopen
+    # (port_world_holders.h), or the next world takes this one's models from the pool.
+    mp_port_test(port_world_holders_tests
+        SOURCES tests/port_world_holders.cpp platform/port_world_holders.cpp
+        INCLUDES platform/include)
+    # --- Dread Samus import (step 6: the dread-samus mod) ---
+    # The converter's explicit-weights path, the synthetic Model of a re-skinned body, the retail
+    # skin reader and the mod order rule over synthetic fixtures; the whole import on real data is
+    # opt-in (PORT_DREAD_ROMFS + PORT_PRIME_SAMUS_DIR).
+    mp_port_test(port_dread_samus_tests
+        SOURCES tests/port_dread_samus.cpp platform/port_dread_samus.cpp platform/port_dread_material.cpp
+            platform/port_dread_bctex.cpp platform/port_dread_bsmat.cpp platform/port_dread_bcmdl.cpp
+            platform/port_dread_pkg.cpp platform/port_dread_reskin.cpp
+            platform/port_remastered_tegra_swizzle.cpp platform/port_remastered_bcdec.cpp
+            platform/port_remastered_cmdl.cpp platform/port_ball_looks.cpp
+        INCLUDES platform platform/include
+        LIBRARIES mp_test_remastered_convert ZLIB::ZLIB ${CMAKE_THREAD_LIBS_INIT}
+        TIMEOUT 600)
+    # --- end Dread Samus import ---
+    # The Echoes suits conversion: LZO, PAK segments, CINF and skin joint mapping on hand-built data.
+    mp_port_test(port_echoes_suits_tests
+        SOURCES tests/port_echoes_suits.cpp platform/port_echoes_suits.cpp platform/port_dread_reskin.cpp
+            platform/port_dread_bcmdl.cpp
+        INCLUDES platform/include
+        LIBRARIES ZLIB::ZLIB)
     # Every port_settings.ini key reads back as written (platform/debug_ui/settings.cpp,
     # kSettingKeys); the game binary checks itself and exits before starting.
     add_test(NAME port_settings_roundtrip COMMAND metroid_prime_port --settings-selftest)
@@ -1389,6 +1642,11 @@ if(MP_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_settings_index.py
                     ${CMAKE_CURRENT_SOURCE_DIR})
         set_tests_properties(port_settings_index PROPERTIES TIMEOUT 15 LABELS port)
+        # The committed entity schema against the headers; skips (77) without clang-19.
+        add_test(NAME port_entity_schema_current
+            COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_entity_schema.py --check)
+        set_tests_properties(port_entity_schema_current PROPERTIES TIMEOUT 300 LABELS port
+            SKIP_RETURN_CODE 77)
         add_test(NAME port_air_mover_wiring
             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_air_mover_wiring.py
                     ${CMAKE_CURRENT_SOURCE_DIR}/platform/port_remastered_movers.cpp)
@@ -1428,6 +1686,12 @@ if(MP_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_map_extra_ui_wiring.py
                     ${CMAKE_CURRENT_SOURCE_DIR})
         set_tests_properties(port_map_extra_ui_wiring PROPERTIES TIMEOUT 15 LABELS port)
+        # F1's Mods page holds the Remastered and Dread sections: one page, the old
+        # MP_DEBUG_TAB names opening their section, and the search rows reaching it.
+        add_test(NAME port_mods_page_wiring
+            COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_mods_page_wiring.py
+                    ${CMAKE_CURRENT_SOURCE_DIR})
+        set_tests_properties(port_mods_page_wiring PROPERTIES TIMEOUT 15 LABELS port)
         # The model-opacity key must be carried by exactly one row of the converter's
         # recipe table (port_vfx_opacity.h): the C++ tests pin that one recipe's word
         # and the selection, not the count.
@@ -1435,6 +1699,13 @@ if(MP_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_vfx_opacity_wiring.py
                     ${CMAKE_CURRENT_SOURCE_DIR})
         set_tests_properties(port_vfx_opacity_wiring PROPERTIES TIMEOUT 15 LABELS port)
+        # BarrierShield (bit 29) is wired the same way everywhere: the shader branch, both fog
+        # exclusions, both slot reads, the scene gate, the CCH rows and the time, the vertex
+        # attribute, the mesh feed and readiness, and the converter's recipe and MFC0 gate.
+        add_test(NAME port_vfx_barrier_wiring
+            COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_vfx_barrier_wiring.py
+                    ${CMAKE_CURRENT_SOURCE_DIR})
+        set_tests_properties(port_vfx_barrier_wiring PROPERTIES TIMEOUT 15 LABELS port)
         # Every command in the console's table is documented in docs/CONSOLE.md.
         add_test(NAME port_console_docs
             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/port_console_docs.py

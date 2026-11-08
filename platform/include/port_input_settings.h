@@ -34,6 +34,8 @@ constexpr float kGyroSensitivityMin = 0.1f;
 constexpr float kGyroSensitivityMax = 10.f;
 // Gyro smoothing/tightening thresholds, deg/s.
 constexpr float kGyroThresholdMax = 50.f;
+// Flick stick's outer deadzone, percent.
+constexpr float kFlickOuterDeadZoneMax = 50.f;
 // Gyro pointer aim: degrees of pad turn that sweep the pointer across the screen.
 constexpr float kGyroCursorAngleMin = 5.f;
 constexpr float kGyroCursorAngleMax = 180.f;
@@ -54,10 +56,19 @@ constexpr int kScancodeLShift = 225;
 struct Settings {
   bool mouseAim = false;
   bool twinStick = false;
+  // The last controller preset picked (PortControls' EPadPreset: 0 GameCube,
+  // 1 Remastered, 2 Modern, 3 Southpaw), -1 for none or a saved layout of the user's.
+  int padPreset = -1;
   bool springBall = false;
   bool swapScanXray = false;
+  bool radialMenus = false;  // Trilogy discs: the Wii's radial beam and visor menus
   bool fastMorph = false;
   bool lockOnToggle = false;
+  bool grappleShoot = true;
+  bool scanShoot = false;
+  bool grappleToggle = false;
+  bool spiderToggle = false;
+  bool aimLockOn = false;
   bool stickyCharge = false;
   bool rapidCharge = false;
   bool remasteredMovement = true;
@@ -69,6 +80,12 @@ struct Settings {
   // stickAimRate only the horizontal; off, stickAimRate drives both.
   bool stickAimSplit = false;
   float stickAimRateY = 900.f;
+  // Twin stick's right stick as Flick Stick: it turns the view to face the way
+  // it points and turns with it, yaw only (PortFlickStick).
+  bool flickStick = false;
+  // Flick stick's outer deadzone, in percent of travel: the stick counts as fully tilted
+  // this far from its edge (pads that don't reach the circle still flick).
+  float flickOuterDeadZone = 10.f;
   // Gyro aiming: off / hold to aim / always / hold to pause / toggle to aim, auto / controller /
   // phone, and how far the camera turns per turn of the pad (1 = the same angle).
   int gyroMode = 0;
@@ -109,9 +126,10 @@ struct Settings {
   bool touchAimSplit = false;
   float touchAimSpeedY = 2.25f;
   bool touchMapTap = true;
-  bool touchWheels = true;
+  bool touchWheels = false; // retired touch_wheels, until the overlay migrates it (port_debug.h)
   bool touchClassic = false;       // classic GameCube layout
   bool touchTwinStick = false;     // exclusive with touchClassic; classic wins on load
+  bool touchFlickStick = false;    // the twin-stick layout's right stick as Flick Stick
   bool touchVisorTapScan = false;
   // Read from the Android UI thread.
   std::atomic< float > touchSideMargin{kTouchSideMarginDefault};
@@ -124,17 +142,28 @@ struct Settings {
   std::atomic< bool > touchControls{true};
   bool mouseInvertX = false;
   bool mouseInvertY = false;
+  bool mapInvertX = false; // map rotate left/right
+  bool mapInvertY = false; // map rotate up/down
   bool mouseButtons = true;
   bool mouseCrosshair = true;
   int crosshairSize = kCrosshairSizeDefault;
   bool pointerAim = false; // the mouse moves a pointer; the view turns past the dead box
   int pointerAimBox = kPointerAimBoxDefault;
   int pointerAimTurn = kPointerAimTurnDefault;
-  float mouseSensitivity = 0.0035f; // radians per count; shown on the Source scale
+  // Lock-on free aim (Remastered): under a combat lock a pointer moves over the view and
+  // shots follow it while the lock steers the view (any direct aim, with or without
+  // pointer aim).
+  bool lockOnFreeAim = false;
+  // Hand on cannon (Trilogy, PrimeHack): standing still under direct aim rests Samus's
+  // left hand on the cannon (R's free-look pose).
+  bool handOnCannon = true;
+  // Radians per count; shown on the Source scale. Defaults to 3.0 there
+  // (PortMouse::kDefaultSensitivity).
+  float mouseSensitivity = 0.00115192f;
   // With mouseSensitivitySplit on, mouseSensitivityY (radians per count) drives vertical mouse
   // aim and mouseSensitivity only the horizontal.
   bool mouseSensitivitySplit = false;
-  float mouseSensitivityY = 0.0035f;
+  float mouseSensitivityY = 0.00115192f;
   int mouseDpi = 800;               // only for the cm/360 readout
   // What each mouse button does under mouse aim (PortInputMap::EMouseAction).
   int mouseActions[PortInputMap::kMouseButtonCount] = {

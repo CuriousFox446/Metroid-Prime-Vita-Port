@@ -9,6 +9,8 @@
 #include "port_apclient.h"
 #include "port_controls.h"
 #include "port_input_devices.h"
+#include "port_input_remap_ui.h"
+#include <dolphin/pad.h>
 #include "port_mouse.h"
 
 #include "MetroidPrime/Player/CGameOptions.hpp"
@@ -18,18 +20,41 @@
 #include <imgui_internal.h>
 #include <SDL3/SDL_gamepad.h>
 
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 #include "touch_pad.h"
 #endif
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 
 namespace PortDebug {
 
 void DrawControlsOptions() {
   const bool locked = BeginOriginalLocked();
+  ImGui::SeparatorText("Quick setup");
+  if (ImGui::Button("Use mouse & keyboard")) {
+    PortInputRemap::ApplyPreset(PortInput::Family::Keyboard, "mouse");
+  }
+  ItemHelp("Turns on mouse aim and the Mouse & keyboard layout: WASD to move, mouse to aim, left "
+           "click to fire, Space to jump, Q to lock on. Replaces your own keyboard bindings; "
+           "Controls > Remap > Presets... has the others.");
+  SameLineAfterHelp();
+  ImGui::TextDisabled(sInput.mouseAim ? "Mouse aim is on." : "Mouse aim is off.");
+  // A GameCube pad has no right stick click for the dual-stick layout (as Remap's Presets...).
+  ImGui::BeginDisabled(PADIsGCAdapter(0) != 0);
+  if (ImGui::Button("Use twin-stick controller")) {
+    PortInputRemap::ApplyPreset(PortInput::Family::Pad, "remastered");
+  }
+  ImGui::EndDisabled();
+  ItemHelp("Turns on Twin Stick Aim and the Remastered layout for all controllers: left stick moves, "
+           "right stick aims, RT fire, LT lock on, A jump, X morph ball, right stick click free look. "
+           "Replaces your own controller bindings; Controls > Remap > Presets... has Modern and the "
+           "others. Not for a GameCube controller, which has no right stick click.");
+  SameLineAfterHelp();
+  ImGui::TextDisabled(PadTwinStick() ? "Twin-stick aim is on." : "Twin-stick aim is off.");
+
   ImGui::SeparatorText("On-screen prompts");
   int glyphs = sPromptGlyphs.load(std::memory_order_relaxed);
   if (ImGui::Combo("Button glyphs", &glyphs,
@@ -46,8 +71,32 @@ void DrawControlsOptions() {
   if (ImGui::Checkbox("Toggle Lock-On", &lockOnToggle)) {
     SetLockOnToggle(lockOnToggle);
   }
-  ItemHelp("Press L once to lock on, scan or grapple, and again to let go. With no target, L works "
-           "as usual.");
+  ItemHelp("Press L once to lock on or scan, and again to let go. With no target, L works as "
+           "usual. Grappling follows Toggle Grapple.");
+  bool grappleToggle = sInput.grappleToggle;
+  if (ImGui::Checkbox("Toggle Grapple", &grappleToggle)) {
+    SetGrappleToggle(grappleToggle);
+  }
+  ItemHelp("Press L once at a grapple point to grapple, and again or jump to let go. The Grapple "
+           "key always works this way.");
+  bool grappleShoot = sInput.grappleShoot;
+  if (ImGui::Checkbox("Shoot While Grappling", &grappleShoot)) {
+    SetGrappleShoot(grappleShoot);
+  }
+  ItemHelp("The arm cannon stays out while you grapple, so you can fire mid-swing. Off: the cannon "
+           "is put away, as in the original game.");
+  bool scanShoot = sInput.scanShoot;
+  if (ImGui::Checkbox("Shoot in Scan Visor", &scanShoot)) {
+    SetScanShoot(scanShoot);
+  }
+  ItemHelp("The arm cannon stays out in the Scan Visor and fires and charges as in the others. Off: "
+           "the cannon is put away and firing switches to the Combat Visor, as in the original game.");
+  bool aimLockOn = sInput.aimLockOn;
+  if (ImGui::Checkbox("Aim Lock-On", &aimLockOn)) {
+    SetAimLockOn(aimLockOn);
+  }
+  ItemHelp("Lock onto the target nearest the crosshair. The original prefers a nearer target even "
+           "when it is off to the side. Scanning works as usual.");
   bool stickyCharge = sInput.stickyCharge;
   if (ImGui::Checkbox("Sticky Charge", &stickyCharge)) {
     SetStickyCharge(stickyCharge);
@@ -65,7 +114,13 @@ void DrawControlsOptions() {
     SetSwapScanXray(swapScanXray);
   }
   ImGui::SetItemTooltip("Swaps the two buttons' D-pad directions, as in Remastered's Dual Sticks "
-                        "layout.\nThe controller presets set it.");
+                        "layout.\nThe controller presets (Remap > Presets...) set it.");
+  bool radialMenus = sInput.radialMenus;
+  if (ImGui::Checkbox("Radial beam and visor menus (Trilogy)", &radialMenus)) {
+    SetRadialMenus(radialMenus);
+  }
+  ItemHelp("With a Metroid Prime Trilogy disc: hold Beam menu or Visor menu (Remap) to open the "
+           "Wii's radial menu, point with the mouse, stick or C-stick, and let go to pick.");
 
   ImGui::SeparatorText("Aiming");
   if (ImGui::Checkbox("Auto-aim", &sAutoAim)) {
@@ -96,6 +151,22 @@ void DrawControlsOptions() {
   }
   ImGui::SetItemTooltip("Turn speed with the crosshair at the screen edge.");
   ImGui::EndDisabled();
+  ImGui::BeginDisabled(!DirectAim());
+  if (ImGui::Checkbox("Lock-on free aim", &sInput.lockOnFreeAim)) {
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
+  ItemHelp("As in Remastered: while locked on, the mouse, right stick, gyro or a touch drag moves "
+           "a crosshair and shots follow it. Centred, shots and missiles go for the locked target "
+           "as before. Needs Mouse aim, Twin stick or the modern touch layout.");
+  ImGui::BeginDisabled(!DirectAim());
+  if (ImGui::Checkbox("Hand on cannon when still", &sInput.handOnCannon)) {
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
+  ItemHelp("As in Trilogy and PrimeHack: after a second standing still, Samus rests her left "
+           "hand on the cannon (the R free-look pose) and keeps it while you aim and fire. "
+           "Walking or jumping drops it. Needs Mouse aim, Twin stick or the modern touch layout.");
   bool resetAimBoth = sInput.resetAimBoth;
   if (ImGui::Checkbox("Reset aim resets pointer and camera", &resetAimBoth)) {
     sInput.resetAimBoth = resetAimBoth;
@@ -110,6 +181,12 @@ void DrawControlsOptions() {
     SetFastMorph(fastMorph);
   }
   ItemHelp("Morphing is quick and keeps your momentum, as in Metroid Prime 4.");
+  bool spiderToggle = sInput.spiderToggle;
+  if (ImGui::Checkbox("Toggle Spider Ball", &spiderToggle)) {
+    SetSpiderToggle(spiderToggle);
+  }
+  ItemHelp("Press R once to cling to a Spider Ball track, and again to let go. Leaving the track "
+           "lets go by itself. Away from a track, R works as usual.");
   const int springRule = PortAp::SpringBallRule();
   ImGui::BeginDisabled(springRule >= 0);
   bool springBall = sInput.springBall;
@@ -139,6 +216,17 @@ void DrawControlsOptions() {
   ImGui::EndDisabled();
   ItemHelp("Same switch as Rumble in the pause menu. A controller doesn't rumble while you last "
            "used the keyboard or mouse.");
+
+  ImGui::SeparatorText("Map");
+  if (ImGui::Checkbox("Invert map rotate X", &sInput.mapInvertX)) {
+    MarkDirty();
+  }
+  ImGui::SameLine();
+  if (ImGui::Checkbox("Invert map rotate Y", &sInput.mapInvertY)) {
+    MarkDirty();
+  }
+  ItemHelp("Flips which way the map turns when you rotate it. The game turns the map the "
+           "opposite way to the stick; check both for camera-style rotation.");
 }
 
 void DrawControlsKeyboardMouse() {
@@ -153,10 +241,12 @@ void DrawControlsKeyboardMouse() {
     MarkDirty();
   }
   ImGui::TextDisabled("Also switches on Twin stick, so a controller's right stick aims too.");
+  ItemHelp("While a controller is in use with twin stick and gyro off, it plays the classic "
+           "GameCube way (R to look) and the mouse aims again once you press a key or click.");
   // Shown on the Quake/Source/Apex scale (0.022 degrees a count per unit), stored in radians.
   float sourceSensitivity = PortMouse::SourceFromRadians(sInput.mouseSensitivity);
-  if (ImGui::SliderFloat("Sensitivity", &sourceSensitivity, 0.05f, 30.f, "%.3f",
-                         ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat)) {
+  if (ImGui::SliderFloat("Sensitivity", &sourceSensitivity, 0.3f, 30.f, "%.3f",
+                         ImGuiSliderFlags_NoRoundToFormat)) {
     SetMouseSensitivity(PortMouse::RadiansFromSource(sourceSensitivity));
     MarkDirty();
   }
@@ -169,8 +259,8 @@ void DrawControlsKeyboardMouse() {
   ItemHelp("Own sensitivity for looking up and down; Sensitivity then sets left and right only.");
   if (sInput.mouseSensitivitySplit) {
     float sourceSensitivityY = PortMouse::SourceFromRadians(sInput.mouseSensitivityY);
-    if (ImGui::SliderFloat("Vertical sensitivity", &sourceSensitivityY, 0.05f, 30.f, "%.3f",
-                           ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat)) {
+    if (ImGui::SliderFloat("Vertical sensitivity", &sourceSensitivityY, 0.3f, 30.f, "%.3f",
+                           ImGuiSliderFlags_NoRoundToFormat)) {
       SetMouseSensitivityY(PortMouse::RadiansFromSource(sourceSensitivityY));
       MarkDirty();
     }
@@ -214,6 +304,25 @@ void DrawControlsKeyboardMouse() {
   ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
 }
 
+// Flick stick turns only left and right; say so when nothing aims up and down.
+static void DrawFlickStickWarning() {
+  const char* warning = nullptr;
+  if (sInput.gyroMode == 0) {
+    warning = "Flick stick only turns left and right: turn on Gyro aim (Controls > Touch & gyro) to "
+              "aim up and down.";
+  } else if (std::strcmp(GyroStatus(), "no gyro found") == 0) {
+    warning = "No gyro found: flick stick only turns left and right, so nothing aims up and down.";
+  } else if (PointerAim()) {
+    warning = "Under Pointer aim the right stick flicks only while the gyro is aiming; otherwise it "
+              "moves the pointer.";
+  }
+  if (warning != nullptr) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ThemeWarnColor());
+    ImGui::TextWrapped("%s", warning);
+    ImGui::PopStyleColor();
+  }
+}
+
 void DrawControlsController() {
   ImGui::SeparatorText("Stick aim");
   bool twinStick = sInput.twinStick;
@@ -221,19 +330,37 @@ void DrawControlsController() {
     SetTwinStick(twinStick);
     MarkDirty();
   }
-  ItemHelp("Aims with the right stick like the mouse, so it no longer free-looks. Fire stays on A; "
-           "change it in Controls > Remap.");
+  ItemHelp("Aims with the right stick like the mouse, so it no longer free-looks, and the R trigger stops "
+           "free-looking (it stays Spider Ball in the Morph Ball). Fire stays on A; change it in Controls > Remap.");
   bool remasteredMovement = sInput.remasteredMovement;
   if (ImGui::Checkbox("Remastered movement (twin stick and mouse aim)", &remasteredMovement)) {
     SetRemasteredMovement(remasteredMovement);
   }
   ItemHelp("Moves as in Remastered and PrimeHack: even diagonal speed and a smooth jump arc. Off: "
            "GameCube movement. Classic controls always use GameCube movement.");
-  // Shown only with twin stick on, as the pause menu's Stick Aim Speed row.
   if (sInput.twinStick) {
+    bool flickStick = sInput.flickStick;
+    if (ImGui::Checkbox("Flick stick", &flickStick)) {
+      SetFlickStick(flickStick);
+    }
+    ItemHelp("Tilting the right stick turns you to face that way (right: a quarter turn, down: turn "
+             "around); rotating the held stick turns with it. Left and right only: aim up and down with "
+             "gyro aim.");
+    if (sInput.flickStick) {
+      DrawFlickStickWarning();
+      float outer = sInput.flickOuterDeadZone;
+      if (ImGui::SliderFloat("Flick outer deadzone", &outer, 0.f, PortInput::kFlickOuterDeadZoneMax, "%.0f%%")) {
+        sInput.flickOuterDeadZone = std::clamp(outer, 0.f, PortInput::kFlickOuterDeadZoneMax);
+        MarkDirty();
+      }
+      ItemHelp("How far from its edge the right stick counts as fully tilted. Raise it if flicks need "
+               "the stick pushed hard into its rim, or don't fire on the diagonals.");
+    }
+  }
+  // Shown only with twin stick on, as the pause menu's Stick Aim Speed row; flick stick has no speed.
+  if (sInput.twinStick && !sInput.flickStick) {
     float stickRate = sInput.stickAimRate;
-    if (ImGui::SliderFloat("Stick aim speed", &stickRate, 100.f, 8100.f, "%.0f px/s",
-                           ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat("Stick aim speed", &stickRate, 100.f, 8100.f, "%.0f px/s")) {
       SetStickAimRate(stickRate);
     }
     ItemHelp(sInput.stickAimSplit ? "How fast the right stick turns left and right at full tilt."
@@ -248,8 +375,7 @@ void DrawControlsController() {
     ItemHelp("Own speed for looking up and down; Stick aim speed then sets left and right only.");
     if (sInput.stickAimSplit) {
       float stickRateY = sInput.stickAimRateY;
-      if (ImGui::SliderFloat("Vertical stick aim speed", &stickRateY, 100.f, 8100.f, "%.0f px/s",
-                             ImGuiSliderFlags_Logarithmic) &&
+      if (ImGui::SliderFloat("Vertical stick aim speed", &stickRateY, 100.f, 8100.f, "%.0f px/s") &&
           std::isfinite(stickRateY) && stickRateY >= 50.f && stickRateY <= 10000.f) {
         sInput.stickAimRateY = stickRateY;
         MarkDirty();
@@ -275,11 +401,11 @@ void DrawControlsController() {
 }
 
 void DrawControlsTouchGyro() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   ImGui::SeparatorText("Touch controls");
   // First on the page: the layout is what touch players come here to change.
   if (ImGui::Button("Edit layout")) {
-    // The touch view takes the request and opens its editor over the game.
+    // The touch overlay takes the request and opens its editor once this closes.
     sTouchEditRequested.store(true, std::memory_order_release);
     RequestToggle();
   }
@@ -323,6 +449,7 @@ void DrawControlsTouchGyro() {
   }
   ItemHelp("The left stick appears wherever your thumb lands on the left half of the screen. "
            "The map keeps the fixed stick.");
+#if defined(PORT_TOUCH_CONTROLS) // both views draw the classic and twin-stick layouts
   int touchLayout = sInput.touchClassic ? 1 : sInput.touchTwinStick ? 2 : 0;
   static const char* const kTouchLayouts[] = {"Default", "Classic GameCube", "Twin stick (Remastered)"};
   if (ImGui::Combo("Layout", &touchLayout, kTouchLayouts, 3)) {
@@ -336,7 +463,21 @@ void DrawControlsTouchGyro() {
   ItemHelp("Default: GameCube buttons, drag the screen to aim, Visor and Beam wheels.\n"
            "Classic GameCube: adds the C-stick and D-pad.\n"
            "Twin stick (Remastered): a right stick aims; Jump, Fire, Morph, Missile, LT Lock; "
-           "D-pad for visors, Y + D-pad for beams.");
+           "D-pad for visors, Y + D-pad for beams.\n"
+           "Any layout takes Visor and Beam wheels as buttons: Edit layout, Add a button.");
+  ImGui::BeginDisabled(!sInput.touchTwinStick);
+  bool touchFlickStick = sInput.touchFlickStick;
+  if (ImGui::Checkbox("Flick stick##touch", &touchFlickStick)) {
+    SetTouchFlickStick(touchFlickStick);
+  }
+  ItemHelp("Twin stick layout: pushing the right stick to its edge turns you to face that way (right: "
+           "a quarter turn, down: turn around); circling it turns with it. Left and right only: aim up "
+           "and down with gyro aim.");
+  if (sInput.touchTwinStick && sInput.touchFlickStick) {
+    DrawFlickStickWarning();
+  }
+  ImGui::EndDisabled();
+#endif
   ImGui::BeginDisabled(!sInput.touchClassic);
   bool touchAim = sInput.touchAim;
   if (ImGui::Checkbox("Touch aim", &touchAim)) {
@@ -350,25 +491,14 @@ void DrawControlsTouchGyro() {
     SetTouchMapTap(touchMapTap);
   }
   ItemHelp("Tap the minimap to open the map. Replaces the Z button.");
-  ImGui::BeginDisabled(!sInput.touchClassic && !sInput.touchTwinStick);
-  bool touchWheels = sInput.touchWheels;
-  if (ImGui::Checkbox("Beam and visor wheels", &touchWheels)) {
-    SetTouchWheels(touchWheels);
-  }
-  ItemHelp("Replaces the D-pad with Visor and Beam buttons: hold, slide to one, let go. "
-           "Let go in the middle to cancel.");
-  ImGui::EndDisabled();
-  ImGui::BeginDisabled(!((!sInput.touchClassic && !sInput.touchTwinStick) || sInput.touchWheels));
   bool touchVisorTapScan = sInput.touchVisorTapScan;
   if (ImGui::Checkbox("Tap Visor for Scan Visor", &touchVisorTapScan)) {
     SetTouchVisorTapScan(touchVisorTapScan);
   }
-  ItemHelp("A quick tap on Visor switches to the Scan Visor.");
-  ImGui::EndDisabled();
+  ItemHelp("A quick tap on the Visor wheel button switches to the Scan Visor.");
   ImGui::BeginDisabled(!(!sInput.touchClassic || sInput.touchAim));
   float touchAimSpeed = sInput.touchAimSpeed;
-  if (ImGui::SliderFloat("Touch aim speed", &touchAimSpeed, 0.5f, 6.f, "%.2f px/dp",
-                         ImGuiSliderFlags_Logarithmic)) {
+  if (ImGui::SliderFloat("Touch aim speed", &touchAimSpeed, 0.5f, 10.f, "%.2f px/dp")) {
     SetTouchAimSpeed(touchAimSpeed);
   }
   if (ImGui::Checkbox("Separate vertical speed##touch", &sInput.touchAimSplit)) {
@@ -377,8 +507,7 @@ void DrawControlsTouchGyro() {
   }
   if (sInput.touchAimSplit) {
     float touchAimSpeedY = sInput.touchAimSpeedY;
-    if (ImGui::SliderFloat("Vertical touch aim speed", &touchAimSpeedY, 0.5f, 6.f, "%.2f px/dp",
-                           ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat("Vertical touch aim speed", &touchAimSpeedY, 0.5f, 10.f, "%.2f px/dp")) {
       SetTouchAimSpeedY(touchAimSpeedY);
     }
   }
@@ -436,8 +565,9 @@ void DrawControlsTouchGyro() {
   ImGui::BeginDisabled(sInput.gyroMode == 0);
   // With pointer aim the gyro moves the pointer at its own speed; the camera
   // sensitivity then only matters if the gyro also turns the camera.
+  // Lock-on free aim's pointer moves at Pointer speed too, with or without pointer aim.
   const bool gyroPointer = PointerAim();
-  if (gyroPointer) {
+  if (gyroPointer || LockOnFreeAim()) {
     float cursorAngle = sInput.gyroCursorAngle;
     if (ImGui::SliderFloat("Pointer speed##gyro", &cursorAngle, PortInput::kGyroCursorAngleMin,
                            PortInput::kGyroCursorAngleMax, "%.0f deg across the screen")) {
@@ -446,6 +576,9 @@ void DrawControlsTouchGyro() {
       MarkDirty();
     }
     ItemHelp("How far the pad turns to sweep the pointer across the screen. Smaller is faster.");
+  }
+  // A lock owns the view, so this only matters under pointer aim.
+  if (gyroPointer) {
     bool cursorCamera = sInput.gyroCursorCamera;
     if (ImGui::Checkbox("Gyro also turns the camera", &cursorCamera)) {
       sInput.gyroCursorCamera = cursorCamera;
@@ -458,7 +591,7 @@ void DrawControlsTouchGyro() {
   float gyroSensitivity = sInput.gyroSensitivity;
   // The ## suffix keeps its ImGui id apart from the mouse Sensitivity slider.
   if (ImGui::SliderFloat("Sensitivity##gyro", &gyroSensitivity, PortInput::kGyroSensitivityMin,
-                         PortInput::kGyroSensitivityMax, "%.2fx", ImGuiSliderFlags_Logarithmic)) {
+                         PortInput::kGyroSensitivityMax, "%.2fx")) {
     SetGyroSensitivity(gyroSensitivity);
   }
   ItemHelp("How far the camera turns per turn of the pad: at 1.00x a 90 degree turn gives 90. With "
@@ -472,7 +605,7 @@ void DrawControlsTouchGyro() {
   if (sInput.gyroSplit) {
     float gyroSensitivityY = sInput.gyroSensitivityY;
     if (ImGui::SliderFloat("Vertical sensitivity##gyro", &gyroSensitivityY, PortInput::kGyroSensitivityMin,
-                           PortInput::kGyroSensitivityMax, "%.2fx", ImGuiSliderFlags_Logarithmic)) {
+                           PortInput::kGyroSensitivityMax, "%.2fx")) {
       SetGyroSensitivityY(gyroSensitivityY);
     }
   }

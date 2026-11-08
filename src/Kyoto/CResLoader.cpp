@@ -8,20 +8,25 @@
 #include "Kyoto/CDvdRequest.hpp"
 #include "port_ap_world.h"
 #include "port_custom_res.h"
+#include "port_disc.h"
 #include "port_log.h"
 #include "port_mods.h"
+#include "port_prompts.h"
 #include "port_skip_cutscenes.h"
 
 #include <dolphin/ar.h>
 #include <dolphin/dvd.h>
 #include <dolphin/os.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 #endif
 
@@ -76,11 +81,20 @@ struct PortDiscResource {
   bool compressed;
 };
 
+std::mutex sDiscIndexMutex;
+std::map< uint, PortDiscResource > sDiscIndex;
+bool sDiscIndexBuilt = false;
+
+// Disc reads PortCustomResource keeps for the run (until PortForgetDiscReads).
+std::mutex sCopiesMutex;
+std::map< uint, std::unique_ptr< PortCustomRes::Resource > > sCopies;
+
 // Where each resource sits in the disc's PAKs, loaded or not; built on first use.
 const std::map< uint, PortDiscResource >& PortDiscIndex() {
-  static std::map< uint, PortDiscResource > index;
-  static std::once_flag once;
-  std::call_once(once, [] {
+  std::lock_guard< std::mutex > lock(sDiscIndexMutex);
+  std::map< uint, PortDiscResource >& index = sDiscIndex;
+  if (!sDiscIndexBuilt) {
+    sDiscIndexBuilt = true;
     for (const std::pair< int32_t, std::string >& pak : PortMods::DiscPaks()) {
       DVDFileInfo file;
       if (!DVDFastOpen(pak.first, &file))
@@ -109,8 +123,21 @@ const std::map< uint, PortDiscResource >& PortDiscIndex() {
       }
       DVDClose(&file);
     }
-  });
+  }
   return index;
+}
+
+// The disc's PAKs include the mods' (extra PAKs, resources added to world PAKs), so a mod reload
+// changes them: what was read or indexed before may be gone (a Remastered effect's child, once
+// Remastered is off) or moved.
+void PortForgetDiscReads() {
+  {
+    std::lock_guard< std::mutex > lock(sDiscIndexMutex);
+    sDiscIndex.clear();
+    sDiscIndexBuilt = false;
+  }
+  std::lock_guard< std::mutex > lock(sCopiesMutex);
+  sCopies.clear();
 }
 
 // A resource read straight from its PAK on the disc, decompressed.
@@ -162,9 +189,7 @@ const PortCustomRes::Resource* CResLoader::PortCustomResource(const CAssetId ass
   // has, which retail never asks for but a mod's resource can (an imported Remastered effect's
   // child from another world): it crashed on a null PAK. Kept for the run; a later load of that
   // PAK is found first.
-  static std::mutex sMutex;
-  static std::map< uint, std::unique_ptr< PortCustomRes::Resource > > sCopies;
-  std::lock_guard< std::mutex > lock(sMutex);
+  std::lock_guard< std::mutex > lock(sCopiesMutex);
   std::map< uint, std::unique_ptr< PortCustomRes::Resource > >::iterator found = sCopies.find(asset);
   if (found != sCopies.end())
     return found->second.get();
@@ -198,7 +223,37 @@ void CResLoader::MoveToCorrectLoadedList(const rstl::auto_ptr< CPakFile >& pak) 
   }
 }
 
+#ifdef TARGET_PC
+namespace {
+// Trilogy's RS5.pak, mounted ahead of the rest, holds Wii-remote art under the
+// ids of the GameCube button textures (the PlayerRes tweak and the strings'
+// &image= tags name the same ids). Looking past it for these finds the GC art
+// in Strings/NoARAM/GGuiSys, which port_prompts re-icons for the active input
+// as on a GC disc (#220). RS5's other assets (beam/visor select, scan rings)
+// stay.
+bool PortSkipRS5Button(const CPakFile& pak, const CAssetId asset) {
+  if (!PortPrompts::IsPromptAsset(asset))
+    return false;
+  if (!PortDisc::IsTrilogy(PortDisc::Current()))
+    return false;
+  const char* name = pak.GetDvdFile().GetFilename().data();
+  // "aram:RS5.pak"
+  const char* base = strrchr(name, ':');
+  base = base ? base + 1 : name;
+  constexpr std::string_view rs5 = "RS5.";
+  return std::strlen(base) >= rs5.size() &&
+         std::equal(rs5.begin(), rs5.end(), base, [](char a, char b) {
+           return a == std::toupper(static_cast<unsigned char>(b));
+         });
+}
+} // namespace
+#endif
+
 bool CResLoader::CacheFromPak(const CPakFile& pak, const CAssetId asset) const {
+#ifdef TARGET_PC
+  if (PortSkipRS5Button(pak, asset))
+    return false;
+#endif
   const CPakFile::SResInfo* resInfo = pak.GetResInfo(asset);
   if (!resInfo) {
     return false;
@@ -211,6 +266,10 @@ bool CResLoader::CacheFromPak(const CPakFile& pak, const CAssetId asset) const {
 }
 
 bool CResLoader::CacheFromPakForLoad(CPakFile& pak, const CAssetId asset) {
+#ifdef TARGET_PC
+  if (PortSkipRS5Button(pak, asset))
+    return false;
+#endif
   const CPakFile::SResInfo* resInfo = nullptr;
   if (x54_forwardSeek) {
     resInfo = pak.GetResInfoForLoadPreferForward(asset);
@@ -346,6 +405,7 @@ void CResLoader::PortReopenPaks(void (*between)()) {
     }
   }
   between();
+  PortForgetDiscReads();
   for (size_t i = 0; i < paks.size(); ++i) {
     CPakFile* pak = rs_new CPakFile(paks[i].name, paks[i].depList, paks[i].worldPak);
     while (!pak->IsCompletelyLoaded()) {

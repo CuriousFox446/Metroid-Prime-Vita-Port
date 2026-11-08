@@ -34,6 +34,7 @@ struct SRiders {
 };
 
 class CScriptPlatform : public CPhysicsActor {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   CScriptPlatform(
       TUniqueId uid, const rstl::string& name, const CEntityInfo& info, const CTransform4f& xf,
@@ -53,6 +54,11 @@ public:
   // CActor
   void PreRender(CStateManager&, const CFrustumPlanes&) override;
   void Render(const CStateManager&) const override;
+#ifdef TARGET_PC
+  void AddToRenderer(const CFrustumPlanes&, const CStateManager&) const override;
+  void PortAddThermalColdNode(const CFrustumPlanes&, const CStateManager&) const override;
+  void PortSetBarrierController(TUniqueId uid) { xPortBarrierController = uid; }
+#endif
   CHealthInfo* HealthInfo(CStateManager&) override;
   const CDamageVulnerability* GetDamageVulnerability() const override;
   rstl::optional_object< CAABox > GetTouchBounds() const override;
@@ -117,7 +123,7 @@ public:
 
 private:
   friend struct PortRoomState;
-  typedef rstl::reserved_vector< ushort, 1024 > TMovedList;
+  typedef rstl::reserved_vector< ushort, kMaxObjects > TMovedList;
 
   void DragSlave(CStateManager& mgr, TMovedList& moved, CActor* actor, const CVector3f& delta);
   void DragSlaves(CStateManager& mgr, TMovedList& moved, const CVector3f& delta);
@@ -156,6 +162,7 @@ private:
   CTransform4f xPortPreThinkXf = CTransform4f::Identity();
   CTransform4f xPortPreThinkEnd = CTransform4f::Identity();
   uint xPortPoseTick = ~0u;
+  TUniqueId xPortBarrierController = kInvalidUniqueId;
 #endif
 };
 CHECK_SIZEOF(CScriptPlatform, (VERSION >= VERSION_GM8P_00 ? 0x368 : 0x358))

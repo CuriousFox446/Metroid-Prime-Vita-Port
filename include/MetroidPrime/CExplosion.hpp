@@ -16,6 +16,7 @@ class CGenDescription;
 class CElectricDescription;
 
 class CExplosion : public CEffect {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   CExplosion(const TLockedToken< CGenDescription >& particle, TUniqueId uid, bool active,
              const CEntityInfo& info, const rstl::string& name, const CTransform4f& xf, uint flags,
@@ -41,11 +42,18 @@ public:
   CAssetId GetSourceId() const { return xf0_sourceId; }
 #ifdef TARGET_PC
   static uint PortNestedLightSourceId(CAssetId explosionSourceId) { return explosionSourceId; }
+  // A Remastered PART with FRMD set (CExplosionMP1::GetFaceReflectMode 0xd0e6cc), else null:
+  // retail explosions keep lighting the face through their game light.
+  const CGenDescription* PortFaceReflectDesc() const;
+  // A Remastered PART: Remastered builds no face light list, so its lights skip the face.
+  bool PortIsRemastered() const;
 #endif
 
 #ifdef TARGET_PC
 private:
   CPortNestedLights xPortNestedLights;
+  // CExplosionMP1 +0x254 bit 3 (ctor flag 0x10): Think steps the particles by a fixed 1/60 s.
+  bool xPortFixedStep;
   void PortUpdateNestedLights(CStateManager& mgr);
 #endif
 

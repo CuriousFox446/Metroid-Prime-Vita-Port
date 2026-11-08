@@ -68,7 +68,8 @@ void PutProperty(std::vector<uint8_t>& out, const char* name, uint8_t tag) {
 void PutGenerator(std::vector<uint8_t>& out, bool root) {
   PutFourCC(out, "GPSM");
   out.resize(out.size() + 17);
-  Put32(out, root ? 1 : 0);
+  out[out.size() - 16] = 1; // base MTRL for active synthetic sprites
+  Put32(out, root ? 2 : 0); // GPSM sprite primitive + 1
 }
 
 void PutGuid(std::vector<uint8_t>& out, const EffectGuid& id);
@@ -1002,9 +1003,97 @@ void TestNamedEffect() {
   CHECK_MSG(result.candidates == 1 && result.written == 1, "the named effect is a candidate and written");
   CHECK_MSG(written.size() == 1 && written.count("1EF973EA.PART") == 1, "it replaces the PART of its name");
 }
+
+// The FlickerBat's 0B9E48EB is adopted on a visual A/B, not on a CHPR: the table
+// entry (#visual-inferred) must keep pairing 3b29b0b3 with it.
+void TestVisualInferredEffect() {
+  std::vector<uint8_t> genp(0x3c, 0);
+  std::memcpy(genp.data(), "RFRM", 4);
+  std::memcpy(genp.data() + 0x14, "GENP", 4);
+  PutGenerator(genp, true);
+  PutProperty(genp, "MAXP", 1);
+  PutFourCC(genp, "CNST");
+  Put32(genp, 5);
+  PutProperty(genp, "_END", 4);
+  Put32(genp, 0);
+
+  // 3b29b0b3-0c3d-42b6-9159-f4863f6c3ed9, in pak order.
+  const EffectGuid effectId = {0x3b, 0x29, 0xb0, 0xb3, 0x0c, 0x3d, 0x42, 0xb6,
+                               0x91, 0x59, 0xf4, 0x86, 0x3f, 0x6c, 0x3e, 0xd9};
+  std::map<std::string, std::vector<uint8_t>> written;
+  EffectImportIO io;
+  io.effects = {effectId, Fresh(0x60)};
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& out, std::string& error) {
+    if (type == kGenp && id == effectId) {
+      out = genp;
+      return true;
+    }
+    error = "not in the image";
+    return false;
+  };
+  io.typeOf = [](const EffectGuid&) -> uint32_t { return 0; };
+  io.retailId = [](uint32_t id) { return id == 0x0B9E48EB; };
+  io.freshId = [](uint32_t) { return 0x00ABC000u; };
+  io.write = [&](const std::string& name, const std::vector<uint8_t>& data) {
+    written[name] = data;
+    return true;
+  };
+  const EffectImportResult result = ImportEffects(io);
+  CHECK_MSG(result.candidates == 1 && result.written == 1, "the inferred effect is a candidate and written");
+  CHECK_MSG(written.size() == 1 && written.count("0B9E48EB.PART") == 1,
+            "it replaces retail PART 0B9E48EB");
+}
+// These replacement PARTs used to be invisible to the rooms step: none belongs
+// to the shared-genp section, even though ImportEffects writes all three.
+void TestRoomPlacementPairings() {
+  const EffectGuid flame = {0x69, 0x16, 0x27, 0x2d, 0x42, 0x72, 0x4e, 0xc4,
+                           0xa0, 0xb2, 0xa4, 0xf9, 0xb3, 0x16, 0x0e, 0xf6};
+  const EffectGuid landingA = {0x60, 0x98, 0x59, 0x73, 0x2d, 0x34, 0x42, 0xf2,
+                              0x8c, 0x43, 0x2d, 0x57, 0x46, 0x0e, 0x81, 0x8a};
+  const EffectGuid landingB = {0xdb, 0x9d, 0xd5, 0x87, 0xd5, 0xc7, 0x41, 0x03,
+                              0x86, 0x2e, 0x7c, 0x1e, 0x33, 0xc1, 0x6a, 0x59};
+  for (const auto& item : {std::make_pair(flame, 0x3A617BEBu),
+                           std::make_pair(landingA, 0xBD3DC521u),
+                           std::make_pair(landingB, 0xD0376F71u)}) {
+    const auto ids = MatchedRetailEffects(item.first);
+    CHECK(std::count(ids.begin(), ids.end(), item.second) == 1);
+  }
+  CHECK(MatchedRetailEffects(Fresh(0xfa)).empty());
+}
+// An ELSM's GPSM/EPSM GENPs, once each; a reference to any other type is not one.
+void TestElectricGenps() {
+  const EffectGuid electric = Fresh(0x60);
+  const EffectGuid gpsm = Fresh(0x61);   // as the ELSM stores it
+  const EffectGuid epsm = Fresh(0x62);
+  const EffectGuid other = Fresh(0x63);  // a MATI
+  std::vector<uint8_t> data = MakeChildForm("ELSM");
+  for (const auto& [name, id] : {std::pair<const char*, EffectGuid>{"GPSM", gpsm}, {"EPSM", epsm},
+                                 {"EPSM", gpsm}, {"GPSM", other}}) {
+    PutProperty(data, name, 0);
+    PutGuid(data, id);
+  }
+  PutProperty(data, "_END", 4);
+  FinishChildForm(data);
+  EffectImportIO io;
+  io.effects = {Swap(electric), Swap(gpsm)};
+  io.typeOf = [&](const EffectGuid& id) {
+    return id == Swap(electric) ? kElsm : id == Swap(other) ? kMati : kGenp;
+  };
+  io.read = [&](uint32_t type, const EffectGuid& id, std::vector<uint8_t>& out, std::string&) {
+    if (type != kElsm || id != Swap(electric)) {
+      return false;
+    }
+    out = data;
+    return true;
+  };
+  const std::vector<EffectGuid> genps = ElectricGenps(io);
+  CHECK_MSG(genps.size() == 2 && genps[0] == Swap(gpsm) && genps[1] == Swap(epsm),
+            "an ELSM's GPSM and EPSM GENPs, in order, once each");
+}
 } // namespace
 
 int main() {
+  TestRoomPlacementPairings();
   TestImport();
   TestExternalSwoosh();
   TestExternalSwooshFailures();
@@ -1012,7 +1101,9 @@ int main() {
   TestEmbeddedAndExternalIdsDoNotCollide();
   TestLostTexture();
   TestNamedEffect();
+  TestVisualInferredEffect();
   TestVectorField();
+  TestElectricGenps();
   if (port_test::Failures() == 0) {
     std::printf("port_remastered_effect_import: ok\n");
   }

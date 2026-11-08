@@ -37,8 +37,11 @@
 
 #include "port_apclient.h"
 #include "port_debug.h"
+#include "port_pointer.h"
 #include "port_pointer_menu.h"
 #include "port_savestate.h"
+
+#include <cwchar>
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -84,12 +87,126 @@ bool FusionLinked() {
 #endif
   return gpGameState->SystemState().GetFusionLinked();
 }
+
+#ifdef TARGET_PC
+// Port: "Exit Game" on the main menu (PortDebug::MenuExit; Prime 2's issue #80). The Select
+// legend draws it as its companion (CGuiTextPane::PortSetCompanion) a line below it, under
+// the left column, with the Z prompt in place of Select's A; holding Z, or a finger or mouse
+// button on it, fills its letters orange, then quits. SNewFileSelectFrame's size is fixed, so
+// the state lives here (there is one file select at a time).
+namespace ExitLegend {
+CGuiTextSupport* sText = nullptr;
+PortPointerMath::Rect sHit;
+float sHeld = 0.f;
+int sFilled = -1;
+const wchar_t kLabel[] = L"Exit Game";
+const int kLetters = 8; // in kLabel
+const uint kZPrompt = 0x6CBE6EF2; // PortPrompts draws the binding
+
+// Select's string with its prompt swapped for Z's, then the label, `filled` letters orange.
+rstl::wstring Text(int filled) {
+  rstl::wstring text;
+  const wchar_t* select = gpStringTable->GetString(0x55);
+  const wchar_t* tag = wcsstr(select, L"&image=");
+  const wchar_t* end = tag != nullptr ? wcschr(tag, L';') : nullptr;
+  if (end != nullptr && end - tag >= 7 + 8) {
+    text.append(select, end - 8 - select);
+  } else {
+    text.append(L"&image=SI,0.6875,0.6875,", -1);
+  }
+  text.append(CStringExtras::ConvertToUNICODE(rstl::string(CBasics::Stringize("%8.8X;", kZPrompt))));
+  text.append(L" ", -1); // Z's pill is wider than its advance
+  int split = 0;
+  for (int letters = 0; kLabel[split] != L'\0' && letters < filled; ++split) {
+    letters += kLabel[split] != L' ' ? 1 : 0;
+  }
+  if (split > 0) {
+    text.append(L"&push;&main-color=#E8701A;", -1);
+    text.append(kLabel, split);
+    text.append(L"&pop;", -1);
+  }
+  text.append(kLabel + split, -1);
+  return text;
+}
+
+// A finger or mouse button held on the legend, where it went down; sliding off lets go.
+bool PointerHolds() {
+  const PortPointer::Recognizer& gestures = PortPointer::Gestures();
+  float px, py, gx, gy;
+  const float pad = 4.f;
+  PortPointerMath::Rect hit = sHit;
+  hit.x0 -= pad;
+  hit.y0 -= pad;
+  hit.x1 += pad;
+  hit.y1 += pad;
+  return PortPointer::Enabled() && hit.Valid() && gestures.Pressed() &&
+         gestures.FingerCount() <= 1 &&
+         PortPointer::WindowToGui(gestures.PressX(), gestures.PressY(), px, py) &&
+         PortPointer::Position(gx, gy) && hit.Contains(px, py) && hit.Contains(gx, gy);
+}
+
+void Hide(CGuiTextPane* select) {
+  if (select != nullptr) {
+    select->PortSetCompanion(nullptr, 0.f, nullptr);
+  }
+  sHit = PortPointerMath::Rect();
+  sHeld = 0.f;
+}
+
+void Release(CGuiTextPane* select) {
+  Hide(select);
+  delete sText;
+  sText = nullptr;
+  sFilled = -1;
+}
+
+// Once per frame, from controller 0's input. `column` is the pane whose left end it lines up with.
+void Update(CGuiTextPane* select, CGuiTextPane* column, bool show, const CFinalInput& input) {
+  if (!show || select == nullptr || column == nullptr) {
+    Hide(select);
+    return;
+  }
+  if (sText == nullptr) {
+    const CGuiTextSupport& look = select->GetTextSupport();
+    sText = rs_new CGuiTextSupport(look.GetFontID(), look.PortProperties(), look.PortFontColor(),
+                                   look.PortOutlineColor(), CColor::White(),
+                                   look.GetTextBoundingWidth(), look.GetTextBoundingHeight(),
+                                   gpSimplePool);
+    sText->SetJustification(kJustification_Left);
+    sText->SetWordWrap(false);
+    sFilled = -1;
+  }
+  // Start with Z is the F1 overlay's Back+Start chord.
+  if ((input.DZ() && !input.DStart()) || PointerHolds()) {
+    sHeld += input.Time();
+  } else {
+    sHeld = 0.f;
+  }
+  int filled = static_cast< int >(sHeld / PortDebug::kMenuExitHoldSeconds * kLetters);
+  filled = rstl::max_val(0, rstl::min_val(kLetters, filled));
+  if (filled != sFilled) {
+    sFilled = filled;
+    sText->SetText(Text(filled));
+  }
+  const float left =
+      (column->PortTextModel() *
+       CVector3f(static_cast< float >(column->TextSupport().GetBounds().first.GetX()), 0.f, 0.f))
+          .GetX();
+  select->PortSetCompanion(sText, left, &sHit);
+  if (sHeld >= PortDebug::kMenuExitHoldSeconds) {
+    sHeld = -1e9f; // once; the quit takes a frame or two to arrive
+    PortDebug::RequestQuit();
+  }
+}
+} // namespace ExitLegend
+#endif
 } // namespace
 
 #include <dolphin/ar.h>
 #include <dolphin/os.h>
 
 #include <ctime>
+#include <cwchar>
 #include <string>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +228,42 @@ static const FEMovie FEMovies[] = {
     {"Video/08_GBA_fileselect.thp", false},
     {"Video/08_GBA_fileselect.thp", false},
 };
+
+#ifdef TARGET_PC
+// Port: Trilogy's MP1 has none of the GameCube front-end movies; its own MP1 menu
+// movies sit in fe/Video/mp1. Each GameCube movie falls back to the nearest one there.
+static const char* PortFrontEndMovie(const char* path) {
+  static const struct {
+    const char* prefix;
+    const char* trilogy;
+  } skTrilogyMovies[] = {
+      {"Video/00_", "fe/Video/mp1/Mp1_wii_Titles_To_Logo.thp"},
+      {"Video/01_", "fe/Video/mp1/Mp1_wii_Logo_Loop.thp"},
+      {"Video/02_", "fe/Video/mp1/Mp1_wii_Logo_To_Main.thp"},
+      {"Video/03_", "fe/Video/mp1/Mp1_wii_Main_Menu_Loop.thp"},
+      {"Video/04_", "fe/Video/mp1/Mp1_wii_Main_To_Game.thp"},
+      {"Video/06_", "fe/Video/mp1/Mp1_wii_Main_Menu_Loop.thp"},
+      {"Video/07_", "fe/Video/mp1/Mp1_wii_Main_Menu_Loop.thp"},
+      {"Video/08_", "fe/Video/mp1/Mp1_wii_Main_Menu_Loop.thp"},
+      {"Video/attract0.", "fe/Video/mp1/Attract01.thp"},
+      {"Video/attract1.", "fe/Video/mp1/Attract02.thp"},
+  };
+  if (CDvdFile::FileExists(path)) {
+    return path;
+  }
+  for (int i = 0; i < static_cast< int >(sizeof(skTrilogyMovies) / sizeof(skTrilogyMovies[0]));
+       ++i) {
+    if (strncmp(path, skTrilogyMovies[i].prefix, strlen(skTrilogyMovies[i].prefix)) == 0 &&
+        CDvdFile::FileExists(skTrilogyMovies[i].trilogy)) {
+      return skTrilogyMovies[i].trilogy;
+    }
+  }
+  return path;
+}
+#define PORT_FE_MOVIE(path) PortFrontEndMovie(path)
+#else
+#define PORT_FE_MOVIE(path) (path)
+#endif
 // TODO: set this to the default value and bake version string as a post-build step
 #if VERSION == VERSION_GM8E_00
 const char MetroidBuildInfo[] = BUILD_INFO_TAG "Build v1.088 10/29/2002 2:21:25\0PAD";
@@ -876,7 +1029,14 @@ CFrontEndUI::SNewFileSelectFrame::SNewFileSelectFrame(CSaveGameScreen* saveUI, u
   x10_frme.Lock();
 }
 
-CFrontEndUI::SNewFileSelectFrame::~SNewFileSelectFrame() {}
+CFrontEndUI::SNewFileSelectFrame::~SNewFileSelectFrame() {
+#ifdef TARGET_PC
+  // The frame stays in the pool and may come back with the next file select.
+  ExitLegend::Release(x1c_loadedFrame != nullptr ? static_cast< CGuiTextPane* >(
+                                                       x1c_loadedFrame->FindWidget("textpane_proceed"))
+                                                 : nullptr);
+#endif
+}
 
 bool CFrontEndUI::SNewFileSelectFrame::PumpLoad() {
   if (x1c_loadedFrame) {
@@ -1059,6 +1219,15 @@ CFrontEndUI::SNewFileSelectFrame::ProcessUserInput(const CFinalInput& input) {
     }
     x10e_needsNewToggle = false;
   }
+
+#ifdef TARGET_PC
+  if (input.ControllerNumber() == 0 && x1c_loadedFrame != nullptr) {
+    const bool root = x10c_saveReady && x8_subMenu == kSM_Root &&
+                      !x40_tablegroup_popup->GetIsActive() && PortDebug::MenuExit();
+    ExitLegend::Update(static_cast< CGuiTextPane* >(x1c_loadedFrame->FindWidget("textpane_proceed")),
+                       x28_textpane_erase.x0_textPane, root, input);
+  }
+#endif
 
   return xc_action;
 }
@@ -1333,13 +1502,36 @@ void CFrontEndUI::SNewFileSelectFrame::ActivateNewGamePopup() {
   PlayAdvanceSfx();
 
   if (NormalModeBeat()) {
+#ifdef TARGET_PC
+    // Port: Trilogy's English string here is "Hypermode Mode", too long for
+    // the slot that fits GC's "Hard Mode"; drop the doubled " Mode".
+    const wchar_t* hard = gpStringTable->GetString(0x66);
+    static const wchar_t kHypermode[] = L"Hypermode Mode";
+    const size_t len = wcslen(hard);
+    const size_t hyperLen = wcslen(kHypermode);
+    // Static: the pane keeps pointing at the text (wstring_l doesn't copy).
+    static std::wstring shortened;
+    if (len >= hyperLen && wcscmp(hard + len - hyperLen, kHypermode) == 0) {
+      shortened.assign(hard, len - wcslen(L" Mode"));
+      hard = shortened.c_str();
+    }
+    x48_textpane_popupadvance.SetPairText(rstl::wstring_l(hard));
+#else
     x48_textpane_popupadvance.SetPairText(rstl::wstring_l(gpStringTable->GetString(0x66)));
+#endif
     x50_textpane_popupcancel.SetPairText(rstl::wstring_l(gpStringTable->GetString(0x5e)));
     x58_textpane_popupextra.SetPairText(rstl::wstring_l(gpStringTable->GetString(0x65)));
 
     x40_tablegroup_popup->GetWorkerWidget(2)->SetIsSelectable(true);
     x40_tablegroup_popup->GetWorkerWidget(2)->SetVisibility(true, kTM_Children);
     x44_model_dash7->SetVisibility(true, kTM_Children);
+#ifdef TARGET_PC
+    // Port: a label still too long for the slot (another language's) is
+    // squeezed right of the divider rather than drawn over Normal Mode.
+    // (The divider is hidden, and so the squeeze off, in the other popups.)
+    x48_textpane_popupadvance.x0_textPane->PortSetLeftEdge(x44_model_dash7);
+    x48_textpane_popupadvance.x4_textPaneB->PortSetLeftEdge(x44_model_dash7);
+#endif
   } else {
     x48_textpane_popupadvance.SetPairText(rstl::wstring_l(gpStringTable->GetString(0x43)));
     x50_textpane_popupcancel.SetPairText(rstl::wstring_l(gpStringTable->GetString(0x5e)));
@@ -2411,7 +2603,7 @@ bool CFrontEndUI::PumpMovieLoad() {
         path[strlen(path) - 5] = static_cast< char >(x1c_rndB + 'A');
       }
 
-      x6c_menuMovies[i].x0_movie = rs_new CMoviePlayer(path, 0.05f, movie->loop, true);
+      x6c_menuMovies[i].x0_movie = rs_new CMoviePlayer(PORT_FE_MOVIE(path), 0.05f, movie->loop, true);
       x6c_menuMovies[i].x0_movie->SetPlayMode(CMoviePlayer::kPM_Stopped);
       return false;
     }
@@ -2852,7 +3044,7 @@ const char* CFrontEndUI::GetNextAttractMovieFileName() {
 }
 
 const char* CFrontEndUI::GetAttractMovieFileName(int idx) {
-  return CBasics::Stringize("Video/attract%d.thp", idx);
+  return PORT_FE_MOVIE(CBasics::Stringize("Video/attract%d.thp", idx));
 }
 
 #ifdef TARGET_PC

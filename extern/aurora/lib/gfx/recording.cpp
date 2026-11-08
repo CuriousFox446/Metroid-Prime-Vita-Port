@@ -1,4 +1,5 @@
 #include "recording.hpp"
+#include "overdraw.hpp"
 
 #include <aurora/phase.hpp>
 
@@ -1254,8 +1255,8 @@ bool scene_hdr_pass_active() noexcept {
   return pass.colorAttachments[SceneColorAttachmentIndex].view.Get() == webgpu::g_sceneHdr.view.Get();
 }
 
-bool set_scene_hdr(bool on) {
-  if (g_recorder.hdrScene == on) {
+bool set_scene_hdr(bool on, bool pause) {
+  if (g_recorder.hdrScene == on && !pause) {
     return true;
   }
   // Only between EFB draws: not outside a frame, offscreen, or in a begin_color_pass pass.
@@ -1270,11 +1271,17 @@ bool set_scene_hdr(bool on) {
     return false;
   }
   // An HDR scene must be convertible before its first draw. Check the same FIFO-owned post budget
-  // used by bloom::record so an unsupported third segment falls back to the display EFB here.
+  // used by bloom::record so an unsupported third segment is refused here, and draws without the post.
   if (on && !bloom::scene_post_available()) {
     return false;
   }
   if (on && !webgpu::ensure_scene_hdr_target()) {
+    // No retail fallback: the frame draws without the Remastered post, each PBR draw toned on its own.
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      Log.warn("HDR scene unavailable: the frame draws without the Remastered post (warned once)");
+    }
     return false;
   }
 
@@ -1286,7 +1293,16 @@ bool set_scene_hdr(bool on) {
   g_recorder.hdrScene = on;
   auto& pass = current_render_passes()[g_recorder.currentRenderPass];
   set_efb_targets(pass);
-  if (on && !g_recorder.hdrSceneCleared) {
+  if (pause) {
+    // RenderPauseScreenElements clears depth (flags 2), not the reused colour.
+    auto& color = pass.colorAttachments[SceneColorAttachmentIndex];
+    color.clear = false;
+    color.loadOp = wgpu::LoadOp::Load;
+    pass.clearDepth = true;
+    pass.depthLoadOp = wgpu::LoadOp::Clear;
+    pass.clearDepthValue = gx::UseReversedZ ? 0.f : 1.f;
+    g_recorder.hdrSceneCleared = true;
+  } else if (on && !g_recorder.hdrSceneCleared) {
     auto& color = pass.colorAttachments[SceneColorAttachmentIndex];
     color.clear = true;
     color.loadOp = wgpu::LoadOp::Clear;
@@ -1397,7 +1413,7 @@ bool resolve_scene_copy(TextureHandle color, const ResolveHdr* hdr, wgpu::Textur
   const auto& attachment = pass.colorAttachments[SceneColorAttachmentIndex];
   const uint32_t width = attachment.size.width;
   const uint32_t height = attachment.size.height;
-  if (pass.hasDepth && tex_copy_conv::snapshot_depth_supported()) {
+  if (pass.hasDepth && tex_copy_conv::snapshot_depth_supported(pass.msaaSamples)) {
     auto& entry = acquire_pass_snapshot(width, height, attachment.format, pass.msaaSamples, false, true);
     pass.snapshotDepthDst = entry.depth.view;
     depth = entry.depth.view;
@@ -1405,6 +1421,20 @@ bool resolve_scene_copy(TextureHandle color, const ResolveHdr* hdr, wgpu::Textur
   const bool mips = color->mipCount > 1;
   resolve_pass_into(std::move(color), ClipRect{0, 0, int32_t(width), int32_t(height)}, false, false, false, {}, 0.f,
                     GX_TF_RGBA8, -1, mips, hdr);
+  return true;
+}
+
+bool resolve_display_linear_copy(TextureHandle color) {
+  if (!color || !g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX || g_recorder.inOffscreen ||
+      scene_hdr_pass_active()) {
+    return false;
+  }
+  auto& pass = current_render_passes()[g_recorder.currentRenderPass];
+  const auto& attachment = pass.colorAttachments[SceneColorAttachmentIndex];
+  const auto width = static_cast<int32_t>(attachment.size.width);
+  const auto height = static_cast<int32_t>(attachment.size.height);
+  pass.resolveDomain = tex_copy_conv::CopyDomain::DisplayLinear;
+  resolve_pass_into(std::move(color), ClipRect{0, 0, width, height}, false, false, false, {}, 0.f);
   return true;
 }
 
@@ -1419,13 +1449,13 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
     return false;
   }
 
+  auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
   bool wantDepth = desc.depth;
-  if (wantDepth && !tex_copy_conv::snapshot_depth_supported()) {
+  if (wantDepth && !tex_copy_conv::snapshot_depth_supported(prevPass.msaaSamples)) {
     Log.warn("resolve_pass: depth snapshots are unsupported on this device");
     wantDepth = false;
   }
 
-  auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
   const uint32_t width = prevPass.colorAttachments[SceneColorAttachmentIndex].size.width;
   const uint32_t height = prevPass.colorAttachments[SceneColorAttachmentIndex].size.height;
   // Requesting no snapshots is a plain pass break (or offscreen close, discarding its output).
@@ -1585,7 +1615,7 @@ void push_draw_command(rmlui::DrawData data) {
 
 // A GX draw's pipeline: blocking when the caller must not lose its draw (gx::blocking_pipelines).
 static PipelineRef gx_pipeline_ref(const gx::PipelineConfig& config, bool blocking) {
-  return find_pipeline(
+  const auto ref = find_pipeline(
       ShaderType::GX, config,
       [=] {
         phase::Scope compiling(render_worker::is_worker_thread() ? phase::Render : phase::Main,
@@ -1593,6 +1623,8 @@ static PipelineRef gx_pipeline_ref(const gx::PipelineConfig& config, bool blocki
         return create_pipeline(config);
       },
       blocking ? PipelinePriority::Blocking : PipelinePriority::Normal);
+  overdraw::note_pipeline(ref, config);
+  return ref;
 }
 
 template <>

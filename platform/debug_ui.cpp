@@ -58,7 +58,7 @@ bool sVsyncEnabled = true;
 bool sVsyncEnabled = false;
 #endif
 // Android hides the status and navigation bars by default; a desktop starts windowed.
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(SDL_PLATFORM_IOS)
 bool sFullscreen = true;
 #else
 bool sFullscreen = false;
@@ -73,7 +73,7 @@ float sRenderScale = 1.f;
 // Dynamic resolution: draws the EFB between sDynamicResMin and sRenderScale to hold a frame rate.
 bool sDynamicRes = false;
 int sDynamicResTarget = 0;  // fps; 0 = the 60 fps cap, or the display's rate without it
-float sDynamicResMin = 1.f; // the lowest scale it drops to: 0.5, 0.75 or 1
+float sDynamicResMin = 1.f; // the lowest scale it drops to, kDynamicResMinLowest to 4
 // Sharpening of a frame stretched up to the window: 0 off, 1 while dynamic resolution has
 // lowered the scale, 2 whenever the EFB is smaller than the window. Strength 0-100.
 int sSharpenMode = 1;
@@ -82,19 +82,25 @@ float sDynScale = 0.f;      // the scale in use; 0 = sRenderScale
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
 bool sHudWide = true;
 bool sCinemaBars = false;
+bool sBallBars = false;
+bool sPhazonShell = true;
 bool sSharpScanWindow = false;
 bool sGeneratedBallLooks = true;
 bool sAutoAim = true;
 int sScanSpeed = 100;
+int sHintDelay = 0;
+int sMusicBoost = PortDebug::kVolumeBoostDefault;
+int sSfxBoost = PortDebug::kVolumeBoostDefault;
 bool sSecondaryCrosshairs = true;
 // A remapped pad drives menus and the map with its standard buttons (issue #57).
 bool sMenuStandardButtons = true;
+bool sMenuExit = true;
 // Index into kPromptGlyphs; 0 = follow the input in use. Atomic: PortPrompts reads it off the UI thread.
 std::atomic< int > sPromptGlyphs{0};
 bool sShowShaderCompilation = true;
 bool sShowMenuHint = true;
 int sHudScale = PortDebug::kHudScaleMax;
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 int sScanSpread = PortDebug::kScanSpreadMin; // touch controls cover the screen edges
 #else
 int sScanSpread = PortDebug::kScanSpreadMax;
@@ -105,6 +111,8 @@ int sHudOpacity[PortDebug::kHudOpacityPartCount] = {PortDebug::kHudOpacityVisor,
 int sCrosshairOpacity = PortDebug::kCrosshairOpacityMax;
 PortDebug::ECrosshairStyle sCrosshairStyle = PortDebug::kCrosshairStyle_Classic;
 bool sCrosshairCustomColor = false;
+bool sCrosshairXRay = false;
+bool sCrosshairThermal = false;
 float sCrosshairColor[3] = {1.f, 1.f, 1.f};
 bool sHideHelmet = false;
 bool sHideVisorEffects = false;
@@ -127,6 +135,10 @@ bool sSkippableCutscenes = false;
 // Off by default: a beam door that was opened stays blue (PortBeamDoors).
 bool sBeamDoorsStayUnlocked = false;
 bool sStackBeams = false;
+int sBeamSwitchSpeed = PortDebug::kBeamSwitchSpeedDefault;
+bool sSeamlessPickups = false;
+bool sWalkSpeedEnabled = true;
+int sWalkSpeed = PortDebug::kWalkSpeedDefault;
 // The stored choice only. Randomizer and Archipelago games force it on at use
 // (PortSkipCutscenes::Forced), which the getter does not fold in.
 bool sRevision100Compatibility = false;
@@ -139,9 +151,12 @@ bool sSaveStateRoomState = true;
 std::atomic<bool> sTouchBeamShift{false}; // the touch twin layout's held Beam button
 std::atomic<bool> sTouchTurboFire{false}; // the touch Turbo button, held
 bool sInvulnerable = false;
+bool sPhazonBeamCheat = false;
 // MP_GODMODE, for this run only: -1 unset, else 0 or 1. Never saved, and changing the
 // setting ends it.
 int sInvulnerableRun = -1;
+// The infinite ammo cheat's kInfAmmo* bits. Never saved; MP_INFINITE_AMMO=1 sets them all.
+unsigned sInfiniteAmmo = 0;
 // On by default: a game that closes at launch gives no chance to tick the box
 // first, and a phone or a desktop launcher has no terminal to read.
 bool sLogFile = true;
@@ -149,6 +164,8 @@ bool sLogFile = true;
 std::mutex sRandoMutex;
 PortRandoGen::Settings sRandoSettings;
 float sFirstPersonFov = PortDebug::kFovRetail;
+bool sGunFollowsFov = false;
+float sGunFov = PortDebug::kFovRetail;
 float sGunOffset[3] = {};
 int sMsaa = 1;
 int sAnisotropy = 16;
@@ -158,8 +175,8 @@ bool sProjectedShadows = true;
 // Setting `opengles`; sOpenGlesAtStart is what this run was started with.
 bool sOpenGles = false;
 bool sOpenGlesAtStart = false;
-// Setting `graphics_backend` (Windows, issue #135); sGraphicsBackendAtStart is what
-// this run was started with, so the Video page can say when a change needs a restart
+// Setting `graphics_backend` (Windows and desktop Linux, issue #135); sGraphicsBackendAtStart
+// is what this run was started with, so the Video page can say when a change needs a restart
 // and when Aurora fell back from it.
 PortDebug::EGraphicsBackend sGraphicsBackend = PortDebug::kGraphicsBackend_Auto;
 PortDebug::EGraphicsBackend sGraphicsBackendAtStart = PortDebug::kGraphicsBackend_Auto;
@@ -167,6 +184,8 @@ PortDebug::EGraphicsBackend sGraphicsBackendAtStart = PortDebug::kGraphicsBacken
 std::string sGpuDriver;
 std::string sGpuDriverAtStart;
 bool sUnlockHardMode = false;
+float sDamageTakenMult = 1.f;
+float sDamageDealtMult = 1.f;
 // Setting `storage_clamp`: -1 auto (aurora decides), 0 off, 1 on; read once when shaders are first made.
 int sStorageClamp = -1;
 int sStorageClampAtStart = -1;
@@ -286,6 +305,9 @@ std::string sRemasteredKeysPath;
 // The parts the panel leaves out of an import, comma separated (remastered_skip):
 // hud, text, effects, movies, gallery, geometry.
 std::string sRemasteredSkip;
+// The parts of the installed import the mods load without (remastered_hide), comma separated:
+// PortMods::kImportParts.
+std::string sRemasteredHide;
 
 std::string SettingsFilePath() {
   const std::string& dir = PortPaths::UserFolder();
@@ -458,6 +480,9 @@ void EnsureInitialized() {
   if (port::EnvString("MP_GODMODE") != nullptr) {
     sInvulnerableRun = port::EnvFlag("MP_GODMODE") ? 1 : 0;
   }
+  if (port::EnvFlag("MP_INFINITE_AMMO")) {
+    sInfiniteAmmo = PortDebug::kInfAmmoAll;
+  }
   if (port::EnvFlag("MP_SHOW_DEBUG_UI")) {
     sVisible = true;
   }
@@ -474,20 +499,31 @@ void EnsureInitialized() {
   }
   sHudWide = port::EnvFlag("MP_HUD_WIDE", sHudWide);
   sCinemaBars = port::EnvFlag("MP_CINEMA_BARS", sCinemaBars);
+  sBallBars = port::EnvFlag("MP_BALL_BARS", sBallBars);
   sSharpScanWindow = port::EnvFlag("MP_SHARP_SCAN_WINDOW", sSharpScanWindow);
   sGeneratedBallLooks = port::EnvFlag("MP_POWER_SPIDER_BALL", sGeneratedBallLooks);
   sAutoAim = port::EnvFlag("MP_AUTO_AIM", sAutoAim);
   sScanSpeed = std::clamp(port::EnvInt("MP_SCAN_SPEED", sScanSpeed), PortDebug::kScanSpeedMin,
                           PortDebug::kScanSpeedMax);
+  sHintDelay = std::clamp(port::EnvInt("MP_HINT_DELAY", sHintDelay), PortDebug::kHintDelayMin,
+                          PortDebug::kHintDelayMax);
+  sMusicBoost = std::clamp(port::EnvInt("MP_MUSIC_BOOST", sMusicBoost), PortDebug::kVolumeBoostMin,
+                           PortDebug::kVolumeBoostMax);
+  sSfxBoost = std::clamp(port::EnvInt("MP_SFX_BOOST", sSfxBoost), PortDebug::kVolumeBoostMin,
+                         PortDebug::kVolumeBoostMax);
+  ApplyVolumeBoosts();
   sSecondaryCrosshairs = port::EnvFlag("MP_SECONDARY_CROSSHAIRS", sSecondaryCrosshairs);
   if (const char* style = std::getenv("MP_CROSSHAIR_STYLE")) {
     if (std::strcmp(style, "classic") == 0) {
       sCrosshairStyle = PortDebug::kCrosshairStyle_Classic;
     } else if (std::strcmp(style, "remastered") == 0) {
       sCrosshairStyle = PortDebug::kCrosshairStyle_Remastered;
+    } else if (std::strcmp(style, "gamecube") == 0) {
+      sCrosshairStyle = PortDebug::kCrosshairStyle_GameCube;
     }
   }
   sMenuStandardButtons = port::EnvFlag("MP_MENU_STANDARD_BUTTONS", sMenuStandardButtons);
+  sMenuExit = port::EnvFlag("MP_MENU_EXIT", sMenuExit);
   PortPointer::SetEnabled(port::EnvFlag("MP_POINTER_MENUS", PortPointer::Enabled()));
   PortPointer::SetMapSwapFingers(port::EnvFlag("MP_MAP_SWAP_FINGERS", PortPointer::MapSwapFingers()));
   PortInput::ApplyEnvOverrides();
@@ -522,6 +558,8 @@ void EnsureInitialized() {
 } // namespace DebugUi
 
 namespace PortDebug {
+
+void MarkSettingsDirty() { MarkDirty(); }
 
 void LoadDiscPath() {
   const std::string path = SettingsFilePath();

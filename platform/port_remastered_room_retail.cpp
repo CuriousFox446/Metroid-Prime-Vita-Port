@@ -79,6 +79,30 @@ bool ReadMlvl(const std::vector<uint8_t>& d, std::vector<std::pair<uint32_t, Mat
   return true;
 }
 
+// The bytes between a script object's name and its position (ScriptLoader): Dock's active
+// bool, the patterned flavors (Beetle, WarWasp, FlickerBat, PuddleSpore, PuddleToadGamma,
+// Parasite, Ripper, Drone, Metroid, EyeBall) and GunTurret's component.
+size_t PositionLead(uint8_t type) {
+  switch (type) {
+  case 0x0b:
+    return 1;
+  case 0x16:
+  case 0x21:
+  case 0x2e:
+  case 0x31:
+  case 0x34:
+  case 0x3d:
+  case 0x3f:
+  case 0x43:
+  case 0x44:
+  case 0x64:
+  case 0x67:
+    return 4;
+  default:
+    return 0;
+  }
+}
+
 // The script objects of an MREA's SCLY section.
 bool ReadScly(const std::vector<uint8_t>& m, std::vector<ScriptObject>& objects) {
   if (m.size() < 100) {
@@ -134,7 +158,9 @@ bool ReadScly(const std::vector<uint8_t>& m, std::vector<ScriptObject>& objects)
         return false;
       }
       for (uint64_t k = 0; k < children; ++k) {
-        object.targets.push_back(ReadBE32(&m[q + 8 + 12 * size_t(k) + 8]));
+        const size_t c = q + 8 + 12 * size_t(k);
+        object.links.push_back({ReadBE32(&m[c]), ReadBE32(&m[c + 4]), ReadBE32(&m[c + 8])});
+        object.targets.push_back(object.links.back().target);
       }
       q += 8 + size_t(12 * children) + 4;
       if (q > objectEnd) {
@@ -146,9 +172,17 @@ bool ReadScly(const std::vector<uint8_t>& m, std::vector<ScriptObject>& objects)
         return false;
       }
       const size_t rest = size_t(zero - m.data()) + 1;
-      if (objectEnd - rest >= 12) {
+      const size_t at = rest + PositionLead(type);
+      if (objectEnd - rest >= PositionLead(type) + 12) {
         object.hasPos = true;
-        object.pos = {port::ReadBEFloat(&m[rest]), port::ReadBEFloat(&m[rest + 4]), port::ReadBEFloat(&m[rest + 8])};
+        object.pos = {port::ReadBEFloat(&m[at]), port::ReadBEFloat(&m[at + 4]), port::ReadBEFloat(&m[at + 8])};
+        if (objectEnd - at >= 36) {
+          object.hasXf = true;
+          for (size_t i = 0; i < 3; ++i) {
+            object.rot[i] = port::ReadBEFloat(&m[at + 12 + 4 * i]);
+            object.scale[i] = port::ReadBEFloat(&m[at + 24 + 4 * i]);
+          }
+        }
       } else if (type == 3) {
         return false;
       }

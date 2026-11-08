@@ -27,6 +27,7 @@
 #include <array>
 #include <bitset>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -92,6 +93,7 @@ enum Context : uint16_t {
   kCtxMap = 1 << 2,
   kCtxMenu = 1 << 3,
   kCtxScan = 1 << 4,
+  kCtxLockOn = 1 << 5, // with gameplay, while locked on to an object
   kCtxLayer1 = 1 << 8,
   kCtxLayer2 = 1 << 9,
   kCtxLayer3 = 1 << 10,
@@ -158,6 +160,8 @@ enum class ActionKind : uint8_t {
   X(LoadState, Digital, "load_state", "Load state")                                                \
   X(Screenshot, Digital, "screenshot", "Screenshot")                                               \
   X(ToggleOriginal, Digital, "toggle_original", "Original experience")                             \
+  X(ToggleRemastered, Digital, "toggle_remastered", "Remastered graphics")                         \
+  X(ToggleTexturePack, Digital, "toggle_texture_pack", "Texture pack")                             \
   X(PhotoMode, Digital, "photo_mode", "Photo mode")                                                \
   X(GyroAim, Digital, "gyro_aim", "Gyro aim")                                                      \
   X(ResetAim, Digital, "reset_aim", "Reset aim")                                                   \
@@ -172,7 +176,26 @@ enum class ActionKind : uint8_t {
   X(MenuUp, Digital, "menu_up", "Menu up")                                                         \
   X(MenuDown, Digital, "menu_down", "Menu down")                                                   \
   X(MenuLeft, Digital, "menu_left", "Menu left")                                                   \
-  X(MenuRight, Digital, "menu_right", "Menu right")
+  X(MenuRight, Digital, "menu_right", "Menu right")                                                \
+  X(BallBomb, Digital, "ball_bomb", "Bomb")                                                        \
+  X(BallPowerBomb, Digital, "ball_power_bomb", "Power Bomb")                                       \
+  X(BallBoost, Digital, "ball_boost", "Boost Ball")                                                \
+  X(BallSpider, Digital, "ball_spider", "Spider Ball")                                             \
+  X(BallUnmorph, Digital, "ball_unmorph", "Unmorph")                                              \
+  X(BeamMenu, Digital, "beam_menu", "Trilogy beam radial selector (hold)")                          \
+  X(VisorMenu, Digital, "visor_menu", "Trilogy visor radial selector (hold)")                      \
+  X(Dodge, Digital, "dodge", "Dodge (with strafe)") \
+  X(Grapple, Digital, "grapple", "Grapple (at a grapple point)")                                   \
+  X(TargetNext, Digital, "target_next", "Next target (locked on)")                                 \
+  X(TargetPrev, Digital, "target_prev", "Previous target (locked on)")                             \
+  X(MapRotateUp, HalfAxis, "map_rotate_up", "Map rotate up")                                       \
+  X(MapRotateDown, HalfAxis, "map_rotate_down", "Map rotate down")                                 \
+  X(MapRotateLeft, HalfAxis, "map_rotate_left", "Map rotate left")                                 \
+  X(MapRotateRight, HalfAxis, "map_rotate_right", "Map rotate right")                              \
+  X(MapPanUp, HalfAxis, "map_pan_up", "Map pan up")                                                \
+  X(MapPanDown, HalfAxis, "map_pan_down", "Map pan down")                                          \
+  X(MapPanLeft, HalfAxis, "map_pan_left", "Map pan left")                                          \
+  X(MapPanRight, HalfAxis, "map_pan_right", "Map pan right")
 
 enum class Action : uint16_t {
 #define PORT_INPUT_ACTION_ENUM(id, kind, key, label) id,
@@ -182,13 +205,27 @@ enum class Action : uint16_t {
 };
 constexpr int kActionCount = int(Action::Count);
 
+// Custom actions are Action values kCustomBase + id (id >= 1), defined by the
+// player in controls.toml ([[custom_action]]); they are always Digital. The
+// value range works everywhere an Action does: bindings, unbind, the overlay
+// rule and the touch buttons.
+constexpr uint16_t kCustomBase = 0x1000;
+constexpr int kMaxCustomId = 0xffff - kCustomBase;
+
+inline bool IsCustom(Action a) { return uint16_t(a) > kCustomBase; }
+inline Action CustomAction(uint16_t id) { return Action(uint16_t(kCustomBase + id)); }
+inline uint16_t CustomId(Action a) { return IsCustom(a) ? uint16_t(uint16_t(a) - kCustomBase) : 0; }
+
 struct ActionInfo {
   ActionKind kind;
   std::string_view key;   // controls.toml name
   std::string_view label; // UI name
 };
+// A custom action's Info is the generic Digital one; Info(a).key is "custom".
 const ActionInfo& Info(Action a);
 Action ActionFromKey(std::string_view key); // Action::None if unknown
+// The controls.toml name: Info(a).key, or "custom:<id>" for a custom action.
+std::string ActionKey(Action a);
 
 enum class Trigger : uint8_t {
   Press,     // while held (analog values pass through)
@@ -213,6 +250,10 @@ struct Binding {
   float scale = 1.f;
   bool invert = false;
   uint16_t contexts = kCtxAll;
+  // Context bits that turn it off, even with a held layer matching `contexts`.
+  // Set only by the passes that build the polled profile (never saved), so taking
+  // a binding out of one context leaves its rank alone.
+  uint16_t blocked = 0;
 
   bool operator==(const Binding&) const = default;
   bool IsChord() const { return count > 1; }
@@ -229,11 +270,34 @@ struct Profile {
 struct Output {
   std::array<float, kActionCount> value{};
   std::bitset<kActionCount> held, pressed, released;
+  // Custom actions, by custom id (CustomId), sized to the profile's ids: a read
+  // past the end is false. A caller that wants every custom press walks
+  // customPressed, or uses ForEachCustomPressed.
+  std::vector<uint8_t> customHeld, customPressed, customReleased;
 
-  float Value(Action a) const { return value[size_t(a)]; }
-  bool Held(Action a) const { return held[size_t(a)]; }
-  bool Pressed(Action a) const { return pressed[size_t(a)]; }
-  bool Released(Action a) const { return released[size_t(a)]; }
+  static bool CustomBit(const std::vector<uint8_t>& bits, uint16_t id) {
+    return id < bits.size() && bits[id] != 0;
+  }
+  float Value(Action a) const {
+    return IsCustom(a) ? (CustomBit(customHeld, CustomId(a)) ? 1.f : 0.f) : value[size_t(a)];
+  }
+  bool Held(Action a) const {
+    return IsCustom(a) ? CustomBit(customHeld, CustomId(a)) : held[size_t(a)];
+  }
+  bool Pressed(Action a) const {
+    return IsCustom(a) ? CustomBit(customPressed, CustomId(a)) : pressed[size_t(a)];
+  }
+  bool Released(Action a) const {
+    return IsCustom(a) ? CustomBit(customReleased, CustomId(a)) : released[size_t(a)];
+  }
+  // f(custom action) for each custom action pressed this poll.
+  template <typename F> void ForEachCustomPressed(F f) const {
+    for (size_t id = 0; id < customPressed.size(); ++id) {
+      if (customPressed[id] != 0) {
+        f(CustomAction(uint16_t(id)));
+      }
+    }
+  }
   // Positive minus negative half, -1..1.
   float Axis(Action neg, Action pos) const;
 };
@@ -244,6 +308,11 @@ public:
   void SetProfile(const Profile* profile);
   // Drops every latch and timer; inputs held now are consumed until released.
   void Reset();
+  // Whether a Toggle binding of `a` is on, and turning them all off: the next
+  // poll reads them as let go (a release edge if nothing else holds `a`), and
+  // the next press turns them on again.
+  bool Toggled(Action a) const;
+  void Untoggle(Action a);
   // One poll. contexts: the active context bits (layers are added from the
   // profile's Layer actions). nowMs: a monotonic clock. quiet: context bits whose
   // switching on or off leaves held inputs alone instead of consuming them.
@@ -282,7 +351,9 @@ private:
   static constexpr int kConsumedAll = -2;
 
   void Rebuild();
-  bool InContext(const Binding& b, uint16_t contexts) const { return (b.contexts & contexts) != 0; }
+  bool InContext(const Binding& b, uint16_t contexts) const {
+    return (b.contexts & contexts) != 0 && (b.blocked & contexts) == 0;
+  }
   static bool Passthrough(const Binding& b);
   bool MembersFree(int bi) const;
   void Consume(int bi);

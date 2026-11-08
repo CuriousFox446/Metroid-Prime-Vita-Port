@@ -49,6 +49,12 @@ void DrawCutscenesSection() {
     SameLineAfterHelp();
     ImGui::TextDisabled("(on in randomized games)");
   }
+  bool seamlessPickups = sSeamlessPickups;
+  if (ImGui::Checkbox("Seamless item pickups", &seamlessPickups)) {
+    SetSeamlessPickups(seamlessPickups);
+  }
+  ItemHelp("Picking up an item keeps you in control: no cutscene, and its message shows on the "
+           "HUD instead of pausing. Applies to rooms loaded afterwards.");
   int elevatorRide = sElevatorRide;
   if (ImGui::Combo("Elevator ride", &elevatorRide, "Original\0Fast\0Skip\0")) {
     SetElevatorRide(static_cast< EElevatorRide >(elevatorRide));
@@ -67,6 +73,20 @@ void DrawCutscenesSection() {
   }
   ItemHelp("How fast the scan visor fills its bar: 200% scans in half the time. What a scan "
            "records is unchanged.");
+  if (ImGui::SliderInt("Hint delay", &sHintDelay, kHintDelayMin, kHintDelayMax,
+                       sHintDelay == 0 ? "Game default" : "%d min", ImGuiSliderFlags_AlwaysClamp)) {
+    MarkDirty();
+  }
+  ItemHelp("The longest a hint waits before it first shows. Game default keeps the game's own "
+           "timing; a shorter wait also applies to hints already waiting in your save. Needs the "
+           "in-game hint system on.");
+  ImGui::BeginDisabled(gpGameState == nullptr || !gpGameState->GameOptions().GetIsHintSystemEnabled());
+  if (ImGui::Button("Show current hint")) {
+    RequestShowHint();
+  }
+  ImGui::EndDisabled();
+  ItemHelp("Shows the hint the game would show next, now: the one on screen again, or the one "
+           "due soonest. Needs the in-game hint system on.");
   bool beamDoors = sBeamDoorsStayUnlocked;
   if (ImGui::Checkbox("Unlock beam doors once opened", &beamDoors)) {
     SetBeamDoorsStayUnlocked(beamDoors);
@@ -80,6 +100,28 @@ void DrawCutscenesSection() {
   }
   ItemHelp("Each normal or charged shot also fires every other beam you own. Charge combos, "
            "missiles and the Phazon Beam are unchanged.");
+  int beamSwitchSpeed = sBeamSwitchSpeed;
+  if (ImGui::SliderInt("Beam switch speed", &beamSwitchSpeed, kBeamSwitchSpeedMin,
+                       kBeamSwitchSpeedMax, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+    SetBeamSwitchSpeed(beamSwitchSpeed);
+  }
+  ItemHelp("How fast the arm cannon changes beams: 200% changes in half the time. 100% is the "
+           "original.");
+  bool walkSpeedEnabled = sWalkSpeedEnabled;
+  if (ImGui::Checkbox("Custom walk speed", &walkSpeedEnabled)) {
+    SetWalkSpeedEnabled(walkSpeedEnabled);
+  }
+  ItemHelp("Off: the original speed. A custom action (Controls) bound to this setting turns the "
+           "speed below on and off, to sprint.");
+  ImGui::BeginDisabled(!walkSpeedEnabled);
+  int walkSpeed = sWalkSpeed;
+  if (ImGui::SliderInt("Walk speed", &walkSpeed, kWalkSpeedMin, kWalkSpeedMax, "%d%%",
+                       ImGuiSliderFlags_AlwaysClamp)) {
+    SetWalkSpeed(walkSpeed);
+  }
+  ItemHelp("How fast Samus moves on foot, walking, strafing and circle-strafing, in percent of "
+           "the original speed. Jumps, dashes, turning and the Morph Ball are unchanged.");
+  ImGui::EndDisabled();
   EndOriginalLocked(locked);
 
   // Not under the Original experience lock: the stored choice applies there too.
@@ -108,6 +150,33 @@ void WearFusionSuit(CStateManager& mgr, bool wearing) {
   if (mgr.Player()->GetMorphballTransitionState() != CPlayer::kMS_Unmorphed) {
     mgr.Player()->MorphBall()->LoadMorphBallModel(mgr);
   }
+}
+
+void DrawDifficultySection() {
+  ImGui::SeparatorText("Difficulty");
+  const bool locked = BeginOriginalLocked();
+  float taken = sDamageTakenMult;
+  if (ImGui::SliderFloat("Damage taken", &taken, kDamageMultMin, kDamageMultMax, "x%.2f",
+                         ImGuiSliderFlags_AlwaysClamp)) {
+    SetDamageTakenMultiplier(taken);
+  }
+  ItemHelp("Multiplies the damage Samus takes. A Hard file's own x2 applies on top. Ctrl+click "
+           "to type a value.");
+  float dealt = sDamageDealtMult;
+  if (ImGui::SliderFloat("Damage dealt", &dealt, kDamageMultMin, kDamageMultMax, "x%.2f",
+                         ImGuiSliderFlags_AlwaysClamp)) {
+    SetDamageDealtMultiplier(dealt);
+  }
+  ItemHelp("Multiplies the damage of beams, charge shots, missiles and charge combos (not bombs, "
+           "as on Hard). A Hard file's own x0.5 applies on top. Ctrl+click to type a value.");
+  ImGui::BeginDisabled(sDamageTakenMult == 1.f && sDamageDealtMult == 1.f);
+  if (ImGui::Button("Reset difficulty")) {
+    SetDamageTakenMultiplier(1.f);
+    SetDamageDealtMultiplier(1.f);
+  }
+  ImGui::EndDisabled();
+  ImGui::SetItemTooltip("Both back to x1, the file's own difficulty.");
+  EndOriginalLocked(locked);
 }
 
 void DrawUnlocksSection() {
@@ -253,7 +322,6 @@ void DrawUpdateSection() {
     PortUpdateCheck::CheckNow(); // switched on: check now, not next launch
     MarkDirty();
   }
-  ImGui::SetItemTooltip("Asks GitHub at launch whether a newer release is out. Nothing else is sent.");
   ImGui::SameLine();
   const PortUpdateCheck::EStatus status = PortUpdateCheck::Status();
   switch (status) {
@@ -298,8 +366,8 @@ void DrawUpdateSection() {
   }
 }
 
-#if defined(__ANDROID__)
-// The folder picker's progress, set from the Java copy thread.
+// The texture pack import's progress: set from the Java copy thread on Android,
+// from the zip import thread on desktop.
 std::mutex sTexturePackStatusMutex;
 std::string sTexturePackStatus;
 
@@ -313,27 +381,30 @@ void SetTexturePackStatus(std::string status) {
   sTexturePackStatus = std::move(status);
 }
 
-// MetroidPrimeActivity.pickTexturePack opens the system folder picker and
-// copies the chosen folder in the background, reporting back through the
-// nativeTexturePack* functions below.
-void PickTexturePack() {
+#if defined(__ANDROID__)
+
+// MetroidPrimeActivity.pickTexturePack opens the system folder (or, with zip,
+// file) picker and copies the chosen pack in the background, reporting back
+// through the nativeTexturePack* functions below.
+void PickTexturePack(bool zip) {
+  const char* failed = zip ? "Could not open the file picker." : "Could not open the folder picker.";
   JNIEnv* env = static_cast< JNIEnv* >(SDL_GetAndroidJNIEnv());
   jobject activity = static_cast< jobject >(SDL_GetAndroidActivity());
   if (env == nullptr || activity == nullptr) {
-    SetTexturePackStatus("Could not open the folder picker.");
+    SetTexturePackStatus(failed);
     return;
   }
   jclass cls = env->GetObjectClass(activity);
-  jmethodID method = env->GetMethodID(cls, "pickTexturePack", "(Ljava/lang/String;)V");
+  jmethodID method = env->GetMethodID(cls, "pickTexturePack", "(Ljava/lang/String;Z)V");
   if (method != nullptr) {
     // The pack is copied into the data folder, wherever that is.
     jstring folder = env->NewStringUTF(PortPaths::UserFolder().c_str());
-    env->CallVoidMethod(activity, method, folder);
+    env->CallVoidMethod(activity, method, folder, static_cast< jboolean >(zip));
     env->DeleteLocalRef(folder);
   }
   if (env->ExceptionCheck()) {
     env->ExceptionClear();
-    SetTexturePackStatus("Could not open the folder picker.");
+    SetTexturePackStatus(failed);
   }
   env->DeleteLocalRef(cls);
   env->DeleteLocalRef(activity);
@@ -354,8 +425,6 @@ void DrawOverlaySection() {
       sUiTheme = theme;
       MarkDirty();
     }
-    ItemHelp("The overlay's look. Auto uses the Remastered style while the Remastered import is "
-             "loaded, else the Metroid Prime style; Plain is stock Dear ImGui.");
     if (ImGui::Checkbox("Menu sounds", &sUiSounds)) {
       MarkDirty();
     }

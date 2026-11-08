@@ -70,12 +70,21 @@ extern float sDynScale;
 extern PortDebug::EAspectMode sAspectMode;
 extern bool sHudWide;
 extern bool sCinemaBars;
+extern bool sBallBars;
+extern bool sPhazonShell;
 extern bool sSharpScanWindow;
 extern bool sGeneratedBallLooks;
 extern bool sAutoAim;
 extern int sScanSpeed;
+extern int sHintDelay;
+extern int sMusicBoost;
+extern int sSfxBoost;
+// Hands both boosts (percent / 100) to the mixers: the MusyX voices in hw_pc.c and the AI DMA
+// stream's own gain. Called once the file and environment are read, and by the Audio rows.
+void ApplyVolumeBoosts();
 extern bool sSecondaryCrosshairs;
 extern bool sMenuStandardButtons;
+extern bool sMenuExit;
 extern std::atomic< int > sPromptGlyphs; // index into kPromptGlyphs
 inline constexpr const char* kPromptGlyphs[] = {"auto",   "xbox",     "playstation",
                                                 "switch", "gamecube", "keyboard"};
@@ -87,6 +96,8 @@ extern int sHudOpacity[PortDebug::kHudOpacityPartCount]; // indexed by PortDebug
 extern int sCrosshairOpacity;
 extern PortDebug::ECrosshairStyle sCrosshairStyle;
 extern bool sCrosshairCustomColor;
+extern bool sCrosshairXRay;
+extern bool sCrosshairThermal;
 extern float sCrosshairColor[3];
 extern bool sHideHelmet;
 extern bool sHideVisorEffects;
@@ -102,6 +113,10 @@ extern bool sCheats;
 extern bool sSkippableCutscenes;
 extern bool sBeamDoorsStayUnlocked;
 extern bool sStackBeams;
+extern int sBeamSwitchSpeed;
+extern bool sSeamlessPickups;
+extern bool sWalkSpeedEnabled;
+extern int sWalkSpeed;
 extern bool sRevision100Compatibility;
 extern std::string sTextLanguage;
 extern int sElevatorRide;
@@ -112,11 +127,15 @@ extern bool sSaveStateRoomState;
 extern std::atomic< bool > sTouchBeamShift;
 extern std::atomic< bool > sTouchTurboFire;
 extern bool sInvulnerable;
+extern bool sPhazonBeamCheat;
 extern int sInvulnerableRun;
+extern unsigned sInfiniteAmmo;
 extern bool sLogFile;
 extern std::mutex sRandoMutex;
 extern PortRandoGen::Settings sRandoSettings;
 extern float sFirstPersonFov;
+extern bool sGunFollowsFov;
+extern float sGunFov;
 extern float sGunOffset[3];
 extern int sMsaa;
 extern int sAnisotropy;
@@ -130,6 +149,8 @@ extern PortDebug::EGraphicsBackend sGraphicsBackendAtStart;
 extern std::string sGpuDriver;
 extern std::string sGpuDriverAtStart;
 extern bool sUnlockHardMode;
+extern float sDamageTakenMult;
+extern float sDamageDealtMult;
 extern int sStorageClamp;
 extern int sStorageClampAtStart;
 extern bool sStorageClampEnvFromSetting;
@@ -143,6 +164,7 @@ struct DriverWorkaround {
   const char* tooltip;
   const char* enable;  // Dawn toggles it turns on, comma-separated, or nullptr
   const char* disable; // and the ones it turns off
+  const char* env = nullptr; // an aurora variable it sets to 1 (unless already set), or nullptr
 };
 inline constexpr DriverWorkaround kDriverWorkarounds[] = {
     {"keep_depth", "Keep depth buffers (Direct3D 11)",
@@ -161,6 +183,10 @@ inline constexpr DriverWorkaround kDriverWorkarounds[] = {
      "Turns the graphics library's own checks back on for one start, so a command the driver\n"
      "rejects is named in the log. Costs performance, so it turns itself off after that start.",
      nullptr, "skip_validation,disable_robustness"},
+    {"no_bc", "Decode compressed textures on the CPU",
+     "Hands the GPU plain textures instead of compressed ones (more video memory).\n"
+     "Try it if textures show as green and magenta blocks.",
+     nullptr, nullptr, "AURORA_NO_BC"},
 };
 inline constexpr size_t kDriverWorkaroundCount = std::size(kDriverWorkarounds);
 // `validation` is for one start only: BeginDriverWorkarounds applies it and unticks it.
@@ -246,6 +272,7 @@ extern std::string sDiscPath;
 extern std::string sRemasteredImagePath;
 extern std::string sRemasteredKeysPath;
 extern std::string sRemasteredSkip;
+extern std::string sRemasteredHide;
 
 std::string SettingsFilePath();
 bool ParseBool(const std::string& value);
@@ -293,6 +320,9 @@ extern bool sSettingsLogged;
 using namespace DebugUi;
 
 namespace PortDebug {
+// Flick Stick's turn this tick (radians, right positive) for the right stick at
+// (x, y); false when the stick aims as usual instead (input.cpp).
+bool FlickStickTurn(float x, float y, float dt, float& yaw);
 
 // Pages and sections, each drawn by the file it is named after.
 struct DebugPage {
@@ -319,12 +349,23 @@ extern char sSearch[128];
 int TakeJumpPage();
 void DrawPageBody(const DebugPage& page);
 bool SubTab(const char* page, const char* name);
+// A page's section, opened when MP_DEBUG_TAB names it.
+bool StartSection(const char* page, const char* name);
 void BeginSearchJump();
 void EndSearchJump();
 void DrawSearchField();
 bool Searching();
 void DrawSearchResults();
 ImGuiWindow* ScrollableWindowAt(ImGuiWindow* window);
+
+// window.cpp
+bool TouchScrolling(); // a finger drag is scrolling a page, taken from the widget it began on
+
+#if defined(__ANDROID__)
+// android_jni.cpp: the cutout and visible system bars, in pixels; false until
+// the activity has sent them.
+bool DrawInsetsPx(int& left, int& top, int& right, int& bottom);
+#endif
 
 // ui_common.cpp
 bool PageLayout();
@@ -350,6 +391,9 @@ void EndOriginalLocked(bool locked);
 extern PortDynamicRes::Controller sDynController;
 extern double sDynGpuMs;
 float EffectiveRenderScale();
+float DynamicResTop();
+// Lines of the frame buffer drawn at `scale` (0 = auto) in the current window.
+int DrawnLines(float scale);
 int EffectiveMsaa();
 void ApplyPresentSharpness();
 double DynamicResTargetFps();
@@ -371,12 +415,24 @@ extern std::string sPalLanguagesPick;
 // Which 3 of the same picker: a PAL/JP GameCube or Trilogy image for the full Flaahgra theme.
 inline constexpr int kFlaahgraPick = 3;
 extern std::string sFlaahgraPick;
+// Which 4 of the same picker: the Metroid Dread image for the Dread Samus import (desktop).
+inline constexpr int kDreadPick = 4;
+// Not a picker: OpenRemasteredPick's descriptor slot for the Remastered key file the Dread import
+// opens again, so the Remastered panel's own descriptor stays open (Android).
+inline constexpr int kDreadKeysSlot = 5;
+extern std::string sDreadPick;
+// Which 6 of the same picker: the Metroid Prime 2: Echoes GameCube image for the Echoes suits import.
+inline constexpr int kEchoesPick = 6;
+extern std::string sEchoesPick;
 std::string RemasteredPickFile(int which);
 void TakeRemasteredPickFiles();
 void OpenRemasteredDialog(int which);
 std::string OpenRemasteredPick(int which, const std::string& uri);
 std::string RemasteredPickName(const std::string& uri);
 void DrawModReloadMessage();
+// Asks for a mod reload, again every two seconds until one runs (a reload is
+// refused where the game can't save).
+void ReloadUntilDone();
 extern bool sImportUnloadedMods;
 void FinishRemasteredImport();
 
@@ -396,6 +452,12 @@ void BeginTopToastStack();
 void DrawPhotoUI();
 void DrawResumePrompt();
 void DrawUpdateToast();
+void DrawNoteToast();
+#if defined(PORT_TOUCH_OVERLAY)
+// touch_overlay.cpp: the SDL event filter that feeds it, and its draw
+void InstallTouchOverlay();
+void DrawTouchOverlay();
+#endif
 void HoldBackgroundShadersOnFrontEnd();
 void DrawShaderCompilationToast();
 std::string HotkeyHint();
@@ -403,18 +465,24 @@ void DrawMenuHintToast();
 void DrawDiscReadFailedAlert();
 
 // mods.cpp
+void DrawImportKeys();
 void DrawRemasteredImport();
+void DrawDreadSamusImport();
+void DrawEchoesSuitsImport();
 void DrawMods();
+// remastered.cpp: the Mods page's built-in mods (Remastered's models, Dread's Samus).
+void DrawBuiltinMods();
 
 // game_sections.cpp
 void DrawCutscenesSection();
+void DrawDifficultySection();
 void DrawUnlocksSection();
 void DrawSpeedrunSection();
 void DrawDiscordSection();
 void DrawUpdateSection();
 std::string TexturePackStatus();
 void SetTexturePackStatus(std::string status);
-void PickTexturePack();
+void PickTexturePack(bool zip);
 void DrawOverlaySection();
 
 // video.cpp
@@ -443,7 +511,6 @@ void DrawDiscCheckSection();
 void DrawDebugTab();
 void DrawPerformanceTab();
 void DrawLanguageSection();
-void DrawRemasteredTab();
 void DrawRemasteredDebug();
 void DrawSaveStatesTab();
 void DrawTrackerTab();

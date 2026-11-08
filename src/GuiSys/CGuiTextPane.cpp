@@ -7,6 +7,33 @@
 
 #ifdef TARGET_PC
 #include "port_pointer.h"
+#include "port_pause_lighting.h"
+#include <dolphin/gx.h>
+
+namespace {
+// Capture the pane's camera, not the doll/helmet camera current at replay.
+// Widget hit testing stays in the original traversal, while text/image draws
+// replay with their original alpha, blend flags and model transform.
+struct TextViewState {
+  CGraphics::CProjectionState projection = CGraphics::GetProjectionState();
+  CTransform4f view = CGraphics::GetViewMatrix();
+  CTransform4f model = CGraphics::GetModelMatrix();
+  CViewport viewport = CGraphics::GetViewport();
+  float near = CGraphics::GetDepthNear(), far = CGraphics::GetDepthFar();
+  u32 left, top, width, height;
+  TextViewState() { GXGetScissor(&left, &top, &width, &height); }
+  void Apply() const {
+    CGraphics::SetViewport(viewport.mLeft,
+                           CGraphics::GetRenderMode().efbHeight - viewport.mTop - viewport.mHeight,
+                           viewport.mWidth, viewport.mHeight);
+    CGraphics::SetDepthRange(near, far);
+    CGraphics::SetProjectionState(projection);
+    CGraphics::SetViewPointMatrix(view);
+    CGraphics::SetModelMatrix(model);
+    GXSetScissor(left, top, width, height);
+  }
+};
+} // namespace
 #endif
 
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
@@ -84,6 +111,19 @@ CGuiTextPane::CGuiTextPane(const CGuiWidgetParms& parms, CSimplePool* sp, const 
 
 CGuiTextPane::~CGuiTextPane() {}
 
+#ifdef TARGET_PC
+CTransform4f CGuiTextPane::PortTextModel() const {
+  const float* vtxBuf = GetVtxBuf();
+  const CVector2f dimensions = GetDimensions();
+  const int extentX = GetTextSupport().GetTextBoundingWidth();
+  const int extentY = GetTextSupport().GetTextBoundingHeight();
+  return GetWorldTransform() *
+         CTransform4f::Translate(CVector3f(vtxBuf[0], vtxBuf[1], vtxBuf[2]) + GetPivot()) *
+         CTransform4f::Scale(extentX == 0 ? 0.f : dimensions.GetX() / extentX, 1.f,
+                             extentY == 0 ? 0.f : dimensions.GetY() / extentY);
+}
+#endif
+
 void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   if (sDrawPaneRects) {
@@ -112,6 +152,49 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
       CTransform4f::Scale(width, 1.f, height);
   CTransform4f model = GetWorldTransform() * local;
 #ifdef TARGET_PC
+  // The companion's model: one line below this one (side by side it runs into this text),
+  // its glyphs' left end at the world x it was given.
+  CTransform4f companionModel = model;
+  const bool drawCompanion = mPortCompanion != nullptr && width != 0.f && height != 0.f;
+  if (drawCompanion) {
+    const rstl::pair< CVector2i, CVector2i >& bounds = mPortCompanion->GetBounds();
+    const CVector3f origin = model.GetTranslation();
+    const float left =
+        (model.GetInverse() * CVector3f(mPortCompanionLeft, origin.GetY(), origin.GetZ())).GetX();
+    const float pitch = 1.25f * static_cast< float >(bounds.second.GetY() - bounds.first.GetY());
+    companionModel = model * CTransform4f::Translate(
+                                 left - static_cast< float >(bounds.first.GetX()), 0.f, -pitch);
+    if (mPortCompanionHit != nullptr) {
+      *mPortCompanionHit = PortPointerMath::Rect();
+      const float x0 = static_cast< float >(bounds.first.GetX());
+      const float y0 = static_cast< float >(bounds.first.GetY());
+      const float x1 = static_cast< float >(bounds.second.GetX());
+      const float y1 = static_cast< float >(bounds.second.GetY());
+      const CVector3f corners[4] = {CVector3f(x0, 0.f, -y0), CVector3f(x1, 0.f, -y0),
+                                    CVector3f(x0, 0.f, -y1), CVector3f(x1, 0.f, -y1)};
+      for (const CVector3f& corner : corners) {
+        float gx, gy;
+        if (PortGuiHit::Project(companionModel, corner, gx, gy)) {
+          mPortCompanionHit->Add(gx, gy);
+        }
+      }
+    }
+  }
+  if (mPortLeftEdge != nullptr && mPortLeftEdge->GetIsVisible() && width != 0.f &&
+      height != 0.f) {
+    const rstl::pair< CVector2i, CVector2i >& bounds = xd4_textSupport.GetBounds();
+    const float left = static_cast< float >(bounds.first.GetX());
+    const float right = static_cast< float >(bounds.second.GetX());
+    // The edge in text units, plus a gap like the one Options keeps from its divider.
+    const float edge = (model.GetInverse() * mPortLeftEdge->GetWorldPosition()).GetX() + 12.f;
+    if (left < edge && edge < right) {
+      model = model * CTransform4f::Translate(right, 0.f, 0.f) *
+              CTransform4f::Scale((right - edge) / (right - left), 1.f, 1.f) *
+              CTransform4f::Translate(-right, 0.f, 0.f);
+    }
+  }
+#endif
+#ifdef TARGET_PC
   // Text often runs past the pane: the glyphs are hit too (text y runs down, z up).
   {
     const rstl::pair< CVector2i, CVector2i >& bounds = xd4_textSupport.GetBounds();
@@ -125,11 +208,21 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
     }
   }
 #endif
+  const CColor geomCol = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
+  const EGuiModelDrawFlags flags = GetDrawFlags();
+  const bool depthRead = GetIsAlwaysDepthRead(), depthWrite = GetIsAlwaysDepthWrite();
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
-  CColor geomCol = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
-  CGraphics::SetDepthWriteMode(GetIsAlwaysDepthRead(), kE_LEqual, GetIsAlwaysDepthWrite());
+  const bool drawShadow = xd00_drawShadow;
+#else
+  const bool drawShadow = false;
+#endif
+#ifdef TARGET_PC
+  const auto render = [this, model, companionModel, drawCompanion, geomCol, flags, depthRead,
+                       depthWrite, drawShadow]() {
+#endif
+  CGraphics::SetDepthWriteMode(depthRead, kE_LEqual, depthWrite);
 
-  if (xd00_drawShadow) {
+  if (drawShadow) {
     CGraphics::SetModelMatrix(model * CTransform4f::Translate(2.f, 0.f, -2.f));
     xd4_textSupport.SetGeometryColor(
         CColor(static_cast< uchar >(0), static_cast< uchar >(0), static_cast< uchar >(0))
@@ -141,16 +234,8 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
   CGraphics::SetModelMatrix(model);
   CGuiTextSupport& text = xd4_textSupport;
   text.SetGeometryColor(geomCol);
-#else
-  CGraphics::SetModelMatrix(model);
 
-  CColor geomCol = GetModifiedColor().WithAlphaModulatedBy(parms.GetAlpha());
-  CGuiTextSupport& text = xd4_textSupport;
-  text.SetGeometryColor(geomCol);
-  CGraphics::SetDepthWriteMode(GetIsAlwaysDepthRead(), kE_LEqual, GetIsAlwaysDepthWrite());
-#endif
-
-  switch (GetDrawFlags()) {
+  switch (flags) {
   case kGMDF_Shadeless:
   case kGMDF_Opaque:
     CGraphics::SetBlendMode(kBM_Blend, kBF_One, kBF_Zero, kLO_Clear);
@@ -176,6 +261,33 @@ void CGuiTextPane::Draw(const CGuiWidgetDrawParms& parms) const {
     break;
   }
   }
+#ifdef TARGET_PC
+  if (drawCompanion) {
+    CGraphics::SetModelMatrix(companionModel);
+    mPortCompanion->SetGeometryColor(geomCol);
+    CGraphics::SetBlendMode(kBM_Blend, kBF_SrcAlpha, kBF_InvSrcAlpha, kLO_Clear);
+    mPortCompanion->Render();
+  }
+  };
+  if (PortPauseLighting::TextPass::Deferring()) {
+    const TextViewState state;
+    PortPauseLighting::TextPass::Queue([state, render]() {
+      const TextViewState restore;
+      // The helmet drew in between: redo CGuiFrame::Draw's state setup, or its
+      // lights and fog leave the glyphs black on the black backdrop.
+      CGraphics::SetCullMode(kCM_None);
+      CGraphics::ResetGfxStates();
+      CGraphics::SetAmbientColor(CColor::White());
+      CGraphics::DisableAllLights();
+      CGraphics::SetTevOp(kTS_Stage0, CGraphics::kEnvModulate);
+      state.Apply();
+      render();
+      restore.Apply();
+    });
+  } else {
+    render();
+  }
+#endif
 }
 
 void CGuiTextPane::ScaleDimensions(const CVector3f&) {}

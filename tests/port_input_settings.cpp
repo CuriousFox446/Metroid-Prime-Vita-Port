@@ -1,4 +1,5 @@
 #include "port_input_settings.h"
+#include "port_mouse.h"
 #include "port_test.h"
 
 #include <cmath>
@@ -44,7 +45,25 @@ int main() {
   ApplySetting("stick_aim_rate_y", "20000");
   REQUIRE_MSG(Get().stickAimRateY == 450.f, "stick_aim_rate_y above range");
   ApplySetting("stick_aim_split", "0");
+  REQUIRE_MSG(!PortInput::Settings{}.flickStick, "flick_stick defaults off");
+  REQUIRE_MSG(ApplySetting("flick_stick", "1") && Get().flickStick, "flick_stick");
+  ApplySetting("flick_stick", "0");
+  REQUIRE_MSG(PortInput::Settings{}.flickOuterDeadZone == 10.f, "flick_stick_outer_deadzone defaults to 10");
+  ApplySetting("flick_stick_outer_deadzone", "25");
+  ApplySetting("flick_stick_outer_deadzone", "51");
+  REQUIRE_MSG(Get().flickOuterDeadZone == 25.f &&
+                  Text().find("flick_stick_outer_deadzone=25\n") != std::string::npos,
+              "flick_stick_outer_deadzone");
+  ApplySetting("flick_stick_outer_deadzone", "10");
+  REQUIRE_MSG(!PortInput::Settings{}.touchFlickStick, "touch_flick_stick defaults off");
+  REQUIRE_MSG(ApplySetting("touch_flick_stick", "1") && Get().touchFlickStick && !Get().flickStick,
+              "touch_flick_stick is its own switch");
+  ApplySetting("touch_flick_stick", "0");
   REQUIRE_MSG(!Get().mouseSensitivitySplit && !Get().touchAimSplit && !Get().gyroSplit, "vertical splits default off");
+  // 3.0 on the Source scale (issue #210), both axes.
+  REQUIRE_MSG(std::fabs(PortInput::Settings{}.mouseSensitivity - PortMouse::kDefaultSensitivity) < 1e-8f &&
+                  std::fabs(PortInput::Settings{}.mouseSensitivityY - PortMouse::kDefaultSensitivity) < 1e-8f,
+              "mouse sensitivity defaults to 3.0 Source");
   REQUIRE_MSG(ApplySetting("mouse_sensitivity_split", "1") && Get().mouseSensitivitySplit, "mouse_sensitivity_split");
   REQUIRE_MSG(ApplySetting("mouse_sensitivity_y", "0.002") && Get().mouseSensitivityY == 0.002f, "mouse_sensitivity_y");
   ApplySetting("mouse_sensitivity_y", "5");
@@ -148,6 +167,14 @@ int main() {
   REQUIRE_MSG(Text().find("gyro_cursor_angle=60\n") != std::string::npos &&
                   Text().find("gyro_cursor_camera=1\n") != std::string::npos,
               "gyro cursor written");
+  REQUIRE_MSG(!Get().lockOnFreeAim, "lock_on_free_aim default off");
+  ApplySetting("lock_on_free_aim", "1");
+  REQUIRE_MSG(Get().lockOnFreeAim && Text().find("lock_on_free_aim=1\n") != std::string::npos,
+              "lock_on_free_aim");
+  REQUIRE_MSG(Get().handOnCannon, "hand_on_cannon default on");
+  ApplySetting("hand_on_cannon", "0");
+  REQUIRE_MSG(!Get().handOnCannon && Text().find("hand_on_cannon=0\n") != std::string::npos,
+              "hand_on_cannon");
   REQUIRE_MSG(!Get().resetAimBoth, "reset_aim_both default off");
   ApplySetting("reset_aim_both", "1");
   REQUIRE_MSG(Get().resetAimBoth && Text().find("reset_aim_both=1\n") != std::string::npos,

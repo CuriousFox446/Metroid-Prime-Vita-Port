@@ -1,9 +1,12 @@
 #include "MetroidPrime/Player/CPlayerGun.hpp"
+#include "port_beam_colours.h"
 #include "port_debug.h"
 #include "port_power_charge_release.h"
 #include "port_room_env.h"
 #include "port_shot_aim.h"
 #include "port_synthetic_effect.h"
+#include "port_third_person.h"
+#include "port_third_person_body.h"
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -29,6 +32,8 @@
 #include "MetroidPrime/Enemies/CPatterned.hpp"
 #include "MetroidPrime/HUD/CSamusHud.hpp"
 #include "MetroidPrime/Player/CGrappleArm.hpp"
+#include "MetroidPrime/Cameras/CFirstPersonCamera.hpp"
+#include "MetroidPrime/Player/CMorphBall.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
 #include "MetroidPrime/SFX/PhazonGun.h"
 #include "MetroidPrime/SFX/Weapons.h"
@@ -77,6 +82,9 @@
 
 #include "dolphin/gx/GXFrameBuffer.h"
 #include "dolphin/gx/GXManage.h"
+#ifdef TARGET_PC
+#include "dolphin/gx/GXExtra.h"
+#endif
 
 #include "math.h"
 
@@ -364,6 +372,8 @@ CPlayerGun::CPlayerGun(TUniqueId playerId)
 , mPortRapidTimer(0.f)
 , mPortPointerAimValid(false)
 , mPortPointerAimPoint(CVector3f::Zero())
+, mPortBubbleXf(CTransform4f::Identity())
+, mPortBubbleTimer(0.f)
 #endif
 {
 
@@ -400,11 +410,20 @@ void CPlayerGun::AddToRenderer(const CFrustumPlanes& frustum, const CStateManage
 void CPlayerGun::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum,
                            const CVector3f& camPos) {
   const CPlayerState& playerState = *mgr.GetPlayerState();
-  if (playerState.GetCurrentVisor() == CPlayerState::kPV_Scan) {
+#ifdef TARGET_PC
+  // scan_shoot: the cannon drawn in the Scan Visor is lit as in the Combat Visor.
+  const bool scanShoot = PortDebug::ScanShoot();
+#else
+  const bool scanShoot = false;
+#endif
+  if (playerState.GetCurrentVisor() == CPlayerState::kPV_Scan && !scanShoot) {
     return;
   }
 
   CPlayerState::EPlayerVisor activeVisor = playerState.GetActiveVisor(mgr);
+  if (activeVisor == CPlayerState::kPV_Scan && scanShoot) {
+    activeVisor = CPlayerState::kPV_Combat;
+  }
   switch (activeVisor) {
   case CPlayerState::kPV_Thermal: {
     float rgb =
@@ -439,6 +458,14 @@ void CPlayerGun::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum,
     x740_grappleArm->PreRender(mgr, frustum, camPos);
   }
 
+#ifdef TARGET_PC
+  // Remastered (PreRender 0xc925e8) draws the right hand only in the X-ray visor, wipes too.
+  if (sPortRemasteredGun) {
+    if (activeVisor == CPlayerState::kPV_XRay) {
+      x6e0_rightHandModel.AnimationData()->PreRender();
+    }
+  } else
+#endif
   if (x678_morph.GetGunState() != CGunMorph::kGS_OutWipeDone ||
       activeVisor == CPlayerState::kPV_XRay) {
     x6e0_rightHandModel.AnimationData()->PreRender();
@@ -595,19 +622,23 @@ void CPlayerGun::PortSnapshotPresentedPose(const CStateManager& mgr) const {
 }
 
 void CPlayerGun::PortShotFromDrawnMuzzle(const CStateManager& mgr, CTransform4f& xf, bool aim) const {
-  // CStateManager's RenderGun pass draws the gun at the retail FOV when the view's differs,
+  // CStateManager's RenderGun pass draws the gun at its own FOV when the view's differs,
   // so on screen the muzzle sits where a world point at the same depth, scaled out from the
   // view axis by the ratio of the two projections, would. Shots start there, so they leave
   // the cannon as drawn; with pointer aim they still head for the pointed point.
+  if (PortThirdPerson::Active()) {
+    PortShotFromThirdPersonCannon(mgr, xf, aim);
+    return;
+  }
   const CCameraManager* camMgr = mgr.GetCameraManager();
   if (!camMgr->IsInFPCamera()) {
     return;
   }
   const CGameCamera& cam = camMgr->GetCurrentCamera(mgr);
-  if (cam.GetFov() == PortDebug::kFovRetail) {
+  if (!PortDebug::GunOwnFov(cam.GetFov())) {
     return;
   }
-  const float gunTan = tanf(CGameCamera::VertPlusFov(PortDebug::kFovRetail, cam.GetAspectRatio()) *
+  const float gunTan = tanf(CGameCamera::VertPlusFov(PortDebug::GunDrawFov(cam.GetFov()), cam.GetAspectRatio()) *
                             0.5f * (M_PIF / 180.f));
   const float viewTan = tanf(cam.GetRenderFov() * 0.5f * (M_PIF / 180.f));
   if (gunTan <= 0.f || viewTan <= 0.f) {
@@ -638,6 +669,41 @@ void CPlayerGun::PortShotFromDrawnMuzzle(const CStateManager& mgr, CTransform4f&
     xf = CTransform4f::LookAt(CVector3f::Zero(), toAim);
   }
   xf.SetTranslation(pos);
+}
+
+void CPlayerGun::PortShotFromThirdPersonCannon(const CStateManager& mgr, CTransform4f& xf,
+                                               bool aim) const {
+  // Third person: the shot leaves the body's cannon (the first-person muzzle if the body is not
+  // there) and heads for the point under the camera's centre ray, or the assisted aim point of
+  // the locked target, as retail's does under a lock.
+  const CPlayer& player = *mgr.GetPlayer();
+  if (aim) {
+    PortThirdPersonBody::NoteShot(mgr); // a fired shot (the aux beams' per-frame call passes !aim)
+  }
+  CVector3f origin = xf.GetTranslation();
+  PortThirdPersonBody::CannonPosition(player, origin);
+  if (!aim) {
+    xf.SetTranslation(origin);
+    return;
+  }
+  CVector3f aimPoint;
+  const CVector3f camFwd = mgr.GetCameraManager()->GetFirstPersonCamera()->GetTransform().GetForward();
+  bool have = false;
+  if (player.GetOrbitTargetId() != kInvalidUniqueId &&
+      TCastToConstPtr< CActor >(mgr.GetObjectById(player.GetOrbitTargetId())) != nullptr) {
+    aimPoint = player.GetAssistedTargetAim();
+    have = true;
+  } else {
+    have = PortThirdPerson::AimPoint(aimPoint);
+  }
+  if (have && camFwd.CanBeNormalized()) {
+    const PortThirdPerson::Vec3 d = PortThirdPerson::AimDirection(
+        {origin.GetX(), origin.GetY(), origin.GetZ()},
+        {aimPoint.GetX(), aimPoint.GetY(), aimPoint.GetZ()},
+        {camFwd.AsNormalized().GetX(), camFwd.AsNormalized().GetY(), camFwd.AsNormalized().GetZ()});
+    xf = CTransform4f::LookAt(CVector3f::Zero(), CVector3f(d.x, d.y, d.z));
+  }
+  xf.SetTranslation(origin);
 }
 
 CVector3f CPlayerGun::PortShotAimPoint(const CStateManager& mgr, const CVector3f& from,
@@ -715,12 +781,49 @@ CTransform4f CPlayerGun::PortGunView(const CStateManager& mgr,
 }
 #endif
 
+#ifdef TARGET_PC
+// Trilogy fn_801878D4, gun terms: +6a0 morph state, +2f8 flag 8, +398 damage timer and the
+// CGunMotion controller (+744 -> +98) not striking.
+bool CPlayerGun::PortTriRadialReady() const {
+  const EGunState state = x73c_gunMotion->GunController().GetGunState();
+  return x678_morph.GetGunState() == CGunMorph::kGS_OutWipeDone && (x2f8_stateFlags & 0x8) == 0 &&
+         !(x394_damageTimer > 0.f) && state != kGS_Strike && state != kGS_BigStrike;
+}
+
+bool CPlayerGun::PortRenderDepth(const CStateManager& mgr, const CVector3f& pos) const {
+  // Render's kGS_OutWipeDone placement of the gun; the grapple arm, the phazon beam and
+  // its morph keep only their own draw.
+  if (x678_morph.GetGunState() != CGunMorph::kGS_OutWipeDone || x835_26_phazonBeamMorphing ||
+      x310_currentBeam == CPlayerState::kBI_Phazon || x740_grappleArm->GetActive()) {
+    return false;
+  }
+  const CTransform4f worldView = CGraphics::GetViewMatrix();
+  CGraphics::SetViewPointMatrix(PortGunView(mgr, worldView));
+  CGraphics::SetDepthRange(kDepthGun, kDepthWorld);
+  CTransform4f offsetWorldXf(CTransform4f::Translate(pos) * GetGunMotionTransform());
+  if (x32c_chargePhase != kCP_NotCharging && !IsWeaponStateSet(0x10)) {
+    offsetWorldXf.AddTranslation(CVector3f(x34c_shakeX, 0.f, x350_shakeZ));
+  }
+  const bool drawSuitArm = !x740_grappleArm->IsGrappling() &&
+                           mgr.GetPlayer()->GetGunHolsterState() == CPlayer::kGH_Drawn;
+  GXPortSetDepthPrepass(3); // marks the area for the exposure measure to leave out
+  x72c_currentBeam->PortDrawDepth(drawSuitArm, mgr, offsetWorldXf);
+  GXPortSetDepthPrepass(0);
+  CGraphics::SetViewPointMatrix(worldView);
+  CGraphics::SetDepthRange(kDepthWorld, kDepthFar);
+  return true;
+}
+#endif
+
 void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
                         const CModelFlags& flags) const {
 #ifdef TARGET_PC
   const CVector3f probePos = mgr.GetPlayer()->GetTranslation();
   const float probeXyz[3] = {probePos.GetX(), probePos.GetY(), probePos.GetZ()};
   const PortRoomEnv::ProbeOverrideScope probeScope(probeXyz);
+  // CPlayerGunMP1::Render draws the underwater bubbles first, in world space.
+  gpRender->SetModelMatrix(CTransform4f::Identity());
+  mPortBubbleGens.Render();
 #endif
   const CTransform4f worldView = CGraphics::GetViewMatrix();
 #ifdef TARGET_PC
@@ -766,11 +869,14 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
 
   if (x832_25_chargeEffectVisible &&
       (x38c_muzzleEffectVisTimer > 0.f || x32c_chargePhase > kCP_AnimAndSfx)) {
+#ifdef TARGET_PC
+    PortBeamColours::Scope beamScope(x72c_currentBeam->PortBeamId());
+#endif
     x72c_currentBeam->DrawMuzzleFx(mgr);
   }
 
 #ifdef TARGET_PC
-  PortRenderFlashes();
+  PortRenderFlashes(0, kPortFirstChargeFlash);
 #endif
 
   if (gunState == CGunMorph::kGS_InWipe || gunState == CGunMorph::kGS_OutWipe) {
@@ -781,7 +887,13 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   if (IsWeaponStateSet(0x10)) {
     x744_auxWeapon->RenderMuzzleFx();
   }
-  x72c_currentBeam->PreRenderGunFx(mgr, offsetWorldXf);
+  {
+#ifdef TARGET_PC
+    // The beam's own muzzle, smoke and charge effects (port_beam_colours.h).
+    PortBeamColours::Scope beamScope(x72c_currentBeam->PortBeamId());
+#endif
+    x72c_currentBeam->PreRenderGunFx(mgr, offsetWorldXf);
+  }
   const bool drawSuitArm = !x740_grappleArm->IsGrappling() &&
                            mgr.GetPlayer()->GetGunHolsterState() == CPlayer::kGH_Drawn;
   x73c_gunMotion->Draw(mgr, offsetWorldXf);
@@ -805,12 +917,46 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   case CGunMorph::kGS_InWipe:
   case CGunMorph::kGS_OutWipe: {
     CTransform4f handXf(elbowOffsetXf * CTransform4f::Translate(0.f, -0.2f, 0.02f));
+    bool drawHoloHand = true;
+#ifdef TARGET_PC
+    // Remastered (Render 0xc926d4) draws the hand in the hologram states only in X-ray.
+    drawHoloHand = !sPortRemasteredGun || visor == CPlayerState::kPV_XRay;
+    if (sPortRemasteredGun) {
+      // Remastered has no screen copy or clip cube: the gun is split at a plane across its
+      // forward axis through the holo generator's point (ProcessGunMorph 0xc96708 keeps it
+      // from the last wipe frame through InWipeDone).
+      static CVector3f sHoloClipPoint(CVector3f::Zero());
+      if (gunState != CGunMorph::kGS_InWipeDone) {
+        sHoloClipPoint =
+            offsetWorldXf * CVector3f(0.f,
+                                      x678_morph.GetYLerp() -
+                                          0.4f * (1.f - x678_morph.GetTransitionFactor()),
+                                      0.f);
+      }
+      if (drawHoloHand) {
+        x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
+                                   thermalVisor ? kHandThermalFlag : kHandHoloFlag);
+      }
+      if (x0_lights.HasShadowLight()) {
+        x82c_shadow->EnableModelProjectedShadow(offsetWorldXf, x0_lights.GetShadowLightArrIndex(),
+                                                2.15f);
+      }
+      x72c_currentBeam->PortDrawHologramTransition(mgr, offsetWorldXf,
+                                                   offsetWorldXf.GetColumn(kDY), sHoloClipPoint,
+                                                   beamFlags, &x0_lights);
+      DrawArm(mgr, pos, flags);
+      x82c_shadow->DisableModelProjectedShadow();
+      break;
+    }
+#endif
     if (gunState != CGunMorph::kGS_InWipeDone) {
       CTransform4f morphXf(elbowOffsetXf *
                            CTransform4f::Translate(0.f, x678_morph.GetYLerp(), 0.f));
       CopyScreenTex();
-      x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
-                                 thermalVisor ? kHandThermalFlag : kHandHoloFlag);
+      if (drawHoloHand) {
+        x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
+                                   thermalVisor ? kHandThermalFlag : kHandHoloFlag);
+      }
       x72c_currentBeam->DrawHologram(mgr, offsetWorldXf, CModelFlags::Normal());
       DrawScreenTex(ConvertToScreenSpace(morphXf.GetTranslation(), cam).GetZ());
       if (x0_lights.HasShadowLight()) {
@@ -823,8 +969,10 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
       DrawArm(mgr, pos, flags);
       x82c_shadow->DisableModelProjectedShadow();
     } else {
-      x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
-                                 thermalVisor ? kHandThermalFlag : kHandHoloFlag);
+      if (drawHoloHand) {
+        x6e0_rightHandModel.Render(mgr, handXf, &x0_lights,
+                                   thermalVisor ? kHandThermalFlag : kHandHoloFlag);
+      }
       x72c_currentBeam->DrawHologram(mgr, offsetWorldXf, CModelFlags::Normal());
       if (x0_lights.HasShadowLight()) {
         x82c_shadow->EnableModelProjectedShadow(offsetWorldXf, x0_lights.GetShadowLightArrIndex(),
@@ -840,7 +988,17 @@ void CPlayerGun::Render(const CStateManager& mgr, const CVector3f& pos,
   CTransform4f oldViewMtx2(CGraphics::GetViewMatrix());
   CGraphics::SetViewPointMatrix(offsetWorldXf.GetInverse() * oldViewMtx2);
   gpRender->SetModelMatrix(CTransform4f::Identity());
+#ifdef TARGET_PC
+  {
+    PortBeamColours::Scope beamScope(x72c_currentBeam->PortBeamId());
+    x72c_currentBeam->PostRenderGunFx(mgr, offsetWorldXf);
+  }
+#else
   x72c_currentBeam->PostRenderGunFx(mgr, offsetWorldXf);
+#endif
+#ifdef TARGET_PC
+  PortRenderFlashes(kPortFirstChargeFlash, kPortFlashCount);
+#endif
   if (x832_26_comboFiring && x77c_comboXferGen.get()) {
     x77c_comboXferGen->Render();
   }
@@ -915,14 +1073,21 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
       isUnmorphed ? just_thawed(x834_29_frozen, player.GetFrozenState()) : false;
   x834_29_frozen = isUnmorphed ? player.GetFrozenState() : false;
   const float advDt = x834_29_frozen ? 0.f : dt;
+#ifdef TARGET_PC
+  // beam_switch_speed: a beam change's from/to-beam animations, hand and wipe run
+  // faster (the rest of the gun keeps advDt).
+  const float switchDt = advDt * PortBeamSwitchScale();
+#else
+  const float switchDt = advDt;
+#endif
 
   const bool inMorph = gunState != CGunMorph::kGS_OutWipeDone;
   if (mgr.GetPlayerState()->GetCurrentVisor() == CPlayerState::kPV_XRay || inMorph) {
-    x6e0_rightHandModel.AdvanceAnimation(advDt, mgr, kInvalidAreaId, true);
+    x6e0_rightHandModel.AdvanceAnimation(switchDt, mgr, kInvalidAreaId, true);
   }
   if (inMorph && x734_loadingBeam != NULL && x734_loadingBeam != x72c_currentBeam) {
     x744_auxWeapon->LoadIdle();
-    x734_loadingBeam->Update(advDt, mgr);
+    x734_loadingBeam->Update(switchDt, mgr);
   }
   if (!x744_auxWeapon->IsLoaded()) {
     x744_auxWeapon->LoadIdle();
@@ -941,7 +1106,7 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
     CancelFiring(mgr);
   }
 
-  x72c_currentBeam->Update(advDt, mgr);
+  x72c_currentBeam->Update(switchDt, mgr);
   x73c_gunMotion->Update(advDt * x370_gunMotionSpeedMult, mgr);
   x740_grappleArm->Update(grappleSwingT, advDt, mgr);
 
@@ -1038,6 +1203,10 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   GetLctrWithShake(x4d8_gunLocalXf, motionModel, rstl::string_l(kGunLocator), true, true);
   GetLctrWithShake(x418_beamLocalXf, beamModel, rstl::string_l(CGunWeapon::skMuzzleLocator), false,
                    true);
+#ifdef TARGET_PC
+  // The Dread cannon stands in for the gun: keep the shots on its muzzle.
+  x418_beamLocalXf.AddTranslation(x72c_currentBeam->PortDreadMuzzleShift());
+#endif
   GetLctrWithShake(x508_elbowLocalXf, beamModel, rstl::string_l("elbow"), false, false);
   x4a8_gunWorldXf = x3e8_xf * x4d8_gunLocalXf * x550_camBob.GetCameraBobTransformation();
 
@@ -1049,7 +1218,11 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   sPortRemasteredGun = x774_holoTransitionGen->PortIsRemastered();
 #endif
   x6a0_motionState.Update((x2f0_pressedFireButtonStates & 1) != 0 && x832_28_readyForShot &&
-                              x32c_chargePhase < kCP_AnimAndSfx && !player.IsInFreeLook(),
+                              x32c_chargePhase < kCP_AnimAndSfx && !player.IsInFreeLook()
+#ifdef TARGET_PC
+                              && !mPortHandOnCannon
+#endif
+                              ,
                           advDt, x4a8_gunWorldXf, mgr);
 
   beamModel.AdvanceParticles(GetGunMotionTransform(), advDt, mgr);
@@ -1088,12 +1261,28 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   const CVector3f camTrans = mgr.GetCameraManager()->GetGlobalCameraTranslation(mgr);
   beamWorldXf.AddTranslation(camTrans);
   beamTargetXf.AddTranslation(camTrans);
+#ifdef TARGET_PC
+  // Remastered (Update 0xc93950, UpdateAuxWeapons 0xc977f4) hands the aux weapons the gun x
+  // beam locator moved by the camera translation: no elbow swap or hit point at point blank.
+  if (sPortRemasteredGun) {
+    beamTargetXf = GetGunMotionTransform() * x418_beamLocalXf;
+    beamTargetXf.AddTranslation(camTrans);
+  }
+  // The combo streams (Wavebuster, Flamethrower) start at and follow
+  // beamTargetXf every frame: with the gun at its own FOV it starts at the drawn muzzle and
+  // heads where retail's would, or the stream leaves beside the cannon, more so the wider
+  // the view and the further the cannon is offset.
+  if ((sPortRemasteredGun || !x833_29_pointBlankWorldSurface) &&
+      x744_auxWeapon->IsComboFxActive(mgr)) {
+    PortShotFromDrawnMuzzle(mgr, beamTargetXf);
+  }
+#endif
 
+  const bool emitting = x833_30_canShowAuxMuzzleEffect ? x344_comboXferTimer < 1.f : false;
+  const float scaleFactor =
+      (emitting && x832_26_comboFiring) ? (1.f - x344_comboXferTimer) * 2.f : 2.f;
+  const CVector3f scale(scaleFactor, scaleFactor, scaleFactor);
   if (x832_25_chargeEffectVisible) {
-    const bool emitting = x833_30_canShowAuxMuzzleEffect ? x344_comboXferTimer < 1.f : false;
-    const float scaleFactor =
-        (emitting && x832_26_comboFiring) ? (1.f - x344_comboXferTimer) * 2.f : 2.f;
-    const CVector3f scale(scaleFactor, scaleFactor, scaleFactor);
 #ifdef TARGET_PC
     // The muzzle system inherits the gun/world pose from the render frame; pass only
     // the sampled gun-local LBEAM locator so converted XFMD3 children inherit its rotation.
@@ -1108,11 +1297,10 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   }
 
 #ifdef TARGET_PC
-  {
-    // Same scale as the muzzle flash (Remastered updates them together).
-    const float flashScale = x832_26_comboFiring ? (x344_comboXferTimer < 1.f ? 1.f - x344_comboXferTimer : 0.f) * 2.f : 2.f;
-    PortUpdateFlashes(advDt, CVector3f(flashScale, flashScale, flashScale));
-  }
+  // CPlayerGunMP1::Update updates the muzzle modules every frame with the muzzle
+  // generators' scale, not only while the charge effect is visible.
+  x72c_currentBeam->PortUpdateMuzzleFlash(advDt, scale, x418_beamLocalXf);
+  PortUpdateFlashes(advDt, scale);
 #endif
 
   if (x748_rainSplashGenerator.get()) {
@@ -1120,7 +1308,26 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   }
 
   UpdateGunLight(beamWorldXf, mgr);
-  ProcessGunMorph(advDt, mgr);
+#ifdef TARGET_PC
+  // Port: Remastered's thermal gun (MDL_ThermalHeatMask) glows with the gun's heat, the
+  // HTRN "Heat_Transition_Set" variable on its CCH1.y. CPlayerGunMP1::UpdateGunHeatVisual
+  // 0xc9659c: the larger of the rapid-fire smoke timer / 2 and the charge fraction while
+  // charging; once both are 0 the last level falls at 0.5 per second (unscaled dt). It
+  // feeds the infra model only in the thermal visor, the one place that model draws.
+  {
+    static float sHeatLevel = 0.f;
+    float level = CMath::Clamp(0.f, x380_shotSmokeTimer * 0.5f, 1.f);
+    if (x834_24_charging && x340_chargeBeamFactor > level) {
+      level = x340_chargeBeamFactor;
+    }
+    if (CMath::AbsF(level) < 1e-5f) {
+      level = rstl::max_val(sHeatLevel - dt * 0.5f, 0.f);
+    }
+    sHeatLevel = level;
+    CCubeModel::PortSetGunHeat(sHeatLevel);
+  }
+#endif
+  ProcessGunMorph(switchDt, mgr);
   if (x835_26_phazonBeamMorphing) {
     ProcessPhazonGunMorph(advDt, mgr);
   }
@@ -1153,10 +1360,12 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   // CGunWeaponMP1::UpdateChargeEffects drives it. Its drive isn't the charge factor but
   // CPlayerGunMP1::Update's own accumulator: past the charge FX start (warm-up) it rises
   // at 1/1.45 per second, otherwise it falls at 1 per second. Ice keeps retail's timing,
-  // so the warm-up is kChargeFxStart.
+  // so the warm-up is kChargeFxStart. It grows through the combo phases too (+0x4c <= 9,
+  // i.e. up to kCP_ComboFireDone).
   {
     static float sShellFactor = 0.f;
-    const bool charging = x32c_chargePhase >= kCP_AnimAndSfx && x32c_chargePhase <= kCP_FxGrown;
+    const bool charging =
+        x32c_chargePhase >= kCP_ChargeRequested && x32c_chargePhase <= kCP_ComboFireDone;
     if (charging && x340_chargeBeamFactor >= kChargeFxStart) {
       sShellFactor += advDt / 1.45f;
       if (sShellFactor > 1.f) {
@@ -1187,6 +1396,9 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
 
   UpdateWeaponFire(advDt, playerState, mgr);
   UpdateGunIdle(x364_gunStrikeCoolTimer > 0.f, cameraBobT, advDt, mgr);
+#ifdef TARGET_PC
+  PortUpdateUnderWaterBubbles(advDt, mgr);
+#endif
 
   if ((x2ec_lastFireButtonStates & 0x1) != 0) {
     x378_shotSmokeStartTimer = 0.f;
@@ -1297,6 +1509,10 @@ void CPlayerGun::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
 }
 
 #ifdef TARGET_PC
+float CPlayerGun::PortBeamSwitchScale() const {
+  return IsWeaponStateSet(0x8) ? float(PortDebug::BeamSwitchSpeed()) / 100.f : 1.f;
+}
+
 // Port: the beam change HandleBeamChange starts, without the input.
 void CPlayerGun::PortSwitchToOwnedBeam(CStateManager& mgr) {
   const CPlayerState& playerState = *mgr.GetPlayerState();
@@ -1439,28 +1655,19 @@ void CPlayerGun::PortFireStackedBeams(float dt, CStateManager& mgr, const CTrans
         !playerState.HasPowerUp(mBeamArr[i])) {
       continue;
     }
+    // The port has 2048 object slots (retail 1024) and spins forever in AllocateUniqueId once
+    // they are gone. Stacked shots (up to 5 a trigger, with rapid fire) in a big room filled them
+    // and froze the game (Exterior Docking Hangar alone holds ~950), so they leave the
+    // primary shot and the room's own spawns a reserve.
+    if (mgr.GetObjectListById(kOL_All).size() > kMaxObjects - 48) {
+      break;
+    }
     beam->PortLockStackTokens();
     beam->PortFireStackedProjectile(
         x834_27_underwater, dt, CPlayerState::EChargeStage(x330_chargeState), xf, mgr,
-        static_cast< const TUniqueId& >(targetHoming ? GetTargetId(mgr) : kInvalidUniqueId),
+        static_cast< const TUniqueId& >(targetHoming ? PortHomingTargetId(mgr) : kInvalidUniqueId),
         x340_chargeBeamFactor, x340_chargeBeamFactor);
   }
-}
-
-// The selected beam's shot cool down, or with stack_beams the slowest owned beam's.
-float CPlayerGun::PortShotCoolDown(const CStateManager& mgr) const {
-  float coolDown = x72c_currentBeam->GetWeaponInfo().x0_coolDown;
-  if (!PortDebug::StackBeams() || x833_28_phazonBeamActive) {
-    return coolDown;
-  }
-  const CPlayerState& playerState = *mgr.GetPlayerState();
-  for (int i = 0; i < 4; ++i) {
-    const CGunWeapon* beam = x760_selectableBeams[i];
-    if (beam != nullptr && playerState.HasPowerUp(mBeamArr[i])) {
-      coolDown = rstl::max_val(coolDown, beam->GetWeaponInfo().x0_coolDown);
-    }
-  }
-  return coolDown;
 }
 
 // Releases the stacked beams' projectile tokens once the setting is off.
@@ -1496,7 +1703,7 @@ void CPlayerGun::UpdateNormalShotCycle(float dt, CStateManager& mgr) {
     xf.SetTranslation(pos);
   }
 #ifdef TARGET_PC
-  if (!x833_29_pointBlankWorldSurface) {
+  if (!x833_29_pointBlankWorldSurface || PortThirdPerson::Active()) {
     PortShotFromDrawnMuzzle(mgr, xf);
   }
 #endif
@@ -1514,7 +1721,11 @@ void CPlayerGun::UpdateNormalShotCycle(float dt, CStateManager& mgr) {
 #endif
   x72c_currentBeam->Fire(
       x834_27_underwater, dt, CPlayerState::EChargeStage(x330_chargeState), xf, mgr,
+#ifdef TARGET_PC
+      static_cast< const TUniqueId& >(targetHoming ? PortHomingTargetId(mgr) : kInvalidUniqueId),
+#else
       static_cast< const TUniqueId& >(targetHoming ? GetTargetId(mgr) : kInvalidUniqueId),
+#endif
       x340_chargeBeamFactor, x340_chargeBeamFactor);
 #ifdef TARGET_PC
   PortFireStackedBeams(dt, mgr, xf, targetHoming);
@@ -1529,7 +1740,14 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
   }
 
   CPlayerState* playerState = mgr.PlayerState();
-  if (x835_25_inPhazonBeam || int(x318_comboAmmoIdx) == 0 ||
+#ifdef TARGET_PC
+  // Port: the Phazon Beam cheat fires missiles (not combos) from the Phazon Beam.
+  const bool phazonBlocks = x835_25_inPhazonBeam && !(mPortPhazonCheat && int(x318_comboAmmoIdx) == 1 &&
+                                                      !x832_26_comboFiring);
+#else
+  const bool phazonBlocks = x835_25_inPhazonBeam;
+#endif
+  if (phazonBlocks || int(x318_comboAmmoIdx) == 0 ||
       playerState->HasPowerUp(skItemArr[x318_comboAmmoIdx]) != true || !IsWeaponStateSet(0x4)) {
     NWeaponTypes::play_sfx(SFXsam_b_malfxn_00, x834_27_underwater, false, 0x4a);
     return;
@@ -1538,7 +1756,12 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
   bool fired = false;
   switch (x318_comboAmmoIdx) {
   case 1: {
+#ifdef TARGET_PC
+    // Port: infinite ammo fires with none left (DecrPickUp then keeps the count).
+    x300_remainingMissiles = playerState->PortUsableAmount(CPlayerState::kIT_Missiles);
+#else
     x300_remainingMissiles = playerState->GetItemAmount(CPlayerState::kIT_Missiles);
+#endif
     if (mgr.GetWeaponIdCount(x538_playerId, kWT_Missile) < 3 && int(x300_remainingMissiles) != 0) {
       playerState->DecrPickUp(CPlayerState::kIT_Missiles,
                               x832_26_comboFiring ? playerState->GetMissileCostForAltAttack() : 1);
@@ -1557,8 +1780,16 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
   }
 
   if (fired) {
+#ifdef TARGET_PC
+    TUniqueId targetId = PortHomingTargetId(mgr);
+#else
     TUniqueId targetId = GetTargetId(mgr);
+#endif
+    // Under a lock the aim target is the locked one, so a Wavebuster sent off it takes none.
     if (x832_26_comboFiring && targetId == kInvalidUniqueId &&
+#ifdef TARGET_PC
+        !PortShotOffLock(mgr) &&
+#endif
         x310_currentBeam == CPlayerState::kBI_Wave) {
       targetId = mgr.GetPlayer()->GetAimTargetId();
     }
@@ -1571,7 +1802,7 @@ void CPlayerGun::FireSecondary(float dt, CStateManager& mgr) {
       xf.SetTranslation(pos);
     }
 #ifdef TARGET_PC
-    if (!x833_29_pointBlankWorldSurface) {
+    if (!x833_29_pointBlankWorldSurface || PortThirdPerson::Active()) {
       PortShotFromDrawnMuzzle(mgr, xf);
     }
 #endif
@@ -1662,7 +1893,12 @@ void CPlayerGun::ActivateCombo(CStateManager& mgr) {
 
   CPlayerState& playerState = *mgr.PlayerState();
   const int altCost = playerState.GetMissileCostForAltAttack();
+#ifdef TARGET_PC
+  // Port: infinite ammo starts a charge combo with too few missiles.
+  if (playerState.PortUsableAmount(skItemArr[x318_comboAmmoIdx]) >= altCost) {
+#else
   if (playerState.GetItemAmount(skItemArr[x318_comboAmmoIdx]) >= altCost) {
+#endif
     bool canFire = true;
     if (x310_currentBeam == CPlayerState::kBI_Plasma) {
       canFire = !x834_27_underwater;
@@ -1674,6 +1910,9 @@ void CPlayerGun::ActivateCombo(CStateManager& mgr) {
       TCachedToken< CGenDescription >& cachedXferEffect = x72c_currentBeam->x160_xferEffect;
       if (cachedXferEffect.TryCache()) {
         x77c_comboXferGen = rs_new CElementGen(cachedXferEffect);
+#ifdef TARGET_PC
+        x77c_comboXferGen->PortSetBeamTint(x72c_currentBeam->PortBeamId());
+#endif
         x77c_comboXferGen->SetGlobalScale(kScaleVector);
       }
 
@@ -1710,6 +1949,9 @@ void CPlayerGun::EnableChargeFx(CPlayerState::EChargeStage, CStateManager& mgr) 
   x800_auxMuzzleGenerators[x320_currentAuxBeam] =
       rs_new CElementGen(x7c0_auxMuzzleEffects[x320_currentAuxBeam]);
   x800_auxMuzzleGenerators[x320_currentAuxBeam]->SetParticleEmission(true);
+#ifdef TARGET_PC
+  x800_auxMuzzleGenerators[x320_currentAuxBeam]->PortSetBeamTint(x320_currentAuxBeam);
+#endif
 }
 
 #ifdef TARGET_PC
@@ -1771,6 +2013,8 @@ void CPlayerGun::UpdateChargeState(float dt, CStateManager& mgr) {
 #ifdef TARGET_PC
     if (PortRapidChargeShot(dt, mgr)) {
       x340_chargeBeamFactor = 0.f;
+      // Remastered sets the charging flag before its quick-shot phase, so it bubbles.
+      PortGenerateUnderWaterBubbles(mgr);
       return;
     }
 #endif
@@ -1858,6 +2102,11 @@ void CPlayerGun::UpdateChargeState(float dt, CStateManager& mgr) {
       x340_chargeBeamFactor = 1.f;
     }
   }
+#ifdef TARGET_PC
+  if (x834_24_charging) {
+    PortGenerateUnderWaterBubbles(mgr);
+  }
+#endif
 }
 
 void CPlayerGun::Reset(CStateManager& mgr, bool b1) {
@@ -1950,6 +2199,52 @@ void CPlayerGun::PortForcePhazonBeam(const bool on) {
   }
 }
 
+#ifdef TARGET_PC
+// Port: the Phazon Beam cheat. While on, the Phazon Beam takes the Power Beam's place: it is the
+// selected Power Beam, in any room. The flags are the ones standing in phazon with the suit sets
+// (the retail code drops canFirePhazon on leaving a pool, so they are set again every frame).
+// Another beam is reached by leaving the Phazon Beam first (the game's own exit morph), then
+// changing to the beam picked; picking Power again enters Phazon again. In a real phazon pool the
+// retail code runs untouched.
+void CPlayerGun::PortApplyPhazonCheat(const CFinalInput& input, CStateManager& mgr) {
+  if (!PortDebug::PhazonBeamCheat()) {
+    if (mPortPhazonCheat) {
+      // Turned off: let go of the beam through the exit morph (a pool sets it again).
+      mPortPhazonCheat = false;
+      mPortPhazonPendingBeam = -1;
+      if (!x835_30_inPhazonPool) {
+        x835_24_canFirePhazon = false;
+      }
+    }
+    return;
+  }
+  mPortPhazonCheat = true;
+  if (IsWeaponStateSet(0x8) || x835_30_inPhazonPool) {
+    return;
+  }
+
+  if (x835_25_inPhazonBeam && x33c_phazonBeamState == kPBS_Active && mPortPhazonPendingBeam < 0) {
+    const CPlayerState& playerState = *mgr.GetPlayerState();
+    float maxInput = 0.f;
+    for (int i = 1; i < 4; ++i) {
+      if (playerState.HasPowerUp(mBeamArr[i])) {
+        const float inputVal = ControlMapper::GetAnalogInput(mBeamCtrlCmd[i], input);
+        if (inputVal > 0.65f && inputVal > maxInput) {
+          maxInput = inputVal;
+          mPortPhazonPendingBeam = i;
+        }
+      }
+    }
+  }
+
+  const bool phazon = mPortPhazonPendingBeam < 0 && x310_currentBeam == CPlayerState::kBI_Power;
+  x835_24_canFirePhazon = phazon;
+  if (phazon) {
+    x835_25_inPhazonBeam = true;
+  }
+}
+#endif
+
 void CPlayerGun::StartPhazonBeamTransition(bool active, CStateManager& mgr,
                                            CPlayerState& playerState) {
   if (x833_28_phazonBeamActive == active) {
@@ -1979,6 +2274,9 @@ void CPlayerGun::HandleWeaponChange(const CFinalInput& input, CStateManager& mgr
   if (ControlMapper::GetPressInput(ControlMapper::kC_Morph, input)) {
     StopContinuousBeam(mgr, true);
   }
+#ifdef TARGET_PC
+  PortApplyPhazonCheat(input, mgr);
+#endif
   if (!IsWeaponStateSet(0x8)) {
     if (!x835_25_inPhazonBeam) {
       HandleBeamChange(input, mgr);
@@ -2003,6 +2301,13 @@ void CPlayerGun::HandleBeamChange(const CFinalInput& input, CStateManager& mgr) 
     }
   }
 
+#ifdef TARGET_PC
+  // Port: the Phazon Beam cheat's pending pick, once the Phazon Beam has been left.
+  if (mPortPhazonPendingBeam >= 0) {
+    beam = mPortPhazonPendingBeam;
+    mPortPhazonPendingBeam = -1;
+  }
+#endif
   if (beam > -1) {
     x833_25_ = true;
     if (x310_currentBeam != beam && playerState.HasPowerUp(mBeamArr[beam])) {
@@ -2130,6 +2435,12 @@ void CPlayerGun::PortInitFlashes() {
       PortRemastered::SyntheticEffectId("plasmachargemuzzleflash"),
       PortRemastered::SyntheticEffectId("phazonchargemuzzleflash"),
   };
+  mPortBubbleGens.Clear();
+  mPortBubbleToken = rstl::optional_object_null();
+  const SObjectTag bubbleTag('PART', PortRemastered::SyntheticEffectId("underwaterbubblesweaponfire"));
+  if (gpResourceFactory->CanBuild(bubbleTag)) {
+    mPortBubbleToken = TLockedToken< CGenDescription >(gpSimplePool->GetObj(bubbleTag));
+  }
   mPortFlashTokens = rstl::reserved_vector< TLockedToken< CGenDescription >, kPortFlashCount >();
   for (int i = 0; i < kPortFlashCount; ++i) {
     mPortFlashToken[i] = -1;
@@ -2145,30 +2456,91 @@ void CPlayerGun::PortStartFlash(int slot) {
   if (slot < 0 || slot >= kPortFlashCount || mPortFlashToken[slot] < 0) {
     return;
   }
-  mPortFlashGens[slot] = rs_new CElementGen(mPortFlashTokens[mPortFlashToken[slot]]);
+  mPortFlashGens[slot].Start(mPortFlashTokens[mPortFlashToken[slot]], 2);
 }
 
 void CPlayerGun::PortUpdateFlashes(float dt, const CVector3f& scale) {
   for (int i = 0; i < kPortFlashCount; ++i) {
-    CElementGen* gen = mPortFlashGens[i].get();
-    if (gen == nullptr) {
-      continue;
-    }
-    gen->SetGlobalOrientAndTrans(x418_beamLocalXf);
-    gen->SetGlobalScale(scale);
-    gen->Update(dt);
-    if (gen->IsSystemDeletable()) {
-      mPortFlashGens[i] = rstl::auto_ptr< CElementGen >();
-    }
+    mPortFlashGens[i].Update(dt, x418_beamLocalXf, scale);
   }
 }
 
-void CPlayerGun::PortRenderFlashes() const {
-  for (int i = 0; i < kPortFlashCount; ++i) {
-    if (mPortFlashGens[i].get() != nullptr) {
-      mPortFlashGens[i]->Render();
-    }
+void CPlayerGun::PortRenderFlashes(int first, int end) const {
+  // The beam each flash belongs to (PortInitFlashes): a plain missile has none, the Super
+  // Missile is Power's combo, then the Ice combo and the five charge flashes.
+  static const int kBeam[kPortFlashCount] = {
+      PortBeamColours::kNoTint, CPlayerState::kBI_Power, CPlayerState::kBI_Ice,
+      CPlayerState::kBI_Power,  CPlayerState::kBI_Ice,   CPlayerState::kBI_Wave,
+      CPlayerState::kBI_Plasma, CPlayerState::kBI_Phazon,
+  };
+  for (int i = first; i < end; ++i) {
+    PortBeamColours::Scope beamScope(kBeam[i]);
+    mPortFlashGens[i].Render();
   }
+}
+
+void CPlayerGun::PortRenderMuzzleFxAt(const CStateManager& mgr, const CTransform4f& muzzleXf) const {
+  // The effects are posed at x418_beamLocalXf in the gun's space (Update): seen from a camera
+  // moved into the space that puts that locator on `muzzleXf`, they form at the body's cannon.
+  const CTransform4f gunXf = muzzleXf * x418_beamLocalXf.GetInverse();
+  const CTransform4f oldViewMtx(CGraphics::GetViewMatrix());
+  CGraphics::SetViewPointMatrix(gunXf.GetInverse() * oldViewMtx);
+  gpRender->SetModelMatrix(CTransform4f::Identity());
+  if (x32c_chargePhase >= kCP_FxGrown && x32c_chargePhase < kCP_ComboXfer) {
+    x800_auxMuzzleGenerators[x320_currentAuxBeam]->Render();
+  }
+  if (x832_25_chargeEffectVisible &&
+      (x38c_muzzleEffectVisTimer > 0.f || x32c_chargePhase > kCP_AnimAndSfx)) {
+#ifdef TARGET_PC
+    PortBeamColours::Scope beamScope(x72c_currentBeam->PortBeamId());
+#endif
+    x72c_currentBeam->DrawMuzzleFx(mgr);
+  }
+  PortRenderFlashes(0, kPortFirstChargeFlash);
+  CGraphics::SetViewPointMatrix(oldViewMtx);
+}
+
+// CPlayerMP1::ShouldGenerateUnderWaterBubbles 0xcf14bc: in normal water with the ball's top
+// (morphed) or the camera at least 0.9 below the surface.
+static bool PortShouldGenerateUnderWaterBubbles(const CPlayer& player, const CStateManager& mgr) {
+  if (!player.IsInFluid()) {
+    return false;
+  }
+  const CScriptWater* water = TCastToConstPtr< CScriptWater >(mgr.GetObjectById(player.InFluidId()));
+  if (water == nullptr || water->GetFluidPlane().GetFluidType() != CFluidPlane::kFT_NormalWater) {
+    return false;
+  }
+  const float surfaceZ = water->GetTriggerBoundsWR().GetMaxPoint().GetZ();
+  float depth;
+  if (player.GetMorphballTransitionState() == CPlayer::kMS_Morphed) {
+    depth = surfaceZ - (player.GetBallPosition().GetZ() + player.GetMorphBall()->GetBallRadius());
+  } else {
+    depth = surfaceZ - mgr.GetCameraManager()->GetCurrentCameraTransform(mgr).GetTranslation().GetZ();
+  }
+  return depth >= 0.9f;
+}
+
+// CPlayerGunMP1::GenerateUnderWaterBubbles 0xc9a780, every frame while charging: start (or
+// resume) the module 0.55 along the muzzle's forward axis, placed by translation only
+// (transform mode 2), and keep it alive for 0.25 s.
+void CPlayerGun::PortGenerateUnderWaterBubbles(CStateManager& mgr) {
+  if (!mPortBubbleToken || !PortShouldGenerateUnderWaterBubbles(*mgr.GetPlayer(), mgr)) {
+    return;
+  }
+  mPortBubbleGens.StartOrResume(*mPortBubbleToken);
+  const CTransform4f muzzleXf = x4a8_gunWorldXf * x418_beamLocalXf;
+  mPortBubbleXf =
+      CTransform4f::Translate(muzzleXf.GetTranslation() + muzzleXf.GetForward() * 0.55f);
+  mPortBubbleTimer = 0.25f;
+}
+
+// UpdateUnderWaterBubbles (inlined in CPlayerGunMP1::Update after UpdateGunIdle).
+void CPlayerGun::PortUpdateUnderWaterBubbles(float dt, CStateManager& mgr) {
+  mPortBubbleTimer = rstl::max_val(mPortBubbleTimer - dt, 0.f);
+  if (!PortShouldGenerateUnderWaterBubbles(*mgr.GetPlayer(), mgr) || mPortBubbleTimer <= 0.f) {
+    mPortBubbleGens.FadeActive();
+  }
+  mPortBubbleGens.Update(dt, mPortBubbleXf, CVector3f(1.f, 1.f, 1.f));
 }
 #endif
 
@@ -2181,6 +2553,9 @@ void CPlayerGun::InitMuzzleData() {
         'PART', gpTweakGunRes->GetAuxMuzzleResId(static_cast< CPlayerState::EBeamId >(i)))));
     CElementGen* gen = rs_new CElementGen(x7c0_auxMuzzleEffects[i]);
     gen->SetParticleEmission(false);
+#ifdef TARGET_PC
+    gen->PortSetBeamTint(i);
+#endif
     x800_auxMuzzleGenerators.push_back(gen);
   }
 }
@@ -2209,6 +2584,15 @@ TUniqueId CPlayerGun::GetTargetId(CStateManager& mgr) {
   }
 
   return ret;
+}
+
+bool CPlayerGun::PortShotOffLock(CStateManager& mgr) const {
+  // A centred pointer reports no aim point, and plain pointer aim has no orbit target.
+  return mPortPointerAimValid && mgr.GetPlayer()->GetOrbitTargetId() != kInvalidUniqueId;
+}
+
+TUniqueId CPlayerGun::PortHomingTargetId(CStateManager& mgr) {
+  return PortShotOffLock(mgr) ? kInvalidUniqueId : GetTargetId(mgr);
 }
 
 CPlayerGun::CGunMorph::CGunMorph(float gunTransformTime, float holoHoldTime)
@@ -2305,20 +2689,26 @@ void CPlayerGun::UpdateWeaponFire(float dt, CPlayerState& playerState, CStateMan
   CPlayer& player = *mgr.Player();
 
   if (!x832_24_coolingCharge && !x834_30_inBigStrike) {
-#ifdef TARGET_PC
-    float coolDown = PortShotCoolDown(mgr);
-#else
     float coolDown = x72c_currentBeam->GetWeaponInfo().x0_coolDown;
-#endif
     if ((pressedStates & 0x1) == 0) {
       if (x390_cooldown >= coolDown) {
         x390_cooldown = coolDown;
         if (morphState == CPlayer::kMS_Unmorphed &&
             playerState.ItemEnabled(CPlayerState::kIT_ChargeBeam) &&
             player.GetGunHolsterState() == CPlayer::kGH_Drawn &&
+#ifdef TARGET_PC
+            (player.GetGrappleState() == CPlayer::kGS_None || PortDebug::GrappleShoot()) &&
+#else
             player.GetGrappleState() == CPlayer::kGS_None &&
+#endif
+#ifdef TARGET_PC
+            (PortDebug::ScanShoot() ||
+             (mgr.GetPlayerState()->GetTransitioningVisor() != CPlayerState::kPV_Scan &&
+              mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan)) &&
+#else
             mgr.GetPlayerState()->GetTransitioningVisor() != CPlayerState::kPV_Scan &&
             mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan &&
+#endif
             (x2ec_lastFireButtonStates & 0x1) != 0 && !chargeRequested) {
           x832_28_readyForShot = true;
           pressedStates |= 0x1;
@@ -2355,7 +2745,11 @@ void CPlayerGun::UpdateWeaponFire(float dt, CPlayerState& playerState, CStateMan
           DropBomb(kBW_Bomb, mgr);
       } else {
         x835_29_powerBombReady = playerState.HasPowerUp(CPlayerState::kIT_PowerBombs) &&
+#ifdef TARGET_PC
+                                 playerState.PortUsableAmount(CPlayerState::kIT_PowerBombs) > 0 &&
+#else
                                  playerState.GetItemAmount(CPlayerState::kIT_PowerBombs) > 0 &&
+#endif
                                  mgr.CanCreateProjectile(x538_playerId, kWT_PowerBomb, 1) &&
                                  mgr.CanCreateProjectile(x538_playerId, kWT_Bomb, 1);
         if ((pressedStates & 0x2) != 0 && x835_29_powerBombReady)
@@ -2368,13 +2762,21 @@ void CPlayerGun::UpdateWeaponFire(float dt, CPlayerState& playerState, CStateMan
     }
     if ((pressedStates & 0x2) != 0 && static_cast< int >(x318_comboAmmoIdx) == 0 &&
         !IsWeaponStateSet(0x2) && x32c_chargePhase == kCP_NotCharging) {
+#ifdef TARGET_PC
+      int missileCount = playerState.PortUsableAmount(CPlayerState::kIT_Missiles);
+#else
       int missileCount = playerState.GetItemAmount(CPlayerState::kIT_Missiles);
+#endif
       if (x338_nextState != kNS_EnterMissile && x338_nextState != kNS_ExitMissile) {
         if (playerState.HasPowerUp(CPlayerState::kIT_Missiles) && missileCount > 0) {
           x300_remainingMissiles = missileCount;
           if (static_cast< int >(x300_remainingMissiles) > 5)
             x300_remainingMissiles = 5;
-          if (!x835_25_inPhazonBeam) {
+          if (!x835_25_inPhazonBeam
+#ifdef TARGET_PC
+              || mPortPhazonCheat // Port: Phazon Beam cheat, missiles work in it
+#endif
+          ) {
             ResetToMissile();
           }
           FireSecondary(dt, mgr);
@@ -2430,7 +2832,19 @@ void CPlayerGun::ResetIdle(CStateManager& mgr) {
 void CPlayerGun::UpdateGunIdle(bool inStrikeCooldown, float camBobT, float dt, CStateManager& mgr) {
   CPlayer& player = *mgr.Player();
 
-  if (player.IsInFreeLook() && !x832_29_lockedOn && !x740_grappleArm->IsGrappling() &&
+  bool freeLook = player.IsInFreeLook();
+#ifdef TARGET_PC
+  // Port (#244): as in Trilogy and PrimeHack, standing still under direct aim rests the
+  // left hand on the cannon. Direct aim replaces R's free look, so its pose stands in;
+  // turning and firing keep it, walking or leaving the ground drops it.
+  const bool still = PortDebug::HandOnCannon() && player.MouseControlsAllowed(mgr) &&
+                     player.GetPlayerMovementState() == NPlayer::kMS_OnGround && camBobT <= 0.01f;
+  mPortStillTime = still ? mPortStillTime + dt : 0.f;
+  mPortHandOnCannon = mPortStillTime >= 1.f;
+  freeLook = freeLook || mPortHandOnCannon;
+#endif
+
+  if (freeLook && !x832_29_lockedOn && !x740_grappleArm->IsGrappling() &&
       x3a4_fidget.GetState() != CFidget::kS_HolsterBeam &&
       player.GetGunHolsterState() == CPlayer::kGH_Drawn && !x834_30_inBigStrike) {
     if (!IsWeaponStateSet(0x8)) {
@@ -2652,7 +3066,12 @@ void CPlayerGun::TakeDamage(bool bigStrike, bool notFromMetroid, CStateManager& 
   }
 
   if (hasStrikeAngle || bigStrike) {
+#ifdef TARGET_PC
+    if (mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan ||
+        PortDebug::ScanShoot()) {
+#else
     if (mgr.GetPlayerState()->GetCurrentVisor() != CPlayerState::kPV_Scan) {
+#endif
       x73c_gunMotion->PlayPasAnim(SamusGun::kAS_Struck, mgr, angle, bigStrike);
       if ((bigStrike && notFromMetroid) || x833_31_inFreeLook)
         x740_grappleArm->EnterStruck(mgr, angle, bigStrike, !x833_31_inFreeLook);
@@ -3044,8 +3463,15 @@ void CPlayerGun::UpdateAuxWeapons(float dt, const CTransform4f& targetXf, CState
   if (IsWeaponStateSet(0x10)) {
     if (x310_currentBeam == CPlayerState::kBI_Wave &&
         x744_auxWeapon->HasTarget(mgr) == kInvalidUniqueId) {
+#ifdef TARGET_PC
+      // The Wavebuster re-picks its target while it fires: not the locked one while the
+      // pointer is off it.
+      TUniqueId targetId = PortHomingTargetId(mgr);
+      if (targetId == kInvalidUniqueId && !PortShotOffLock(mgr)) {
+#else
       TUniqueId targetId = GetTargetId(mgr);
       if (targetId == kInvalidUniqueId) {
+#endif
         targetId = mgr.GetPlayer()->GetAimTargetId();
       }
       x744_auxWeapon->SetNewTarget(targetId, mgr);
@@ -3286,7 +3712,11 @@ void CPlayerGun::ProcessGunMorph(float dt, CStateManager& mgr) {
       ReturnArmAndGunToDefault(mgr, false);
     }
     if (x834_28_requestImmediateRecharge || (x2ec_lastFireButtonStates & 0x1) != 0) {
+#ifdef TARGET_PC
+      if (playerState->GetCurrentVisor() != CPlayerState::kPV_Scan || PortDebug::ScanShoot()) {
+#else
       if (playerState->GetCurrentVisor() != CPlayerState::kPV_Scan) {
+#endif
         x32c_chargePhase = kCP_ChargeRequested;
 #ifdef TARGET_PC
         PortStartRapidCharge();

@@ -43,10 +43,15 @@ std::string Relative(const fs::path& path, const fs::path& base) {
 using port::EndsWith;
 
 // Every file a move copies, relative to `root` with '/' separators.
-std::vector< std::string > ListFiles(const std::string& root) {
+// `failed`, when given, is set if the walk stopped on an error: the list is then
+// incomplete, which a copy must not take for the whole folder.
+std::vector< std::string > ListFiles(const std::string& root, bool* failed = nullptr) {
   std::vector< std::string > files;
   std::error_code ec;
   const fs::path base = FromUtf8(root);
+  if (failed != nullptr) {
+    *failed = false;
+  }
   if (!fs::is_directory(base, ec)) {
     return files;
   }
@@ -62,6 +67,9 @@ std::vector< std::string > ListFiles(const std::string& root) {
     if (it->is_regular_file(ec)) {
       files.push_back(relative);
     }
+  }
+  if (ec && failed != nullptr) {
+    *failed = true;
   }
   return files;
 }
@@ -156,7 +164,14 @@ bool CopyTree(const std::string& from, const std::string& to, Progress& progress
     }
   }
   std::vector< char > buffer(1 << 20);
-  for (const std::string& relative : ListFiles(from)) {
+  bool listFailed = false;
+  const std::vector< std::string > files = ListFiles(from, &listFailed);
+  if (listFailed) {
+    // The old data is left alone, and the incomplete flag stays in the target.
+    error = "Could not read all of " + from + " (a folder could not be listed).";
+    return false;
+  }
+  for (const std::string& relative : files) {
     const fs::path in = source / FromUtf8(relative);
     const fs::path out = target / FromUtf8(relative);
     fs::path temp = out;
@@ -451,6 +466,36 @@ void RequestMove(const std::string& target, bool needsAccess) {
   StartCopy(target);
 }
 
+// Copies the shader pipeline cache (app storage, which keeps it when the data moves) into
+// <data>/shader_cache/, where a file manager or adb can read it; the pipeline seed
+// (tools/pipeline_seed.py merge) takes it from there. The write-ahead log goes too: it holds the
+// rows added since the last checkpoint, and SQLite reads it along with the file.
+std::string ExportShaderCache(const std::string& appFolder, const std::string& dataFolder) {
+  if (appFolder.empty() || dataFolder.empty()) {
+    return "No app storage folder.";
+  }
+  const fs::path from = FromUtf8(appFolder);
+  const fs::path to = FromUtf8(dataFolder) / "shader_cache";
+  std::error_code ec;
+  if (!fs::exists(from / "pipeline_cache.db", ec)) {
+    return "There is no shader cache yet.";
+  }
+  fs::create_directories(to, ec);
+  uint64_t bytes = 0;
+  for (const char* name : {"pipeline_cache.db", "pipeline_cache.db-wal"}) {
+    fs::remove(to / name, ec);
+    if (!fs::exists(from / name, ec)) {
+      continue;
+    }
+    if (!fs::copy_file(from / name, to / name, fs::copy_options::overwrite_existing, ec)) {
+      return std::string("Could not copy ") + name + ": " + ec.message();
+    }
+    bytes += fs::file_size(to / name, ec);
+  }
+  PortLog::Write("data folder: shader cache copied to %s\n", ToUtf8(to).c_str());
+  return "Copied the shader cache (" + Size(bytes) + ") to " + ToUtf8(to) + ".";
+}
+
 } // namespace
 
 void DrawPanel() {
@@ -501,6 +546,13 @@ void DrawPanel() {
       if (ImGui::Button("Move back to app storage")) {
         RequestMove(priv, false);
       }
+      ImGui::SameLine();
+      if (ImGui::Button("Copy the shader cache here")) {
+        const std::string result = ExportShaderCache(priv, current);
+        lock.lock();
+        move.message = result;
+        lock.unlock();
+      }
       // Measured once: walking a big mods folder every frame would stutter,
       // and nothing else writes to app storage while the data is elsewhere.
       static bool sConfirmDelete = false;
@@ -519,9 +571,21 @@ void DrawPanel() {
         } else {
           if (ImGui::Button("Delete it for good")) {
             // The disc copy is kept when it is the only one (a move made
-            // before the disc was copied, or "Use the data already there").
+            // before the disc was copied, or "Use the data already there"),
+            // and the file the settings point at, whatever its name.
             const bool discElsewhere = fs::exists(FromUtf8(current + "disc.iso"));
-            DeleteData(priv, [discElsewhere](const std::string& rel) { return rel == "disc.iso" && !discElsewhere; });
+            const char* configured = PortDebug::DiscPath();
+            const fs::path privBase = FromUtf8(priv);
+            DeleteData(priv, [discElsewhere, configured, privBase](const std::string& rel) {
+              if (rel == "disc.iso" && !discElsewhere) {
+                return true;
+              }
+              if (configured == nullptr) {
+                return false;
+              }
+              std::error_code same;
+              return fs::equivalent(privBase / FromUtf8(rel), FromUtf8(configured), same) && !same;
+            });
             sOldMeasured = false;
             sConfirmDelete = false;
           }

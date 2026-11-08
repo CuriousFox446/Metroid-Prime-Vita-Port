@@ -1,5 +1,7 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
 
+#include "port_third_person.h"
+
 #include "Collision/CMaterialFilter.hpp"
 #include "Collision/CRayCastResult.hpp"
 
@@ -76,15 +78,14 @@ float CGameCamera::VertPlusFov(const float fov, const float aspect) {
   return 2.f * std::atan(std::tan(0.5f * fov * kDegToRad) * kMinAspect / aspect) / kDegToRad;
 }
 
-float CGameCamera::VertPlusGunDrop(const float aspect) {
+float CGameCamera::VertPlusGunDrop(const float gunFov, const float aspect) {
   const float kMinAspect = 4.f / 3.f;
   if (!(aspect > 0.f) || aspect >= kMinAspect) {
     return 0.f;
   }
-  // The gun is drawn at the retail FOV. Its 4:3 bottom edge is at tan(fov/2); the widened one
-  // at tan(fov/2) * (4:3 / aspect).
+  // The gun's 4:3 bottom edge is at tan(fov/2); the widened one at tan(fov/2) * (4:3 / aspect).
   const float kDegToRad = 3.14159265f / 180.f;
-  return std::tan(0.5f * PortDebug::kFovRetail * kDegToRad) * (kMinAspect / aspect - 1.f);
+  return std::tan(0.5f * gunFov * kDegToRad) * (kMinAspect / aspect - 1.f);
 }
 
 float CGameCamera::GetUnwidenedFov() const {
@@ -113,7 +114,17 @@ const CMatrix4f& CGameCamera::GetPerspectiveMatrix() const {
 }
 
 CVector3f CGameCamera::ConvertToScreenSpace(const CVector3f& vec) const {
+#ifdef TARGET_PC
+  // Third person draws the world from behind the shoulder, so the lock-on boxes, the target
+  // search and the reticles project from there. Only the first-person camera takes the offset:
+  // any other camera projected meanwhile (cinematic, ball) is drawn from its own transform.
+  const bool firstPerson = PortThirdPerson::Active() &&
+                           TCastToConstPtr< CFirstPersonCamera >(const_cast< CGameCamera* >(this)) != nullptr;
+  CVector3f rotated = (firstPerson ? PortThirdPerson::TickView(GetTransform()) : GetTransform())
+                          .TransposeMultiply(vec);
+#else
   CVector3f rotated = GetTransform().TransposeMultiply(vec);
+#endif
   if (rotated.IsNonZero()) {
     return GetPerspectiveMatrix().MultiplyOneOverW(rotated);
   }

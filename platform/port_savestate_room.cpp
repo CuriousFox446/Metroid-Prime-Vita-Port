@@ -3,12 +3,14 @@
 #include "port_savestate_boss.h"
 #include "port_room_effects.h"
 
+#include "Kyoto/Audio/CStreamAudioManager.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
 #include "MetroidPrime/CGameArea.hpp"
 #include "MetroidPrime/CHealthInfo.hpp"
 #include "MetroidPrime/CObjectList.hpp"
 #include "MetroidPrime/CPhysicsActor.hpp"
 #include "MetroidPrime/CScriptLayerManager.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptSpecialFunction.hpp"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CWorld.hpp"
 #include "MetroidPrime/Cameras/CCinematicCamera.hpp"
@@ -18,12 +20,15 @@
 #include "MetroidPrime/Player/CWorldState.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptActorRotate.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptCounter.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptDebris.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptDock.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptDoor.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptEMPulse.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptHUDMemo.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptMazeNode.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptMemoryRelay.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptMidi.hpp"
+#include "MetroidPrime/ScriptObjects/CScriptPickup.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptPlatform.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptSpiderBallWaypoint.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptStreamedMusic.hpp"
@@ -40,17 +45,26 @@ enum RoomTag : uint32_t {
   kTagTransform = 1,  // 12 floats, the CActor transform
   kTagMotion = 2,     // velocity, momentum (CPhysicsActor)
   kTagHealth = 3,     // hp, knockback resistance
-  // 4 was the AI state: forcing one skips what the enemy class sets up around it
-  // (a parasite put into Patrol from Generate deletes itself), so enemies resume
-  // through their own Start.
+  // 4 was the AI state, forced without the enemy's own fields (a parasite put into
+  // Patrol from Generate deleted itself). kTagFields now carries it with them.
   kTagTimer = 5,      // time, timing
   kTagCounter = 6,    // current
   kTagDoor = 7,       // open
   kTagPlatform = 8,   // current and target waypoint (editor ids), speed, move delay
-  kTagGenerated = 9,  // empty: a script generator's copy of the enemy with this editor id
+  kTagGenerated = 9,  // empty: a script generator's copy of the enemy or pickup with this editor id
   kTagMessages = 10,  // the script messages the enemy was sent (EncodeScriptMsgs)
   kTagBoss = 11,      // a boss's fight state beyond its health (port_savestate_boss.h)
   kTagRotate = 12,    // a turn in progress: flags, time, then per actor editor id + start rotation
+  kTagFields = 13,    // a script object's own fields through the entity schema (port_savestate_fields.cpp)
+  kTagDock = 14,      // the dock's reference, then per reference its load-other flag
+  kTagCinematic = 15, // a running cinematic camera: elapsed time, passed view point, passed target
+  kTagMusic = 16,     // music playing at the save: kind (kMusicMidi/kMusicStream), stream file
+  kTagMaterial = 17,  // u32 lo, u32 hi of an enemy's CMaterialList (solid, shootable, targetable)
+};
+
+enum : uint8_t {
+  kMusicMidi = 0,
+  kMusicStream = 1,
 };
 
 // Friend of the script classes whose state is private.
@@ -333,6 +347,14 @@ uint32_t ScriptId(const CEntity& ent) {
   return ent.GetEditorId().Value();
 }
 
+// The area an object lives in, which owns its record. Usually its editor id's area, but
+// not always (Subchamber Two holds a relay, 000600B5, with Subchamber One's area bits):
+// keyed by the id, the restore of the area it is in would neither save nor delete it.
+int OwnerArea(const CEntity& ent) {
+  const int area = ent.GetAreaId().Value();
+  return area >= 0 ? area : ent.GetEditorId().AreaNum();
+}
+
 // What the CStateManager hooks noted per object (raw TUniqueId value), tagged with
 // the manager it belongs to so a world being torn down never touches the next one's.
 struct Noted {
@@ -362,14 +384,18 @@ TUniqueId RawId(uint16_t value) {
   return uid;
 }
 
+// A dead enemy that is still active plays out its death and deletes itself. One killed
+// while inactive never does: it stays, and may be a script generator's template (Hive
+// Totem's wasps, each one a generator's), so it is saved like any other object.
 bool IsGone(const CEntity& ent) {
   const CPatterned* patterned = TCastToConstPtr< CPatterned >(const_cast< CEntity* >(&ent));
-  return patterned != nullptr && !patterned->IsAlive();
+  return patterned != nullptr && !patterned->IsAlive() && patterned->GetActive();
 }
 
 // A script generator's copy carries its template's editor id. Enemy copies are saved
-// as copies (fights count their deaths); other copies (pickups, maze walls) are not
-// saved at all, as before, but no longer overwrite their template's record.
+// as copies (fights count their deaths), and so are pickups (the Essence's drops) and
+// debris (SavesGeneratedCopy); other copies (maze walls, sounds) are not saved at all,
+// but no longer overwrite their template's record.
 bool IsGeneratedCopy(const CStateManager& mgr, CEntity& ent) {
   const Noted* n = FindNoted(mgr, ent.GetUniqueId());
   return n != nullptr && n->generated;
@@ -393,6 +419,16 @@ void CaptureObject(CStateManager& mgr, CEntity& ent, RoomObject& obj) {
       w.F32(health->GetKnockBackResistance());
       obj.blocks.push_back({kTagHealth, w.bytes});
     }
+    // The fields block enters the saved AI state directly, so the states before it never
+    // set up their materials (a phased-out Chozo Ghost, a burrowed beetle): the list is
+    // saved as it was and put back over what entering the states set.
+    if (TCastToPtr< CPatterned >(&ent) != nullptr) {
+      const uint64_t m = actor->GetMaterialList().GetValue();
+      BlockWriter w;
+      w.U32(static_cast< uint32_t >(m));
+      w.U32(static_cast< uint32_t >(m >> 32));
+      obj.blocks.push_back({kTagMaterial, w.bytes});
+    }
   }
   CPhysicsActor* physics = TCastToPtr< CPhysicsActor >(&ent);
   const bool isDoor = TCastToPtr< CScriptDoor >(&ent) != nullptr;
@@ -402,7 +438,9 @@ void CaptureObject(CStateManager& mgr, CEntity& ent, RoomObject& obj) {
     // platforms and anything moving are saved.
     const bool moving = physics->GetVelocityWR().IsNonZero() ||
                         physics->GetMomentumWR().IsNonZero();
-    if (moving || TCastToPtr< CPatterned >(&ent) != nullptr ||
+    // A generated pickup or debris stands where its generator dropped it, not at its template.
+    const bool dropped = IsGeneratedCopy(mgr, ent);
+    if (moving || dropped || TCastToPtr< CPatterned >(&ent) != nullptr ||
         TCastToPtr< CScriptPlatform >(&ent) != nullptr) {
       BlockWriter xf;
       PutTransform(xf, physics->GetTransform());
@@ -423,6 +461,30 @@ void CaptureObject(CStateManager& mgr, CEntity& ent, RoomObject& obj) {
     PortRoomState::PutCounter(*counter, w);
     obj.blocks.push_back({kTagCounter, w.bytes});
   }
+  if (CScriptDock* dock = TCastToPtr< CScriptDock >(&ent)) {
+    const CWorld* world = mgr.GetWorld();
+    const int area = dock->GetAreaId().Value();
+    if (area >= 0 && area < world->GetNumAreas() &&
+        dock->GetDockId() < world->GetAreaAlways(TAreaId(area)).GetDockCount()) {
+      const IGameArea::Dock& d = world->GetAreaAlways(TAreaId(area)).GetDock(dock->GetDockId());
+      const int refs = static_cast< int >(d.GetDockRefs().size());
+      BlockWriter w;
+      w.U8(static_cast< uint8_t >(d.GetReferenceCount()));
+      w.U8(static_cast< uint8_t >(refs));
+      for (int i = 0; i < refs; ++i)
+        w.U8(d.GetShouldLoadOther(i) ? 1 : 0);
+      obj.blocks.push_back({kTagDock, w.bytes});
+    }
+  }
+  if (CCinematicCamera* cine = TCastToPtr< CCinematicCamera >(&ent)) {
+    if (cine->GetActive()) {
+      BlockWriter w;
+      w.F32(cine->PortElapsed());
+      w.U32(static_cast< uint32_t >(cine->PortPassedViewPoint()));
+      w.U32(static_cast< uint32_t >(cine->PortPassedTarget()));
+      obj.blocks.push_back({kTagCinematic, w.bytes});
+    }
+  }
   if (CScriptDoor* door = TCastToPtr< CScriptDoor >(&ent)) {
     DoorSaveState state;
     state.open = door->IsOpen();
@@ -431,6 +493,8 @@ void CaptureObject(CStateManager& mgr, CEntity& ent, RoomObject& obj) {
     if (!state.open) {
       state.pendingClose = door->PortClosingPending();
       state.refusedClosePending = door->PortRefusedClosePending();
+    } else {
+      state.partner = static_cast< DoorSaveState::Partner >(door->PortPartnerSide());
     }
     state.doClose = door->PortDoClosePending();
     obj.blocks.push_back({kTagDoor, EncodeDoorSaveState(state)});
@@ -445,9 +509,29 @@ void CaptureObject(CStateManager& mgr, CEntity& ent, RoomObject& obj) {
     if (PortRoomState::PutRotate(mgr, *rotate, w))
       obj.blocks.push_back({kTagRotate, w.bytes});
   }
+  // The music actually playing, which the load restarts: the rebuilt objects never get
+  // the Play their trigger sent (CScriptMidi's destructor stopped its song).
+  if (CScriptMidi* midi = dynamic_cast< CScriptMidi* >(&ent)) {
+    if (midi->PortPlaying()) {
+      BlockWriter w;
+      w.U8(kMusicMidi);
+      obj.blocks.push_back({kTagMusic, w.bytes});
+    }
+  }
+  if (CScriptStreamedMusic* music = dynamic_cast< CScriptStreamedMusic* >(&ent)) {
+    if (music->PortPlayingLoop()) {
+      BlockWriter w;
+      w.U8(kMusicStream);
+      w.Str(std::string(music->PortFileName().data()));
+      obj.blocks.push_back({kTagMusic, w.bytes});
+    }
+  }
   std::string boss;
   if (CaptureBossState(mgr, ent, boss))
     obj.blocks.push_back({kTagBoss, boss});
+  std::string fields;
+  if (CaptureEntityFields(mgr, ent, fields))
+    obj.blocks.push_back({kTagFields, fields});
 }
 
 // Delivers `msg` with the entity's links cleared: the handler's own sends (kSS_Active
@@ -487,28 +571,82 @@ void RestoreActive(CStateManager& mgr, CEntity& ent, bool active) {
 // Sends the enemy the script messages it had been sent before the save, in order (what
 // woke a boss: a trigger's Action to Thardus), and keeps them for the next save.
 // Senders are the objects of the rebuilt room with the saved editor ids.
-int ReplayScriptMsgs(CStateManager& mgr, CEntity& ent, const RoomObject& obj) {
+// With `deliver` false (an enemy its kTagFields block restores) the journal is only kept.
+int ReplayScriptMsgs(CStateManager& mgr, CEntity& ent, const RoomObject& obj, bool deliver) {
   const RoomBlock* b = FindBlock(obj, kTagMessages);
   std::vector< ScriptMsgEntry > journal;
   if (b == nullptr || !DecodeScriptMsgs(b->data, journal) || journal.empty())
     return 0;
   const TUniqueId uid = ent.GetUniqueId();
+  int replayed = 0;
   for (const ScriptMsgEntry& e : journal) {
+    if (!deliver)
+      break;
     const TUniqueId sender =
         e.sender == kNoEditorId ? kInvalidUniqueId : mgr.GetIdForScript(TEditorId(e.sender));
     DeliverUnlinked(mgr, ent, sender, static_cast< EScriptObjectMessage >(e.msg));
+    ++replayed;
     // A handler may delete the object (an enemy told to go away).
     if (mgr.ObjectById(uid) != &ent || ent.IsInGraveyard())
       break;
   }
   NoteFor(mgr, uid).msgs = journal;
-  return static_cast< int >(journal.size());
+  return replayed;
+}
+
+// Plays the music a kTagMusic block says was playing at the save. A stream still
+// playing that file (a load in the same world keeps it through the quit) goes on as it
+// is. Returns whether the music is playing.
+bool RestoreMusic(CStateManager& mgr, CEntity& ent, const RoomBlock& b) {
+  if (!ent.GetActive())
+    return false;
+  BlockReader r(b.data);
+  const uint8_t kind = r.U8();
+  if (CScriptMidi* midi = dynamic_cast< CScriptMidi* >(&ent)) {
+    if (!r.ok || kind != kMusicMidi)
+      return false;
+    if (!midi->PortPlaying())
+      DeliverUnlinked(mgr, ent, kInvalidUniqueId, kSM_Play);
+    PortLog::Write("[savestate] music: MIDI %s\n", ent.GetDebugName().data());
+    return midi->PortPlaying();
+  }
+  if (dynamic_cast< CScriptStreamedMusic* >(&ent) != nullptr) {
+    const std::string file = r.Str();
+    if (!r.ok || kind != kMusicStream)
+      return false;
+    const bool playing =
+        CStreamAudioManager::PortIsPlaying(CStreamAudioManager::kSC_Default, file.c_str());
+    if (!playing)
+      DeliverUnlinked(mgr, ent, kInvalidUniqueId, kSM_Play);
+    PortLog::Write("[savestate] music: stream %s %s (%s)\n", ent.GetDebugName().data(),
+                   file.c_str(), playing ? "plays on" : "started");
+    return true;
+  }
+  return false;
 }
 
 void ApplyObject(CStateManager& mgr, CEntity& ent, const RoomObject& obj, RoomApplyStats& stats) {
   RestoreActive(mgr, ent, obj.active);
+  // A cinematic camera saved mid-shot picks the shot up where it was (RestoreActive only
+  // set its flag: its Activate handler would restart it). Saves without the block keep that.
+  if (CCinematicCamera* cine = TCastToPtr< CCinematicCamera >(&ent)) {
+    const RoomBlock* b = FindBlock(obj, kTagCinematic);
+    if (b != nullptr && obj.active && cine->GetActive()) {
+      BlockReader r(b->data);
+      const float t = r.F32();
+      const int viewPoint = static_cast< int >(r.U32());
+      const int target = static_cast< int >(r.U32());
+      cine->PortResumeCinematic(t, viewPoint, target, mgr);
+    }
+  }
+  // An enemy whose fields block covers it gets its state (AI, body, animation, boss phase)
+  // from that block, on top of the Activate above: replaying its messages and the per-boss
+  // restore would only be undone (2026-10-23 sweep, 19 enemy/boss scenarios). Saves without
+  // the block, or with a class this build changed, still go the old way.
+  const RoomBlock* fields = FindBlock(obj, kTagFields);
+  const bool generic = fields != nullptr && EntityFieldsCover(ent, fields->data);
   // Before the saved health and pose, which then win over whatever a message reset.
-  stats.replayed += ReplayScriptMsgs(mgr, ent, obj);
+  stats.replayed += ReplayScriptMsgs(mgr, ent, obj, !generic);
   if (ent.IsInGraveyard())
     return;
 
@@ -550,12 +688,32 @@ void ApplyObject(CStateManager& mgr, CEntity& ent, const RoomObject& obj, RoomAp
       }
     }
   }
+  // Add-on effects and barrier progress are not serialized. This also clears a completed
+  // group's suppression when restoring an earlier point in an already resident area.
+  if (CScriptSpecialFunction* special = TCastToPtr< CScriptSpecialFunction >(&ent))
+    special->PortInvalidateBarrierForRestore(mgr);
   // Omega Pirate keeps its health in a collision actor and needs its intro's Reset later.
   if (COmegaPirate* omega = dynamic_cast< COmegaPirate* >(&ent))
     omega->PortRestoredFromSave(mgr);
   // After health and pose: a boss's phase is worked out from them when the save has no block.
-  const RoomBlock* boss = FindBlock(obj, kTagBoss);
-  RestoreBossState(mgr, ent, boss != nullptr ? &boss->data : nullptr);
+  if (!generic) {
+    const RoomBlock* boss = FindBlock(obj, kTagBoss);
+    RestoreBossState(mgr, ent, boss != nullptr ? &boss->data : nullptr);
+  }
+  // Last of an enemy's blocks: the saved values win over what the replayed messages and
+  // the boss restore set up.
+  if (fields != nullptr)
+    stats.fields += ApplyEntityFields(mgr, ent, fields->data);
+  if (const RoomBlock* b = FindBlock(obj, kTagMaterial)) {
+    BlockReader r(b->data);
+    const uint64_t lo = r.U32();
+    const uint64_t m = lo | (static_cast< uint64_t >(r.U32()) << 32);
+    if (r.ok && actor != nullptr && mgr.ObjectById(ent.GetUniqueId()) == &ent &&
+        !ent.IsInGraveyard() && actor->GetMaterialList().GetValue() != m) {
+      actor->MaterialList() = CMaterialList(m);
+      mgr.UpdateObjectInLists(*actor);
+    }
+  }
   if (CScriptTimer* timer = TCastToPtr< CScriptTimer >(&ent)) {
     if (const RoomBlock* b = FindBlock(obj, kTagTimer)) {
       BlockReader r(b->data);
@@ -580,6 +738,7 @@ void ApplyObject(CStateManager& mgr, CEntity& ent, const RoomObject& obj, RoomAp
         flags.normalClosePending = want.pendingClose;
         flags.refusedClosePending = want.refusedClosePending;
         flags.doClose = want.doClose;
+        flags.partner = want.partner;
         // Applied even when the door already reads closed: that is what restores
         // the message an interrupted close still owes, and the block on opening
         // again a close in flight carries.
@@ -600,6 +759,10 @@ void ApplyObject(CStateManager& mgr, CEntity& ent, const RoomObject& obj, RoomAp
       BlockReader r(b->data);
       PortRoomState::GetRotate(mgr, *rotate, r);
     }
+  }
+  if (const RoomBlock* b = FindBlock(obj, kTagMusic)) {
+    if (RestoreMusic(mgr, ent, *b))
+      ++stats.music;
   }
 }
 
@@ -660,7 +823,7 @@ struct SpawnOverride {
 };
 std::vector< SpawnOverride > sOverrides;
 
-uint32_t WorldKey(CStateManager& mgr) {
+uint32_t WorldKey(const CStateManager& mgr) {
   const CWorld* world = mgr.GetWorld();
   return world != nullptr ? static_cast< uint32_t >(world->IGetWorldAssetId()) : 0;
 }
@@ -721,6 +884,14 @@ void NoteAreaSpawnBegin(CStateManager& mgr, int area) {
   if (layers == nullptr || area < 0 || area >= static_cast< int >(layers->GetAreaLayers().size()))
     return;
   sSpawnMasks[{WorldKey(mgr), area}] = LayerMask(*layers, area);
+}
+
+bool AreaLoadedLayers(const CStateManager& mgr, int area, uint64_t& mask) {
+  const auto it = sSpawnMasks.find({WorldKey(mgr), area});
+  if (it == sSpawnMasks.end())
+    return false;
+  mask = it->second;
+  return true;
 }
 
 void NoteAreaSpawnEnd(CStateManager& mgr, int area) {
@@ -796,10 +967,10 @@ void CaptureRoomState(CStateManager& mgr, RoomState& out) {
   }
   ForEachObject(mgr, [&](CEntity& ent) {
     const uint32_t id = ScriptId(ent);
-    if (id == kNoEditorId || areas.count(ent.GetEditorId().AreaNum()) == 0 || IsGone(ent))
+    if (id == kNoEditorId || areas.count(OwnerArea(ent)) == 0 || IsGone(ent))
       return;
     const bool generated = IsGeneratedCopy(mgr, ent);
-    if (generated && TCastToPtr< CPatterned >(&ent) == nullptr)
+    if (generated && !SavesGeneratedCopy(ent))
       return;
     // A copy's editor id is its template's: the template decides whether that id is present.
     if (!generated)
@@ -810,6 +981,108 @@ void CaptureRoomState(CStateManager& mgr, RoomState& out) {
   });
 }
 
+static void HoldRestoredTimers(CStateManager& mgr, const RoomState& room,
+                               const std::vector< int32_t >& done) {
+  for (const RoomObject& obj : room.objects) {
+    const RoomBlock* b = FindBlock(obj, kTagTimer);
+    if (b == nullptr ||
+        std::find(done.begin(), done.end(), TEditorId(obj.editorId).AreaNum()) == done.end())
+      continue;
+    CEntity* ent = mgr.ObjectById(mgr.GetIdForScript(TEditorId(obj.editorId)));
+    if (CScriptTimer* timer = ent != nullptr ? TCastToPtr< CScriptTimer >(ent) : nullptr) {
+      BlockReader r(b->data);
+      PortRoomState::GetTimer(*timer, r);
+    }
+  }
+}
+
+// A saved area the rebuilt world has not loaded. The game streams in a room's
+// neighbours from the load-other flags of the docks (CStateManager::Update runs
+// TravelToArea(LoadAdjacent) every tick), and those flags are runtime state a state load
+// does not bring back: only the room's own area comes up. Raises the flag of the current
+// room's dock that leads to the saved area, as the dock does when the door nearest it is
+// approached, so a neighbour that was resident at the save streams in again (and gets
+// its saved state when it does). False for an area no dock of the current room leads to
+// (or that the world cannot stream: inactive).
+static bool RequestResidentArea(CStateManager& mgr, int current, int area) {
+  CWorld* world = mgr.World();
+  if (world == nullptr || area < 0 || area >= world->GetNumAreas())
+    return false;
+  CGameArea* target = world->Area(TAreaId(area));
+  if (!target->IsActive())
+    return false;
+  CGameArea* from = world->Area(TAreaId(current));
+  for (int d = 0; d < from->GetDockCount(); ++d) {
+    const IGameArea::Dock& dock = from->GetDock(d);
+    const int refs = static_cast< int >(dock.GetDockRefs().size());
+    for (int r = 0; r < refs; ++r) {
+      if (dock.GetConnectedAreaId(r).Value() == area) {
+        if (!dock.ShouldLoadOtherArea(r))
+          from->DockNC(d).SetShouldLoadOther(r, true);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Which neighbours an area streams in is the load-other flags of its docks, and a
+// rebuilt dock starts from its script property (load connected): every neighbour of the
+// room comes up, also the ones a script had shut (the Impact Crater relays close the
+// Subchambers' docks for the fight). Put back as saved, so the world streams what it
+// streamed at the save. A flag to a neighbour that was resident at the save stays up:
+// RequestResidentArea is still bringing that one back.
+static void RestoreDocks(CStateManager& mgr, const RoomState& room, const std::set< int >& now) {
+  CWorld* world = mgr.World();
+  for (const RoomObject& obj : room.objects) {
+    if (now.count(TEditorId(obj.editorId).AreaNum()) == 0)
+      continue;
+    const RoomBlock* b = FindBlock(obj, kTagDock);
+    if (b == nullptr)
+      continue;
+    CEntity* ent = mgr.ObjectById(mgr.GetIdForScript(TEditorId(obj.editorId)));
+    CScriptDock* dock = ent != nullptr ? TCastToPtr< CScriptDock >(ent) : nullptr;
+    if (dock == nullptr)
+      continue;
+    const int area = dock->GetAreaId().Value();
+    if (area < 0 || area >= world->GetNumAreas() ||
+        dock->GetDockId() >= world->Area(TAreaId(area))->GetDockCount())
+      continue;
+    IGameArea::Dock& d = world->Area(TAreaId(area))->DockNC(dock->GetDockId());
+    BlockReader r(b->data);
+    const int ref = r.U8();
+    const int refs = r.U8();
+    if (!r.ok || refs != static_cast< int >(d.GetDockRefs().size()) || ref >= refs)
+      continue;
+    std::vector< bool > load(refs);
+    for (int i = 0; i < refs; ++i)
+      load[i] = r.U8() != 0;
+    if (!r.ok)
+      continue;
+    if (ref != d.GetReferenceCount())
+      dock->SetDockReference(mgr, ref);
+    for (int i = 0; i < refs; ++i) {
+      const int other = d.GetConnectedAreaId(i).Value();
+      const bool resident =
+          std::find(room.areas.begin(), room.areas.end(), other) != room.areas.end();
+      d.SetShouldLoadOther(i, load[i] || resident);
+    }
+  }
+}
+
+bool RoomAreaAwaitsRestore(CStateManager& mgr, const RoomState& room,
+                           const std::vector< int32_t >& done, int area) {
+  const CWorld* world = mgr.GetWorld();
+  if (world == nullptr || area < 0 || area >= world->GetNumAreas() ||
+      std::find(room.areas.begin(), room.areas.end(), area) == room.areas.end() ||
+      std::find(done.begin(), done.end(), area) != done.end() || !AreaReady(*world, area))
+    return false;
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+  LoadedScriptData(*world, area, data, size);
+  return DecideAreaRestore(room, area, data, size) == RoomAreaRestore::kRestore;
+}
+
 int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32_t >& done,
                    RoomApplyStats& stats) {
   const CWorld* world = mgr.GetWorld();
@@ -817,11 +1090,19 @@ int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32
     return 0;
   std::set< int > now;
   int waiting = 0;
+  stats.late = 0;
+  const int current = world->GetCurrentAreaId().Value();
+  const bool currentReady = current >= 0 && current < world->GetNumAreas() && AreaReady(*world, current);
   for (int32_t area : room.areas) {
     if (std::find(done.begin(), done.end(), area) != done.end())
       continue;
     if (!AreaReady(*world, area)) {
-      ++waiting;
+      // The room Samus stands in is held for; the neighbours that were resident at the
+      // save are streamed in and take their state whenever they finish.
+      if (currentReady && area != current && RequestResidentArea(mgr, current, area))
+        ++stats.late;
+      else
+        ++waiting;
       continue;
     }
     // A rebuilt area may have loaded a different room script than the snapshot
@@ -842,6 +1123,10 @@ int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32
     }
     now.insert(area);
   }
+  // Areas load on different ticks: a timer put back early would count down the
+  // ticks the rest still wait for. Held at its saved value until the last area.
+  if (!done.empty())
+    HoldRestoredTimers(mgr, room, done);
   if (now.empty())
     return waiting;
 
@@ -849,7 +1134,7 @@ int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32
   std::vector< TUniqueId > doomed;
   ForEachObject(mgr, [&](CEntity& ent) {
     const uint32_t id = ScriptId(ent);
-    if (id == kNoEditorId || now.count(ent.GetEditorId().AreaNum()) == 0)
+    if (id == kNoEditorId || now.count(OwnerArea(ent)) == 0)
       return;
     if (present.count(id) == 0 || IsGone(ent))
       doomed.push_back(ent.GetUniqueId());
@@ -861,24 +1146,27 @@ int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32
   const bool waypointsMoved = RestorePlatforms(mgr, room, now);
   std::vector< const RoomObject* > copies;
   for (const RoomObject& obj : room.objects) {
-    if (now.count(TEditorId(obj.editorId).AreaNum()) == 0)
-      continue;
     if (FindBlock(obj, kTagGenerated) != nullptr) {
-      copies.push_back(&obj);
+      if (now.count(TEditorId(obj.editorId).AreaNum()) != 0)
+        copies.push_back(&obj);
       continue;
     }
     CEntity* ent = mgr.ObjectById(mgr.GetIdForScript(TEditorId(obj.editorId)));
     if (ent == nullptr || ent->IsInGraveyard()) {
-      ++stats.unmatched;
+      if (now.count(TEditorId(obj.editorId).AreaNum()) != 0)
+        ++stats.unmatched;
       continue;
     }
+    if (now.count(OwnerArea(*ent)) == 0)
+      continue;
     ApplyObject(mgr, *ent, obj, stats);
     ++stats.applied;
   }
-  // The enemies a script generator made (Hive Totem's wasps): the rebuilt room has
-  // only their templates, and a fight counting their deaths would wait forever.
-  // Made again from the template the way CScriptGenerator does, then given the
-  // copy's saved state (ApplyObject sends the Activate the generator sent).
+  // The enemies and pickups a script generator made (Hive Totem's wasps, the Essence's
+  // drops): the rebuilt room has only their templates, and a fight counting their
+  // deaths would wait forever. Made again from the template the way CScriptGenerator
+  // does, then given the copy's saved state (ApplyObject sends the Activate the
+  // generator sent).
   for (const RoomObject* obj : copies) {
     const bool wasGenerating = mgr.IsGeneratingObject();
     mgr.SetIsGeneratingObject(true);
@@ -889,17 +1177,35 @@ int ApplyRoomState(CStateManager& mgr, const RoomState& room, std::vector< int32
       ++stats.unmatched;
       continue;
     }
+    // Also in the fields block; set here for saves without one.
+    if (CScriptPickup* pickup = TCastToPtr< CScriptPickup >(ent))
+      pickup->SetWasGenerated();
     ApplyObject(mgr, *ent, *obj, stats);
     ++stats.generated;
   }
   if (waypointsMoved)
     PortRoomState::RebuildSpiderBallWaypoints(mgr);
+  RestoreDocks(mgr, room, now);
   done.insert(done.end(), now.begin(), now.end());
   return waiting;
 }
 
 // Read-only views of state the room save keeps, for the statedump console command.
 bool IsScriptGeneratedCopy(const CStateManager& mgr, CEntity& ent) { return IsGeneratedCopy(mgr, ent); }
+
+bool RoomStateHasMusic(const RoomState& room) {
+  for (const RoomObject& obj : room.objects) {
+    if (FindBlock(obj, kTagMusic) != nullptr)
+      return true;
+  }
+  return false;
+}
+
+// A sound copy is left out: made again it would play from its start a second time.
+bool SavesGeneratedCopy(CEntity& ent) {
+  return TCastToPtr< CPatterned >(&ent) != nullptr || TCastToPtr< CScriptPickup >(&ent) != nullptr ||
+         dynamic_cast< CScriptDebris* >(&ent) != nullptr;
+}
 
 bool ScriptTimerState(CEntity& ent, float& time, bool& timing) {
   return PortRoomState::TimerValue(ent, time, timing);

@@ -1,5 +1,5 @@
-// F1 overlay: The Remastered tab, PAL languages and Remastered debugging. State and helpers shared
-// with the other parts are in debug_ui_internal.h.
+// F1 overlay: The Mods page's built-in sections, PAL languages and Remastered debugging. State and
+// helpers shared with the other parts are in debug_ui_internal.h.
 
 #include "debug_ui_internal.h"
 
@@ -11,10 +11,13 @@
 #include "port_room_geo.h"
 #include "port_paths.h"
 #include "port_mods.h"
+#include "port_dread_samus_mod.h"
+#include "port_echoes_suits_mod.h"
 #include "port_remastered_import.h"
 #include "port_remastered_text.h"
 #include "port_savestate.h"
 #include "port_disc.h"
+#include "port_log.h"
 #include "port_pal_languages.h"
 
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
@@ -27,8 +30,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -57,6 +62,12 @@ void DrawRemasteredWarning() {
 
 // The PAL disc's languages for a USA one (port_pal_languages.h).
 void DrawPalLanguages() {
+  if (PortDisc::IsTrilogy(PortDisc::Current())) {
+    ImGui::TextDisabled("Trilogy disc: support is experimental.");
+    ItemHelp("The port runs the USA 1.00 code on the Trilogy disc's Metroid Prime data, which "
+             "already has its languages.");
+    return;
+  }
   if (PortDisc::Current() == PortDisc::Version::Pal) {
     ImGui::TextDisabled("PAL disc: support is experimental.");
     ItemHelp("The port runs the USA 1.00 code on the PAL disc's data. Checked on every room, but "
@@ -166,7 +177,7 @@ void DrawRemasteredRoomModels(bool geoReady) {
       MarkDirty();
     }
     ImGui::SetItemTooltip(
-        "Turns anti-aliasing off and sets the EFB scale to 2x (Quality settings).\nRemastered "
+        "Turns anti-aliasing off and sets the resolution scale to 2x (Quality settings).\nRemastered "
         "rooms draw many more models, which is heavy for a phone's GPU.");
   }
 #endif
@@ -204,20 +215,41 @@ void DrawRemasteredRoomModels(bool geoReady) {
   ImGui::Separator();
 }
 
-// Switches the imported mod on and off, as the Mods page does for the others.
-void DrawRemasteredModToggle() {
+namespace {
+// Whether a built-in mod's import is older than this build. port_mods marks an import made by the
+// Remastered importer on its ModInfo; the Dread and Echoes imports keep their own stamps instead
+// (port_dread_samus_mod.h, port_echoes_suits_mod.h), which the loader reports among the status messages.
+bool ModImportStale(const PortMods::Status& status, const char* modName) {
+  return std::any_of(status.messages.begin(), status.messages.end(), [modName](const std::string& message) {
+    return message.find(modName) != std::string::npos &&
+           message.find("imported by an older version") != std::string::npos;
+  });
+}
+
+// A built-in mod's switch, shared by the Remastered and Dread sections: the mods_disabled entry the
+// Mods page writes for every mod. Nothing to switch while the mod is not installed. Below it: the
+// switch's value (what the next reload loads) and, apart from it, whether this launch loaded it.
+void DrawBuiltinModToggle(const char* modName, const char* label, bool stale) {
   const PortMods::Status& status = PortMods::CurrentStatus();
-  const auto mod = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
-    return m.name == PortRemastered::kImportModName;
+  const auto mod = std::find_if(status.mods.begin(), status.mods.end(), [modName](const PortMods::ModInfo& m) {
+    return m.name == modName;
   });
   if (mod == status.mods.end()) {
     ImGui::TextDisabled("Not imported yet.");
     return;
   }
+  if (stale) {
+    ImGui::TextColored(ThemeWarnColor(), "Imported by an older version: re-import.");
+  } else {
+    ImGui::TextDisabled("Imported.");
+  }
   std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
   bool on = std::find(disabled.begin(), disabled.end(), mod->name) == disabled.end();
-  ImGui::BeginDisabled(!sModsEnabled);
-  if (ImGui::Checkbox("Use the Remastered models", &on)) {
+  // ModsEnabled, not the Load mods setting: Original experience turns every mod off whatever
+  // mods_disabled says, and the switch would be a lie. The setting itself is kept as it is.
+  const bool modsOn = ModsEnabled();
+  ImGui::BeginDisabled(!modsOn);
+  if (ImGui::Checkbox(label, &on)) {
     if (on) {
       disabled.erase(std::remove(disabled.begin(), disabled.end(), mod->name), disabled.end());
     } else {
@@ -226,32 +258,103 @@ void DrawRemasteredModToggle() {
     SetModsDisabled(PortMods::JoinDisabled(disabled));
   }
   ImGui::EndDisabled();
-  ItemHelp("Off plays the retail game. Takes effect when the mods are reloaded.");
-  if (!sModsEnabled) {
+  ItemHelp("Off unloads this mod alone; the other mods still load. Takes effect when the mods are reloaded.");
+  if (!modsOn) {
     SameLineAfterHelp();
-    ImGui::TextDisabled("(mods are off: Mods page)");
+    ImGui::TextDisabled(sModsEnabled ? "(Original experience is on: no mods load)" : "(mods are off)");
   }
-  if (PortMods::Suspended()) {
-    return;
-  }
-  if ((ModsEnabled() && on) != mod->enabled) {
-    ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
-    ImGui::SameLine();
-    if (ImGui::Button("Reload mods##remastered")) {
-      PortSaveState::RequestModReload();
-    }
+  // What this launch loaded, which the switch above only changes at the next reload.
+  if (mod->enabled) {
+    ImGui::TextDisabled(on ? "Loaded." : "Loaded until the mods are reloaded.");
+  } else if (!on) {
+    ImGui::TextDisabled("Off, not loaded.");
+  } else if (PortMods::Suspended()) {
+    ImGui::TextDisabled("Not loaded while an import runs.");
+  } else if (modsOn && mod->pendingRestart) {
+    ImGui::TextColored(ThemeWarnColor(), "Not loaded: Restart the application to apply.");
+  } else if (modsOn) {
+    ImGui::TextColored(ThemeWarnColor(), "Not loaded: reload the mods to apply.");
   }
 }
 
-void DrawRemasteredTab() {
-  DrawRemasteredWarning();
-  ImGui::SeparatorText("Remastered models");
-  DrawRemasteredModToggle();
-  ImGui::SeparatorText("Import");
-  DrawRemasteredImport();
+// Which parts of the installed import the mods load (remastered_hide): the disc's own stands in
+// for each part left out, without importing again. Applies at the next reload.
+void DrawRemasteredParts() {
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  const auto mod = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
+    return m.name == PortRemastered::kImportModName;
+  });
+  if (mod == status.mods.end() || !ImGui::TreeNode("Parts to use")) {
+    return;
+  }
+  struct Part {
+    const char* key;
+    const char* label;
+    const char* help;
+  };
+  static constexpr Part kParts[] = {
+      {"geometry", "Room geometry and lighting",
+       "Remastered's rooms with their lighting, fog and colour grade. Off: the disc's rooms (no restart "
+       "needed to load them)."},
+      {"effects", "Particle effects", "Remastered's particles, beams and room effects."},
+      {"models", "Models", "Remastered's characters, creatures, items and objects."},
+      {"hud", "HUD", "Remastered's visor and HUD."},
+      {"font", "Font", "Remastered's sharp font."},
+      {"text", "Text", "Remastered's text tables."},
+      {"map", "Map", "Remastered's map."},
+      {"movies", "Movies", "Remastered's movies."},
+  };
+  static_assert(std::size(kParts) == std::size(PortMods::kImportParts));
+  const std::string hidden = Loaded(sRemasteredHide);
+  std::string next;
+  bool edited = false;
+  for (const Part& part : kParts) {
+    bool on = !PortMods::ImportPartHidden(hidden, part.key);
+    edited |= ImGui::Checkbox(part.label, &on);
+    ItemHelp(part.help);
+    if (!on) {
+      next += next.empty() ? "" : ",";
+      next += part.key;
+    }
+  }
+  if (edited) {
+    SetRemasteredHidden(next);
+  }
+  if (std::getenv("MP_REMASTERED_HIDE") != nullptr) {
+    ImGui::TextDisabled("(MP_REMASTERED_HIDE is set: it decides for this run)");
+  } else if (mod->enabled && !PortMods::SameImportParts(mod->hidden, next)) {
+    ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reload mods")) {
+      PortSaveState::RequestModReload();
+    }
+  }
+  ImGui::TreePop();
+}
+} // namespace
 
-  ImGui::SeparatorText("Gallery");
-  {
+// The port's own mods, each with its import: Prime Remastered's models, Dread's Samus and Echoes' suits.
+void DrawBuiltinMods() {
+  ImGui::SeparatorText("Built-in mods");
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  // One prod.keys serves both imports, so the page has one row for it, above both sections and
+  // inside neither: it stays visible whichever of them is open, and neither section owns it.
+  DrawImportKeys();
+  // MP_DEBUG_TAB=Mods/<section>, and the old Remastered and Dread page names, open one of these.
+  if (StartSection("Mods", "Prime Remastered")) {
+    ImGui::SetNextItemOpen(true);
+  }
+  // Its header is the only wrapper Prime's content has: the import and the gallery are drawn
+  // straight into this indented body, which ends before the next header.
+  if (ImGui::CollapsingHeader("Prime Remastered")) {
+    ImGui::Indent();
+    DrawBuiltinModToggle(PortRemastered::kImportModName, "Use the Remastered models",
+                         PortMods::StaleRemasteredImport() != nullptr);
+    DrawRemasteredParts();
+    DrawRemasteredWarning();
+    ImGui::SeparatorText("Import");
+    DrawRemasteredImport();
+    ImGui::SeparatorText("Gallery");
     const std::vector<std::string> pictures = PortMods::GalleryPaths();
     if (pictures.empty()) {
       ImGui::TextDisabled("Remastered's concept art. It comes with the Remastered import.");
@@ -261,6 +364,62 @@ void DrawRemasteredTab() {
       ReleaseGalleryTexture();
       sGalleryOpen = true;
     }
+    ImGui::Unindent();
+  }
+  if (StartSection("Mods", "Metroid Dread")) {
+    ImGui::SetNextItemOpen(true);
+  }
+  // A sibling of the Prime section, at the same level: neither import sits under the other.
+  if (ImGui::CollapsingHeader("Metroid Dread")) {
+    ImGui::Indent();
+    DrawBuiltinModToggle(PortDreadSamus::kModName, "Use the Dread Suit models",
+                         ModImportStale(status, PortDreadSamus::kModName));
+    bool cannon = PortDreadSamus::FirstPersonCannonShown();
+    if (ImGui::Checkbox("Dread arm cannon in first person", &cannon)) {
+      PortDreadSamus::SetFirstPersonCannonShown(cannon);
+      MarkDirty();
+    }
+    ItemHelp("Off keeps Prime's own arm cannon in first person; the Dread Suit bodies stay. Applies at once.");
+    ImGui::SeparatorText("Import");
+    DrawDreadSamusImport();
+    ImGui::Unindent();
+  }
+  if (StartSection("Mods", "Metroid Prime 2: Echoes")) {
+    ImGui::SetNextItemOpen(true);
+  }
+  if (ImGui::CollapsingHeader("Metroid Prime 2: Echoes")) {
+    ImGui::Indent();
+    DrawBuiltinModToggle(PortEchoesSuits::kModName, "Use the Echoes Suit models",
+                         ModImportStale(status, PortEchoesSuits::kModName));
+    bool cannon = PortEchoesSuits::FirstPersonCannonShown();
+    if (ImGui::Checkbox("Echoes arm cannon in first person", &cannon)) {
+      PortEchoesSuits::SetFirstPersonCannonShown(cannon);
+      MarkDirty();
+    }
+    ItemHelp("Off keeps Prime's own arm cannon in first person; the Echoes Suit bodies stay. Applies the next "
+             "time a beam is selected.");
+    bool dark = PortEchoesSuits::PlayAsDarkSamus();
+    if (ImGui::Checkbox("Play as Dark Samus", &dark)) {
+      PortEchoesSuits::SetPlayAsDarkSamus(dark);
+      MarkDirty();
+    }
+    ItemHelp("Dark Samus's body in place of every suit's, in third person, cutscenes and the pause screen. "
+             "The first-person arm and the Morph Ball stay the suit's.");
+    // A stale import has no Dark Samus to serve: its own note asks for the re-import.
+    const auto echoes = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
+      return m.name == PortEchoesSuits::kModName;
+    });
+    if (echoes != status.mods.end() && echoes->enabled && !ModImportStale(status, PortEchoesSuits::kModName) &&
+        dark != PortEchoesSuits::DarkSamusServed()) {
+      ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Reload mods##echoes")) {
+        PortSaveState::RequestModReload();
+      }
+    }
+    ImGui::SeparatorText("Import");
+    DrawEchoesSuitsImport();
+    ImGui::Unindent();
   }
 }
 
@@ -303,6 +462,13 @@ void DrawRemasteredDebug() {
     ImGui::SetItemTooltip("Recommended: off. Not saved. Needs \"Draw nearest first\".\nDraws grass "
                           "and leaves for depth first, then shades only what stays visible.\n"
                           "Looks the same; slower on the phones tried so far.");
+    bool opaquePrepass = PortRoomGeo::OpaquePrepass();
+    if (ImGui::Checkbox("Depth pre-pass for all room models", &opaquePrepass)) {
+      PortRoomGeo::SetOpaquePrepass(opaquePrepass);
+    }
+    ImGui::SetItemTooltip("Recommended: on, off on phones (the default). Not saved.\nDraws every room "
+                          "model for depth first, then shades only what stays visible.\n"
+                          "Looks the same; faster on desktop GPUs short of shading power.");
     static constexpr const char* kCostTests[] = {"Off", "Flat", "No lights", "No ambient volume",
                                                  "No reflections", "No normal maps", "No ORM/emissive maps",
                                                  "Maps only", "Maps without anisotropy",
@@ -429,14 +595,6 @@ void DrawRemasteredDebug() {
                           "exposure and bloom.");
     ImGui::BeginDisabled(!env);
     ImGui::SameLine();
-    bool exposed = PortRoomEnv::RoomExposed();
-    if (ImGui::Checkbox("Exposure by room", &exposed)) {
-      PortRoomEnv::SetRoomExposed(exposed);
-    }
-    ImGui::SetItemTooltip("Recommended: on.\nSets brightness as Remastered does, from the camera's "
-                          "room and its tone curve.\n"
-                          "Off exposes every reflection cube to neutral grey.");
-    ImGui::SameLine();
     bool volumes = PortRoomEnv::VolumesEnabled();
     if (ImGui::Checkbox("Baked light per pixel", &volumes)) {
       PortRoomEnv::SetVolumesEnabled(volumes);
@@ -464,6 +622,42 @@ void DrawRemasteredDebug() {
       ImGui::TreePop();
     }
   }
+}
+
+void ToggleRemastered() {
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  const auto mod = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
+    return m.name == PortRemastered::kImportModName;
+  });
+  if (mod == status.mods.end()) {
+    ShowNote("Remastered: not imported");
+    return;
+  }
+  if (!ModsEnabled()) {
+    ShowNote(sOriginalExperience ? "Remastered: off (Original experience is on)" : "Remastered: off (mods are off)");
+    return;
+  }
+  std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
+  const auto found = std::find(disabled.begin(), disabled.end(), mod->name);
+  const bool on = found != disabled.end();
+  if (on) {
+    disabled.erase(found);
+  } else {
+    disabled.push_back(mod->name);
+  }
+  // Saved now: outside the overlay, changes are otherwise written at exit, which a phone's
+  // app rarely reaches before Android kills it.
+  SetModsDisabled(PortMods::JoinDisabled(disabled));
+  SaveSettingsNow();
+  PortLog::Write("port: remastered %s\n", on ? "on" : "off");
+  if (on && mod->pendingRestart) {
+    ShowNote("Remastered: on after a restart");
+    return;
+  }
+  if (!PortMods::Suspended()) {
+    ReloadUntilDone();
+  }
+  ShowNote(on ? "Remastered: on" : "Remastered: off");
 }
 
 } // namespace PortDebug

@@ -5,10 +5,12 @@
 
 #include "port_env.h"
 #include "port_debug.h"
+#include "port_apclient.h"
 #include "port_graphics_backend.h"
 #include "port_gyro_motion.h"
 #include "port_dynamic_res.h"
 #include "port_photo.h"
+#include "port_third_person.h"
 #include "port_pointer.h"
 #include "port_hd_font.h"
 #include "port_log.h"
@@ -20,17 +22,20 @@
 #include "port_discord.h"
 #include "port_savestate.h"
 #include "port_mouse.h"
+#include "port_prompts.h"
 
 #include "MetroidPrime/Player/CGameOptions.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
+#include "MetroidPrime/Player/CPlayerState.hpp"
 
 #include <aurora/gfx.h>
+#include <musyx/port_voices.h>
 #include <dolphin/gx/GXExtra.h>
 #include <dolphin/vi.h>
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_timer.h>
 
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
 #include "touch_pad.h"
 #endif
 
@@ -44,6 +49,21 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+
+namespace aurora {
+bool frame_buffer_size_for_scale(float scale, uint32_t* width, uint32_t* height) noexcept;
+} // namespace aurora
+
+// platform/ai_dma.cpp: the streamed-audio (music, movie) stream's own gain.
+extern "C" void AIPortSetOutputGain(float gain);
+
+void DebugUi::ApplyVolumeBoosts() {
+  const float music = static_cast< float >(sMusicBoost) / 100.f;
+  // The MusyX voices scale one by one in the mix; the AI DMA stream (streamed music, movie audio)
+  // takes the music boost as its stream's gain.
+  MusyxPortSetVolumeBoost(music, static_cast< float >(sSfxBoost) / 100.f);
+  AIPortSetOutputGain(music);
+}
 
 namespace PortDebug {
 
@@ -140,6 +160,12 @@ static float sCaptureScale = 0.f;
 float EffectiveRenderScale() {
   return sCaptureScale > 0.f ? sCaptureScale : sOriginalExperience ? 1.f : sRenderScale;
 }
+// The most dynamic resolution draws at: the scale set, or with auto render scale the
+// window's own (BaseRenderScale), which follows the window as it is resized.
+float DynamicResTop() {
+  const float scale = EffectiveRenderScale();
+  return scale > 0.f ? scale : BaseRenderScale();
+}
 int EffectiveMsaa() { return sOriginalExperience ? 1 : sMsaa; }
 static int EffectiveAnisotropy() { return sOriginalExperience ? 1 : sAnisotropy; }
 
@@ -148,7 +174,7 @@ static int EffectiveAnisotropy() { return sOriginalExperience ? 1 : sAnisotropy;
 void ApplyPresentSharpness() {
   float amount = 0.f;
   if (!sOriginalExperience && sSharpenAmount > 0) {
-    const bool lowered = sDynScale > 0.f && sDynScale < EffectiveRenderScale();
+    const bool lowered = sDynScale > 0.f;
     if (sSharpenMode == 2 || (sSharpenMode == 1 && lowered)) {
       amount = static_cast< float >(sSharpenAmount) / 100.f;
     }
@@ -197,7 +223,7 @@ void WantGpuTimes(unsigned user, bool on) {
 }
 
 void ResetDynamicRes() {
-  sDynController.Reset(EffectiveRenderScale());
+  sDynController.Reset(DynamicResTop());
   sDynGpuMs = -1.0;
   if (sDynScale > 0.f) {
     sDynScale = 0.f;
@@ -213,9 +239,13 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   if (sCaptureScale > 0.f) {
     return;
   }
-  const float top = EffectiveRenderScale();
+  const float top = DynamicResTop();
   const float bottom = std::min(sDynamicResMin, top);
   const bool active = sDynamicRes && !sOriginalExperience && top > bottom && !sTurbo;
+  // Auto's top moves with the window: start over from the new one.
+  static float sDynTop = 0.f;
+  const bool topMoved = sDynTop != top;
+  sDynTop = top;
   // MP_DYNRES_GPU_TIMES=0 steers on the frame rate alone, as on a GPU without timestamps.
   static const bool gpuTimesAllowed = port::EnvFlag("MP_DYNRES_GPU_TIMES", true);
   const bool gpuTimes = gpuTimesAllowed && GXPortGpuTimesSupported() == GX_TRUE;
@@ -227,7 +257,7 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
     }
     return;
   }
-  if (!sDynActive) {
+  if (!sDynActive || topMoved) {
     sDynActive = true;
     ResetDynamicRes();
   }
@@ -235,6 +265,9 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sample.fps = fps;
   sample.frames = frames;
   sample.targetFps = DynamicResTargetFps();
+  AuroraPipelineStats pipelines{};
+  aurora_get_pipeline_stats(&pipelines);
+  sample.compiling = pipelines.pending > 0;
   sample.top = top;
   sample.bottom = bottom;
   if (gpuTimes) {
@@ -247,8 +280,9 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sDynGpuMs = sample.gpuMs;
   const PortDynamicRes::Decision decision = sDynController.Update(sample);
   if (decision.changed) {
-    sDynScale = decision.scale;
-    VISetFrameBufferScale(decision.scale);
+    // Back at the top draws as the setting does (auto: the window's exact size).
+    sDynScale = decision.scale < top ? decision.scale : 0.f;
+    VISetFrameBufferScale(sDynScale > 0.f ? sDynScale : EffectiveRenderScale());
     ApplyPresentSharpness();
     PortLog::Write("port: dynamic resolution %.2fx (%.0f fps, target %.0f, GPU %.1f ms): %s\n", decision.scale,
                    fps, sample.targetFps, sample.gpuMs, PortDynamicRes::ReasonText(decision.reason));
@@ -361,13 +395,28 @@ float BaseRenderScale() {
   if (sRenderScale > 0.f) {
     return sRenderScale;
   }
-  // Auto draws at the window's pixel size; as a multiple of the 480-line base.
-  int width = 0, height = 0;
+  // Auto draws at the window's pixel size, fitted to the game's aspect when that is
+  // narrower than the window's (16:9 in a 4:3 window); as a multiple of what 1x draws,
+  // the render mode's EFB height (480 lines NTSC, 528 PAL).
+  uint32_t width = 0, native = 0, base = 0;
+  if (aurora::frame_buffer_size_for_scale(0.f, &width, &native) &&
+      aurora::frame_buffer_size_for_scale(1.f, &width, &base) && native > 0 && base > 0) {
+    return static_cast< float >(native) / static_cast< float >(base);
+  }
+  int w = 0, h = 0;
   SDL_Window* window = MainWindow();
-  if (window != nullptr && SDL_GetWindowSizeInPixels(window, &width, &height) && height > 0) {
-    return static_cast< float >(height) / 480.f;
+  if (window != nullptr && SDL_GetWindowSizeInPixels(window, &w, &h) && h > 0) {
+    return static_cast< float >(h) / 480.f;
   }
   return 1.f;
+}
+
+int DrawnLines(float scale) {
+  uint32_t width = 0, height = 0;
+  if (aurora::frame_buffer_size_for_scale(scale, &width, &height)) {
+    return static_cast< int >(height);
+  }
+  return static_cast< int >(std::lround(scale * 480.f));
 }
 
 void SetCaptureRenderScale(float scale) {
@@ -407,6 +456,16 @@ void SetHudWide(bool enabled) { StoreSetting(sHudWide, enabled); }
 bool CinemaBars() {
   EnsureInitialized();
   return sCinemaBars || sOriginalExperience;
+}
+
+bool BallBars() {
+  EnsureInitialized();
+  return sBallBars || sOriginalExperience;
+}
+
+bool PhazonShell() {
+  EnsureInitialized();
+  return sPhazonShell;
 }
 
 bool SharpScanWindow() {
@@ -463,6 +522,23 @@ bool AutoAim() {
   return sAutoAim || sOriginalExperience;
 }
 
+float HintDelaySeconds() {
+  EnsureInitialized();
+  return sOriginalExperience ? 0.f : static_cast< float >(sHintDelay) * 60.f;
+}
+
+static bool sShowHintRequested = false;
+
+void RequestShowHint() {
+  sShowHintRequested = true;
+}
+
+bool ConsumeShowHintRequest() {
+  const bool requested = sShowHintRequested;
+  sShowHintRequested = false;
+  return requested;
+}
+
 float ScanSpeed() {
   EnsureInitialized();
   return sOriginalExperience ? 1.f : static_cast< float >(sScanSpeed) / 100.f;
@@ -470,6 +546,8 @@ float ScanSpeed() {
 
 bool MenuStandardButtons() { return Loaded(sMenuStandardButtons); }
 void SetMenuStandardButtons(bool enabled) { StoreSetting(sMenuStandardButtons, enabled); }
+bool MenuExit() { return Loaded(sMenuExit); }
+void SetMenuExit(bool enabled) { StoreSetting(sMenuExit, enabled); }
 
 void SetPointerMenus(bool enabled) {
   EnsureInitialized();
@@ -486,6 +564,21 @@ void SetMapSwapFingers(bool swap) {
 bool SecondaryCrosshairs() {
   EnsureInitialized();
   return sSecondaryCrosshairs || sOriginalExperience;
+}
+
+bool CrosshairInVisor(int visor) {
+  EnsureInitialized();
+  if (sOriginalExperience) {
+    return true;
+  }
+  switch (visor) {
+  case CPlayerState::kPV_XRay:
+    return sCrosshairXRay;
+  case CPlayerState::kPV_Thermal:
+    return sCrosshairThermal;
+  default:
+    return true;
+  }
 }
 
 int HudOpacity(HudOpacityPart part) {
@@ -530,7 +623,7 @@ bool CrosshairColor(float rgb[3]) {
 
 bool HideHelmet() {
   EnsureInitialized();
-  return (sHideHelmet || PortPhoto::Active()) && !sOriginalExperience;
+  return (sHideHelmet || PortPhoto::Active() || PortThirdPerson::Active()) && !sOriginalExperience;
 }
 
 void SetHideHelmet(bool enabled) { StoreSetting(sHideHelmet, enabled); }
@@ -601,6 +694,42 @@ bool StackBeams() {
 
 void SetStackBeams(bool enabled) { StoreSetting(sStackBeams, enabled); }
 
+int BeamSwitchSpeed() {
+  EnsureInitialized();
+  return sOriginalExperience ? kBeamSwitchSpeedDefault : sBeamSwitchSpeed;
+}
+
+void SetBeamSwitchSpeed(int percent) {
+  EnsureInitialized();
+  sBeamSwitchSpeed = std::clamp(percent, kBeamSwitchSpeedMin, kBeamSwitchSpeedMax);
+  MarkDirty();
+}
+
+bool SeamlessPickups() {
+  EnsureInitialized();
+  return sSeamlessPickups && !sOriginalExperience;
+}
+
+void SetSeamlessPickups(bool enabled) { StoreSetting(sSeamlessPickups, enabled); }
+
+int WalkSpeed() {
+  EnsureInitialized();
+  return sOriginalExperience || !sWalkSpeedEnabled ? kWalkSpeedDefault : sWalkSpeed;
+}
+
+bool WalkSpeedEnabled() {
+  EnsureInitialized();
+  return sWalkSpeedEnabled;
+}
+
+void SetWalkSpeedEnabled(bool enabled) { StoreSetting(sWalkSpeedEnabled, enabled); }
+
+void SetWalkSpeed(int percent) {
+  EnsureInitialized();
+  sWalkSpeed = std::clamp(percent, kWalkSpeedMin, kWalkSpeedMax);
+  MarkDirty();
+}
+
 bool Revision100Compatibility() { return Loaded(sRevision100Compatibility); }
 void SetRevision100Compatibility(bool enabled) { StoreSetting(sRevision100Compatibility, enabled); }
 
@@ -648,6 +777,26 @@ void SetFirstPersonFov(float degrees) {
   EnsureInitialized();
   if (std::isfinite(degrees)) {
     sFirstPersonFov = std::clamp(degrees, kFovMin, kFovMax);
+    MarkDirty();
+  }
+}
+
+bool GunFollowsFov() {
+  EnsureInitialized();
+  return sGunFollowsFov && !sOriginalExperience;
+}
+
+void SetGunFollowsFov(bool enabled) { StoreSetting(sGunFollowsFov, enabled); }
+
+float GunFov() {
+  EnsureInitialized();
+  return sOriginalExperience ? kFovRetail : sGunFov;
+}
+
+void SetGunFov(float degrees) {
+  EnsureInitialized();
+  if (std::isfinite(degrees)) {
+    sGunFov = std::clamp(degrees, kFovMin, kFovMax);
     MarkDirty();
   }
 }
@@ -778,6 +927,14 @@ void BeginDriverWorkarounds(const std::string& userFolder, std::string& enable, 
     if (bits & (1u << i)) {
       append(enable, kDriverWorkarounds[i].enable);
       append(disable, kDriverWorkarounds[i].disable);
+      if (const char* var = kDriverWorkarounds[i].env; var != nullptr && port::EnvString(var) == nullptr) {
+#ifdef _WIN32
+        _putenv_s(var, "1");
+#else
+        setenv(var, "1", 1);
+#endif
+        PortLog::Write("port: driver workaround %s sets %s=1\n", kDriverWorkarounds[i].key, var);
+      }
     }
   }
   // A run on MP_DRIVER_WORKAROUNDS says nothing about the ticked boxes: it leaves the marker alone.
@@ -846,6 +1003,28 @@ bool UnlockHardMode() {
 
 void SetUnlockHardMode(bool enabled) { StoreSetting(sUnlockHardMode, enabled); }
 
+float DamageTakenMultiplier() {
+  EnsureInitialized();
+  return sOriginalExperience ? 1.f : sDamageTakenMult;
+}
+
+void SetDamageTakenMultiplier(float m) {
+  if (std::isfinite(m)) {
+    StoreSetting(sDamageTakenMult, std::clamp(m, kDamageMultMin, kDamageMultMax));
+  }
+}
+
+float DamageDealtMultiplier() {
+  EnsureInitialized();
+  return sOriginalExperience ? 1.f : sDamageDealtMult;
+}
+
+void SetDamageDealtMultiplier(float m) {
+  if (std::isfinite(m)) {
+    StoreSetting(sDamageDealtMult, std::clamp(m, kDamageMultMin, kDamageMultMax));
+  }
+}
+
 bool UnlockFusionSuit() {
   EnsureInitialized();
   return sUnlockFusionSuit && !sOriginalExperience;
@@ -869,7 +1048,7 @@ void SetMouseAim(bool enabled) {
 }
 
 bool TouchDirectAim() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   return !sInput.touchClassic && sTouchActive.load(std::memory_order_acquire) && !Visible();
 #else
   return false;
@@ -877,20 +1056,27 @@ bool TouchDirectAim() {
 }
 
 bool TouchActive() {
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   return sTouchActive.load(std::memory_order_acquire) && !Visible();
 #else
   return false;
 #endif
 }
 
-bool DirectAim() { return MouseAim() || TwinStick() || TouchDirectAim(); }
+// Direct aim takes the pad off the classic scheme (the left stick strafes, R no
+// longer looks), so mouse aim switches it on while a pad is in use only when the
+// pad itself aims there, by twin stick or gyro: else the classic GameCube preset
+// could neither turn nor look (#253).
+bool DirectAim() {
+  return TwinStick() || TouchDirectAim() ||
+         (MouseAim() && (!PortPrompts::PadActive() || Loaded(sInput.gyroMode) != 0));
+}
 
 // The pad-preset getters below read as the GameCube preset (off / unbound) while touch is in use: the
 // touch overlay always does what its buttons say. The F1 menu (Visible) sees the stored values.
 bool TwinStick() {
   EnsureInitialized();
-#if defined(__ANDROID__)
+#if defined(PORT_TOUCH_CONTROLS)
   // Touch has its own twin stick (the right stick aims), apart from the pad preset.
   if (TouchActive()) {
     return sInput.touchTwinStick;
@@ -901,7 +1087,31 @@ bool TwinStick() {
 
 bool PadTwinStick() { return Loaded(sInput.twinStick); }
 
+int PadShiftBinding() { return Loaded(sInput.shiftBindings[2]); }
+
+bool PadSwapScanXray() { return Loaded(sInput.swapScanXray); }
+
+int StoredPadAltButton(int bit) {
+  EnsureInitialized();
+  return bit >= 0 && bit < kPadAltCount ? sInput.padAltButtons[bit] : -1;
+}
+
 void SetTwinStick(bool enabled) { StoreSetting(sInput.twinStick, enabled); }
+
+// Touch keeps its own switch, as it keeps its own twin-stick layout.
+bool FlickStick() {
+  return TwinStick() && (TouchActive() ? Loaded(sInput.touchFlickStick) : Loaded(sInput.flickStick));
+}
+
+void SetFlickStick(bool enabled) { StoreSetting(sInput.flickStick, enabled); }
+
+float FlickOuterDeadZone() { return Loaded(sInput.flickOuterDeadZone) / 100.f; }
+
+void SetTouchFlickStick(bool enabled) { StoreSetting(sInput.touchFlickStick, enabled); }
+
+int PadPreset() { return Loaded(sInput.padPreset); }
+
+void SetPadPreset(int preset) { StoreSetting(sInput.padPreset, preset); }
 
 float TwinStickRightY() { return sTwinStickRightY; }
 
@@ -926,6 +1136,13 @@ bool SwapScanXray() {
 }
 
 void SetSwapScanXray(bool enabled) { StoreSetting(sInput.swapScanXray, enabled); }
+
+bool RadialMenus() {
+  EnsureInitialized();
+  return sInput.radialMenus && !sOriginalExperience;
+}
+
+void SetRadialMenus(bool enabled) { StoreSetting(sInput.radialMenus, enabled); }
 
 int TurboBinding(int slot) {
   EnsureInitialized();
@@ -1045,6 +1262,11 @@ void SetOriginalExperience(bool enabled) {
 
 std::string ModsDisabled() { return Loaded(sModsDisabled); }
 void SetModsDisabled(const std::string& list) { StoreSetting(sModsDisabled, list); }
+std::string RemasteredHidden() {
+  const char* env = std::getenv("MP_REMASTERED_HIDE");
+  return env != nullptr ? std::string(env) : Loaded(sRemasteredHide);
+}
+void SetRemasteredHidden(const std::string& list) { StoreSetting(sRemasteredHide, list); }
 
 bool Invulnerable() {
   EnsureInitialized();
@@ -1057,6 +1279,56 @@ void SetInvulnerable(bool enabled) {
   sInvulnerableRun = -1;
   MarkDirty();
 }
+
+bool PhazonBeamCheat() { return Loaded(sPhazonBeamCheat); }
+void SetPhazonBeamCheat(bool enabled) { StoreSetting(sPhazonBeamCheat, enabled); }
+
+unsigned InfiniteAmmoSet() {
+  EnsureInitialized();
+  return sInfiniteAmmo;
+}
+
+bool InfiniteAmmo(unsigned kinds) {
+  return kinds != 0 && (InfiniteAmmoSet() & kinds) == kinds && !OriginalExperience() && !PortAp::Connected();
+}
+
+void SetInfiniteAmmo(unsigned kinds, bool enabled) {
+  EnsureInitialized();
+  sInfiniteAmmo = enabled ? (sInfiniteAmmo | kinds) : (sInfiniteAmmo & ~kinds);
+}
+
+namespace {
+bool sMoonJump = false;
+float sBoostSpeedScale = 1.f;
+float sBoostDurationScale = 1.f;
+bool sBoostAnywhere = false;
+bool sBoostSteer = false;
+
+bool CheatsApply() { return !OriginalExperience() && !PortAp::Connected(); }
+
+float ClampBoostScale(float scale) {
+  return std::isfinite(scale) ? std::clamp(scale, 1.f, kBoostScaleMax) : 1.f;
+}
+} // namespace
+
+bool MoonJumpSet() { return sMoonJump; }
+bool MoonJump() { return sMoonJump && CheatsApply(); }
+void SetMoonJump(bool enabled) { sMoonJump = enabled; }
+
+float BoostSpeedScaleSet() { return sBoostSpeedScale; }
+float BoostDurationScaleSet() { return sBoostDurationScale; }
+float BoostSpeedScale() { return CheatsApply() ? sBoostSpeedScale : 1.f; }
+float BoostDurationScale() { return CheatsApply() ? sBoostDurationScale : 1.f; }
+void SetBoostScales(float speed, float duration) {
+  sBoostSpeedScale = ClampBoostScale(speed);
+  sBoostDurationScale = ClampBoostScale(duration);
+}
+bool BoostAnywhereSet() { return sBoostAnywhere; }
+bool BoostAnywhere() { return sBoostAnywhere && CheatsApply(); }
+void SetBoostAnywhere(bool enabled) { sBoostAnywhere = enabled; }
+bool BoostSteerSet() { return sBoostSteer; }
+bool BoostSteer() { return sBoostSteer && CheatsApply(); }
+void SetBoostSteer(bool enabled) { sBoostSteer = enabled; }
 
 bool LogFile() { return Loaded(sLogFile); }
 void SetLogFile(bool enabled) { StoreSetting(sLogFile, enabled); }
@@ -1074,6 +1346,41 @@ bool LockOnToggle() {
 }
 
 void SetLockOnToggle(bool enabled) { StoreSetting(sInput.lockOnToggle, enabled); }
+
+bool GrappleShoot() {
+  EnsureInitialized();
+  return sInput.grappleShoot && !sOriginalExperience;
+}
+
+void SetGrappleShoot(bool enabled) { StoreSetting(sInput.grappleShoot, enabled); }
+
+bool ScanShoot() {
+  EnsureInitialized();
+  return sInput.scanShoot && !sOriginalExperience;
+}
+
+void SetScanShoot(bool enabled) { StoreSetting(sInput.scanShoot, enabled); }
+
+bool GrappleToggle() {
+  EnsureInitialized();
+  return sInput.grappleToggle && !sOriginalExperience;
+}
+
+void SetGrappleToggle(bool enabled) { StoreSetting(sInput.grappleToggle, enabled); }
+
+bool SpiderToggle() {
+  EnsureInitialized();
+  return sInput.spiderToggle && !sOriginalExperience;
+}
+
+void SetSpiderToggle(bool enabled) { StoreSetting(sInput.spiderToggle, enabled); }
+
+bool AimLockOn() {
+  EnsureInitialized();
+  return sInput.aimLockOn && !sOriginalExperience;
+}
+
+void SetAimLockOn(bool enabled) { StoreSetting(sInput.aimLockOn, enabled); }
 
 bool StickyCharge() {
   EnsureInitialized();
@@ -1134,8 +1441,17 @@ void SetStickAimRate(float pixelsPerSecond) {
 
 void AddStickAim(float x, float y, float dt) {
   EnsureInitialized();
-  if (!TwinStick() || Visible() || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(dt) ||
-      dt <= 0.f) {
+  if (!TwinStick() || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(dt) || dt <= 0.f) {
+    return;
+  }
+  float flickYaw = 0.f;
+  const bool flick = FlickStickTurn(x, y, dt, flickYaw);
+  if (Visible()) return;
+  if (flick) {
+    // An exact angle, so the mouse sensitivity is divided out and Invert X undone.
+    const float travelX = flickYaw / MouseSensitivity() * (MouseInvertX() ? -1.f : 1.f);
+    sMouseFrameX += travelX;
+    sStickFrameX += travelX;
     return;
   }
   // Stick aim stands in for free look, so it follows the game's Reverse Y Axis
@@ -1143,9 +1459,13 @@ void AddStickAim(float x, float y, float dt) {
   if (gpGameState != nullptr && gpGameState->GameOptions().GetInvertYAxis()) {
     y = -y;
   }
-  // x right / y up; the aim state expects SDL-style right/down positive.
-  const float travelX = x * sInput.stickAimRate * dt;
-  const float travelY = -y * (sInput.stickAimSplit ? sInput.stickAimRateY : sInput.stickAimRate) * dt;
+  // x right / y up; the aim state expects SDL-style right/down positive. The travel
+  // turns (and moves the pointer) by the mouse sensitivity, so divide that out: a stick
+  // pixel turns kAimPixelRadians whatever the mouse is set to (issue #209).
+  const float sensitivity = MouseSensitivity();
+  const float travelX = PortMouse::AimPixelsAsCounts(x * sInput.stickAimRate * dt, sensitivity);
+  const float travelY = PortMouse::AimPixelsAsCounts(
+      -y * (sInput.stickAimSplit ? sInput.stickAimRateY : sInput.stickAimRate) * dt, sensitivity);
   sMouseFrameX += travelX;
   sMouseFrameY += travelY;
   sStickFrameX += travelX;

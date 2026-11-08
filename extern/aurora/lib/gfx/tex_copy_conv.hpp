@@ -5,6 +5,7 @@
 #include <dolphin/gx/GXEnum.h>
 
 #include <array>
+#include <string_view>
 
 namespace aurora::gfx::tex_copy_conv {
 
@@ -23,6 +24,10 @@ enum class CopyDomain : uint8_t {
   // The RGBA16F HDR scene as linear light into an RGBA16F destination (GXPortCopyScene); only
   // the plain colour formats (RGB565 still writes alpha 1).
   Linear,
+  // The 8-bit display EFB (sRGB-encoded) decoded to linear light into an RGBA16F destination, each
+  // texel decoded before a bilinear filter: what sampling a copy into an sRGB texture returns
+  // (Remastered's visor copy of its sRGB post output). Always filtered; RGBA8 only.
+  DisplayLinear,
 };
 
 // The copy shaders' uniform: the source region in UV space, and opaqueAlpha for a source without alpha
@@ -43,16 +48,24 @@ struct ConvRequest {
   SampleFilter sampleFilter = SampleFilter::Nearest;
   CopyDomain domain = CopyDomain::Display;
   Range toneRange; // HdrDisplay: the tone curve's three vec4f rows
+  uint32_t srcSamples = 1; // Depth formats: srcView's sample count (a multisampled EFB reads sample 0)
 };
 
 bool needs_conversion(GXTexFmt fmt);
+// Whether run() can convert a depth copy of fmt from an EFB with msaaSamples samples. Compatibility
+// devices cannot bind multisampled depth textures.
+bool depth_conversion_supported(GXTexFmt fmt, uint32_t msaaSamples) noexcept;
 
 void initialize();
 void shutdown();
 void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
 void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
 
-bool snapshot_depth_supported() noexcept;
+// Compatibility: WGSL defining mp_depth_load(texture_depth_2d, sampler_comparison, vec2i) -> f32, the exact
+// equivalent of textureLoad(t, px, 0) for a depth texture (the sampler must be Nearest with compare LessEqual).
+std::string_view compat_depth_load_wgsl() noexcept;
+
+bool snapshot_depth_supported(uint32_t msaaSamples = 1) noexcept;
 void snapshot_depth(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& srcDepth, uint32_t msaaSamples,
                     const wgpu::TextureView& dst);
 

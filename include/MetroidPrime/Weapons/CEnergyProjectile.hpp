@@ -13,6 +13,7 @@
 #include "Kyoto/Math/CVector3f.hpp"
 
 class CEnergyProjectile : public CGameProjectile {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   CEnergyProjectile(const bool active, const TToken< CWeaponDescription >& desc,
                     const EWeaponType type, const CTransform4f& xf, const EMaterialTypes excludeMat,
@@ -30,6 +31,9 @@ public:
 
   // CActor
   void AddToRenderer(const CFrustumPlanes&, const CStateManager&) const override;
+#ifdef TARGET_PC
+  void PortAddThermalColdNode(const CFrustumPlanes&, const CStateManager&) const override;
+#endif
   void Render(const CStateManager&) const override;
   void Touch(CActor&, CStateManager&) override;
 
@@ -52,6 +56,10 @@ public:
   void PlayImpactSound(const CVector3f& pos, EWeaponCollisionResponseTypes type);
   void ChangeProjectileOwner(TUniqueId owner, CStateManager& mgr);
   void ResolveCollisionWithWorld(const CRayCastResult& res, CStateManager& mgr);
+#ifdef TARGET_PC
+  // CEnergyProjectileMP1::SetRemainingRicochetCount (0x1013554); read only by Remastered Explode.
+  void PortSetRemainingRicochetCount(int count) { xPortRicochets = count; }
+#endif
 
 private:
   CSfxHandle x2e8_sfx;
@@ -65,6 +73,7 @@ private:
   float x3d4_curTime;
 #ifdef TARGET_PC
   CPortNestedLights xPortNestedLights; // lights of the nested PHDR children of the APSM effect
+  int xPortRicochets = 8; // CEnergyProjectileMP1 +0x528, ctor 0x1011bdc
 #endif
 
   static const CMaterialList kCheckMaterial;

@@ -105,8 +105,16 @@ void Shutdown() {
   sPlaneObjectBucket = nullptr;
 }
 
+#ifdef TARGET_PC
+static u8 sPortNextWaterSort = 0;
+#endif
+
 void Insert(const CVector3f& pos, const CAABox& aabb, EDrawableType dtype, const void* data,
             const CPlane& plane, const ushort extraSort) {
+#ifdef TARGET_PC
+  const u8 waterSort = sPortNextWaterSort;
+  sPortNextWaterSort = 0;
+#endif
   AUTO_REF(tmpData, *sData);
   if (tmpData.size() == tmpData.capacity()) {
     return;
@@ -114,6 +122,9 @@ void Insert(const CVector3f& pos, const CAABox& aabb, EDrawableType dtype, const
   float dist = CVector3f::Dot(pos, plane.GetNormal()) - plane.GetConstant();
   const CDrawable& drawable = CDrawable(dtype, extraSort, dist, aabb, data);
   tmpData.push_back(drawable);
+#ifdef TARGET_PC
+  tmpData.back().PortSetWaterSort(waterSort);
+#endif
   sMinMaxDistance.first = rstl::min_val(dist, sMinMaxDistance.first);
   sMinMaxDistance.second = rstl::max_val(dist, sMinMaxDistance.second);
 #ifdef __MWERKS__
@@ -209,6 +220,13 @@ void Sort() {
                      ? true
                      : false;
         }
+#ifdef TARGET_PC
+        // Remastered's WSTP 1/2 fix the sort type (5 above the water, 1 below) instead of
+        // taking it from the bounds (BinEntriesWithSortPlane 0x1f3140): entirely above or below.
+        if (it->PortWaterSort() == 1 || it->PortWaterSort() == 2) {
+          partial = full = it->PortWaterSort() == 1;
+        }
+#endif
 
         bool cont;
         if (it->GetType() == kDT_Particle) {
@@ -324,6 +342,8 @@ void CCubeRenderer::PortRestoreBuckets(int slot) {
     Buckets::Restore(Buckets::sStash[slot]);
   }
 }
+
+void CCubeRenderer::PortSetNextWaterSort(u8 mode) { Buckets::sPortNextWaterSort = mode; }
 
 void CCubeRenderer::PortDrawSortedDrawables(int areaIdx) {
   sPortDrawablesOnly = true;
@@ -618,6 +638,11 @@ void CCubeRenderer::AddParticleGen(const CParticleGen& gen) {
   AUTO(bounds, gen.GetBounds());
   if (bounds) {
     CVector3f closestPoint = bounds->ClosestPointAlongVector(GetViewPlane().GetNormal());
+#ifdef TARGET_PC
+    // Remastered adds SBIS to the sort depth (SSceneRenderSortEntry +0x24, SortFarToNear
+    // 0x1f3000); the view normal is unit length, so the shift along it adds exactly that.
+    closestPoint += GetViewPlane().GetNormal() * gen.PortSortBias();
+#endif
     Buckets::Insert(closestPoint, *bounds, kDT_Particle, static_cast< const void* >(&gen),
                     GetViewPlane(), 0);
   }
@@ -625,7 +650,12 @@ void CCubeRenderer::AddParticleGen(const CParticleGen& gen) {
 
 void CCubeRenderer::AddParticleGen(const CParticleGen& gen, const CVector3f& pos,
                                    const CAABox& bounds) {
+#ifdef TARGET_PC
+  Buckets::Insert(pos + GetViewPlane().GetNormal() * gen.PortSortBias(), bounds, kDT_Particle,
+                  static_cast< const void* >(&gen), GetViewPlane(), 0);
+#else
   Buckets::Insert(pos, bounds, kDT_Particle, static_cast< const void* >(&gen), GetViewPlane(), 0);
+#endif
 }
 
 void CCubeRenderer::AddPlaneObject(const void* obj, const CAABox& aabb, const CPlane& plane,
@@ -1934,7 +1964,9 @@ void CCubeRenderer::ReallyRenderFogVolume(const CColor& color, const CAABox& aab
         uv0MaxX = static_cast< float >(chunkW - 1) / static_cast< float >(chunkW);
         uv0MaxY = static_cast< float >(chunkH - 1) / static_cast< float >(chunkH);
 
-        GXSetTexCopyDst(static_cast< u16 >(chunkW), static_cast< u16 >(chunkH), GX_CTF_A8,
+        // A depth copy (li r5, 0x13 in the DOL): the ramp is indexed by the copy's upper
+        // 16 bits of Z, read back as IA8.
+        GXSetTexCopyDst(static_cast< u16 >(chunkW), static_cast< u16 >(chunkH), GX_TF_Z16,
                         GX_FALSE);
 
         uv0MinX = 0.5f / static_cast< float >(chunkW);
@@ -2176,8 +2208,22 @@ void CCubeRenderer::DoThermalModelDraw(const CCubeModel& model, const CColor& mu
       (flags.GetOtherFlags() & CModelFlags::kF_DepthUpdate) == CModelFlags::kF_DepthUpdate);
 
   const ushort drawFlags = flags.GetOtherFlags();
+#ifdef TARGET_PC
+  // A hot model's converted surfaces take Remastered's thermal override in the HDR scene
+  // (CCubeModel::PortDrawThermalOverride); the rest keep this ramp.
+  const ESurfaceSelection which =
+      (drawFlags & CModelFlags::kF_ThermalUnsortedOnly) != 0 ? kSS_Unsorted : kSS_All;
+  const bool portOverride = CCubeModel::PortThermalOverrideActive() && model.TryLockTextures();
+  CCubeModel::sPortThermalSplit = portOverride;
+  model.DrawFlat(pos, nrm, which);
+  CCubeModel::sPortThermalSplit = false;
+  if (portOverride) {
+    model.PortDrawThermalOverride(pos, nrm, flags, which);
+  }
+#else
   model.DrawFlat(pos, nrm,
                  (drawFlags & CModelFlags::kF_ThermalUnsortedOnly) != 0 ? kSS_Unsorted : kSS_All);
+#endif
 }
 
 void CCubeRenderer::DrawThermalModel(const CModel& model, const CColor& mulCol,
@@ -2706,6 +2752,35 @@ void CCubeRenderer::DoPhazonSuitIndirectAlphaBlur(float blurRadius, float blurRa
 
     CGX::End();
   }
+
+#ifdef TARGET_PC
+  // Port: the GC EFB saturates each ONE/ONE blend at 1, so the eight 0.3 taps leave the body's
+  // inside at 1 and the subtract below clears it to the halo. The HDR scene's float target keeps
+  // the sum (up to 2.4), and the whole body stays in the mask. All the taps add, so one clamp of
+  // the sum equals the per-blend saturation: an A8 copy (unorm) drawn back over the alpha. In the
+  // 8-bit display EFB the round trip changes nothing.
+  CopyTex(4, false, GetRenderToTexBuffer(12), GX_TF_A8, false);
+  GXSetColorUpdate(GX_FALSE);
+  CGraphics::LoadDolphinSpareTexture(width >> 2, height >> 2, GX_TF_I8, GetRenderToTexBuffer(12),
+                                     CGraphics::kSpareBufferTexMapID);
+  CGX::SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+  CGX::Begin(GX_TRIANGLESTRIP, GX_VTXFMT0, 4);
+  GXPosition3f32(0.f, 0.f, 0.f);
+  GXColor1u32(white);
+  GXTexCoord2f32(0.f, 1.f);
+  GXPosition3f32(0.25f, 0.f, 0.f);
+  GXColor1u32(white);
+  GXTexCoord2f32(1.f, 1.f);
+  GXPosition3f32(0.f, 0.f, 0.25f);
+  GXColor1u32(white);
+  GXTexCoord2f32(0.f, 0.f);
+  GXPosition3f32(0.25f, 0.f, 0.25f);
+  GXColor1u32(white);
+  GXTexCoord2f32(1.f, 0.f);
+  CGX::End();
+  CGraphics::LoadDolphinSpareTexture(width >> 2, height >> 2, GX_TF_I8, GetRenderToTexBuffer(8),
+                                     CGraphics::kSpareBufferTexMapID);
+#endif
 
   GXSetDstAlpha(GX_FALSE, 0);
   CGX::SetBlendMode(GX_BM_SUBTRACT, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);

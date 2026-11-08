@@ -42,6 +42,7 @@
 #include "port_debug.h"
 #include "port_model_variant.h"
 #include "port_ball_looks.h"
+#include "port_dread_samus_mod.h"
 #include "port_remastered_ball_light.h"
 #include "port_synthetic_effect.h"
 #include "Kyoto/Math/CPlane.hpp"
@@ -58,6 +59,11 @@
 
 static inline CMaterialFilter MakeBallDamageFilter() {
   return CMaterialFilter::MakeIncludeExclude(CMaterialList(kMT_Solid), CMaterialList());
+}
+
+// The Boost Ball duration cheat (PortDebug::BoostDurationScale) stretches the boosted window.
+static inline float BoostDrainTime() {
+  return gpTweakBall->GetBoostBallDrainTime() * PortDebug::BoostDurationScale();
 }
 
 float kSpiderBallCollisionRadius;
@@ -1101,6 +1107,32 @@ void CMorphBall::ComputeMarioMovement(const CFinalInput& input, CStateManager& m
     CVector3f controlForce = turnForce + forwardForce;
     x1c_controlForce = controlForce;
 
+#ifdef TARGET_PC
+    // The boost steering cheat: the stick turns the boosted ball's course at up to kSteerRate,
+    // keeping its speed, where the game only lets it push sideways. Half-pipes keep theirs.
+    if (x1de4_24_inBoost && !GetIsInHalfPipeMode() && PortDebug::BoostSteer()) {
+      static const float kSteerRate = 4.7f; // radians per second at full tilt (~270 degrees)
+      const float tilt = CMath::Clamp(0.f, CVector2f(turn, forward).Magnitude(), 1.f);
+      CVector3f vel = x0_player.GetVelocityWR();
+      const CVector3f want = controlXf.Rotate(CVector3f(turn, forward, 0.f));
+      const float speed2d = CVector2f(vel.GetX(), vel.GetY()).Magnitude();
+      if (tilt > 0.1f && speed2d > 1.f) {
+        const float delta = atan2(vel.GetX() * want.GetY() - vel.GetY() * want.GetX(),
+                                  vel.GetX() * want.GetX() + vel.GetY() * want.GetY());
+        const float step = CMath::Clamp(-kSteerRate * tilt * dt, delta, kSteerRate * tilt * dt);
+        const float c = cos(step);
+        const float s = sin(step);
+        const auto turnZ = [c, s](const CVector3f& v) {
+          return CVector3f(v.GetX() * c - v.GetY() * s, v.GetX() * s + v.GetY() * c, v.GetZ());
+        };
+        // The spin turns with the course, or the ball's grip on the ground fights the new course.
+        x0_player.SetVelocityWR(turnZ(vel));
+        x0_player.SetAngularVelocityWR(
+            CAxisAngle::FromVector(turnZ(x0_player.GetAngularVelocityWR().GetVector())));
+      }
+      controlForce = CVector3f::Zero();
+    } else
+#endif
     if (x1de4_24_inBoost && !GetIsInHalfPipeMode()) {
       const CVector3f controlLocalForce = x1924_surfaceToWorld.TransposeRotate(controlForce);
       CVector3f boostControlForce;
@@ -1580,7 +1612,7 @@ void CMorphBall::UpdateEffects(float dt, CStateManager& mgr) {
 
     const float t = x1df4_boostDrainTime == 0.f
                         ? x1de8_boostChargeTime / gpTweakBall->GetBoostBallMaxChargeTime()
-                        : 1.f - x1df4_boostDrainTime / gpTweakBall->GetBoostBallDrainTime();
+                        : 1.f - x1df4_boostDrainTime / BoostDrainTime();
 
     CElementGen* boostBallGlowGen = x19d8_boostBallGlowGen.get();
     boostBallGlowGen->SetModulationColor(
@@ -1673,7 +1705,7 @@ void CMorphBall::UpdateEffects(float dt, CStateManager& mgr) {
           }
           float boost = 0.f;
           if (x1df4_boostDrainTime != 0.f) {
-            boost = 1.f - x1df4_boostDrainTime / gpTweakBall->GetBoostBallDrainTime();
+            boost = 1.f - x1df4_boostDrainTime / BoostDrainTime();
           } else if (x1de8_boostChargeTime != 0.f) {
             boost = x1de8_boostChargeTime / gpTweakBall->GetBoostBallMaxChargeTime();
           }
@@ -1763,7 +1795,8 @@ void CMorphBall::ComputeBoostBallMovement(const CFinalInput& input, const CState
 
       if (x1de8_boostChargeTime >= gpTweakBall->GetBoostBallMinChargeTime()) {
         if (GetBallBoostState() == kBBS_BoostAvailable) {
-          if (GetIsInHalfPipeMode() || x1df8_27_ballCloseToCollision) {
+          if (GetIsInHalfPipeMode() || x1df8_27_ballCloseToCollision ||
+              PortDebug::BoostAnywhere()) {
             EnterBoosting(const_cast< CStateManager& >(mgr));
           } else {
             const CVector3f surfaceY = x1924_surfaceToWorld.GetColumn(kDY);
@@ -1787,12 +1820,13 @@ void CMorphBall::ComputeBoostBallMovement(const CFinalInput& input, const CState
     }
   } else {
     x1df4_boostDrainTime += dt;
-    if (x1df4_boostDrainTime > gpTweakBall->GetBoostBallDrainTime()) {
+    if (x1df4_boostDrainTime > BoostDrainTime()) {
       LeaveBoosting();
     }
 
-    if (!GetIsInHalfPipeMode() && !x1df8_27_ballCloseToCollision) {
-      if (x1df4_boostDrainTime / gpTweakBall->GetBoostBallDrainTime() < 0.3f) {
+    // The boost-anywhere cheat lets a boost run its course off the ground, undamped.
+    if (!GetIsInHalfPipeMode() && !x1df8_27_ballCloseToCollision && !PortDebug::BoostAnywhere()) {
+      if (x1df4_boostDrainTime / BoostDrainTime() < 0.3f) {
         DampLinearAndAngularVelocities(0.5f, 0.01f);
       }
 
@@ -1853,6 +1887,7 @@ void CMorphBall::EnterBoosting(CStateManager& mgr) {
     speedMul = 0.35f * speedDamp + (1.f - speedDamp);
   }
 
+  incSpeed *= PortDebug::BoostSpeedScale();
   x0_player.ApplyImpulseWR(lookDir * (speedMul * incSpeed * x0_player.GetMass()),
                            CAxisAngle::Identity());
 #ifdef TARGET_PC
@@ -2715,6 +2750,11 @@ float CMorphBall::CalculateSurfaceFriction() const {
     friction *= drainSourceCount * 1.5f;
   }
 
+  // The duration cheat: a boosted ball keeps its speed that much longer.
+  if (x1de4_24_inBoost) {
+    friction /= PortDebug::BoostDurationScale();
+  }
+
   return friction;
 }
 
@@ -2888,7 +2928,11 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
 #endif
           );
       x6c_lowPolyBallModelShader = skSpiderBallLowPoly[modelIdx].x4_shader;
-      if (skSpiderBallGlass[modelIdx].x0_name != nullptr) {
+      if (skSpiderBallGlass[modelIdx].x0_name != nullptr
+#ifdef TARGET_PC
+          && !PortDreadSamus::ReplacesBall(modelIdx, true)
+#endif
+      ) {
         x60_spiderBallGlassModel =
             GetMorphBallModel(rstl::string_l(skSpiderBallGlass[modelIdx].x0_name), xc_radius
 #ifdef TARGET_PC
@@ -2931,6 +2975,14 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
     }
 
     const float scale = 2.f * gpTweakPlayer->GetPlayerBallHalfExtent();
+#ifdef TARGET_PC
+    if (PortDreadSamus::ReplacesBall(modelIdx, spiderBall)) {
+      x5c_ballModelShader = 0;
+    }
+    if (PortDreadSamus::ReplacesLowBall(modelIdx, spiderBall)) {
+      x6c_lowPolyBallModelShader = 0;
+    }
+#endif
     x58_ballModel->SetScale(CVector3f(scale, scale, scale));
   }
 }

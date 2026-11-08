@@ -17,6 +17,7 @@ class CEntityInfo;
 class CModelData;
 
 class CScriptDebris : public CPhysicsActor {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   enum EOrientationType {
     kOT_NotOriented,
@@ -62,6 +63,9 @@ public:
   // CActor
   void PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) override;
   void AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const override;
+#ifdef TARGET_PC
+  void PortAddThermalColdNode(const CFrustumPlanes&, const CStateManager&) const override;
+#endif
   void Render(const CStateManager& mgr) const override;
   rstl::optional_object< CAABox > GetTouchBounds() const override;
   void Touch(CActor& other, CStateManager& mgr) override;

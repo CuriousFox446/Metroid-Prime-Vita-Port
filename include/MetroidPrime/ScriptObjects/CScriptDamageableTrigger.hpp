@@ -13,6 +13,7 @@
 class CVisorParameters;
 
 class CScriptDamageableTrigger : public CActor {
+  friend struct PortEntitySchema; // save-state field schema (platform/include/port_entity_schema.h)
 public:
   enum ECanOrbit {
     kCO_NoOrbit,
@@ -33,6 +34,9 @@ public:
                                                          const CWeaponMode&, int) const override;
   void Render(const CStateManager& mgr) const override;
   void AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const override;
+#ifdef TARGET_PC
+  void PortAddThermalColdNode(const CFrustumPlanes&, const CStateManager&) const override;
+#endif
   void PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) override;
   const CDamageVulnerability* GetDamageVulnerability() const override;
   CHealthInfo* HealthInfo(CStateManager&) override;

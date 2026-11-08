@@ -1,5 +1,9 @@
 #include "MetroidPrime/Cameras/CGameCamera.hpp"
 #include "MetroidPrime/CSamusDoll.hpp"
+#ifdef TARGET_PC
+#include "port_pause_lighting.h"
+#include <dolphin/gx/GXExtra.h>
+#endif
 
 #include "MetroidPrime/CActorLights.hpp"
 #include "MetroidPrime/CEulerAngles.hpp"
@@ -9,6 +13,10 @@
 #include "MetaRender/CCubeRenderer.hpp"
 #include "Collision/CollisionUtil.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
+#include "Kyoto/Graphics/CCubeModel.hpp"
+#ifdef TARGET_PC
+#include "port_dread_samus_mod.h"
+#endif
 #include "rstl/math.hpp"
 #include "MetroidPrime/CAnimRes.hpp"
 #include "MetroidPrime/Player/CMorphBall.hpp"
@@ -19,6 +27,9 @@
 #include <dolphin/gx/GXPixel.h>
 #include <float.h>
 #include "MetroidPrime/Tweaks/CTweakPlayer.hpp"
+#ifdef TARGET_PC
+#include "port_shell.h"
+#endif
 
 static const int skSuitToCharacterType[8] = {0, 6, 2, 10, 16, 24, 20, 28};
 static const int skSuitToCharacterType2[8][2] = {{14, 15}, {8, 9},   {4, 5},   {12, 13},
@@ -49,6 +60,16 @@ static SObjectTag PortSuitVariantTag(const char* name, int suit) {
   const SObjectTag* tag = gpResourceFactory->GetResourceIdByName(name);
   return SObjectTag(tag->GetType(),
                     CMorphBall::PortSuitVariant(tag->GetId(), tag->GetType(), suit));
+}
+
+// Whether a mod serves this suit's doll body: one mesh with its own boots and visor, so the suit's
+// other parts, boots and visor models are not drawn.
+static bool PortDreadDoll(int suit) {
+  return PortDreadSamus::Replaces(PortDreadSamus::DollBody(suit));
+}
+// Whether that body has its own cannon too (Dread, Dark Samus), so the beam model is not drawn.
+static bool PortDollHasCannon(int suit) {
+  return PortDreadSamus::HasOwnCannon(PortDreadSamus::DollBody(suit));
 }
 #endif
 
@@ -150,6 +171,11 @@ bool CSamusDoll::CheckLoadComplete() {
   xc8_suitModel0 = BuildSuitModelData1(x44_suit);
   for (int i = 0; i < 2; ++i) {
     const int character = skSuitToCharacterType2[x44_suit][i];
+#ifdef TARGET_PC
+    if (PortDreadDoll(x44_suit)) {
+      break;
+    }
+#endif
     if (character != -1) {
       CAnimRes res(gpResourceFactory->GetResourceIdByName("ANCS_ItemScreenSamus")->GetId(),
                    character, skDefaultScale, 2, true);
@@ -361,6 +387,14 @@ void CSamusDoll::Update(float dt, CRandom16& rand) {
 }
 
 void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
+#ifdef TARGET_PC
+  const PortPauseLighting::Scope dollScope(PortPauseLighting::doll, PortPauseLighting::active);
+  // Remastered builds the doll's models on the master scene (CSamusDollMP1::TryFinishLoad
+  // 0xe78a18, CModelLightingDataMP1::Default), group 0, while the UI area's baked context
+  // has its own group (CGameAreaLoader::ContinueLoad 0x3f8ea0, room types mask 0x1b9), so
+  // HasProbeData (0x1c6bbc) fails and the doll has no baked light, only the UI lights.
+  const PortPauseLighting::Scope unbakedScope(CCubeModel::sPortUnbaked, PortPauseLighting::active);
+#endif
   if (!IsLoaded()) {
     return;
   }
@@ -394,6 +428,30 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                            static_cast< float >(CGraphics::GetViewportHeight()), 0.2f, 4096.f);
   CGraphics::SetViewPointMatrix(xb0_userRot.BuildTransform4f(xa4_offset) *
                                 CTransform4f::Translate(0.f, xc0_userZoom, 0.f));
+#ifdef TARGET_PC
+  struct UILights {
+    bool on;
+    float previous[64 * 16];
+    u32 count = 0;
+    u8 shadow = 0;
+    UILights() : on(PortPauseLighting::doll) {
+      if (!on) return;
+      count = GXPortGetRoomLights(previous);
+      shadow = GXPortGetShadowCasterMode();
+      GXPortSetShadowCaster(GX_FALSE);
+      float worldToView[3][4];
+      PortPauseLighting::LightView(worldToView);
+      float lights[32];
+      GXPortSetRoomLights(lights, PortPauseLighting::Lights(worldToView, lights));
+    }
+    ~UILights() {
+      if (!on) return;
+      GXPortSetRoomLights(previous, count);
+      GXPortSetShadowCaster(shadow != 0);
+      if (shadow == 2) GXPortSetShadowCasterOnly(GX_TRUE);
+    }
+  } uiLights;
+#endif
   const CTransform4f scale = CTransform4f::Scale(skDefaultScale);
   const CTransform4f gunXf =
       xc8_suitModel0->GetScaledLocatorTransform(rstl::string_l(kGunLocator)) * scale;
@@ -409,6 +467,9 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
     if (phazonSuit) {
       GXSetDstAlpha(GX_TRUE, 255);
     }
+#ifdef TARGET_PC
+    float portBallAlpha = 0.f;
+#endif
     for (int i = 0; i <= x118_suitModel1and2.size(); ++i) {
       TLockedToken< CSkinnedModel > backupModel = xc8_suitModel0->AnimationData()->GetModelData();
       if (i < x118_suitModel1and2.size()) {
@@ -420,6 +481,11 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                                         CColor::White().WithAlphaOf(drawAlpha * suitPulse));
       xc8_suitModel0->AnimationData()->SubstituteModelData(backupModel);
     }
+#ifdef TARGET_PC
+    // Port: a mod's body has its own boots and visor (PortDreadDoll), and maybe cannon.
+    const bool portDread = PortDreadDoll(x44_suit);
+    if (!portDread)
+#endif
     x134_suitModelBoots->MultiLightingDraw(CModelData::kWM_Normal, CTransform4f::Identity(),
                                            x24c_actorLights.get(),
                                            CColor::White().WithAlphaOf(drawAlpha),
@@ -427,10 +493,17 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
     CGraphics::LoadLight(kLight0, x23c_lights[0]);
     CGraphics::EnableLight(kLight0);
     CGraphics::SetAmbientColor(CColor(0x00000000));
+#ifdef TARGET_PC
+    if (!PortDollHasCannon(x44_suit)) {
+#endif
     CGraphics::SetModelMatrix(gunXf);
     beam->Draw(CModelFlags::AlphaBlended(drawAlpha));
     beam->Draw(CModelFlags::Additive(drawAlpha * itemPulse * x5c_beamPulseFactor)
                    .DepthCompareUpdate(true, false));
+#ifdef TARGET_PC
+    }
+    if (!portDread) {
+#endif
 
     CGraphics::SetModelMatrix(visorXf);
     const float visorT =
@@ -467,6 +540,9 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
     visor->Draw(CModelFlags::Additive(drawAlpha * addBlend * x68_visorPulseFactor)
                     .DepthCompareUpdate(true, false));
 #endif
+#ifdef TARGET_PC
+    }
+#endif
     if (x270_25_hasGrappleBeam) {
       CGraphics::SetModelMatrix(grappleXf);
       grapple->Draw(CModelFlags::AlphaBlended(drawAlpha));
@@ -486,6 +562,9 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
         ballAlpha =
             rstl::max_val(0.f, (x54_remTransitionTime - (x50_totalTransitionTime - 0.25f)) / 0.25f);
       }
+#ifdef TARGET_PC
+      portBallAlpha = ballAlpha;
+#endif
       if (ballAlpha > 0.f) {
         CModelFlags flags[2] = {
             CModelFlags::AlphaBlended(0.f)
@@ -537,7 +616,51 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                 .UseShaderSet(x1e4_glassMatIdx));
       }
     }
+#ifdef TARGET_PC
+    // Remastered draws Model_SilhouetteShell (type 2) over each part instead (port_shell.h;
+    // CSamusDollMP1::RenderSuit 0xe79c48): the port draws them all after the parts, through the
+    // frame's scene copy.
+    bool portShellDrawn = false;
     if (phazonSuit && drawAlpha > 0.1f) {
+      portShellDrawn = PortShell::DrawNow(
+          PortShell::kDoll, xc8_suitModel0->GetBounds(CTransform4f::Identity()), [&] {
+            const CModelFlags flags = CModelFlags::Normal();
+            for (int i = 0; i <= x118_suitModel1and2.size(); ++i) {
+              TLockedToken< CSkinnedModel > backupModel =
+                  xc8_suitModel0->AnimationData()->GetModelData();
+              if (i < x118_suitModel1and2.size()) {
+                xc8_suitModel0->AnimationData()->SubstituteModelData(x118_suitModel1and2[i]);
+              }
+              xc8_suitModel0->Render(CModelData::kWM_Normal, CTransform4f::Identity(),
+                                     x24c_actorLights.get(), flags);
+              xc8_suitModel0->AnimationData()->SubstituteModelData(backupModel);
+            }
+            x134_suitModelBoots->Render(CModelData::kWM_Normal, CTransform4f::Identity(),
+                                        x24c_actorLights.get(), flags);
+            CGraphics::SetModelMatrix(gunXf);
+            beam->Draw(flags);
+            CGraphics::SetModelMatrix(visorXf);
+            visor->Draw(flags);
+            if (x270_25_hasGrappleBeam) {
+              CGraphics::SetModelMatrix(grappleXf);
+              grapple->Draw(flags);
+            } else if (x44_suit >= CPlayerState::kPS_FusionPower) {
+              CGraphics::SetModelMatrix(grappleXf);
+              fins->Draw(flags);
+            }
+            if (portBallAlpha > 0.f) {
+              x184_ballModelData->Render(CModelData::kWM_Normal, x10_ballTransform,
+                                         x24c_actorLights.get(), flags);
+            }
+          });
+      if (portShellDrawn) {
+        GXSetDstAlpha(GX_FALSE, 0);
+      }
+    }
+    if (!portShellDrawn && phazonSuit && drawAlpha > 0.1f) {
+#else
+    if (phazonSuit && drawAlpha > 0.1f) {
+#endif
       CCubeRenderer* const renderer = gpRender;
       const float radius = CMath::Clamp(
           0.2f, (10.f - (xc0_userZoom >= 0.f ? xc0_userZoom : -xc0_userZoom)) / 20.f, 1.f);

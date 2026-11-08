@@ -2,6 +2,7 @@
 #include "port_freecam.h"
 
 #include "port_debug.h"
+#include "port_third_person.h"
 #include "Kyoto/Input/CFinalInput.hpp"
 #include "Kyoto/Math/CRelAngle.hpp"
 #include "Kyoto/Math/CTransform4f.hpp"
@@ -9,6 +10,8 @@
 #include "MetroidPrime/CActor.hpp"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
+#include "MetroidPrime/Player/CPlayer.hpp"
+#include "MetroidPrime/Tweaks/CTweakPlayer.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -23,6 +26,7 @@ bool sActive = false;
 bool sFrozen = false;
 float sSpeed = 10.f;
 bool sShowPlayer = true;
+bool sDrive = false;
 Pose sPose{0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
 float sFov = 0.f;
 float sTouchMoveX = 0.f;
@@ -118,6 +122,8 @@ void SetSpeed(float speed) {
 
 bool ShowPlayer() { return sActive && sShowPlayer; }
 void SetShowPlayer(bool show) { sShowPlayer = show; }
+bool Drive() { return sActive && sDrive; }
+void SetDrive(bool drive) { sDrive = drive; }
 
 Pose GetPose() { return sPose; }
 
@@ -131,6 +137,22 @@ void SetPose(const Pose& pose, bool snap) {
   if (snap) {
     Snap();
   }
+}
+
+bool MovePlayerHere(CStateManager& mgr) {
+  CPlayer* player = mgr.Player();
+  if (!sActive || player == nullptr) {
+    return false;
+  }
+  const bool morphed = player->GetMorphballTransitionState() == CPlayer::kMS_Morphed;
+  const float height = morphed ? gpTweakPlayer->GetPlayerBallHalfExtent() : player->GetEyeHeight();
+  const CVector3f pos(sPose.x, sPose.y, sPose.z - height);
+  const float yaw = sPose.yaw / kDegrees;
+  const CVector3f dir(-std::sin(yaw), std::cos(yaw), 0.f);
+  player->Teleport(CTransform4f::LookAt(pos, pos + dir, CVector3f::Up()), mgr, true);
+  player->SetVelocityWR(CVector3f(0.f, 0.f, 0.f));
+  SetActive(false, &mgr);
+  return true;
 }
 
 float FovOverride() { return sActive ? sFov : 0.f; }
@@ -171,6 +193,9 @@ bool Input(const CFinalInput& input) {
   if (PortDebug::OverlayVisible()) {
     return true; // the overlay has the pad
   }
+  if (sDrive) {
+    return false; // the player has the pad
+  }
   const float dt = std::clamp(input.Time(), 0.f, 0.1f);
   sPose.yaw -= (input.ARARight() - input.ARALeft()) * kTurnRate * dt;
   sPose.pitch += (input.ARAUp() - input.ARADown()) * kTurnRate * dt;
@@ -203,7 +228,7 @@ bool Input(const CFinalInput& input) {
 
 CTransform4f View(const CTransform4f& game) {
   if (!sActive) {
-    return game;
+    return PortThirdPerson::View(game);
   }
   const Pose pose = PresentedPose();
   CTransform4f xf = ViewRotation(pose);

@@ -39,6 +39,9 @@ struct EffectImportIO {
   // Optional: pairings the image itself gives (a projectile's particles, from its WPSM and the
   // disc's WPSC), used after the importer's own table.
   std::vector<EffectPairing> pairings;
+  // Optional: Remastered decals (DPSM) paired with the disc's DPSCs (DecalPairings), each
+  // written over its DPSC as ConvertDecal makes it.
+  std::vector<EffectPairing> decals;
   // Optional: GENPs a room's effect actors use (RoomEffectGenps) that stand for no disc PART:
   // each is written under RoomEffectId(), for the rooms' .roomfx files to name.
   std::vector<EffectGuid> roomOnly;
@@ -52,6 +55,8 @@ struct EffectImportIO {
   // A disc resource's bytes by type and id; false when the disc has none.
   // Optional: without it a converted effect keeps its own light.
   std::function<bool(uint32_t type, uint32_t id, std::vector<uint8_t>& out)> retail;
+  // Optional: whether the disc has a resource of this type and id (any type, unlike `retail`).
+  std::function<bool(uint32_t type, uint32_t id)> retailHas;
   // A new id for a resource of the import, never one the disc or the import
   // already has; `seed` makes it the same in every import.
   std::function<uint32_t(uint32_t seed)> freshId;
@@ -77,6 +82,9 @@ struct EffectImportIO {
   // Optional: the VMSH blob of a model `model` converted under `retailId` (empty for any
   // other id), so a model particle with a VMAT carries its mesh.
   std::function<std::vector<uint8_t>(uint32_t retailId)> modelMesh;
+  // Optional: whether the Remastered model `id` has an ANUV program; false when it cannot be
+  // read. Without it a PMPH does not convert.
+  std::function<bool(const EffectGuid& id, bool& animatesUv)> modelAnimatesUv;
   // Stores one output file: "<ID>.PART", "<ID>.TXTR" or "<ID>.CMDL".
   std::function<bool(const std::string& name, const std::vector<uint8_t>& data)> write;
   std::function<void(const std::string& line)> log;  // optional
@@ -93,6 +101,8 @@ struct EffectImportResult {
   int flipbooks = 0;   // of those, atlases of an array texture's layers
   int models = 0;      // Remastered-only models converted for the effects
   int dropped = 0;     // retail properties left out across the written PARTs
+  int decals = 0;      // DPSCs written from a paired DPSM
+  int decalsFailed = 0;  // paired DPSMs left retail
 };
 
 // Whether the next import converts effects: on, unless MP_REMASTERED_EFFECTS
@@ -105,5 +115,16 @@ EffectImportResult ImportEffects(const EffectImportIO& io);
 // (in a pak's byte order) as it prints, 8-4-4-4-12 in lower case.
 uint32_t RoomEffectId(const EffectGuid& id);
 
-}  // namespace PortRemastered
+// The Remastered-only GENPs the ELSMs and ELC2s of `io.effects` name as GPSM or EPSM (not an
+// embedded child), in order and once each: the import writes them as it does roomOnly ones.
+std::vector<EffectGuid> ElectricGenps(const EffectImportIO& io);
 
+// Whether `id` (in a pak's byte order) prints as `text` (8-4-4-4-12, lower case).
+bool EffectIdIs(const EffectGuid& id, const char* text);
+
+// All retail PARTs kMatchedEffects pairs with `id` (in a pak's byte order), regardless of
+// pairing method. The rooms step verifies their presence before assigning the source
+// actor's placement and particle variables to a matched retail Effect.
+std::vector<uint32_t> MatchedRetailEffects(const EffectGuid& id);
+
+}  // namespace PortRemastered

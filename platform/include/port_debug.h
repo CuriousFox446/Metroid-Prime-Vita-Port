@@ -13,6 +13,7 @@
 
 class CStateManager;
 class CGuiModel;
+class CPlayerState;
 
 namespace PortDebug {
 
@@ -158,12 +159,16 @@ void SetFullscreen(bool enabled);
 // 0 = auto (native, driven by the display scale), otherwise a fixed multiplier.
 float RenderScale();
 void SetRenderScale(float scale);
-// Photo mode captures: the configured scale (1 when auto), and a temporary override
+// Photo mode captures: the configured scale (auto: the scale the window's own size
+// is, as a multiple of what 1x draws), and a temporary override
 // (0 = none) that also holds dynamic resolution still.
 float BaseRenderScale();
 void SetCaptureRenderScale(float scale);
+// The lowest scale dynamic resolution may be set to drop to.
+constexpr float kDynamicResMinLowest = 0.25f;
 // Dynamic resolution: draws the EFB between DynamicResMin and RenderScale to
-// hold DynamicResTarget fps (0 = the frame cap). False when off.
+// hold DynamicResTarget fps (0 = the frame cap). False when off. With auto render
+// scale the top is the window's own scale.
 bool DynamicRes();
 int DynamicResTarget();
 float DynamicResMin();
@@ -194,6 +199,12 @@ void SetHudWide(bool enabled);
 // below 16:9 the cinematic camera already renders the full shot, so it fills the
 // screen instead.
 bool CinemaBars();
+// The morph ball view's top/bottom bands (tweak BallViewportYReduction). Off by default:
+// the world fills the screen in ball mode, as below 4:3.
+bool BallBars();
+// Remastered's Phazon Suit aura (PortShell, the silhouette shell). On by default; off: the
+// Phazon Suit draws retail's distortion effect, as without the Remastered room environment.
+bool PhazonShell();
 // The scan visor's magnifier draws the world a second time through a camera zoomed by the
 // window's magnification (CMFGame::Draw), instead of stretching a copy of the screen. Off by
 // default and under Original experience.
@@ -237,8 +248,9 @@ const int kCrosshairOpacityMin = 0;
 const int kCrosshairOpacityMax = 100;
 int CrosshairOpacity();
 // The centre crosshair's look: the game's model, or a procedural take on Remastered's design
-// (crosshair_style=, MP_CROSSHAIR_STYLE). Classic under Original experience.
-enum ECrosshairStyle { kCrosshairStyle_Classic, kCrosshairStyle_Remastered };
+// (crosshair_style=, MP_CROSSHAIR_STYLE). Classic under Original experience. GameCube is the
+// GC crosshair in place of Trilogy's aiming cursor on a Trilogy disc, Classic on a GC disc.
+enum ECrosshairStyle { kCrosshairStyle_Classic, kCrosshairStyle_Remastered, kCrosshairStyle_GameCube };
 ECrosshairStyle CrosshairStyle();
 void SetCrosshairStyle(ECrosshairStyle style);
 bool CrosshairColor(float rgb[3]);
@@ -250,12 +262,39 @@ bool AutoAim();
 const int kScanSpeedMin = 100;
 const int kScanSpeedMax = 500;
 float ScanSpeed();
+// Hint delay in minutes (hint_delay=, MP_HINT_DELAY); 0 = the game's own timing. HintDelaySeconds()
+// caps the wait before a hint first shows (CHintOptions::Update); 0 when off or under Original
+// experience. RequestShowHint() (F1 button, `hint show`) asks the next CHintOptions::Update to show
+// the hint the game would show next; ConsumeShowHintRequest() takes the request.
+const int kHintDelayMin = 0;
+const int kHintDelayMax = 30;
+// Music and sound effects boost in percent (music_boost=, sfx_boost=, MP_MUSIC_BOOST, MP_SFX_BOOST;
+// 100 = none): the F1 Game > Audio rows' part above 100 percent. The port's mixer scales the music
+// (the sequenced MusyX voices and the streamed music) or the sound effects voices past the game's
+// own maximum.
+const int kVolumeBoostMin = 100;
+const int kVolumeBoostMax = 200;
+const int kVolumeBoostDefault = 100;
+float HintDelaySeconds();
+void RequestShowHint();
+bool ConsumeShowHintRequest();
 // The next-target reticles (combat seeker, X-ray ring, thermal crosshair). Off hides them;
 // lock-on and scan reticles stay. On under Original experience.
 bool SecondaryCrosshairs();
+// Whether the crosshair (and Trilogy's aiming cursor) shows in a visor (a
+// CPlayerState::EPlayerVisor). Combat and Scan follow the game; X-Ray and Thermal
+// can be turned off (issue #241). On under Original experience.
+bool CrosshairInVisor(int visor);
 // Menus and the map read a remapped pad's standard buttons (F1 Controls > Remap).
 bool MenuStandardButtons();
 void SetMenuStandardButtons(bool enabled);
+// The main menu's "Exit Game" legend (F1 Controls > Remap; `MP_MENU_EXIT`): holding Z, or a
+// finger or mouse button on the legend, for kMenuExitHoldSeconds quits.
+const float kMenuExitHoldSeconds = 1.5f;
+bool MenuExit();
+void SetMenuExit(bool enabled);
+// Saves the settings and asks the main loop to shut down, as closing the window does.
+void RequestQuit();
 void SetMapSwapFingers(bool swap); // the map_swap_fingers setting; read with PortPointer::MapSwapFingers()
 void SetPointerMenus(bool enabled); // the pointer_menus setting; read with PortPointer::Enabled()
 // Hide the helmet frame (the visor rim and its glow and lights).
@@ -320,6 +359,35 @@ void SetBeamDoorsStayUnlocked(bool enabled);
 // and the Phazon Beam are unchanged. Off by default, and off in the Original experience.
 bool StackBeams();
 void SetStackBeams(bool enabled);
+// beam_switch_speed (CPlayerGun::PortBeamSwitchScale), in percent: a beam change's
+// animations, wipe and hold run that much faster, so 200 swaps in half the time.
+// 100 (retail) by default, and 100 in the Original experience.
+const int kBeamSwitchSpeedMin = 100;
+const int kBeamSwitchSpeedMax = 400;
+const int kBeamSwitchSpeedDefault = 100;
+int BeamSwitchSpeed();
+void SetBeamSwitchSpeed(int percent);
+// seamless_pickups: picking up an item keeps control and plays no cutscene
+// (randomprime's pickup patches, as AP games load rooms, minus the Artifact
+// Temple totem switches), and the item's message box shows as a HUD memo
+// (CScriptHUDMemo). Rooms load patched, so it applies to rooms loaded
+// afterwards. Off by default, and off in the Original experience.
+bool SeamlessPickups();
+void SetSeamlessPickups(bool enabled);
+// walk_speed (CPlayerDynamics WalkScale), in percent: Samus's on-foot top speed,
+// acceleration and friction (and the orbit strafe speeds) are scaled by it, so she
+// moves that much faster or slower and gets there in the same time. Jumps, dashes,
+// turning, grapple and the morph ball are unchanged. 100 (retail) by default, and
+// 100 in the Original experience.
+const int kWalkSpeedMin = 50;
+const int kWalkSpeedMax = 200;
+const int kWalkSpeedDefault = 100;
+int WalkSpeed();
+void SetWalkSpeed(int percent);
+// walk_speed_enabled: whether walk_speed applies (on by default; 100 while off).
+// A custom action bound to it is a sprint switch.
+bool WalkSpeedEnabled();
+void SetWalkSpeedEnabled(bool enabled);
 // The stored 1.00 sequence-break compatibility choice (raw, not the effective
 // policy). Randomizer and Archipelago games force it on at use.
 bool Revision100Compatibility();
@@ -343,12 +411,23 @@ enum EBootLogos { kBootLogos_Show, kBootLogos_Skippable, kBootLogos_Off };
 EBootLogos BootLogos();
 void SetBootLogos(EBootLogos mode);
 // First-person vertical field of view in degrees (retail 55). The arm cannon is
-// drawn at the retail FOV whatever this is, like a view-model FOV.
+// drawn at its own FOV (GunFov, retail 55) whatever this is, like a view-model
+// FOV, unless GunFollowsFov: then it shares the world's projection (smaller,
+// further into the corner at a wide FOV). Both are 55 and following is off in
+// the original experience.
 const float kFovRetail = 55.f;
 const float kFovMin = 45.f;
 const float kFovMax = 120.f;
 float FirstPersonFov();
 void SetFirstPersonFov(float degrees);
+bool GunFollowsFov();
+void SetGunFollowsFov(bool enabled);
+float GunFov();
+void SetGunFov(float degrees);
+// The FOV the arm cannon is drawn at, for a first-person camera whose FOV is cameraFov.
+inline float GunDrawFov(float cameraFov) { return GunFollowsFov() ? cameraFov : GunFov(); }
+// Whether the arm cannon gets its own projection (at GunDrawFov) this frame.
+inline bool GunOwnFov(float cameraFov) { return GunDrawFov(cameraFov) != cameraFov; }
 // Arm cannon offset from its retail place, in metres along the camera's right,
 // forward and up axes (issue #72, like PrimeHack's). It moves the real gun, so
 // shots leave from the new muzzle. Zero in the original experience.
@@ -378,21 +457,25 @@ void SetProjectedShadows(bool enabled);
 // creation, so it takes a restart; aurora falls back to Vulkan if it fails.
 bool OpenGles();
 void SetOpenGles(bool enabled);
-// Setting `graphics_backend` (Windows only): the graphics API to ask Aurora for
-// at the next start. Auto asks for nothing in particular, so Aurora takes its own
-// order (Direct3D 12, then Vulkan, then Direct3D 11); an explicit API is tried
-// first (issue #135). Either way a failed start falls back to that order for the
-// run and leaves the setting alone. Read at window creation, so it takes a
-// restart. Other platforms ignore it: Android's OpenGL ES choice is `opengles`.
-// These are the config file's values: don't reorder or renumber.
+// Setting `graphics_backend` (Windows and desktop Linux): the graphics API to ask
+// Aurora for at the next start. Auto asks for nothing in particular, so Aurora
+// takes its own order (Direct3D 12, then Vulkan, then Direct3D 11 on Windows;
+// Vulkan, then OpenGL ES on Linux); an explicit API is tried first (issue #135).
+// Either way a failed start falls back to that order for the run and leaves the
+// setting alone. Read at window creation, so it takes a restart. OpenGL is offered
+// on desktop Linux only for now, through Dawn's desktop GL: Windows has no WGL
+// backend yet. Other platforms ignore the setting: Android's OpenGL ES choice is
+// `opengles`. These are the config file's values: don't reorder or renumber.
 enum EGraphicsBackend {
   kGraphicsBackend_Auto = 0,
   kGraphicsBackend_D3D12,
   kGraphicsBackend_Vulkan,
   kGraphicsBackend_D3D11,
+  kGraphicsBackend_OpenGL,
 };
-// The number of choices, for the combo that lists them in EGraphicsBackend order.
-constexpr int kGraphicsBackendCount = 4;
+// The number of choices. The Video page lists a platform's subset of them
+// (port_graphics_backend.h's Choices()), so this is not a combo's item count.
+constexpr int kGraphicsBackendCount = 5;
 EGraphicsBackend GraphicsBackend();
 void SetGraphicsBackend(EGraphicsBackend backend);
 // The config file's name for a choice; these, and only these, are what
@@ -405,6 +488,8 @@ inline const char* GraphicsBackendConfigName(EGraphicsBackend backend) {
     return "vulkan";
   case kGraphicsBackend_D3D11:
     return "d3d11";
+  case kGraphicsBackend_OpenGL:
+    return "opengl";
   default:
     return "auto";
   }
@@ -420,6 +505,8 @@ inline bool ParseGraphicsBackend(const std::string& value, EGraphicsBackend& out
     out = kGraphicsBackend_Vulkan;
   } else if (value == "d3d11") {
     out = kGraphicsBackend_D3D11;
+  } else if (value == "opengl") {
+    out = kGraphicsBackend_OpenGL;
   } else {
     return false;
   }
@@ -446,10 +533,23 @@ void DriverWorkaroundsStarted();
 bool UnlockHardMode();
 void SetUnlockHardMode(bool enabled);
 bool UnlockFusionSuit();
+// Custom difficulty (F1 > Game > Difficulty, `damage_taken` / `damage_dealt`):
+// multipliers on the damage the player takes and the damage the arm cannon's
+// shots deal, applied on top of a Hard file's own (x2 taken, x0.5 dealt). 1 is
+// retail; Original experience reads 1.
+const float kDamageMultMin = 0.1f;
+const float kDamageMultMax = 10.f;
+float DamageTakenMultiplier();
+void SetDamageTakenMultiplier(float m);
+float DamageDealtMultiplier();
+void SetDamageDealtMultiplier(float m);
 void SetUnlockFusionSuit(bool enabled);
 // Puts the Fusion Suit on or off in game, as the Fusion Bonus menu's choice
 // would: the suit, arm and ball load again as after a suit pickup.
 void WearFusionSuit(CStateManager& mgr, bool wearing);
+// Lights or darkens the Artifact Temple totems to match the artifacts held, as
+// the artifact pickups' scripts would, for artifacts given by a cheat.
+void SyncTempleTotems(CStateManager& mgr, const CPlayerState& ps);
 bool UnlockGalleries();
 void SetUnlockGalleries(bool enabled);
 
@@ -458,6 +558,8 @@ void SetUnlockGalleries(bool enabled);
 // Motion/buttons are accepted only while SDL owns relative capture.
 bool MouseAim();
 void SetMouseAim(bool enabled);
+// Marks settings.cfg for saving; for code that changes settings through the setters that do not.
+void MarkSettingsDirty();
 // Twin-stick: the right stick aims the first-person camera directly (through the
 // same aim state as the mouse) and is consumed, so it no longer drives the
 // game's free-look. Works with or without mouse aim.
@@ -466,6 +568,11 @@ void SetMouseAim(bool enabled);
 bool TwinStick();
 // The stored pad Twin Stick setting, whatever the touch layout: what the pause option edits.
 bool PadTwinStick();
+// The stored pad settings, whatever the touch layout (ShiftBinding(2), SwapScanXray and
+// PadAltButton read as unset while touch is in use): what a saved controller preset keeps.
+int PadShiftBinding();
+bool PadSwapScanXray();
+int StoredPadAltButton(int bit);
 // Android: touch was the last input and the F1 menu is closed. False on desktop.
 bool TouchActive();
 // True on Android when the modern (non-classic) touch layout is the active device: drag aims like a mouse.
@@ -477,6 +584,9 @@ void SetTouchClassic(bool on);
 bool TouchTwinStick();
 void SetTouchTwinStick(bool on);
 void SetTwinStick(bool enabled);
+// The last controller preset (Settings::padPreset), which a controller connected later gets.
+int PadPreset();
+void SetPadPreset(int preset);
 // Right stick Y (-1..1) before twin-stick consumed it, for the Spring Ball;
 // 0 when twin-stick is off (the game input still carries it then).
 float TwinStickRightY();
@@ -493,6 +603,10 @@ void SetSpringBall(bool enabled);
 // layout), off by default.
 bool SwapScanXray();
 void SetSwapScanXray(bool enabled);
+// Trilogy discs only: holding Beam menu / Visor menu opens the Wii's radial menus
+// (CHudRadialSelect); the aim travel or C-stick picks. Off by default.
+bool RadialMenus();
+void SetRadialMenus(bool enabled);
 // The beam shift's bindings (read by PortInputDevices, which pairs each with the D-pad
 // into the beam chords): slots 0 and 1 are keys
 // or mouse buttons (scancode or PAD_KEY_MOUSE_*), slot 2 a controller button
@@ -539,10 +653,26 @@ bool OriginalExperience();
 void SetOriginalExperience(bool enabled);
 std::string ModsDisabled();
 void SetModsDisabled(const std::string& list);
+// The parts of the Remastered import the mods load without (remastered_hide, comma separated,
+// PortMods::kImportParts); MP_REMASTERED_HIDE overrides the saved list for this run.
+std::string RemasteredHidden();
+void SetRemasteredHidden(const std::string& list);
+// The Remastered import on or off (mods_disabled, saved as on the Mods page), then the mods
+// reload; a note at the top of the screen says which.
+void ToggleRemastered();
+// The user's texture pack on or off (texture_pack, saved now); a note says which.
+void ToggleTexturePack();
+// A note at the top of the screen for a few seconds. Thread-safe.
+void ShowNote(const std::string& text);
 // Starts a Remastered import (port_remastered_import.h) with the mods unloaded
 // while it runs; they load again, the new import included, when it ends.
 // False when one is already running or there is no mods folder.
 bool StartRemasteredImport(const std::string& image, const std::string& keys);
+// The Dread Samus import (PortRemastered::StartDreadSamusImport), with the same mods unload/reload
+// around it.
+bool StartDreadSamusImport(const std::string& image, const std::string& keys);
+// The Echoes suits import (PortRemastered::StartEchoesSuitsImport), likewise.
+bool StartEchoesSuitsImport(const std::string& image);
 // Memory card transfer to and from Dolphin (port_gci.h), for the overlay and
 // the console. Each returns a message for the user. Imports are refused in
 // game; `path` may be a .gci, a raw card image, a folder of .gci files or an
@@ -559,6 +689,44 @@ std::string CardExportDolphin(const std::string& format = "");
 // Cheat: the player takes no damage (F1 > Debug > Cheats, MP_GODMODE, console `god`).
 bool Invulnerable();
 void SetInvulnerable(bool enabled);
+// Cheat: the Phazon Beam takes the Power Beam's place, anywhere (F1 > Debug > Cheats).
+bool PhazonBeamCheat();
+void SetPhazonBeamCheat(bool enabled);
+// Cheat: firing does not use up missiles or power bombs, even at zero, and the HUD shows
+// infinity (F1 > Debug > Cheats, MP_INFINITE_AMMO, console `infammo`). One bit per counter;
+// the real counts are kept and pickups still add to them. Not saved.
+enum : unsigned { kInfAmmoMissile = 1, kInfAmmoPowerBomb = 2, kInfAmmoAll = 3 };
+// The bits as set, whether or not they apply.
+unsigned InfiniteAmmoSet();
+// Whether every counter in `kinds` is infinite now: never in the Original experience or with
+// Archipelago connected, like every cheat.
+bool InfiniteAmmo(unsigned kinds);
+void SetInfiniteAmmo(unsigned kinds, bool enabled);
+// Cheat: holding Jump in the air lifts Samus at a steady speed (F1 > Debug > Cheats, console
+// `moonjump`). Not saved; off in the Original experience and with Archipelago connected.
+bool MoonJumpSet();
+bool MoonJump();
+void SetMoonJump(bool enabled);
+// Cheat: Boost Ball speed and duration multipliers, 1 = retail (F1 > Debug > Cheats, console
+// `boost`). Speed scales the boost's push, duration both the time the ball stays boosted and,
+// over that time, how slowly it loses speed. Not saved; 1 in the Original experience and with
+// Archipelago connected. The Set getters return the values as set.
+constexpr float kBoostScaleMax = 10.f;
+float BoostSpeedScaleSet();
+float BoostDurationScaleSet();
+float BoostSpeedScale();
+float BoostDurationScale();
+void SetBoostScales(float speed, float duration);
+// Cheats (F1 > Debug > Cheats, console `boost air|steer`). BoostAnywhere: the Boost Ball also
+// fires in the air (after a bomb or spring jump) and a boost no longer ends, damped, when the ball
+// leaves the ground, so a boost into a spring jump keeps its height. BoostSteer: the stick turns
+// a boosted ball's course, keeping its speed. Not saved; off like the others above.
+bool BoostAnywhereSet();
+bool BoostAnywhere();
+void SetBoostAnywhere(bool enabled);
+bool BoostSteerSet();
+bool BoostSteer();
+void SetBoostSteer(bool enabled);
 // Write the log to <user folder>/metroid_prime_port.log (port_log_file.h). MP_LOG_FILE=1
 // turns it on for one run without changing the setting.
 bool LogFile();
@@ -574,6 +742,24 @@ void SetFastMorph(bool enabled);
 // apply only unmorphed, in gameplay (port_hold_toggle.h).
 bool LockOnToggle();
 void SetLockOnToggle(bool enabled);
+// Shoot While Grappling (issue #243): the arm cannon stays out and fires while
+// the grapple beam holds a grapple point.
+bool GrappleShoot();
+void SetGrappleShoot(bool enabled);
+// Shoot in Scan Visor (issue #243): the arm cannon stays out, fires and charges in
+// the Scan Visor, and a fire press no longer switches to the Combat Visor.
+bool ScanShoot();
+void SetScanShoot(bool enabled);
+bool GrappleToggle();
+void SetGrappleToggle(bool enabled);
+// Toggle Spider Ball (issue #243): an R press that attaches the spider ball
+// latches until pressed again or the ball leaves its track; morph ball only.
+bool SpiderToggle();
+void SetSpiderToggle(bool enabled);
+// Aim Lock-On: lock onto the target nearest the crosshair instead of retail's
+// pick, which prefers a nearer target (CPlayer::FindBestOrbitableObject).
+bool AimLockOn();
+void SetAimLockOn(bool enabled);
 bool StickyCharge();
 void SetStickyCharge(bool enabled);
 // Remastered charge: holding fire shoots a few quick shots after the press shot
@@ -602,6 +788,13 @@ void SetGyroOverride(bool active, float pitch, float yaw);
 // sensitivity, so both share the same feel).
 float StickAimRate();
 void SetStickAimRate(float pixelsPerSecond);
+// Twin stick's right stick as Flick Stick: the controller's setting, or the touch
+// overlay's own while touch is active.
+bool FlickStick();
+void SetFlickStick(bool enabled);
+void SetTouchFlickStick(bool enabled);
+// Flick stick's outer deadzone as a fraction of travel (flick_stick_outer_deadzone).
+float FlickOuterDeadZone();
 // Gyro aiming. Mode: 0 off, 1 aim while the Gyro aim button is held, 2 always
 // aim, 3 aim except while it is held, 4 press to toggle aim (initially off).
 // Source: 0 auto (a pad's gyro if it has
@@ -644,6 +837,9 @@ bool MouseGameplayActive();
 void SetMouseGameplayActive(bool active);
 bool MouseInvertX();
 bool MouseInvertY();
+// Map rotate direction flips (Controls > Options > Map).
+bool MapInvertX();
+bool MapInvertY();
 bool MouseButtons();
 bool MouseCrosshair();
 // The free-aim crosshair under direct aim: the setting, or always with pointer aim.
@@ -656,6 +852,13 @@ bool PointerAim();
 void SetPointerAim(bool on);
 int PointerAimBox();
 int PointerAimTurn();
+// Lock-on free aim: under a combat lock any direct aim moves a pointer, with or
+// without pointer aim (no edge turn: the lock owns the view). CPlayer::PortLockFreeAim
+// reads it.
+bool LockOnFreeAim();
+// Hand on cannon: under direct aim, standing still rests the left hand on the cannon
+// (CPlayerGun::UpdateGunIdle reads it).
+bool HandOnCannon();
 // The pointer (-1..1 of the half view, right/down positive) as of the last tick;
 // false (and centre) unless it steered that tick's free look.
 bool PointerAimPosition(float& x, float& y);
@@ -688,7 +891,12 @@ unsigned MouseHeldButtons();
 bool UpdateToastShowing();
 bool TapUpdateToast(float x, float y);
 // Called during simulation, using the effective unbobbed camera direction.
-bool UpdateMouseAim(bool active, bool locked, float x, float y, float z);
+// pointerHold: under pointer aim, a lock that keeps the pointer where it is instead of
+// re-centring it (the Scan Visor's point orbit, CPlayer::UpdateMouseAim).
+// pointerStays: a pointerLock with no target (an empty lock under pointer aim). The view
+// holds, so the pointer keeps its place as the lock starts and ends.
+bool UpdateMouseAim(bool active, bool locked, float x, float y, float z, bool pointerLock = false,
+                    bool pointerHold = false, bool pointerStays = false);
 void SynchronizeMouseAim(float x, float y, float z);
 // Turns the mouse-look yaw by dyaw radians (the game turned the player: a rotating
 // platform's rider carry). No effect until the aim is initialized.
@@ -733,6 +941,13 @@ bool TakeTouchLook(float& dyaw, float& dpitch);
 // Plasma, 8-9 current visor, 10-11 current beam, 12 valid, 13 morphed or
 // morphing; 0 when stale). A
 // request is read by ControlMapper for ~120 ms as a press of that command.
+// The wheels are stock in the default layout; elsewhere they are added buttons
+// with these overlay-only keys (input skips them), key then label, listed after
+// Previous visor. TouchWheels is the retired setting that put the stock pair in
+// the classic and twin layouts: true until the overlay has turned it into those
+// buttons.
+inline constexpr const char* kTouchWheelActions[4] = {"visor_wheel", "Visor wheel", "beam_wheel",
+                                                      "Beam wheel"};
 bool TouchWheels();
 void SetTouchWheels(bool on);
 bool TouchVisorTapScan();
@@ -757,10 +972,31 @@ bool BeamRequested(int beam);
 // save-state hotkeys (1 save, 2 load; F5/F9 send the same).
 void RequestSpringBall();
 bool SpringBallRequested();
+// Issue #236: the Dodge action, a sideways dash without a lock-on target. The
+// request lasts a short window; CPlayer takes it once (false under Original
+// experience).
+void RequestDodge();
+bool TakeDodgeRequest();
+// Issue #243: Next/Previous target while locked on (+1 right, -1 left on screen).
+// CPlayer takes it once; 0 when none is pending or under Original experience.
+void RequestTargetCycle(int dir);
+int TakeTargetCycle();
+// Issue #243: the Grapple action's state, set by the input routing each frame;
+// HoldGrapple holds it for a time (console). CStateManager turns it into L at a
+// grapple point (port_hold_toggle.h GrappleKey).
+void SetGrappleHeld(bool held);
+void HoldGrapple(float seconds);
+bool GrappleHeld();
 void RequestSaveStateHotkey(int which);
 bool TouchMapTap();
 void SetTouchMapTap(bool on);
+// Game thread, once per HUD draw: BeginMinimapFrame clears the frame's rect,
+// SetMinimapRect sets it, EndMinimapFrame publishes it. Readers (the overlay's UI
+// thread) only see whole frames; a read between the clear and the set hid the
+// map button while looking around.
+void BeginMinimapFrame();
 void SetMinimapRect(bool valid, bool drawn, float x0, float y0, float x1, float y1);
+void EndMinimapFrame();
 bool MinimapRect(float* out4, bool* drawn = nullptr);
 void RequestMapTap();
 // Pad poll hook: true for the one poll where a requested tap reads Z held.
@@ -838,6 +1074,10 @@ std::string TouchLayout();
 void SetTouchLayout(const std::string& layout);
 // True once after F1's "Edit layout" was pressed.
 bool TakeTouchEditRequested();
+// Asks for the layout editor as "Edit layout" does (the console's `touchedit`).
+void RequestTouchEdit();
+// True while the in-game touch layout editor is open (never without PORT_TOUCH_OVERLAY).
+bool TouchEditing();
 void Toggle();
 // Asks for the overlay to be toggled on the next frame. Safe to call from any
 // thread, unlike Toggle(), which touches ImGui state.

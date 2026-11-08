@@ -21,6 +21,16 @@ bool aurora_dvd_open(const char* disc_path);
 void aurora_dvd_close(void);
 
 /**
+ * For a disc holding several games (Metroid Prime Trilogy): show the open disc's directory
+ * root_dir as the root, its files keeping their EntryNums (the old root's other entries stay at
+ * the top level where root_dir has none of that name), and have DVDGetDOLLocation return the
+ * root-level file dol_file instead of the partition's DOL. Null or empty leaves either unchanged
+ * from the disc's own. Returns false, changing nothing, if the disc lacks either.
+ * aurora_dvd_open resets both.
+ */
+bool aurora_dvd_set_root(const char* root_dir, const char* dol_file);
+
+/**
  * OVERLAY FILES!
  *
  * Overlay files allow you to replace and add ("overlay") files that are present in the loaded DVD.
@@ -161,6 +171,9 @@ AuroraDiscImage* aurora_disc_image_open(const char* path, char gameId[6], u8* di
 /** \brief Calls `callback` for every file (not directory) of the image's data partition, with its FST index. */
 void aurora_disc_image_list(AuroraDiscImage* image, void (*callback)(u32 index, const char* name, u32 size, void* user),
                             void* user);
+
+/** \brief The FST index of the file at `path` (e.g. "MP2/Metroid1.pak") and its size; -1 if there is no such file. */
+s32 aurora_disc_image_find(AuroraDiscImage* image, const char* path, u32* size);
 
 /**
  * \brief Opens a file of the image by FST index. Read, seek and close it with the aurora_dvd_base_* calls (its

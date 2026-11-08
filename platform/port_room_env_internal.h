@@ -79,6 +79,8 @@ struct Area {
   bool pendingFluid = false; // sPlayerFluid and sCameraWater when Load was called
   bool pendingWater = false;
   std::vector<std::pair<uint32_t, int>> queued; // sender, state
+  std::vector<uint8_t> roomInside; // by file.roomVolumes entry: the player or camera is in it
+  std::vector<uint8_t> roomActive; // by file.roomVolumes entry: its trigger is switched on
   uint32_t serial = 0;  // of this load, which the worker's jobs for it carry
   std::vector<GpuCube> cubes;
   std::vector<GpuVolume> volumes; // one a grid
@@ -90,10 +92,11 @@ struct Area {
   uint32_t lightmap = 0; // GXCreatePBRLightmap's id; 0 until the worker has made it, or none
   float exposure = 0.f; // what takes the room's radiance to the display's range; 0: unknown
   float tone[3][4] = {}; // its tone curve
-  bool hasGeo = false;   // the mod replaces its geometry
   ExposureHints hints;   // the fluid-mode exposure hints' state
   bool hintSnap = false; // a fluid hint registered this frame: the exposure snaps
   uint64_t layers = ~uint64_t(0); // its active script layers (SetAreaLayers)
+  bool visible = true;            // its occlusion state (SetAreaVisible)
+  std::vector<uint8_t> lightHints; // by file.lightHints entry: on last UpdateLightHints
   // Its grades' requests (Remastered's CAreaPrioritizedGameHintManager): on or off, and
   // when they were last turned on, which decides between equal priorities.
   struct GradeRequest {
@@ -121,7 +124,7 @@ struct Area {
     float cap = 0.f;
   };
   std::vector<Transition> transitions;
-  // A point or spot light's state (CLightDynamicGOC): active, and its timeline.
+  // A light's state (CLightDynamicGOC): active, and its timeline.
   struct Light {
     bool active = false;
     bool playing = false;
@@ -130,6 +133,7 @@ struct Area {
     int group = -1; // what its script group last said (PortRoomGeo::GroupShown)
   };
   std::vector<Light> lights;
+  std::vector<Light> suns;
 };
 
 // The frame's exposure and tone curve, as CPostFXManager::UpdateTonemapping moves them.
@@ -137,14 +141,9 @@ struct FrameState {
   bool started = false;
   uint32_t area = 0; // the camera's room last frame
   std::vector<uint32_t> loaded; // the areas in memory last frame
-  Convergence ev;
-  float sigma = -1.f;
+  float ev = 0.f; // the frame's EV
   float targetEv = 0.f;
   bool measuring = false; // this frame is measured (MeasureExposure)
-  bool measured = false;  // targetEv is a measurement
-  float measuredEv = 0.f;
-  uint32_t serial = 0;      // of the last measurement seen
-  uint32_t ignoreUntil = 0; // measurements up to here are of before a jump
   // The tonemap's EV, mid, contrast, toe and shoulder, and the static EV (see GlowScale),
   // moving linearly from `from` to `to`.
   float from[6] = {};
@@ -289,6 +288,7 @@ struct FogCore {
   float attenSlope = 0.f, attenBias = 1.f;
   float noiseFreq = 0.f, noiseStrength = 0.f, lightCap = 65535.f;
   float wind[3] = {};
+  float worldShift[3] = {};
   float colorB[4] = {1.f, 1.f, 1.f, 1.f}, colorA[3] = {1.f, 1.f, 1.f};
   bool noProbe = false;
   float lut[64] = {};
@@ -378,9 +378,19 @@ extern int sVolFog;
 extern bool sFogRegions;
 extern bool sPlayerFluid;
 extern bool sCameraWater;
+extern uint8_t sExposureSwap; // ExposureHints::SwapState of the frame
 extern uint64_t sItems;
 extern std::vector<WorldVolume> sWorldVolumes; // the world's camera volumes (SetCameraPoint)
 extern WorldVolumeState sWorldVolumeState;
+// The world's environment variables as they stand (EnvVar: its declaration, `value` its default),
+// by guid; filled as areas load, emptied by ResetGrades.
+struct EnvVarLive {
+  EnvVar var;
+  int32_t value = 0;
+};
+extern std::vector<EnvVarLive> sEnvVars;
+// The ops of the world volumes' triggers, from the file that set sWorldVolumes.
+extern std::vector<EnvOp> sWorldEnvOps;
 extern std::unordered_set<uint32_t> sGradeLuts;
 extern bool sLastValid;
 extern bool sLastFound;
@@ -412,6 +422,12 @@ void DriveGrades(uint32_t mrea, Area& area, uint32_t sender, int state);
 void DriveCameraWaterItems(uint32_t mrea, Area& area, uint64_t items);
 void StartGrades(uint32_t mrea, Area& area, bool playerFluid, bool cameraWater);
 void ReplayWorldVolumes(uint32_t mrea, Area& area);
+// Adds the area's declared environment variables the table lacks, then drives its onLoad branches
+// that hold.
+void LoadEnvVars(uint32_t mrea, Area& area);
+// Runs the ops of `ops` that `sender` fires on `state`, then the onChange branches of every loaded
+// area for each var changed.
+void RunEnvOps(const std::vector<EnvOp>& ops, uint32_t sender, int state);
 bool LoadTiming();
 double MsSince(std::chrono::steady_clock::time_point t);
 Loaded ReadRoomFile(const std::string& path);

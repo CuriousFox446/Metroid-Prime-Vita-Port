@@ -14,6 +14,8 @@
 #include "port_gci.h"
 #include "port_mods.h"
 #include "port_remastered_import.h"
+#include "port_dread_samus_mod.h"
+#include "port_echoes_suits_mod.h"
 #include "port_remastered_text.h"
 #include "port_discord.h"
 #include "port_savestate.h"
@@ -22,6 +24,7 @@
 #include <imgui_internal.h>
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_misc.h>
+#include <SDL3/SDL_timer.h>
 
 #if defined(__ANDROID__)
 #include "touch_pad.h"
@@ -33,6 +36,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -209,7 +213,7 @@ std::string CardImportDolphin() {
   // Dolphin uses one or the other, per its settings: try the one written last.
   std::error_code ec;
   std::filesystem::file_time_type folderTime = std::filesystem::file_time_type::min();
-  for (const std::filesystem::path& file : PortGci::GameFiles(dolphin.gciFolder)) {
+  for (const std::filesystem::path& file : PortGci::ImportableFiles(dolphin.gciFolder)) {
     folderTime = std::max(folderTime, std::filesystem::last_write_time(file, ec));
   }
   const auto rawTime = dolphin.rawImage.empty() ? std::filesystem::file_time_type::min()
@@ -400,7 +404,16 @@ std::string CardQueueExport(const std::filesystem::path& folder, const std::stri
         sCardExportQueue.clear();
         return "Could not read " + PortGci::PathString(file.filename()) + ".";
       }
-      sCardExportQueue.push_back({PortGci::PathString(file.filename()), std::move(bytes), {}});
+      // Named by the format's game code (a Trilogy disc's keep R3ME/R3MP).
+      PortGci::Header header;
+      std::string error;
+      if (!PortGci::ParseHeader(bytes.data(), bytes.size(), header, error)) {
+        sCardExportQueue.clear();
+        return "Could not read " + PortGci::PathString(file.filename()) + ": " + error;
+      }
+      std::memcpy(bytes.data(), PortGci::GameCodeOf(to), 4);
+      header.game = PortGci::GameCodeOf(to);
+      sCardExportQueue.push_back({PortGci::DiskName(header), std::move(bytes), {}});
     }
     return {};
   }
@@ -571,16 +584,20 @@ void DrawEmulatorCard() {
     SaveSettings();
   }
   ImGui::EndDisabled();
-  ItemHelp("The port and the emulator share the same saves: never run both at once. GameCube "
-           "Metroid Prime only; Randomizer and Archipelago keep their own cards. Takes effect at "
-           "the title screen.");
+  ItemHelp("The port and the emulator share the same saves: never run both at once. On a Trilogy "
+           "disc the port's card is mirrored with the emulator's Trilogy save instead. Randomizer "
+           "and Archipelago keep their own cards. Takes effect at the title screen.");
   if (!share) {
     return;
   }
   std::string why;
   const std::filesystem::path base = PortGci::SharedCardBase(&why);
   if (base.empty()) {
-    ImGui::TextColored(ThemeWarnColor(), "%s", why.c_str());
+    if (PortGci::TrilogyShareBin().empty()) {
+      ImGui::TextColored(ThemeWarnColor(), "%s", why.c_str());
+    } else {
+      ImGui::TextWrapped("%s", why.c_str());
+    }
     return;
   }
   ImGui::BeginDisabled(inGame || sCardDialogOpen);
@@ -636,6 +653,24 @@ void DrawMemoryCard() {
             "/Card A, GC/MemoryCardA." + PortGci::CardRegion() + ".raw).")
                .c_str());
 #endif
+  // Saves another disc left on the card (each release keeps its own files).
+  // Rescanned every two seconds: it reads every file's header.
+  static std::vector<PortGci::OtherRelease> sOthers;
+  static Uint64 sOthersNext = 0;
+  if (SDL_GetTicks() >= sOthersNext) {
+    sOthers = PortGci::OtherReleaseSaves();
+    sOthersNext = SDL_GetTicks() + 2000;
+  }
+  for (size_t i = 0; i < sOthers.size(); ++i) {
+    ImGui::PushID(static_cast<int>(i));
+    if (ImGui::Button(("Restore from " + sOthers[i].label).c_str())) {
+      sCardStatus = "From " + sOthers[i].label + ": " + PortGci::RestoreFrom(sOthers[i]).Summary("Restored");
+      sOthersNext = 0;
+    }
+    ItemHelp("Copies that version's save onto this disc's card, converted; this card's saves move to "
+             "_replaced first, and the other version's saves are left as they are.");
+    ImGui::PopID();
+  }
   ImGui::EndDisabled();
   ImGui::BeginDisabled(busy || saves == 0);
   const std::string asIs = std::string("As on the card (") +
@@ -709,6 +744,8 @@ std::vector<std::pair<int, std::string>> sRemasteredPicks;
 // Which 2 of the same picker: a PAL image for its languages (DrawLanguageSection).
 std::string sPalLanguagesPick;
 std::string sFlaahgraPick;
+std::string sDreadPick;
+std::string sEchoesPick;
 
 #if defined(__ANDROID__)
 // Not SDL_ShowOpenFileDialog: Android often kills the game behind the picker
@@ -762,6 +799,10 @@ void OpenRemasteredDialog(int which) {
         sPalLanguagesPick = files[0];
       } else if (which == kFlaahgraPick) {
         sFlaahgraPick = files[0];
+      } else if (which == kDreadPick) {
+        sDreadPick = files[0];
+      } else if (which == kEchoesPick) {
+        sEchoesPick = files[0];
       } else {
         sRemasteredPicks.emplace_back(which, files[0]);
       }
@@ -773,7 +814,7 @@ void OpenRemasteredDialog(int which) {
       {"GameCube images (.iso, .gcm, .rvz, .wia, .gcz, .ciso, .wbfs, .tgc)", "iso;gcm;rvz;wia;gcz;ciso;wbfs;tgc"},
       {"All files", "*"}};
   SDL_ShowOpenFileDialog(done, reinterpret_cast< void* >(static_cast< intptr_t >(which)), window,
-                         which == 0 ? imageFilters : which == 1 ? keyFilters : discFilters, 2, nullptr, false);
+                         which == 0 || which == kDreadPick ? imageFilters : which == 1 ? keyFilters : discFilters, 2, nullptr, false);
 }
 #endif
 
@@ -783,7 +824,10 @@ void OpenRemasteredDialog(int which) {
 // opened here and the import reads it through the descriptor ("fd:<n>", see
 // SourceFile). One descriptor per field, closed when another file is picked.
 std::string OpenRemasteredPick(int which, const std::string& uri) {
-  static int sHeld[2] = {-1, -1};
+  static int sHeld[kDreadKeysSlot + 1] = {-1, -1, -1, -1, -1, -1};
+  if (which < 0 || which > kDreadKeysSlot) {
+    return {};
+  }
   if (sHeld[which] >= 0) {
     close(sHeld[which]);
     sHeld[which] = -1;
@@ -831,12 +875,14 @@ void DrawModReloadMessage() {
 static bool sImportWatched = false;
 bool sImportUnloadedMods = false;
 static bool sImportInstallStarted = false;
+// The mod the running import makes, switched on when it ends.
+static std::string sImportModName = PortRemastered::kImportModName;
 // A reload is refused where the game can't save (a cutscene, say), so these
 // are asked again every two seconds until one runs.
 static int sReloadAwaited = -1;
 static double sReloadRetry = 0.0;
 
-static void ReloadUntilDone() {
+void ReloadUntilDone() {
   sReloadAwaited = PortSaveState::ModReloads();
   sReloadRetry = ImGui::GetTime() + 2.0;
   PortSaveState::RequestModReload();
@@ -854,6 +900,7 @@ bool StartRemasteredImport(const std::string& image, const std::string& keys) {
   if (!started) {
     return false;
   }
+  sImportModName = PortRemastered::kImportModName;
   sImportWatched = true;
   const PortMods::Status& status = PortMods::CurrentStatus();
   if (std::any_of(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& mod) { return mod.enabled; })) {
@@ -861,6 +908,35 @@ bool StartRemasteredImport(const std::string& image, const std::string& keys) {
     ReloadUntilDone();
     sImportUnloadedMods = true;
   }
+  return true;
+}
+
+// A started Dread or Echoes import: its old files are replaced at the end, so nothing of the mods
+// may be open meanwhile.
+static void WatchModImport(const char* modName) {
+  sImportModName = modName;
+  sImportWatched = true;
+  const PortMods::Status& status = PortMods::CurrentStatus();
+  if (std::any_of(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& mod) { return mod.enabled; })) {
+    PortMods::SetSuspended(true);
+    ReloadUntilDone();
+    sImportUnloadedMods = true;
+  }
+}
+
+bool StartDreadSamusImport(const std::string& image, const std::string& keys) {
+  if (!PortRemastered::StartDreadSamusImport(image, keys)) {
+    return false;
+  }
+  WatchModImport(PortDreadSamus::kModName);
+  return true;
+}
+
+bool StartEchoesSuitsImport(const std::string& image) {
+  if (!PortRemastered::StartEchoesSuitsImport(image)) {
+    return false;
+  }
+  WatchModImport(PortEchoesSuits::kModName);
   return true;
 }
 
@@ -906,7 +982,7 @@ void FinishRemasteredImport() {
   if (state.ok) {
     // A mod just imported is wanted, even if it was switched off to import.
     std::vector<std::string> disabled = PortMods::SplitDisabled(sModsDisabled);
-    const auto kept = std::remove(disabled.begin(), disabled.end(), std::string(PortRemastered::kImportModName));
+    const auto kept = std::remove(disabled.begin(), disabled.end(), sImportModName);
     if (kept != disabled.end()) {
       disabled.erase(kept, disabled.end());
       SetModsDisabled(PortMods::JoinDisabled(disabled));

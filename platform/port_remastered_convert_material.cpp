@@ -32,8 +32,11 @@ constexpr uint32_t kShaderParallax = 0x2F3FB02B;  // TCH0 is seen inside the sur
 constexpr uint32_t kShaderGlass = 0x231F8383;
 // A lava pool's surface (a LavaRenderVolume's model): BCLR is a colour ramp, TCH0 a pattern
 // carried along TCH2's flow map in two phases that TCH1's noise offsets, CCH0 the flow's
-// strength, its period in seconds and the brightness, CCH1 the maps' scales.
-constexpr uint32_t kShaderLavaPool[] = {0x3ADE58B7, 0xB9C24545, 0xBB4CD79B};
+// strength, its period in seconds and the brightness, CCH1 the maps' scales. Every
+// Lava2EmissiveOnly shader: their fragment perms are the same code, and the vertex perms
+// differ only in which attribute holds the vertex colour.
+constexpr uint32_t kShaderLavaPool[] = {0x3ADE58B7, 0x4140EA84, 0x5089A70F, 0x5C2F3604, 0x696EA755,
+                                        0xA58218EC, 0xB9C24545, 0xBB4CD79B, 0xDAC8BF61};
 // The arm cannon's beam glow (Wave, Plasma), over a lit surface: TCH0's three
 // channels scroll at CCH1's and CCH2.xy's speeds (times CCH0.y) and, less twice
 // the vertex colour, plus CCH0.w, pick a colour from TCH1, a ramp whose row is
@@ -57,10 +60,6 @@ constexpr uint32_t kShaderMatcapShell = 0xC83E6FCD;
 // The macro-normal shaders (a3c367be, 72b34e42, b9e899f3, 7feb9e94 without vertex colour, f84ac32d
 // with MNMP on texcoord set 1; same whiteout fold, kb material/7feb9e94.md): NMAP in TANGENT_0's frame, then MNMP
 // (kept in layer[kNormal], map 6) added to it in TANGENT_1's frame (mode bit 16384).
-// AreaLight unlit (69edcc3c, c2b36795; kb material/69edcc3c.md): DIFT x DIFC x vertex colour + ICNC + ICMC. Their DIFT
-// (and ICAN) is the 1x1 white default a6cc3300, which is the whole base, not a missing one: the colour comes from the
-// vertices and constants, so the flat base must not send the surface back to retail's TEV material.
-constexpr uint32_t kShaderAreaLight[] = {0x69EDCC3C, 0xC2B36795};
 // 3c66aaef is d37039f7's two layers (both in TANGENT_0's frame) plus MNMP (kb material/3c66aaef.md): a layered
 // material whose macro normal is an 8th map.
 constexpr uint32_t kShaderLayeredMacro = 0x3C66AAEF;
@@ -93,8 +92,9 @@ constexpr uint32_t kShaderIncanMaskSquared[] = {
 // The arm cannon's body: lit PBR that reflects its REFL cube (a Tallon forest, LDR) along
 // the reflection vector, at the roughness's mip, instead of a room probe. Drawn with the
 // room's cube the metal took the room's colours and read pale. The default REFL (black)
-// that most materials carry keeps the room's.
-constexpr uint32_t kShaderGunBody[] = {0x547E64E5, 0xD43DE005, 0x917F1415, 0xF495B260};
+// that most materials carry keeps the room's. A469DAAD (the third-person insets) and
+// 0C22AB97 (its barrel) are 917F1415's rigid twins: the same fragment code, unskinned.
+constexpr uint32_t kShaderGunBody[] = {0x547E64E5, 0xD43DE005, 0x917F1415, 0xF495B260, 0xA469DAAD, 0x0C22AB97};
 // The beam panels inside the Wave, Plasma and Phazon guns (lightning, magma, phazon): a
 // black base whose alpha masks an ICAN glow of ICNC 4-7. Only those three use the shader.
 // Under kPbrEmissive the magma read as faint dark red.
@@ -117,6 +117,7 @@ constexpr uint32_t kShaderBoundaryShield = 0x6C1A4768;
 // the same pixel and vertex code as 6C1A4768 (perms 002_0/002_1/004_0 fold identically), only a
 // different shader id, so it takes the same kind.
 constexpr uint32_t kShaderForceField = 0x6F53C775;
+constexpr uint32_t kShaderEnergyField = 0x9C867F3C;
 // PickUp (PickUp_Blue_Mat / PickUp_Orange_Mat, build/mpr/artifact/NOTES.md): unlit, a normal-map
 // fresnel pair over a gradient that scrolls through world space. PBR kind 15, constants in the
 // same PBR8 trailer (rows 0-3 CCH0..CCH3, row 7 DIFC, rows 4-5 filled at run time).
@@ -129,7 +130,33 @@ constexpr uint32_t kShaderEyeGloss = 0x974CA6DD;
 // 7cf91c66 (variasuit Eyeball_Exterior) is the same lighting and matcap. Its glow is DMGI(CCH2.y) x ICMC + ICNC (c4[0].y x
 // c5[1] + c4[1]; c5[0] is DIFC), which is zero in all 11 materials whatever DMGI is: nothing to drive (kb material/7cf91c66.md).
 constexpr uint32_t kShaderEyeGloss2 = 0x7CF91C66;
-constexpr bool IsEyeGloss(uint32_t shader) { return shader == kShaderEyeGloss || shader == kShaderEyeGloss2; }
+// f16bfffc (Thermal/X-ray VisorGlow) is the same matcap lighting plus an ICAN term (kb material/f16bfffc.md).
+constexpr uint32_t kShaderEyeGloss3 = 0xF16BFFFC;
+// 8c7a939f (the spider ball's glass without ICAN, kb material/8c7a939f.md) is dda64c97's maths exactly: ambient + lights,
+// REFV x REFS(N'.xy) x lum(L), the 1/pi diffuse of BCLR x DIFC weighted by METL, unmasked GGX, ICNC + ICMC, alpha
+// BCLR.a^2 x DIFC.a. Its light scale c4[5] is unverified and taken as 1, as dda64c97's.
+constexpr uint32_t kShaderEyeGloss4 = 0x8C7A939F;
+constexpr bool IsEyeGloss(uint32_t shader) {
+  return shader == kShaderEyeGloss || shader == kShaderEyeGloss2 || shader == kShaderEyeGloss3 || shader == kShaderEyeGloss4;
+}
+// 1fbafbca (the Varia spider ball's glass, kb material/1fbafbca.md): 8c7a939f plus ICAN x ICNC. Kind 42.
+constexpr uint32_t kShaderBallGlass = 0x1FBAFBCA;
+// 5854e91b, the unlit Surface with a reflection cube, and bda080c0, the same with a normal map: kind 38
+// (kb material/5854e91b.md, bda080c0.md).
+constexpr uint32_t kShaderUnlitCube = 0x5854E91B;
+constexpr uint32_t kShaderUnlitCubeNormal = 0xBDA080C0;
+// af330de4 (the zoomer's blinn1/blinn90; kb material/af330de4.md): kind 16's unlit DIFT x DIFC + ICNC + ICMC with
+// the vertex colour on the colour and the alpha (kind 39).
+constexpr uint32_t kShaderUnlitVertex = 0xAF330DE4;
+// 664ee5ca (the zoomer's blinn2; kb material/664ee5ca.md): kind 19's matcap without the light, DIFT x DIFC + REFS x
+// REFV + ICNC + ICMC (kind 40).
+constexpr uint32_t kShaderUnlitMatcap = 0x664EE5CA;
+// 67053ffe (the gun fx CCFE3C49's CAdd layer; kb material/67053ffe.md): unlit METL-weighted BCLR x DIFC + ICAN x ICNC +
+// ICMC (kind 41).
+constexpr uint32_t kShaderUnlitAdd = 0x67053FFE;
+// bc1509e8 (kb material/bc1509e8.md): 67053ffe's maps, constants and vertex perms, its incandescence masked by BCLR.a
+// (its materials set USE_DIFFUSE_ALPHA_AS_INCAN_MASK) and its alpha DIFC.a alone. Kind 41 with row 6.w = 1.
+constexpr uint32_t kShaderUnlitAddMasked = 0xBC1509E8;
 // Unlit, the vertex colour times the base map (a door shield's noise), which
 // scrolls at (CCH0.y, -CCH0.z) a second over texcoords scaled by CCH1.yz. Its
 // vertex shader linearises the colour and doubles it (2 pow(|c|, 2.2)), the base
@@ -159,7 +186,27 @@ constexpr uint32_t kShaderRefractGlass = 0x24670BF0;
 // the scene term is v3.w x scene, without the base map and vertex colour tint (kb material/cc8afd0f.md).
 constexpr uint32_t kShaderHoloGlassC = 0x2F95A061;  // HoloGlass's twin: the bent room tinted by CCH1, dual-source blended
 constexpr uint32_t kShaderHoloGlassB = 0x3991DA00;  // HoloGlass: scrolling indirect layers over a distorted screen copy
+// E2644678, the Ore Processing pillar glass (kb material/e2644678.md): 3991da00's body, but its vertex shader scales
+// the phase by CCH4.x and the screen offset by INDP.w (the draw camera's near plane) over the depth, capped at a
+// shipped 0.02, and it reflects the camera's probe (ResolveReflectionProbe), never a cube of the material's own.
+constexpr uint32_t kShaderHoloGlassE264 = 0xE2644678;
+// 5586D988 VS000: static hologram with green-selected apex collapse and X/Z fade.
+constexpr uint32_t kShaderRouteHologram = 0x5586D988;
+// 9d53cf06 (ChozoLore_Mat_B, the lore statues' sheet): unlit, premultiplied, its vertices waved along the normal.
+constexpr uint32_t kShaderChozoLore = 0x9D53CF06;
+constexpr double kHoloGlassE264DepthCap = 0.019999999552965164;  // vp_c1[0].x, binary32 0x3ca3d70a
 constexpr uint32_t kShaderRefractGlassB = 0xCC8AFD0F;
+// SimpleGlass_DX11_1 (kind 43, kb material/084a8db5.md): HoloGlass (3991da00) without TCH1, TCH2 and DIFC. TCH0
+// bends both the scrolled BCLR and the screen copy, whose blur follows the scrolled BCLR's alpha.
+constexpr uint32_t kShaderSimpleGlass = 0x084A8DB5;
+// Crystal (kind 48, kb material/54b4021f.md): unlit, alpha CCH3.w. BCLR (its alpha a weight), the NMAP-bent normal's
+// fresnel on the vertex colour, TCH0 at a time-scrolled, tangent-parallaxed uv, TCH1 at the bent normal and the
+// blurred screen copy, bent by NMAP and the normal.
+constexpr uint32_t kShaderCrystal = 0x54B4021F;
+constexpr uint32_t kShaderSkyFlow = 0xCD033236;
+// C928A6C5 MDL_ThermalHeatMask (kind 50, kb material/c928a6c5.md): the thermal-visor-only copies of the arm cannon,
+// drawn in the thermal hot pass alone. TCH0 the heat mask, CCH0/CCH1 its params, the vertex colour's red the heat.
+constexpr uint32_t kShaderThermalHeatMask = 0xC928A6C5;
 // FB2BC671 and DF3E3423 (the ids as the reports print them), the ChozoGhost's X-ray materials, static and skinned
 // (kind 31, kb material/fb2bc671.md, df3e3423.md).
 constexpr uint32_t kShaderXrayStatic = 0xFB2BC671;
@@ -178,9 +225,78 @@ constexpr ShaderTwin kShaderTwins[] = {
     // v5, weights in v6) and renormalise the skinned N and T (T1 too), nothing else. The port skins on its side
     // (DolphinCSkinRules.cpp, FinishTangentFrame, incl. the second frame).
     {0xC36C5166, kShaderIceSpreader}, {0xB55635D2, 0xA978D507}, {0xEF94ACCF, kShaderLava},
+    // 81b8e136 (thardus_test_shader3, Thardus and his rocks only): every one of its 57 perms, vertex and fragment,
+    // is byte-identical to an a978d507 perm, with the same bindings; only the lightmap perms are left out, which
+    // its actor-only users never select.
+    {0x81B8E136, 0xA978D507},
     // 1ac34e37 (Core_Phazon_Mat) is 07acff46's skinned copy, as the others.
     {0x1AC34E37, kShaderPhazonPool},
+    // 1826e69d (Thermal_Suit, the <Suit>Arm_Thermal and grapple thermal models) is c928a6c5's static copy: the
+    // same fragment perms byte for byte, the vertex perms without the bone fetch.
+    {0x1826E69D, kShaderThermalHeatMask},
+    // cc3e88af is cc96c27d's skinned copy (its fragment perms 006/042/054 are cc96c27d's 018/042/078; the vertex
+    // perms add the bone fetch and pass the vertex colour through raw): the Omega fight's healing nodules.
+    {0xCC3E88AF, kShaderPhazon},
+    // The fx shaders of kb material/{96009286,a5bd3ed7,ed8ab6e7,937a8c35}.md routed to the kind they match (a5bd3ed7 and
+    // ed8ab6e7 differ in AUVI only; 937a8c35 has no MTRL: inferred).
+    {0x96009286, kShaderRefractGlassB}, {0xA5BD3ED7, kShaderPickUp}, {0xED8AB6E7, kShaderPickUp},
+    {0x937A8C35, kShaderBoundaryShield},
+    // More verbatim copies (mpr/twins/twins.py, every perm compared; kb topic/shader-twins.md "2026-10-31"). Until
+    // these were listed their materials drew as plain PBR (kind 0).
+    {0x77F88A3C, kShaderUnlitCubeNormal}, {0xDC4DBF16, kShaderUnlitCubeNormal}, {0x39EDAB28, kShaderUnlitCubeNormal},
+    {0x32971316, kShaderUnlitAdd}, {0xE7ADAD1F, kShaderUnlitAdd}, {0xBF68E8CA, kShaderGlass},
+    {0x54697605, kShaderHoloGlassC}, {0x85B93D0E, kShaderHoloGlassE264}, {0xF4AD13BE, kShaderHoloGlass},
+    {0x1A8CFA41, kShaderSimpleGlass}, {0x22EB51BB, kShaderColorUnlit}, {0xB246EEEC, kShaderPickUp},
+    {0xA2DB9122, 0xA469DAAD}, {0x206BC9E8, 0x0C22AB97}, {0xACA2344D, kShaderEyeGloss3},
+    {0xC44295BC, kShaderEyeGloss}, {0xEB208CFD, 0x0C0B6119 /* kShaderXrayRim */}, {0x9871B590, 0x131ED7F0},
+    {0xB1637667, 0x131ED7F0}, {0x3EA28466, 0xC78982B4},
+    // 63fa0a93 (ForceField) has 8 perms fewer than 6c1a4768; the ones it has are the same code.
+    {0x63FA0A93, kShaderBoundaryShield},
+    // 9b752e5e (ForceField_DX11, Research Lab Hydra's field 603d908b) ships only perm 002, the same code and bindings.
+    {0x9B752E5E, kShaderBoundaryShield},
+    // Same fragment perms; the vertex perms differ only in an input attribute's location.
+    {0x156E5E53, kShaderPhazonPool}, {0xEBFFBA88, 0x131ED7F0}, {0x9D7E74C7, kShaderUnlitAdd},
+    {0x0A2CAF60, kShaderUnlitAdd}, {0x6F1F0438, kShaderUnlitAdd},
+    // Same fragment perms; one side's vertex perms add the bone fetch, as the skinned variants above.
+    {0xD809A1FD, 0x62F671E0}, {0xC2296CB7, 0x62F671E0}, {0xFD51FCBB, kShaderPickUp}, {0x5BF5E648, 0x547E64E5},
+    {0xB0937395, kShaderGunPanel}, {0x7159ECC8, kShaderUnlitAdd}, {0xF2DA2392, kShaderUnlitMatcap},
+    {0x1350D65D, kShaderUnlitVertex},
+    // f07e9761 has all 57 of 98f0556d's perms; 3ef54cc4 and 35acebd7 (copies of each other) have 57 where 4bc890c1
+    // ships only 018 and 042, and those two match. Each skinned vertex perm reads the same vp_c3 slots, writes the
+    // same outputs and adds one inversesqrt (the skinned N); the bones come from vp_c4 here.
+    {0xF07E9761, kShaderGunFx}, {0x3EF54CC4, kShaderLambertFx}, {0x35ACEBD7, kShaderLambertFx},
+    // Every perm the same as bc1509e8's.
+    {0xF43E3C13, kShaderUnlitAddMasked}, {0x68EEC2A3, kShaderUnlitAddMasked},
+    // Same fragment perms; the vertex perms differ in the UVs: one side passes the model's sets through, the other
+    // feeds each channel the set AUVI names through an animated-UV transform. None of these materials has ANUV, and
+    // the port applies AUVI itself (port_remastered_uv.h), so both draw the same. Some also add or drop the bone
+    // fetch (d7e924e8, ee7307aa, 7ce6fe00, ecf71237) or shift an input attribute (2ce6bda0 and its copies), as above.
+    // f8cdff01 is left out: its vertex shader can also project a UV from the position.
+    {0x8C5D6F3C, kShaderUnlitAdd},     {0x4CD6322A, kShaderPhazonPool},    {0xD7E924E8, kShaderPhazonPool},
+    {0x294466B6, kShaderHoloGlassE264}, {0xDB22A8D4, kShaderHoloGlassC}, {0xFCE8531B, kShaderHoloGlassC},
+    {0xC2758D23, 0x27A91776}, {0xEE7307AA, 0x27A91776}, {0x61DC2B75, 0xB9E899F3},
+    {0x2CE6BDA0, 0x557A7DE4}, {0xAF89E54E, 0x557A7DE4}, {0x49050489, 0x557A7DE4}, {0x55B23C73, 0x557A7DE4},
+    {0x963919C8, 0x557A7DE4}, {0x7CE6FE00, 0xF495B260}, {0xECF71237, 0xF495B260},
+    // ColorUnlit without the vertex colour (ColorUnlitWhite below): the same scroll and CCH0.x, no CCH1.x term, white
+    // where ColorUnlit reads the vertex.
+    {0x568B8E25, kShaderColorUnlit}, {0x8AFAC076, kShaderColorUnlit}, {0xEE2D9846, kShaderColorUnlit},
+    // 353d6547: 3991da00's fragment math on texcoord set 0 (no AUVI); kb material/353d6547.md.
+    {0x353D6547, kShaderHoloGlassB},
+    // 74c655e4: 084a8db5 plus the CCH1 tint on the bent room and a second output, 1 - CCH1 x (1 - vertex
+    // alpha), as 2f95a061's (SimpleGlassTinted below); kb material/74c655e4.md.
+    {0x74C655E4, kShaderSimpleGlass},
+    // ac620b1d (gun_sides_XRAY_mat, the arm cannon's X-ray models 9d82dc5e and 998992d7): 65e90e82's fragment math
+    // (perm 002_0 folded side by side: rim, depth fade, ICAN mux, -2 TCH0, the same alpha) with ICAN read on the
+    // texcoord set its TexCoordIndex names (c5[3].x) where 65e90e82 reads set 0; the port samples each map on its
+    // authored set, so both draw the same. The vertex perms add the bone fetch; kb material/ac620b1d.md.
+    {0xAC620B1D, 0x65E90E82 /* kShaderXrayMap */},
+    // f88778c9 (the Varia/Gravity/Phazon <Suit>Arm_XRay): 65e90e82's fragment perms verbatim (002, 018, 042 folded),
+    // 0c0b6119's static vertex shader in place of its bone fetch; kb material/f88778c9.md.
+    {0xF88778C9, 0x65E90E82 /* kShaderXrayMap */},
 };
+bool SimpleGlassTinted(uint32_t shader) { return shader == 0x74C655E4; }
+// kb topic/shader-twins.md "ColorUnlit-white": out = base x CCH0.x, alpha base.a; no vertex colour, no CCH1.x.
+bool ColorUnlitWhite(uint32_t shader) { return shader == 0x568B8E25 || shader == 0x8AFAC076 || shader == 0xEE2D9846; }
 uint32_t ShaderFamily(uint32_t shader) {
   for (const ShaderTwin& t : kShaderTwins)
     if (t.copy == shader) return t.of;
@@ -192,6 +308,10 @@ uint32_t ShaderFamily(uint32_t shader) {
 // TEXCOORD_0.zw (logical coord 1) default. Call this with RemMaterial::family so
 // exact shader twins inherit their source family's coordinate rule.
 constexpr uint32_t kLightmapCoord3Families[] = {
+    // Door frames tile ICAN on TEXCOORD_0.zw; their independent baked atlas UV is
+    // TEXCOORD_1.zw. Reusing the glow coordinates samples unlit atlas regions.
+    // 131ED7F0 is the same shader bar its alpha, and reads the same coordinates.
+    0xC78982B4, 0x131ED7F0,
     0x41A12C9E, 0x72B34E42, 0x9AB899E7, 0xA978D507, 0xB9E899F3,
     0xD363D694, 0xD37039F7, 0xD6AA2A3A, 0xDF0677FF, 0xDFEC1A87,
     0xE538B757, 0xE9DF2188, 0xF22FEB5B, 0x557A7DE4, 0xF84AC32D,
@@ -210,7 +330,15 @@ size_t LightmapSourceCoordinate(uint32_t family) {
 constexpr uint32_t kShaderXraySkinned2 = 0xDFC2A7DC;
 constexpr bool IsXraySkinned(uint32_t shader) { return shader == kShaderXraySkinned || shader == kShaderXraySkinned2; }
 constexpr uint32_t kShaderXrayMap = 0x65E90E82;
-constexpr bool IsXrayGhost(uint32_t shader) { return shader == kShaderXrayStatic || IsXraySkinned(shader); }
+// e84190e0 (kb material/e84190e0.md) is the same X-ray fresnel/depth-fade material as fb2bc671.
+constexpr uint32_t kShaderXrayStatic2 = 0xE84190E0;
+// 0c0b6119 (xray_ice / XRAYLava, kb material/0c0b6119.md) folds to fb2bc671's maths (rim, depth fade, (rim + ICMC) x
+// c6[0], clustered GGX lights); its c6[0] is DIFC (inferred from the bind names) where fb2bc671's is ICNC.
+constexpr uint32_t kShaderXrayRim = 0x0C0B6119;
+constexpr bool IsXrayGhost(uint32_t shader) {
+  return shader == kShaderXrayStatic || shader == kShaderXrayStatic2 || shader == kShaderXrayRim ||
+         IsXraySkinned(shader);
+}
 // The decal cutouts (kind 24; kb material/e538b757.md, 42fe2ed0.md): a bfb300b6 surface cut by a smoothstep of an
 // alpha A about CCH0.x = c (0.5 on all of them): discard where t²(3-2t) < 0.25, t = (A - 0.5 + c) / 2c; output
 // alpha 1, no vertex colour. e538b757 cuts on BCLR.a², 42fe2ed0 on TCH0.r (its alpha map, in the emissive slot).
@@ -258,17 +386,24 @@ std::string ShaderRole(uint32_t shader) {
   add(shader == kShaderHolo, "holo");
   add(shader == kShaderHoloRefl, "holo-refl");
   add(shader == kShaderHologram, "hologram");
+  add(shader == kShaderEnergyField, "energy-field");
+  add(shader == kShaderChozoLore, "chozo-lore");
   add(shader == kShaderLambertFx, "lambert-fx");
   add(shader == kShaderGunFx, "gun-fx");
   add(IsEyeGloss(shader), "eye-gloss");
+  add(shader == kShaderBallGlass, "ball-glass");
   add(shader == kShaderColorUnlit, "color-unlit");
   add(shader == kShaderPhazon, "phazon");
   add(shader == kShaderPhazonB, "phazon-b");
   add(shader == kShaderPhazonPool, "phazon-pool");
   add(shader == kShaderPhazonVeins, "phazon-veins");
   add(shader == kShaderRefractGlass || shader == kShaderRefractGlassB, "refract-glass");
-  add(shader == kShaderHoloGlassB || shader == kShaderHoloGlassC, "holo-glass-b");
+  add(shader == kShaderHoloGlassB || shader == kShaderHoloGlassC || shader == kShaderHoloGlassE264, "holo-glass-b");
   add(shader == kShaderDualGlass, "dual-glass");
+  add(shader == kShaderSimpleGlass, "simple-glass");
+  add(shader == kShaderCrystal, "crystal");
+  add(shader == kShaderSkyFlow, "sky-flow");
+  add(shader == kShaderThermalHeatMask, "thermal-heat-mask");
   add(shader == kShaderInventoryGlass, "inventory-glass");
   add(shader == kShaderInventoryAdd, "inventory-add");
   add(IsXrayGhost(shader), "xray-ghost");
@@ -278,47 +413,32 @@ std::string ShaderRole(uint32_t shader) {
   return out.empty() ? "-" : out;
 }
 
-const char* KindName(int kind) {
-  switch (kind) {
-  case 0: return "standard";
-  case 1: return "up-layer";
-  case 2: return "detail";
-  case 3: return "lava";
-  case 4: return "parallax";
-  case 6: return "lava-pool";
-  case 7: return "waterfall";
-  case 8: return "glass";
-  case 9: return "gun-glow";
-  case 10: return "premul-glass";
-  case 11: return "holo-glass";
-  case 12: return "frozen-shell";
-  case 13: return "matcap-shell";
-  case 14: return "boundary-shield";
-  case 15: return "pickup";
-  case 16: return "holo";
-  case 17: return "holo-refl";
-  case 18: return "hologram";
-  case 19: return "gun-fx";
-  case 20: return "vertex-blend";
-  case 21: return "phazon";
-  case 22: return "phazon-b";
-  case 23: return "refract-glass";
-  case 24: return "decal-cut";
-  case 25: return "eye-gloss";
-  case 26: return "projected-blend";
-  case 27: return "decal-alpha";
-  case 28: return "ice";
-  case 29: return "holo-glass-b";
-  case 30: return "refract-glass-b";
-  case 31: return "xray-ghost";
-  case 32: return "phazon-pool";
-  case 33: return "xray-map";
-  case 34: return "dual-glass";
-  case 35: return "phazon-veins";
-  case 36: return "inventory-glass";
-  case 37: return "inventory-add";
-  default: return "kind?";
+const char* KindName(int kind) { return aurora::PbrKindName(static_cast<aurora::PbrKind>(kind)); }
+
+// A shader's DIFC, ICNC and ICMC constants (white, black and black where the material has none).
+struct ShaderColors {
+  double difc[4] = {1.0, 1.0, 1.0, 1.0};
+  double icnc[3] = {0.0, 0.0, 0.0};
+  double icmc[3] = {0.0, 0.0, 0.0};
+};
+ShaderColors ReadShaderColors(const ModelMaterial& mat) {
+  ShaderColors c;
+  for (const ModelMaterialData& d : mat.data) {
+    if (d.kind != ModelMaterialData::Kind::Color) {
+      continue;
+    }
+    if (d.usage == FourCC('D', 'I', 'F', 'C')) {
+      for (int i = 0; i < 4; ++i) {
+        c.difc[i] = ShortestDouble(d.color[i]);
+      }
+    } else if (d.usage == FourCC('I', 'C', 'N', 'C') || d.usage == FourCC('I', 'C', 'M', 'C')) {
+      double* row = d.usage == FourCC('I', 'C', 'N', 'C') ? c.icnc : c.icmc;
+      for (int i = 0; i < 3; ++i) {
+        row[i] = ShortestDouble(d.color[i]);
+      }
+    }
   }
+  return c;
 }
 
 RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
@@ -334,9 +454,10 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
   out.shader = rawShader;
   out.family = shader;
   out.role = ShaderRole(shader);
+  if (ColorUnlitWhite(rawShader)) out.role = "color-unlit-white";
   out.shell = shader == kShaderMatcapShell;
   out.shield = shader == kShaderBoundaryShield || shader == kShaderForceField || shader == kShaderPickUp || shader == kShaderHolo ||
-               shader == kShaderHoloRefl || shader == kShaderHologram || shader == kShaderGunFx || IsEyeGloss(shader) ||
+               shader == kShaderHoloRefl || shader == kShaderHologram || shader == kShaderRouteHologram || shader == kShaderGunFx || IsEyeGloss(shader) ||
                IsXrayGhost(shader) || shader == kShaderXrayMap;
   bool custom = false;
   for (const ModelMaterialData& d : mat.data) {
@@ -350,7 +471,8 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       std::find(std::begin(kShaderPremulGlass), std::end(kShaderPremulGlass), shader) != std::end(kShaderPremulGlass);
   // Plain MFVC shaders (882014EE, F22FEB5B, the layered ones) multiply only the diffuse;
   // every kShaderTints shader multiplies the albedo, so its F0 is tinted too.
-  out.tintF0 = std::find(std::begin(kShaderTints), std::end(kShaderTints), shader) != std::end(kShaderTints);
+  out.tintF0 = std::find(std::begin(kShaderTints), std::end(kShaderTints), shader) != std::end(kShaderTints) &&
+               !ColorUnlitWhite(rawShader);
   out.tinted = (mat.unk1 & kVertexColorFlag) != 0 && (!custom || premulGlass || out.tintF0);
   // What the alpha a shader writes is made of is only in its code. Every one
   // read writes the base map's alpha squared, times the vertex alpha, bar these:
@@ -400,6 +522,7 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
   };
   bool bclr = false;
   bool refl = false;
+  MapRef incanMask;
   const ModelMaterialData* icnc = nullptr;
   const ModelMaterialData* bklt = nullptr;
   const ModelMaterialData* bkla = nullptr;
@@ -433,7 +556,7 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     case FourCC('R', 'E', 'F', 'L'):
       refl = refl || texture;
       if (texture && (shader == kShaderIceSpreader || shader == kShaderHoloRefl || shader == kShaderInventoryGlass ||
-                      shader == kShaderInventoryAdd)) {
+                      shader == kShaderInventoryAdd || shader == kShaderUnlitCube || shader == kShaderUnlitCubeNormal)) {
         set(kBase, d.texture, &out.refl);
         if (Lower(IdToString(out.refl.id)).rfind(kDefaultRefl, 0) == 0) {
           out.refl = MapRef{};
@@ -451,8 +574,9 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       break;
     case FourCC('R', 'E', 'F', 'S'):
     case FourCC('R', 'E', 'F', 'V'):
-      // 98F0556D's sphere map and reflectivity map: the second layer's base and MR (kind 19).
-      if (texture && (shader == kShaderGunFx || IsEyeGloss(shader))) {
+      // 98F0556D's sphere map and reflectivity map: the second layer's base and MR (kind 19). 664ee5ca's (kind 40)
+      // the same; which of its two textures is REFS is inferred from the matcap coordinate (kb), not verified.
+      if (texture && (shader == kShaderGunFx || IsEyeGloss(shader) || shader == kShaderBallGlass || shader == kShaderUnlitMatcap)) {
         const bool sphere = d.usage == FourCC('R', 'E', 'F', 'S');
         MapRef& m = sphere ? out.layer[kBase] : out.layer[kMr];
         set(sphere ? kBase : kMr, d.texture, &m);
@@ -520,6 +644,11 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
         set(kEmissive, d.texture);
       }
       break;
+    case FourCC('T', 'C', 'H', '0'):
+      if (texture && std::find(std::begin(kShaderGunBody), std::end(kShaderGunBody), shader) != std::end(kShaderGunBody)) {
+        set(kBase, d.texture, &incanMask);
+      }
+      break;
     case FourCC('I', 'C', 'N', 'C'):
       if (d.kind == ModelMaterialData::Kind::Color) {
         icnc = &d;
@@ -579,6 +708,16 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.glowLinear = true;
     out.emissive = s;
     out.reason += "gun-body list: stripes ramp at inverse exposure; ";
+    // Compiled with USE_CUSTOM_INCAN_MASK, the glow is also multiplied by TCH0's red
+    // ("IncanMask"), read at the base map's texcoord. On the third-person barrel the
+    // ramp (206819a9) repeats and scrolls over the whole surface and the mask (cc7657ad,
+    // 8% of it bright) keeps it to a few strips: unmasked, the barrel glowed all over at
+    // 5x in a pattern that never held still.
+    if (incanMask.has && out.maps[kBase].has && incanMask.coord == out.maps[kBase].coord) {
+      out.maps[kBase].mask = {incanMask};
+      out.mask = true;
+      out.reason += "TCH0 incan mask as base alpha; ";
+    }
   } else if (out.maps[kEmissive].has && shader == kShaderGunPanel) {
     // The beam panels: ICAN x ICNC x base alpha with no exposure factor (only the lit
     // part is exposed), so like the inverse-exposed glows it is kept linear.
@@ -661,6 +800,15 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       set(kEmissive, tch[0]->texture);
       out.maps[kEmissive].detail = out.maps[kEmissive].has;
     }
+  } else if (shader == kShaderSkyFlow && tch[0] && cch[0] && cch[0]->color[1] > 0.0 && !out.maps[kEmissive].has) {
+    // The flow mask TCH0 rides in the emissive slot as kind 24's does. CCH0 is (strength, period
+    // in seconds, angle of the flow's world direction about up); the period goes as its inverse.
+    out.kind = 49;
+    set(kEmissive, tch[0]->texture);
+    out.maps[kEmissive].detail = out.maps[kEmissive].has;
+    out.kindParam[0] = 1.0 / ShortestDouble(cch[0]->color[1]);  // the game multiplies it by the time
+    out.kindParam[1] = ShortestDouble(cch[0]->color[0]);
+    out.kindParam[2] = ShortestDouble(cch[0]->color[2]);
   } else if ((shader == kShaderDetail || shader == kShaderDetailTinted) && tch[0]) {
     out.kind = 2;
     set(kBase, tch[0]->texture, &out.layer[kBase]);
@@ -768,6 +916,17 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.layerHeight[1] = ShortestDouble(cch[2]->color[1]);
     out.layerHeight[2] = ShortestDouble(cch[0]->color[1]);
     out.layerHeight[3] = 0.0;
+    // DIFC (row 7) scales the lit and bent terms and o1 (the fold's c6[0]); the PBR8 trailer carries it.
+    for (int i = 0; i < 4; ++i) {
+      out.shieldRows[28 + i] = 1.0;
+    }
+    for (const ModelMaterialData& d : mat.data) {
+      if (d.kind == ModelMaterialData::Kind::Color && d.usage == FourCC('D', 'I', 'F', 'C')) {
+        for (int i = 0; i < 4; ++i) {
+          out.shieldRows[28 + i] = ShortestDouble(d.color[i]);
+        }
+      }
+    }
   } else if (shader == kShaderFrozenShell && out.maps[kBase].has && tch[1] && cch[0] && cch[1] && cch[2]) {
     out.kind = 12;
     // The dissolve noise is bound as the second layer's base. The edge is
@@ -935,6 +1094,17 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       }
     }
     out.kindParam[0] = out.shieldRows[31];  // the runtime may replace it with the live variable
+  } else if (shader == kShaderThermalHeatMask && tch[0] && cch[0] && cch[1]) {
+    out.kind = 50;
+    // CCH0 and CCH1 are rows 0 and 1; the mask TCH0 rides in the MR slot, raw, and the vertex colour is read as it is.
+    for (int r = 0; r < 2; ++r) {
+      for (int i = 0; i < 4; ++i) {
+        out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
+      }
+    }
+    set(kMr, tch[0]->texture);
+    out.maps[kMr].raw = true;
+    out.vcolor = true;
   } else if (shader == kShaderXrayMap && out.maps[kBase].has && out.maps[kNormal].has && tch[0] && cch[0] && cch[1]) {
     out.kind = 33;
     // 65e90e82, the X-ray visor's map material: CCH0/CCH1 are rows 0 and 1 as kind 31's, DIFC row 2 (rgba, default 1),
@@ -982,7 +1152,7 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       if (d.kind != ModelMaterialData::Kind::Color) {
         continue;
       }
-      if (d.usage == FourCC('I', 'C', 'N', 'C')) {
+      if (d.usage == (shader == kShaderXrayRim ? FourCC('D', 'I', 'F', 'C') : FourCC('I', 'C', 'N', 'C'))) {
         for (int i = 0; i < 4; ++i) {
           out.shieldRows[8 + i] = ShortestDouble(d.color[i]);
         }
@@ -992,7 +1162,8 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
         }
       }
     }
-    out.shieldRows[15] = IsXraySkinned(shader) && out.maps[kEmissive].has ? 1.0 : 0.0;
+    // The skinned shader and e84190e0 (ICAN x ICOF x fresnel when MUXI = CCH1.w) read ICAN; fb2bc671 and 0c0b6119 do not.
+    out.shieldRows[15] = (IsXraySkinned(shader) || shader == kShaderXrayStatic2) && out.maps[kEmissive].has ? 1.0 : 0.0;
   } else if ((shader == kShaderRefractGlass || shader == kShaderRefractGlassB) && out.maps[kBase].has &&
              out.maps[kNormal].has && cch[0]) {
     out.kind = shader == kShaderRefractGlassB ? 30 : 23;
@@ -1003,18 +1174,20 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     for (int i = 0; i < 4; ++i) {
       out.kindParam[i] = ShortestDouble(cch[0]->color[i]);
     }
-  } else if ((shader == kShaderHoloGlassB || shader == kShaderHoloGlassC) && out.maps[kBase].has && tch[0] && tch[1] && tch[2] && cch[0] && cch[1] &&
-             cch[2] && cch[3]) {
+  } else if ((shader == kShaderHoloGlassB || shader == kShaderHoloGlassC || (shader == kShaderHoloGlassE264 && cch[4])) &&
+             out.maps[kBase].has && tch[0] && tch[1] && tch[2] && cch[0] && cch[1] && cch[2] && cch[3]) {
     out.kind = 29;
     out.vcolor = true;
     // BCLR is the base map (its alpha the roughness); TCH0 and TCH2 are indirect offsets (raw) and TCH1
-    // a colour (sRGB), bound as the second layer's base, MR and normal on their own AUVI texcoords.
+    // a colour whose alpha is the scene blur's level, bound as the second layer's base, MR and normal on
+    // their own AUVI texcoords. All three are raw: TCH1 decodes as its source format says and keeps its
+    // alpha, as the shader samples it, never an MR map's metal clamp.
     // The shader's constants go to the runtime whole (rows 0-3 CCH0..CCH3, row 7 DIFC); row 4 x is the
     // per-object phase the game fills, row 6 w says whether the material has a cube of its own.
     set(kBase, tch[0]->texture, &out.layer[kBase]);
     set(kMr, tch[1]->texture, &out.layer[kMr]);
     set(kNormal, tch[2]->texture, &out.layer[kNormal]);
-    out.layer[kBase].raw = out.layer[kNormal].raw = true;
+    out.layer[kBase].raw = out.layer[kMr].raw = out.layer[kNormal].raw = true;
     out.kindParam[0] = 1.0;  // the game multiplies it by the time
     out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
     double difc[4] = {1.0, 1.0, 1.0, 1.0};
@@ -1032,9 +1205,55 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     }
     out.shieldRows[20] = shader == kShaderHoloGlassC ? 1.0 : 0.0;  // row 5 x: tint and dual-source terms
     out.shieldRows[27] = out.refl.has ? 1.0 : 0.0;
+    if (shader == kShaderHoloGlassE264) {
+      // Row 4: y the near plane (the game's), z the depth factor's cap, w CCH4.x, the phase's scale; row 5 y
+      // marks E2644678. Its cube is the camera's probe, which the game binds (row 6 w), not the material's.
+      out.shieldRows[18] = kHoloGlassE264DepthCap;
+      out.shieldRows[19] = ShortestDouble(cch[4]->color[0]);
+      out.shieldRows[21] = 1.0;
+      out.shieldRows[27] = 0.0;
+    }
     for (int i = 0; i < 4; ++i) {
       out.shieldRows[28 + i] = difc[i];
     }
+  } else if (shader == kShaderSimpleGlass && out.maps[kBase].has && tch[0] && cch[0] && cch[1] && cch[2] && cch[3]) {
+    out.kind = 43;
+    out.vcolor = true;
+    // Kind 29's layout less its TCH1/TCH2 layers and DIFC: BCLR is the base map (its alpha the roughness and the
+    // screen blur), TCH0 the indirect offset, raw, bound as the second layer's base. The fold's samplers are texA
+    // (TCH0, read at -0.5 as an offset), tex8 (BCLR), tex10 (screen), texE (read at (N.V, BCLR.a): the BRDF LUT, as
+    // 3991da00's tex12; the kb page's "TCH0 -> texE" is unverified) and texC (REFL). Rows 0-3 CCH0..CCH3
+    // (c5[n] = CCHn, unverified), row 4 x the per-object phase (the fold's v4.y, taken as 3991da00's v6.y), row 6 w
+    // whether the material has a cube of its own.
+    set(kBase, tch[0]->texture, &out.layer[kBase]);
+    out.layer[kBase].raw = true;
+    out.kindParam[0] = 1.0;  // the game multiplies it by the time
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    for (int r = 0; r < 4; ++r) {
+      for (int i = 0; i < 4; ++i) {
+        out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
+      }
+    }
+    out.shieldRows[20] = SimpleGlassTinted(rawShader) ? 1.0 : 0.0;  // row 5 x: tint and dual-source terms
+    out.shieldRows[27] = out.refl.has ? 1.0 : 0.0;
+  } else if (shader == kShaderCrystal && out.maps[kBase].has && out.maps[kNormal].has && tch[0] && tch[1] && cch[0] && cch[1] &&
+             cch[2] && cch[3] && cch[4]) {
+    out.kind = 48;
+    out.vcolor = true;
+    // BCLR (raw; its alpha weighs the blur and the parallax) and NMAP are maps 0 and 2; TCH0 (scrolled, parallaxed
+    // by the view tangent) is the second layer's base and TCH1 (read at the bent normal's xy) its MR, both raw.
+    // Rows 0-4 CCH0..CCH4 (c5[n] = CCHn, as the kb page reads the fold); no cube, LUT, DIFC or lights.
+    set(kBase, tch[0]->texture, &out.layer[kBase]);
+    set(kMr, tch[1]->texture, &out.layer[kMr]);
+    out.layer[kBase].raw = out.layer[kMr].raw = true;
+    out.kindParam[0] = 1.0;  // the game multiplies it by the time
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    for (int r = 0; r < 5; ++r) {
+      for (int i = 0; i < 4; ++i) {
+        out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
+      }
+    }
+    out.shieldRows[27] = 0.0;
   } else if ((shader == kShaderBoundaryShield || shader == kShaderForceField) && out.maps[kBase].has && tch[0] && tch[1] && cch[0] && cch[1] &&
              cch[2] && cch[3] && cch[4] && cch[5] && cch[6]) {
     out.kind = 14;
@@ -1091,10 +1310,58 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     for (int i = 0; i < 4; ++i) {
       out.shieldRows[28 + i] = difc[i];
     }
-  } else if ((shader == kShaderHolo || shader == kShaderHoloRefl || shader == kShaderHologram) &&
-             out.maps[kBase].has && (shader != kShaderHologram || (cch[0] && cch[1] && cch[2] && cch[3]))) {
-    out.kind = shader == kShaderHolo ? 16 : shader == kShaderHoloRefl ? 17 : 18;
-    out.vcolor = out.kind == 18;
+  } else if (shader == kShaderEnergyField && out.maps[kBase].has && tch[0] && cch[0] && cch[1]) {
+    // Ore Processing EnergyField: 000/001 fragments are identical. BCLR.r/g
+    // are the two counter-scrolling threshold masks; TCH0.r is the UV stripe.
+    // VS emits world position, view normal, UV0 and raw vertex RGBA.
+    out.kind = 44;
+    out.shield = true;
+    out.vcolor = true;
+    out.unlit = true;
+    out.maps[kBase].raw = true;
+    set(kBase, tch[0]->texture, &out.layer[kBase]);
+    out.layer[kBase].raw = true;
+    out.kindParam[0] = 1.0;
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    for (int r = 0; r < 2; ++r) {
+      for (int i = 0; i < 4; ++i) {
+        out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
+      }
+    }
+    for (int i = 0; i < 4; ++i) out.shieldRows[28 + i] = 1.0;
+    for (const ModelMaterialData& d : mat.data) {
+      if (d.kind == ModelMaterialData::Kind::Color && d.usage == FourCC('D', 'I', 'F', 'C')) {
+        for (int i = 0; i < 4; ++i) out.shieldRows[28 + i] = ShortestDouble(d.color[i]);
+      }
+    }
+  } else if (shader == kShaderChozoLore && out.maps[kBase].has && tch[0] && cch[0] && cch[1] && cch[2]) {
+    // ChozoLore 9d53cf06 (kb material/9d53cf06.md), unlit and premultiplied: BCLR (tex8) is the base map, TCH0
+    // (texA, the offset that bends it) is bound raw as the second layer's base (stage 4). Rows 0-2 CCH0..CCH2
+    // (FS c5[0], c5[1], VS/FS CCH2: the wave), row 7 DIFC. The VS waves the vertices along the normal by the
+    // vertex alpha and maps the sheet from the model-space y and z.
+    out.kind = 46;
+    out.shield = true;
+    out.vcolor = true;
+    out.unlit = true;
+    set(kBase, tch[0]->texture, &out.layer[kBase]);
+    out.layer[kBase].raw = true;
+    out.kindParam[0] = 1.0;  // the game multiplies it by the time
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    for (int r = 0; r < 3; ++r) {
+      for (int i = 0; i < 4; ++i) {
+        out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
+      }
+    }
+    for (int i = 0; i < 4; ++i) out.shieldRows[28 + i] = 1.0;
+    for (const ModelMaterialData& d : mat.data) {
+      if (d.kind == ModelMaterialData::Kind::Color && d.usage == FourCC('D', 'I', 'F', 'C')) {
+        for (int i = 0; i < 4; ++i) out.shieldRows[28 + i] = ShortestDouble(d.color[i]);
+      }
+    }
+  } else if ((shader == kShaderHolo || shader == kShaderHoloRefl || shader == kShaderHologram || shader == kShaderRouteHologram) &&
+             out.maps[kBase].has && ((shader != kShaderHologram && shader != kShaderRouteHologram) || (cch[0] && cch[1] && cch[2] && cch[3]))) {
+    out.kind = shader == kShaderHolo ? 16 : shader == kShaderHoloRefl ? 17 : shader == kShaderRouteHologram ? 45 : 18;
+    out.vcolor = out.kind == 18 || out.kind == 45;
     // DIFT (or BCLR for the hologram) is the base map. The constants go to the runtime in the PBR8
     // trailer: row 7 DIFC; row 6 the incandescence ICNC + ICMC (summed, rgb) for 16 and 17, with w
     // the gain of the material's own cube (17); ICMC alone for 18, whose rows 0-3 are CCH0..CCH3 and
@@ -1111,13 +1378,13 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
         for (int i = 0; i < 4; ++i) {
           difc[i] = ShortestDouble(d.color[i]);
         }
-      } else if (d.usage == FourCC('I', 'C', 'M', 'C') || (d.usage == FourCC('I', 'C', 'N', 'C') && out.kind != 18)) {
+      } else if (d.usage == FourCC('I', 'C', 'M', 'C') || (d.usage == FourCC('I', 'C', 'N', 'C') && out.kind != 18 && out.kind != 45)) {
         for (int i = 0; i < 3; ++i) {
           incan[i] += ShortestDouble(d.color[i]);
         }
       }
     }
-    if (out.kind == 18) {
+    if (out.kind == 18 || out.kind == 45) {
       for (int r = 0; r < 4; ++r) {
         for (int i = 0; i < 4; ++i) {
           out.shieldRows[r * 4 + i] = ShortestDouble(cch[r]->color[i]);
@@ -1133,16 +1400,13 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       out.shieldRows[28 + i] = difc[i];
     }
   }
-  if (std::find(std::begin(kShaderAreaLight), std::end(kShaderAreaLight), shader) != std::end(kShaderAreaLight)) {
-    out.maps[kBase].solid = true;
-  }
   const bool eyeGloss = IsEyeGloss(shader);
-  if ((shader == kShaderGunFx || eyeGloss) && out.maps[kBase].has && out.layer[kBase].has && out.layer[kMr].has) {
-    out.kind = eyeGloss ? 25 : 19;
-    // The Eyon's BCLR is a 1x1 black that is the base all the same (diffuse 0, F0 from METL): no TEV fallback.
-    out.maps[kBase].solid = eyeGloss;
+  const bool ballGlass = shader == kShaderBallGlass;
+  if ((shader == kShaderGunFx || eyeGloss || ballGlass) && out.maps[kBase].has && out.layer[kBase].has && out.layer[kMr].has) {
+    out.kind = ballGlass ? 42 : eyeGloss ? 25 : 19;
     // Lit: REFV (map 5) x REFS (map 4, read at the view-space normal) x luminance(L) + DIFT x DIFC x L
     // + ICNC + ICMC. Row 6 = ICNC + ICMC, row 7 = DIFC; Remastered's mesh has no colour stream.
+    // Kind 42 adds ICAN (map 3) x ICNC: row 5 = ICNC, row 6 = ICMC alone.
     out.layer[kMr].coord = out.layer[kBase].coord = 0;
     out.tint[0] = out.tint[1] = out.tint[2] = 1.0;
     double difc[4] = {1.0, 1.0, 1.0, 1.0};
@@ -1154,6 +1418,10 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       if (d.usage == FourCC('D', 'I', 'F', 'C')) {
         for (int i = 0; i < 4; ++i) {
           difc[i] = ShortestDouble(d.color[i]);
+        }
+      } else if (d.usage == FourCC('I', 'C', 'N', 'C') && ballGlass) {
+        for (int i = 0; i < 3; ++i) {
+          out.shieldRows[20 + i] = ShortestDouble(d.color[i]);
         }
       } else if (d.usage == FourCC('I', 'C', 'M', 'C') || d.usage == FourCC('I', 'C', 'N', 'C')) {
         for (int i = 0; i < 3; ++i) {
@@ -1204,6 +1472,66 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
   if (shader == kShaderInventoryAdd && !out.cutout) {
     out.kind = 37;
   }
+  if ((shader == kShaderUnlitCube || shader == kShaderUnlitCubeNormal) && out.maps[kBase].has) {
+    // Unlit: A x BCLR x (1 - M) x DIFC + F0 x REFL + ICNC + ICMC, METL = (A, rough, M) (kind 38). Row 6 = ICNC + ICMC,
+    // row 7 = DIFC; no exposure factor (mode bit 131072).
+    out.kind = 38;
+    out.unlit = true;
+    out.tint[0] = out.tint[1] = out.tint[2] = 1.0;
+    const ShaderColors c = ReadShaderColors(mat);
+    for (int i = 0; i < 3; ++i) {
+      out.shieldRows[24 + i] = c.icnc[i] + c.icmc[i];
+    }
+    out.shieldRows[27] = 1.0;
+    for (int i = 0; i < 4; ++i) {
+      out.shieldRows[28 + i] = c.difc[i];
+    }
+  }
+  if (shader == kShaderUnlitVertex && out.maps[kBase].has) {
+    // Unlit (perm 003): DIFT x DIFC x vertex colour + ICNC + ICMC, alpha DIFT.a^2 x vertex alpha x DIFC.a, no
+    // exposure (kind 39). Row 6 = ICNC + ICMC, row 7 = DIFC, as kind 16. DIFT is the base map, on its one uv set.
+    out.kind = 39;
+    out.vcolor = true;
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    const ShaderColors c = ReadShaderColors(mat);
+    for (int i = 0; i < 3; ++i) {
+      out.shieldRows[24 + i] = c.icnc[i] + c.icmc[i];
+    }
+    for (int i = 0; i < 4; ++i) {
+      out.shieldRows[28 + i] = c.difc[i];
+    }
+  }
+  if (shader == kShaderUnlitMatcap && out.maps[kBase].has && out.layer[kBase].has && out.layer[kMr].has) {
+    // Unlit (perm 002 assumed): DIFT x DIFC + REFS(view-space normal x 0.5 + 0.5) x REFV + ICNC + ICMC, alpha
+    // DIFT.a^2 x DIFC.a, no exposure (kind 40). One uv set. Rows as kind 19: 6 = ICNC + ICMC, 7 = DIFC.
+    out.kind = 40;
+    out.layer[kMr].coord = out.layer[kBase].coord = 0;
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    const ShaderColors c = ReadShaderColors(mat);
+    for (int i = 0; i < 3; ++i) {
+      out.shieldRows[24 + i] = c.icnc[i] + c.icmc[i];
+    }
+    for (int i = 0; i < 4; ++i) {
+      out.shieldRows[28 + i] = c.difc[i];
+    }
+  }
+  if ((shader == kShaderUnlitAdd || shader == kShaderUnlitAddMasked) && out.maps[kBase].has && out.maps[kMr].has) {
+    // Unlit (perm 002 assumed): METL.x x BCLR x (1 - METL.z) x DIFC + ICAN x ICNC + ICMC, alpha BCLR.a^2 x DIFC.a, no
+    // exposure (kind 41). Row 5 = ICMC, row 6 = ICNC (apart: only ICNC scales ICAN), row 7 = DIFC. ICAN keeps the
+    // texcoord its reference names (the kb guesses it is the sampler on uv set 1; unverified). bc1509e8 sets row
+    // 6.w: ICAN x ICNC x BCLR.a, alpha DIFC.a. The kind sets its own glow and alpha, so the incan-mask mode is moot.
+    out.kind = 41;
+    out.shieldRows[27] = shader == kShaderUnlitAddMasked ? 1.0 : 0.0;
+    out.tint[0] = out.tint[1] = out.tint[2] = 0.0;
+    const ShaderColors c = ReadShaderColors(mat);
+    for (int i = 0; i < 3; ++i) {
+      out.shieldRows[20 + i] = c.icmc[i];
+      out.shieldRows[24 + i] = c.icnc[i];
+    }
+    for (int i = 0; i < 4; ++i) {
+      out.shieldRows[28 + i] = c.difc[i];
+    }
+  }
   if (shader == kShaderIceSpreader && tch[0] && !out.maps[kEmissive].has && cch[0] && cch[1] && cch[2] && cch[3]) {
     // Ice (088e025e, kind 28): TCH0 is the frost, shifted by a parallax along the view and drawn
     // over the lit surface with a rim. Rows: CCH0 (normal strength z, parallax scale w), CCH1
@@ -1247,6 +1575,12 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
   if (shader == kShaderColorUnlit) {
     out.colorUnlit = true;
     out.backlight = (cch[0] ? ShortestDouble(cch[0]->color[0]) : 1.0) * (cch[1] ? ShortestDouble(cch[1]->color[0]) : 1.0);
+    // The white variant is base x CCH0.x: half of it here, as the draw doubles the
+    // (white) vertex colour.
+    if (ColorUnlitWhite(rawShader)) {
+      out.colorUnlitWhite = true;
+      out.backlight = 0.5 * (cch[0] ? ShortestDouble(cch[0]->color[0]) : 1.0);
+    }
   }
   // Both layers' base maps and an edge width make a blend; the shader's own
   // floor on the width is not known, so a zero one is the thinnest edge.
@@ -1286,7 +1620,7 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.backlight = out.backlightTop = 0.0;
     out.maps[kMr].has = out.maps[kNormal].has = out.maps[kEmissive].has = false;
   }
-  if (out.kind == 14 || out.kind == 29) {
+  if (out.kind == 14 || out.kind == 29 || out.kind == 43) {
     // Unlit and alpha blended; every colour is the shader's, and it reads the screen copy.
     out.layered = out.blended = true;
     out.cutout = out.tinted = out.mask = out.unlit = false;
@@ -1294,6 +1628,16 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.emissive = 0.0;
     out.backlight = out.backlightTop = 0.0;
     out.maps[kMr].has = out.maps[kNormal].has = out.maps[kEmissive].has = false;
+  }
+  if (out.kind == 48) {
+    // Unlit and alpha blended; every colour is the shader's, the normal map is kept (it bends the layers and the
+    // screen copy's uv) and it reads the screen copy.
+    out.layered = out.blended = true;
+    out.cutout = out.tinted = out.mask = out.unlit = false;
+    out.height = 0.0;
+    out.emissive = 0.0;
+    out.backlight = out.backlightTop = 0.0;
+    out.maps[kMr].has = out.maps[kEmissive].has = false;
   }
   if (out.kind == 15) {
     // Unlit and blended; every colour is the shader's, and the normal map is kept (it bends the rim).
@@ -1304,7 +1648,7 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.backlight = out.backlightTop = 0.0;
     out.maps[kMr].has = out.maps[kEmissive].has = false;
   }
-  if (out.kind >= 16 && out.kind <= 18) {
+  if ((out.kind >= 16 && out.kind <= 18) || out.kind == 45) {
     // Unlit and additive; every colour is the shader's, and the base map's alpha is its own.
     // No second layer: the one map is the base.
     out.blended = true;
@@ -1315,10 +1659,33 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
     out.backlight = out.backlightTop = 0.0;
     out.maps[kMr].has = out.maps[kNormal].has = out.maps[kEmissive].has = false;
   }
+  if (out.kind == 44) {
+    // Every shipped EnergyField carries the transparent flag, which leaves it unlayered; its TCH0
+    // stripe is bound as the second layer's base map (stage 4) all the same, and its class blends it.
+    out.layered = true;
+    out.cutout = out.tinted = out.mask = false;
+    out.height = 0.0;
+  }
+  if (out.kind == 46) {
+    // The lore sheet's TCH0 is the second layer's base (stage 4); it blends One / InvSrcAlpha (PbrBlend).
+    out.layered = out.blended = true;
+    out.cutout = out.tinted = out.mask = false;
+    out.height = 0.0;
+    out.emissive = 0.0;
+    out.backlight = out.backlightTop = 0.0;
+    out.maps[kMr].has = out.maps[kNormal].has = out.maps[kEmissive].has = false;
+  }
   if (out.kind == 28) {
     // Lit, with the frost map in the emissive slot and its own opacity (the base alpha).
     out.tinted = out.mask = out.maskSquared = out.unlit = false;
     out.height = 0.0;
+    out.backlight = out.backlightTop = 0.0;
+  }
+  if (out.kind == 50) {
+    // One map, drawn by the thermal hot pass alone (kind 50 there): nothing of the lit surface is read.
+    out.layered = out.cutout = out.tinted = out.mask = out.unlit = false;
+    out.height = 0.0;
+    out.emissive = 0.0;
     out.backlight = out.backlightTop = 0.0;
   }
   if (out.kind == 33) {
@@ -1341,20 +1708,30 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
       out.maps[kEmissive].has = false;
     }
   }
-  if (out.kind == 25) {
+  if (out.kind == 25 || out.kind == 42) {
     // As kind 19, but the normal map, MR and the light's spec stay: only the reflection is the matcap.
+    // Kind 42 keeps ICAN (map 3), which its shader scales by ICNC.
     out.layered = true;
     out.blended = out.cutout = out.tinted = out.mask = out.unlit = false;
     out.height = 0.0;
     out.emissive = 0.0;
     out.backlight = out.backlightTop = 0.0;
-    out.maps[kEmissive].has = false;
+    out.maps[kEmissive].has = out.maps[kEmissive].has && out.kind == 42;
   }
   if (out.kind == 19) {
     // Lit and opaque (Remastered's mesh class 0; a fade is the model flags'). Maps 4 and 5 are
     // REFS and REFV; the lit base is DIFT alone.
     out.layered = true;
     out.blended = out.cutout = out.tinted = out.mask = out.unlit = false;
+    out.height = 0.0;
+    out.emissive = 0.0;
+    out.backlight = out.backlightTop = 0.0;
+    out.maps[kMr].has = out.maps[kNormal].has = out.maps[kEmissive].has = false;
+  }
+  if (out.kind == 40) {
+    // As kind 19 (maps 4 and 5 are REFS and REFV, the base DIFT alone), but unlit in the shader and with its class's blend.
+    out.layered = true;
+    out.cutout = out.tinted = out.mask = out.unlit = false;
     out.height = 0.0;
     out.emissive = 0.0;
     out.backlight = out.backlightTop = 0.0;
@@ -1414,7 +1791,8 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
                                              "glass",    "lava-pool", "gun-glow", "premul-glass", "holo-glass",
                                              "frozen-shell", "matcap-shell", "boundary-shield", "pickup",
                                              "holo",         "holo-refl",    "hologram",     "gun-fx", "vertex-blend", "phazon", "projected-blend", "decal-alpha", "phazon-pool", "phazon-veins",
-                                             "inventory-glass", "inventory-add"};
+                                             "inventory-glass", "inventory-add", "unlit-cube", "unlit-vertex", "unlit-matcap", "unlit-add",
+                                             "simple-glass", "crystal", "sky-flow", "thermal-heat-mask"};
     for (const char* name : kKindRoles) {
       if (out.role.find(name) != std::string::npos) {
         out.reason += std::string("fallback: ") + name + " shader without its maps/params (or blend); ";
@@ -1423,16 +1801,16 @@ RemMaterial ReadMaterial(const ModelMaterial& mat, const ConvertOptions& opt) {
   } else {
     out.reason += std::string("kind ") + KindName(out.kind) + " from the shader (" + out.role + "); ";
   }
-  // All but lava, premultiplied glass, the holograms (kinds 16-18, one map) and the decal cutouts draw
-  // with the second layer's maps.
+  // All but lava, premultiplied glass, the holograms (kinds 16-18, one map), the decal cutouts, the unlit cube
+  // surface (38) and the unlit vertex-coloured fx (39) draw with the second layer's maps.
   // Ice's fragment shader (088e025e) uses the standard single-layer PBR slots 0-2
   // plus its frost map in slot 3. Keep its kind only when those source maps exist;
   // otherwise the shader would bind neutral placeholders. Its CCH0-CCH3 row guard
   // is above, where kind 28 is assigned. Layered ice retains its historical path.
   const bool iceSingleLayerMapsBound = out.kind == 28 && !out.layered && out.maps[kBase].has && out.maps[kMr].has &&
                                        out.maps[kNormal].has && out.maps[kEmissive].has;
-  if (out.kind != 3 && out.kind != 10 && !(out.kind >= 16 && out.kind <= 18) && out.kind != 24 && out.kind != 27 &&
-      out.kind != 34 && out.kind != 36 && out.kind != 37 && !out.layered && !iceSingleLayerMapsBound) {
+  if (out.kind != 3 && out.kind != 10 && !(out.kind >= 16 && out.kind <= 18) && out.kind != 45 && out.kind != 24 && out.kind != 27 &&
+      out.kind != 34 && out.kind != 36 && out.kind != 37 && out.kind != 38 && out.kind != 39 && out.kind != 41 && out.kind != 49 && out.kind != 50 && !out.layered && !iceSingleLayerMapsBound) {
     if (out.kind != 0) {
       out.reason += std::string("demoted ") + KindName(out.kind) + " to standard: not layered; ";
     }

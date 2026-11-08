@@ -155,6 +155,17 @@ CIceImpact::CIceImpact(const TLockedToken< CGenDescription >& particle, TUniqueI
 
 CIceImpact::~CIceImpact() {}
 
+#ifdef TARGET_PC
+void CIceImpact::PortSetBeamTint(int beam) {
+  CElementGen* gens[] = {xe8_elementGen.get(), xPortWallGen.get(), xPortCeilingGen.get()};
+  for (CElementGen* gen : gens) {
+    if (gen != nullptr) {
+      gen->PortSetBeamTint(beam);
+    }
+  }
+}
+#endif
+
 void CIceImpact::CalculateRenderBounds() {
   rstl::optional_object< CAABox > bounds = xe8_elementGen->GetBounds();
 #ifdef TARGET_PC
@@ -418,7 +429,7 @@ bool CIceImpact::GenerateParticlesAgainstWorld(CStateManager& mgr,
 
 bool CIceImpact::GenerateParticlesAgainstActors(CStateManager& mgr, const CAABox& bounds,
                                                 const CSphere& a, const CSphere& b) {
-  rstl::reserved_vector< TUniqueId, 1024 > nearList;
+  rstl::reserved_vector< TUniqueId, kMaxObjects > nearList;
   mgr.BuildNearList(
       nearList, bounds,
       CMaterialFilter::MakeExclude(CMaterialList(kMT_Character, kMT_Player, kMT_Projectile,
