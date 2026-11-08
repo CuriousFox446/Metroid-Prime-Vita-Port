@@ -1040,6 +1040,86 @@ void index_card() noexcept {
   }
 }
 
+// vitaGL's own cache of the shaders behind its fixed-function calls: the overlay's, and those of
+// every draw whose generated program is not ready (after a build that changes the generated
+// programs, the map's 1,700 draws a frame until theirs compile). vitaGL keeps it in
+// ux0:data/shader_cache/v<N>/v and /f, a folder every vitaGL app shares, whatever
+// vglSetShaderCachePath says (that one is glCompileShader's, which nothing here calls). It writes a
+// shader there in place as soon as it is compiled, without checking that the compile worked, and
+// hands the shader patcher whatever bytes a file holds: a file cut short (a crash or a quit during
+// the write) or a failed compile's is a broken shader in every session after, until it is deleted.
+// The user found the map's GPU crash went away with the card's old shaders deleted
+// (VITA_PHASE2.md, "The map's GPU crash: stale shaders").
+constexpr const char* kFixedFunctionCache = "ux0:data/shader_cache";
+
+// Whether the file at `path`, `size` bytes, is one whole GXP: its magic and version, and its
+// header's size (at byte 8: every byte of the program, unpadded) the file's own.
+bool whole_gxp(const std::filesystem::path& path, uintmax_t size) noexcept {
+  if (size < 16 || size > kMaxBinary) {
+    return false;
+  }
+  std::FILE* file = std::fopen(path.c_str(), "rb");
+  if (file == nullptr) {
+    return true; // vitaGL cannot read it either, and compiles the shader again
+  }
+  uint8_t head[12] = {};
+  const bool read = std::fread(head, sizeof(head), 1, file) == 1;
+  std::fclose(file);
+  uint32_t field = 0;
+  std::memcpy(&field, head + 8, sizeof(field));
+  return read && std::memcmp(head, "GXP", 4) == 0 && head[4] == 1 && field == size;
+}
+
+// Before vitaGL reads any, the fixed-function cache's files that are not whole GXPs deleted
+// (vitaGL compiles a shader again when a draw needs it), and the count logged.
+void check_fixed_function_cache() noexcept {
+  const auto start = std::chrono::steady_clock::now();
+  uint32_t checked = 0;
+  std::vector<std::pair<std::filesystem::path, uintmax_t>> broken;
+  std::error_code ec;
+  std::filesystem::directory_iterator versions{kFixedFunctionCache, ec};
+  for (; !ec && versions != std::filesystem::directory_iterator{}; versions.increment(ec)) {
+    for (const char* stage : {"v", "f"}) {
+      std::error_code listed;
+      std::filesystem::directory_iterator it{versions->path() / stage, listed};
+      for (; !listed && it != std::filesystem::directory_iterator{}; it.increment(listed)) {
+        std::error_code sized;
+        const uintmax_t size = it->file_size(sized);
+        if (sized || !it->path().filename().string().ends_with(".gxp")) {
+          continue;
+        }
+        ++checked;
+        if (!whole_gxp(it->path(), size)) {
+          broken.emplace_back(it->path(), size);
+        }
+      }
+    }
+  }
+  // Deleted once listed: not while the folder is read.
+  std::string names;
+  uint32_t removed = 0;
+  for (const auto& [path, size] : broken) {
+    std::error_code gone;
+    if (!std::filesystem::remove(path, gone)) {
+      continue;
+    }
+    if (++removed <= 8) {
+      const std::filesystem::path& folder = path.parent_path();
+      names += fmt::format("{}{}/{}/{} ({} bytes)", names.empty() ? "" : ", ",
+                           folder.parent_path().filename().string(), folder.filename().string(),
+                           path.filename().string(), size);
+    }
+  }
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  if (removed == 0) {
+    Log.info("vitaGL's fixed-function shaders ({}): {} on the card, all whole ({:.0f} ms)", kFixedFunctionCache,
+             checked, ms);
+  } else {
+    Log.warn("vitaGL's fixed-function shaders ({}): {} on the card, {} not whole GXPs deleted ({:.0f} ms): {}{}",
+             kFixedFunctionCache, checked, removed, ms, names, removed > 8 ? ", ..." : "");
+  }
+}
+
 // Card thread: a program's binary read back, ok when its header matches the sources' lengths.
 void read_cached(LoadJob& job) noexcept {
   const auto start = std::chrono::steady_clock::now();
@@ -2373,12 +2453,14 @@ void draw_world(const Frame& frame) {
 } // namespace
 
 bool initialize() noexcept {
-  // vitaGL compiles the shaders behind its fixed-function calls (the overlay's) with the Vita's
-  // own compiler, which takes a while; it keeps them here, in the game's folder.
+  // vitaGL's cache for what glCompileShader compiles, in the game's folder. Nothing here compiles
+  // through it: the generated programs compile on the compiler thread, and vitaGL keeps its
+  // fixed-function shaders in a folder of its own (check_fixed_function_cache).
   static const std::string cachePath = std::string{g_config.userPath} + "/vitagl_shader_cache";
   std::error_code ec;
   std::filesystem::create_directories(cachePath, ec);
   vglSetShaderCachePath(cachePath.c_str());
+  check_fixed_function_cache();
   // The generated programs' own cache (Program, read_cached), and what it holds.
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);

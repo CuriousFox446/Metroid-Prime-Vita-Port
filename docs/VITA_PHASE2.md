@@ -1707,3 +1707,42 @@ What this cannot do: compile programs for materials the Vita has never drawn. Th
 at their first draw, one by one as they appear. Compiling the whole game's at once needs the whole
 game's materials first: the PC capture run designed on Nov 2 (a tour of every room recording each
 draw's material, the programs precompiled on the PC into `precompiled.bin`).
+
+## The map's GPU crash: stale shaders (tallon23)
+
+The user, after tallon22, had found days before that the map's GPU crash came from "the old
+shaders from any of the previous build after a new build": with the card's old shaders deleted,
+the map held. So the lines drawn a pixel wide since tallon21 were probably not the cure (the wide
+lines' case rested on timing alone).
+
+What could make a shader cached by an earlier build break a later one:
+
+- The generated programs' cache (`vita_programs/<key>.gxp`) looks sound. The key is XXH3 of both
+  Cg sources (`kBinaryVersion` 3), so a binary is read back only for the very same sources. It is
+  written aside and renamed, its header is checked against the sources' lengths, and one that
+  does not link is compiled again. vitaGL's program binary holds the two GXPs (each after a
+  matrix-uniform count and a sampler count) and the attribute table, which the GXP decides; and
+  nothing of a session's.
+- Two compiles never overlap: vitashark's entry points have been wrapped with one lock since the
+  compiler thread came in (4abc21d, then 7dfaad5).
+- vitaGL's fixed-function shaders are the weak spot. vitaGL caches them in
+  `ux0:data/shader_cache/v31/v` and `/f`, a folder hardcoded into it and shared by every vitaGL
+  app (`vglSetShaderCachePath` sets only `glCompileShader`'s cache, which nothing here calls, so
+  the game folder's `vitagl_shader_cache` stays empty). It writes each shader in place right after
+  compiling it, without checking the compile worked, and hands the shader patcher whatever bytes a
+  file holds. A write cut short by a crash or a quit, or a failed compile (vitaGL's compiles ran
+  past the render worker's 32 KiB stack until 7e9aa23), leaves a broken shader that every later
+  session loads. And after a build that changes the generated programs, the map's 1,700 draws a
+  frame draw fixed-function until their programs compile again: those are the draws that load it.
+
+**The change.** At the start, before vitaGL reads any, each file in
+`ux0:data/shader_cache/v*/v` and `/f` that is not one whole GXP is deleted
+(`check_fixed_function_cache`): magic `GXP\0`, version 1, and the header's size (at byte 8)
+the file's own, which a GXP's size field always is (it counts every byte, unpadded, as the
+GXPs in the card's own programs show). vitaGL compiles a deleted one again when a draw needs it.
+The log gives how many were on the card and which were deleted.
+
+Not known yet: which folder the user deleted. A broken file with a whole GXP's header (a
+foreign app's shader under the same name, or garbage of the right length) would get past this
+check; if the next log shows the check finding nothing and the map crashes again, the answer
+decides whether to clear the fixed-function cache at each new build.
