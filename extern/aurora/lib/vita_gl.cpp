@@ -1415,17 +1415,24 @@ void save_material(const void* record, size_t size) noexcept {
 }
 
 namespace {
-// The warm-up's programs (gx/vita_tev.cpp): the FIFO thread's, waiting (one at most: warm_up_room),
-// and the one the render worker builds (warm_up_step), dropped once its binary is on the card, from
-// where the draw that needs it reads it back.
+// The warm-up's programs (gx/vita_tev.cpp): the FIFO thread's, waiting (kWarmUpWaiting at most:
+// warm_up_room; their sources about 9 KiB each), and the one the render worker builds
+// (warm_up_step), dropped once its binary is on the card, from where the draw that needs it reads it
+// back. The render worker sends them to the compiler thread one at a time, so a draw's own compile
+// waits behind one at most however many wait here.
 struct WarmUpJob {
   uint64_t key = 0;
   std::string vertexSource;
   std::string fragmentSource;
 };
+constexpr size_t kWarmUpWaiting = 64;
 std::mutex g_warmUpMutex;
 std::deque<WarmUpJob> g_warmUpQueue;
 std::shared_ptr<Program> g_warmingUp;
+// For the toast (program_compiles): the warm-up's programs waiting their turn (queued, not yet sent
+// to the compiler thread nor found built), and those found built by their turn.
+std::atomic<uint32_t> g_warmUpAhead{0};
+std::atomic<uint32_t> g_warmUpFoundBuilt{0};
 // For the log: the warm-up's programs built, failed, and found built or being built by their turn.
 struct WarmUpStats {
   uint32_t built = 0;
@@ -1465,11 +1472,14 @@ void warm_up_step() noexcept {
     }
     if (known) {
       ++g_warmUpStats.skipped;
+      g_warmUpFoundBuilt.fetch_add(1, std::memory_order_release);
+      g_warmUpAhead.fetch_sub(1, std::memory_order_relaxed);
       continue;
     }
     g_warmingUp = std::make_shared<Program>(std::move(job.vertexSource), std::move(job.fragmentSource), job.key);
     int budget = 0;
     g_warmingUp->ready(budget); // its sources to the compiler thread
+    g_warmUpAhead.fetch_sub(1, std::memory_order_relaxed);
     return;
   }
 }
@@ -1492,12 +1502,13 @@ bool program_known(uint64_t key) noexcept {
 
 bool warm_up_room() noexcept {
   std::lock_guard lock{g_warmUpMutex};
-  return g_warmUpQueue.empty();
+  return g_warmUpQueue.size() < kWarmUpWaiting;
 }
 
 void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource) noexcept {
   std::lock_guard lock{g_warmUpMutex};
   g_warmUpQueue.push_back({key, std::move(vertexSource), std::move(fragmentSource)});
+  g_warmUpAhead.fetch_add(1, std::memory_order_relaxed);
 }
 
 void record(Draw draw) noexcept {
@@ -2604,9 +2615,12 @@ bool keyboard_open() noexcept {
 
 void program_compiles(uint32_t& sent, uint32_t& finished) noexcept {
   // Finished first: read the other way, a compile sent and finished in between could count as
-  // finished and not sent.
-  finished = g_compilesFinished.load(std::memory_order_acquire);
-  sent = g_compilesSent.load(std::memory_order_relaxed);
+  // finished and not sent. The warm-up's programs waiting their turn count as sent, and those found
+  // built by their turn as sent and finished, so the toast counts the warm-up's batch whole from its
+  // start rather than one program at a time.
+  const uint32_t foundBuilt = g_warmUpFoundBuilt.load(std::memory_order_acquire);
+  finished = g_compilesFinished.load(std::memory_order_acquire) + foundBuilt;
+  sent = g_compilesSent.load(std::memory_order_relaxed) + g_warmUpAhead.load(std::memory_order_relaxed) + foundBuilt;
 }
 
 void present(ImDrawData* overlay) noexcept {

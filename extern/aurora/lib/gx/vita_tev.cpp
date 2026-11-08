@@ -777,12 +777,14 @@ void swap_material(MaterialRecord& r) noexcept {
 
 // The warm-up's progress (FIFO thread): the card's records (where each is among
 // vita_gl::saved_materials, and their hashes with those saved since, so a record is saved once), the
-// next to make, and for the log the counts.
+// next to make, and for the log the counts and how long making them all took from the first step.
 struct WarmUp {
   bool indexed = false;
   std::vector<std::pair<u32, u32>> records;
   std::unordered_set<u64> saved;
   size_t next = 0;
+  std::chrono::steady_clock::time_point started{};
+  double seconds = -1.0; // all made again in, once they are
   u32 skipped = 0; // another build's, or one no program draws
   u32 known = 0;   // the card had its program, or it was being compiled
   u32 sent = 0;    // compiled ahead of its first draw
@@ -1311,9 +1313,16 @@ void tev_warm_up_step() noexcept {
     return;
   }
   index_records();
-  // A couple of milliseconds a frame at most, and while the render worker has room for one more.
-  constexpr auto kBudget = std::chrono::milliseconds(2);
+  // Up to 8 ms a frame, while the render worker has room for more: the card's records are all made
+  // again in the first seconds (about 1,600 in 110 frames, during the logos), so every program the
+  // card lacks waits at once, a batch the toast counts whole, rather than each found only after the
+  // one before compiled (2 ms a frame and one waiting, before: twenty seconds, the count growing by
+  // one at a time).
+  constexpr auto kBudget = std::chrono::milliseconds(8);
   const auto start = std::chrono::steady_clock::now();
+  if (sWarmUp.next == 0) {
+    sWarmUp.started = start;
+  }
   const std::vector<u8>& bytes = vita_gl::saved_materials();
   while (sWarmUp.next < sWarmUp.records.size() && std::chrono::steady_clock::now() - start < kBudget &&
          vita_gl::warm_up_room()) {
@@ -1330,11 +1339,15 @@ void tev_warm_up_step() noexcept {
       vita_gl::warm_up(key, std::move(vertexSource), std::move(fragmentSource));
     }
   }
+  if (sWarmUp.seconds < 0.0 && sWarmUp.next == sWarmUp.records.size()) {
+    sWarmUp.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - sWarmUp.started).count();
+  }
 }
 
 void tev_log_warm_up() noexcept {
-  Log.info("material records: {} on the card at the start, {} saved since; warm-up: {} made again ({} on the card "
+  const std::string took = sWarmUp.seconds >= 0.0 ? fmt::format(", all in {:.1f} s", sWarmUp.seconds) : "";
+  Log.info("material records: {} on the card at the start, {} saved since; warm-up: {} made again{} ({} on the card "
            "already, {} sent to be compiled, {} of another build or not drawable)",
-           sWarmUp.records.size(), sWarmUp.added, sWarmUp.next, sWarmUp.known, sWarmUp.sent, sWarmUp.skipped);
+           sWarmUp.records.size(), sWarmUp.added, sWarmUp.next, took, sWarmUp.known, sWarmUp.sent, sWarmUp.skipped);
 }
 } // namespace aurora::gx::vita

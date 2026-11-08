@@ -81,8 +81,8 @@ size_t tev_program_count() noexcept;
 size_t tev_indirect_program_count() noexcept;
 // The warm-up (docs/VITA_PHASE2.md), at each frame's end (FIFO thread, or the game thread with the
 // FIFO drained): the material records the sessions before saved on the card made into programs with
-// this session's generator, a couple of milliseconds' worth, and those the card lacks compiled ahead
-// of their first draw (vita_gl::warm_up). Its counts, for the log.
+// this session's generator, up to 8 ms' worth, and those the card lacks compiled ahead of their
+// first draw, a batch (vita_gl::warm_up). Its counts, for the log.
 void tev_warm_up_step() noexcept;
 void tev_log_warm_up() noexcept;
 // A material record's program (the warm-up's, and the PC's precompile tool's,

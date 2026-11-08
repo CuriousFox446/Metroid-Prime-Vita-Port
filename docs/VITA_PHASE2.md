@@ -1684,3 +1684,26 @@ map seen from above, rain falling toward the camera. That fits a hang when the m
 keep GX's size (the game draws none). The immediate draws' line gives how many line draws GX
 asked wider. The patcher's heaps stay as tallon20 made them (their use under 200 KiB); the larger
 rings stay too.
+
+## The warm-up as one batch (tallon22)
+
+The user: the game "only compiles bits of it at a time". The log sent with that (tallon21, 52
+seconds of the title screen and file select; the longer runs before it were left on the card)
+shows why. The card's 1,592 material records were made again 2 ms a frame, and the FIFO thread
+went on only once the one program it had found missing was compiled. So the 14 the card lacked
+were found one after another (5 sent by 600 presents, 10 by 900, 14 by 1,200), and the toast,
+which counted only what the compiler thread had been sent, grew by one at a time.
+
+- The warm-up makes records again for up to 8 ms a frame, and goes on past a missing program while
+  fewer than 64 wait (`kWarmUpWaiting`; about 9 KiB of sources each): all the records within the
+  first seconds, every missing program waiting at once.
+- The render worker still sends them to the compiler thread one at a time, so a draw's own compile
+  still waits behind one at most.
+- The toast counts the warm-up's waiting programs as sent (`program_compiles`), so it shows the
+  batch whole from its start (0 / 14 up to 14 / 14). The log's warm-up line gives how long making
+  all the records took.
+
+What this cannot do: compile programs for materials the Vita has never drawn. Those still compile
+at their first draw, one by one as they appear. Compiling the whole game's at once needs the whole
+game's materials first: the PC capture run designed on Nov 2 (a tour of every room recording each
+draw's material, the programs precompiled on the PC into `precompiled.bin`).

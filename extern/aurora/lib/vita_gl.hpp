@@ -280,7 +280,7 @@ uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept;
 const std::vector<uint8_t>& saved_materials() noexcept;
 void save_material(const void* record, size_t size) noexcept;
 // FIFO thread: whether the program `key` is on the card, being compiled or waiting to be; whether
-// the warm-up has room for another (one waits at most); and a program the card lacks, to compile
+// the warm-up has room for another (64 wait at most); and a program the card lacks, to compile
 // ahead of its first draw (the render worker builds them one at a time, each dropped once saved).
 bool program_known(uint64_t key) noexcept;
 bool warm_up_room() noexcept;
@@ -298,7 +298,7 @@ bool open_keyboard(const char* text, uint32_t maxLength) noexcept;
 int keyboard_result(std::string& text) noexcept;
 bool keyboard_open() noexcept;
 // Any thread: the generated programs sent to the compiler thread since the start, and those it
-// has finished (compiled or failed).
+// has finished (compiled or failed); the warm-up's waiting their turn count as sent.
 void program_compiles(uint32_t& sent, uint32_t& finished) noexcept;
 #else
 inline bool initialize() noexcept { return false; }
