@@ -8,6 +8,7 @@
 #include "port_embedded.h"
 #include "port_input_devices.h"
 #include "port_pointer.h"
+#include "port_profile.h"
 #include "port_textures.h"
 
 #include <dolphin/gx.h>
@@ -825,6 +826,8 @@ void Poll() {
   sLastDevice = device;
   sLastMap = map;
   sLastResolveNs = nowNs != 0 ? nowNs : 1;
+  // On the Vita's game thread four times a second: the profile shows what it costs there.
+  PORT_ZONE_TIMED("prompts: resolve the bindings");
   for (size_t a = 0; a < std::size(kActions); ++a) {
     const PromptAction& action = kActions[a];
     const std::string stem = IconStemForPrompt(action.prompt, device);

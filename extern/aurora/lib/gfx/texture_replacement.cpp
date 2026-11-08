@@ -9,6 +9,9 @@
 #include "dds_io.hpp"
 #include "png_io.hpp"
 #include "texture_convert.hpp"
+#ifdef AURORA_VITA_GL
+#include "../vita_gl.hpp"
+#endif
 
 #include <aurora/gfx.h>
 #include <aurora/texture.hpp>
@@ -1099,6 +1102,33 @@ gfx::TextureHandle create_converted_texture_handle(const EntryLoadSnapshot& entr
                                                   replacement.format, replacement.mips, gfx::InvalidTextureFormat);
   handle->isReplacement = true;
   aurora::gfx::write_texture(*handle, replacement.data);
+#ifdef AURORA_VITA_GL
+  // The PS Vita draws with its own copy of a texture (gfx::make_vita_texture), which a file's
+  // replacement (a texture pack's picture, a button prompt's icon) did not get, so the Vita path
+  // could not draw it. Its first level, in the two formats the Vita takes: RGBA8 (an uncompressed
+  // DDS, a PNG; a BGRA DDS with red and blue swapped back) and BC1. The data is level 0 first,
+  // rows packed.
+  const bool bgra = replacement.format == wgpu::TextureFormat::BGRA8Unorm;
+  size_t level0 = 0;
+  auto texelFormat = vita_gl::TexelFormat::RGBA8;
+  if (replacement.format == wgpu::TextureFormat::RGBA8Unorm ||
+      replacement.format == wgpu::TextureFormat::RGBA8UnormSrgb || bgra) {
+    level0 = size_t{replacement.width} * replacement.height * 4;
+  } else if (replacement.format == wgpu::TextureFormat::BC1RGBAUnorm) {
+    level0 = size_t{(replacement.width + 3) / 4} * ((replacement.height + 3) / 4) * 8;
+    texelFormat = vita_gl::TexelFormat::BC1;
+  }
+  if (level0 != 0 && replacement.data.size() >= level0) {
+    std::vector<uint8_t> texels(replacement.data.data(), replacement.data.data() + level0);
+    if (bgra) {
+      for (size_t i = 0; i + 3 < texels.size(); i += 4) {
+        std::swap(texels[i], texels[i + 2]);
+      }
+    }
+    handle->vitaTexture =
+        vita_gl::make_texture(replacement.width, replacement.height, texelFormat, std::move(texels));
+  }
+#endif
   return handle;
 }
 

@@ -806,13 +806,22 @@ if(VITA)
         set(_mp_vita_minor "0${_mp_vita_minor}")
     endif()
     set(MP_VITA_APP_VER "${_mp_vita_major}.${_mp_vita_minor}")
+    # The Vita's button prompts (tools/make_prompt_glyphs.py textures vita), which PortPrompts reads
+    # from app0:/textures/bindings. The other devices' icons stay out of the VPKs.
+    file(GLOB _mp_vita_glyphs RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/textures/bindings/vita_*.dds")
+    set(_mp_vita_glyph_files "")
+    foreach(_mp_glyph IN LISTS _mp_vita_glyphs)
+        list(APPEND _mp_vita_glyph_files FILE "${_mp_glyph}" "${_mp_glyph}")
+    endforeach()
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
         VERSION "${MP_VITA_APP_VER}"
         NAME "Metroid Prime"
         FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
-        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+        ${_mp_vita_glyph_files})
     set(VITA_MKSFOEX_FLAGS "${_mp_vita_sfo_flags}")
     set(VITA_PACK_VPK_FLAGS "${_mp_vita_vpk_flags}")
     unset(resources)
@@ -823,7 +832,8 @@ if(VITA)
         FILE platform/vita/sce_sys/demo/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE platform/vita/sce_sys/demo/startup.png sce_sys/livearea/contents/startup.png
-        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+        ${_mp_vita_glyph_files})
 endif()
 
 # Source-derived Remastered box/triangle contact geometry (0xc0a180) and its

@@ -41,6 +41,10 @@ INSET = (SIZE - ICON_SIZE) // 2
 SCALE = 2
 ICONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_icons")
 OUT = sys.argv[1] if len(sys.argv) > 1 else "textures"
+# Device names after the output folder write only those devices' pad icons (and the key and
+# mouse icons only with "keyboard"), so one set is made again without rewriting the others:
+#     tools/make_prompt_glyphs.py textures vita
+ONLY = set(sys.argv[2:])
 
 DIRECTIONS = ("up", "down", "left", "right")
 
@@ -100,6 +104,16 @@ PAD_ICONS = {
         "leftstick": "switch_stick_l_press.png", "rightstick": "switch_stick_r_press.png",
         "lt": "switch_button_zl.png", "rt": "switch_button_zr.png",
         **pad_icons_for_axes("switch"),
+    },
+    # The PS Vita's own pad, the Vita build's only one (platform/port_textures.cpp names
+    # it "vita"). Its art is the user's, framed by tools/vita_prompt_icons.py. It has no
+    # stick clicks and no triggers, so those inputs keep the game's art.
+    "vita": {
+        "south": "vita_button_cross.png", "east": "vita_button_circle.png",
+        "west": "vita_button_square.png", "north": "vita_button_triangle.png",
+        "start": "vita_button_start.png", "back": "vita_button_select.png",
+        "leftshoulder": "vita_button_l.png", "rightshoulder": "vita_button_r.png",
+        **pad_icons_for_axes("vita"),
     },
     # Keyed by the GameCube button rather than the SDL one: the port names a GC
     # pad's button after the action its default mapping gives it (see
@@ -216,6 +230,8 @@ def main():
     # 64x32 of pixels out of half the data and draws the rest as noise.
     sizes = [(32, 32), (64, 32)]
     for device, icons in PAD_ICONS.items():
+        if ONLY and device not in ONLY:
+            continue
         for key, icon in icons.items():
             for w, h in sizes:
                 suffix = "" if (w, h) == (SIZE, SIZE) else f"_{w}x{h}"
@@ -223,7 +239,8 @@ def main():
                           os.path.join(bindings, f"{device}_{key}{suffix}.dds"))
                 padCount += 1
     missing = []
-    for stem in BINDING_ICONS:
+    keys = not ONLY or "keyboard" in ONLY
+    for stem in BINDING_ICONS if keys else []:
         src = os.path.join(ICONS_DIR, stem + ".png")
         if stem not in COMPOSITES and not os.path.exists(src):
             missing.append(stem)
@@ -236,7 +253,8 @@ def main():
             suffix = "" if (w, h) == (SIZE, SIZE) else f"_{w}x{h}"
             write_dds(make_icon(stem + ".png", w, h),
                       os.path.join(bindings, f"{stem}{suffix}.dds"))
-    print(f"bindings: {len(BINDING_ICONS) - len(missing)} key icons, {padCount} pad icons -> {bindings}")
+    keyCount = len(BINDING_ICONS) - len(missing) if keys else 0
+    print(f"bindings: {keyCount} key icons, {padCount} pad icons -> {bindings}")
     if missing:
         print("  missing from tools/prompt_icons: " + ", ".join(missing))
 

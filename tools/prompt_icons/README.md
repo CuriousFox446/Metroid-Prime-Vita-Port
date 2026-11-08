@@ -58,3 +58,21 @@ slashes, tilde for the grave key), the keypad keys that have art of their own
 (enter, plus, asterisk, num lock; its digits, minus, period and slash reuse the
 main keys'), and `mouse_left` / `mouse_right` / `mouse_scroll` (middle button) /
 `mouse_side_back` / `mouse_side_forward`.
+
+## PS Vita
+
+`vita_*.png` are the PS Vita's own buttons, for the Vita build's prompts (the
+`vita` device in `tools/make_prompt_glyphs.py`). They are not from Kenney's
+pack: the user supplied the art (November 2026), and `tools/vita_prompt_icons.py`
+crops each picture to its art and centres it on a 128x128 canvas. To change
+them, run both again:
+
+    tools/vita_prompt_icons.py <folder with the art>
+    tools/make_prompt_glyphs.py textures vita
+
+| File | Used for |
+| --- | --- |
+| `vita_button_cross.png`, `…_circle`, `…_square`, `…_triangle` | the face buttons (SDL's south, east, west, north) |
+| `vita_button_start.png`, `vita_button_select.png` | Start and Select (SDL's start and back) |
+| `vita_button_l.png`, `vita_button_r.png` | L and R (SDL's shoulders); the Vita has no triggers or stick clicks, so those keep the game's art |
+| `vita_stick_l*.png`, `vita_stick_r*.png`, `vita_dpad*.png` | the sticks and the D-pad, whole and per direction |

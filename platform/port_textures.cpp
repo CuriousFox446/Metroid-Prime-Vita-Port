@@ -44,10 +44,16 @@ bool sUserOn = true;
 
 // Every name DeviceDirForType can return; used to tell a device-pack root from
 // a single device-agnostic pack.
-constexpr const char* kDeviceDirs[] = {"xbox", "playstation", "switch", "gamecube", "standard", "keyboard"};
+constexpr const char* kDeviceDirs[] = {"xbox", "playstation", "switch", "gamecube", "standard", "keyboard", "vita"};
 
 // SDL's gamepad types back PADControllerType, so this mirrors the pad in use.
 const char* DeviceDirForType(PADControllerType type) {
+#if defined(__vita__)
+  // The Vita's own pad, which SDL calls a standard one, and any other it reads through it: its
+  // prompts show the Vita's buttons (textures/bindings/vita_*, which the VPK carries).
+  (void)type;
+  return "vita";
+#endif
   switch (type) {
   case PAD_TYPE_XBOX360:
   case PAD_TYPE_XBOXONE:

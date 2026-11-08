@@ -1878,3 +1878,43 @@ The user asked for two things:
 Not known yet: the import's time and memory on the Vita, and how the Echoes suit models draw
 through the Vita path.
 
+## 0.42.0 test 3: the Vita's own button prompts
+
+**Test 2** (bff03e4, the user's log of Nov 8) ran 4 minutes and quit cleanly. The Echoes import
+read `ux0:data/MetroidPrime2/Metroid Prime 2 - Echoes.iso` and converted 15 bodies and left arms,
+6 balls, 3 right arms, 5 beam guns and 113 textures in about 18 s. After the mods reload
+`echoes-suits` served 10 Samus body models and the arm cannon of all 5 beams (181 resources);
+VRAM stayed at 42-47 MiB free of 96, and presented FPS had a median of 45 over the 3 minutes
+after.
+
+The user then sent PS Vita button art for the prompts. Three things kept any prompt icon off the
+Vita:
+
+- **No icons in the VPK.** PortPrompts reads `<base>/textures/bindings`, and the VPK carried no
+  `textures` folder (`MP_EMBED_RESOURCES` is off on the Vita), so it never started. The VPKs now
+  carry the Vita's set alone, `textures/bindings/vita_*.dds` (46 files, 1.1 MiB), read from
+  `app0:/textures/bindings` (SDL's base path there is `app0:/`). PortTextures takes
+  `app0:/textures` as a device-agnostic pack, as the PC build does, and finds no pack textures
+  there.
+- **No Vita set.** The Vita's pad is an SDL standard pad, which the port gives Xbox letters.
+  `PortTextures::DeviceDirForType` now names every pad "vita" on the Vita, and
+  `tools/make_prompt_glyphs.py` has a `vita` device: the face buttons, Start and Select, L and R,
+  both sticks and the D-pad, whole and per direction. It has no triggers or stick clicks, so those
+  keep the game's art. Its icons are the user's art, framed by `tools/vita_prompt_icons.py`: each
+  picture cropped to its art and centred on 128x128, filling as much of the side as Kenney's icons
+  do. `make_prompt_glyphs.py textures vita` writes one device's icons without rewriting the
+  others'.
+- **No Vita copy of a file's replacement.** Aurora made a file's replacement (a texture pack's DDS
+  or PNG, a prompt's icon) a WebGPU texture only. The Vita path draws with its own copy
+  (`vitaTexture`), and `add_missing_copy` makes none when the replacement's size is not the
+  game texture's, so the draw found no texture. `create_converted_texture_handle` now makes the
+  Vita copy from level 0: RGBA8 (a BGRA DDS swapped back) or BC1. A user texture pack needs the
+  same on the Vita.
+
+F1 > Controls > Options > On-screen prompts > Button glyphs offers PS Vita (auto) and GameCube (the
+game's own art) on the Vita. Prompt resolving, four times a second on the game thread, has a
+profile zone ("prompts: resolve the bindings"), and the log names each prompt's icon as it changes
+("metroid_prime_port: prompt ...").
+
+Not known yet: how the art reads at the HUD's size on the Vita's screen, and what the resolve costs.
+

@@ -57,6 +57,19 @@ void DrawControlsOptions() {
 
   ImGui::SeparatorText("On-screen prompts");
   int glyphs = sPromptGlyphs.load(std::memory_order_relaxed);
+#if defined(__vita__)
+  // The Vita carries its own buttons' icons alone (textures/bindings/vita_*), so the choice is
+  // those (auto, which is the Vita's pad there) or the game's own GameCube art. Any other value
+  // (a settings file from elsewhere) reads as the Vita's.
+  constexpr int kGameCubeGlyphs = 4;
+  static_assert(std::string_view(kPromptGlyphs[kGameCubeGlyphs]) == "gamecube");
+  int vitaGlyphs = glyphs == kGameCubeGlyphs ? 1 : 0;
+  if (ImGui::Combo("Button glyphs", &vitaGlyphs, "PS Vita\0" "GameCube\0")) {
+    sPromptGlyphs.store(vitaGlyphs == 1 ? kGameCubeGlyphs : 0, std::memory_order_relaxed);
+    MarkDirty();
+  }
+  ItemHelp("Which buttons the game's prompts show: the Vita's, or the GameCube's (the game's own art).");
+#else
   if (ImGui::Combo("Button glyphs", &glyphs,
                    "Follow the input in use\0" "Xbox\0" "PlayStation\0" "Nintendo Switch\0" "GameCube\0"
                    "Keyboard & mouse\0")) {
@@ -65,6 +78,7 @@ void DrawControlsOptions() {
   }
   ItemHelp("Which buttons the game's prompts show. Follow uses the device you last used; GameCube "
            "shows the game's own art.");
+#endif
 
   ImGui::SeparatorText("Buttons");
   bool lockOnToggle = sInput.lockOnToggle;
