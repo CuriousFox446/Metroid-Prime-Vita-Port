@@ -92,6 +92,29 @@ enum DirtyFlag : u8 {
   DirtyAll = DirtyPipeline | DirtyTextures | DirtyUniform | DirtyImmediates,
 };
 
+// GXState's dirty bits, read and cleared by the WebGPU draw path as a u8, with a second set the PS
+// Vita's draw path (vita_draw.cpp) keeps: every bit set is set in both, and each side clears its own.
+struct DirtyBits {
+  u8 bits = DirtyAll;
+  u8 vita = DirtyAll;
+
+  DirtyBits& operator|=(u8 set) noexcept {
+    bits |= set;
+    vita |= set;
+    return *this;
+  }
+  DirtyBits& operator&=(u8 keep) noexcept {
+    bits &= keep;
+    return *this;
+  }
+  DirtyBits& operator=(u8 value) noexcept {
+    vita |= static_cast<u8>(value & ~bits);
+    bits = value;
+    return *this;
+  }
+  operator u8() const noexcept { return bits; }
+};
+
 struct DrawImmediateData {
   u32 vtxStart = 0;
   u32 currentPnMtx = 0;
@@ -521,7 +544,7 @@ struct GXState {
   std::array<gfx::TextureBind, MaxTextures> textures;
   u16 lastVtxSize = 0;
   GXVtxFmt lastVtxFmt = GX_MAX_VTXFMT;
-  u8 dirty = DirtyAll;
+  DirtyBits dirty;
 
   // Shadow registers
   std::array<u32, 0x100> bpRegCache = [] {
@@ -535,7 +558,12 @@ struct GXState {
   std::array<u32, XfRegCount> xfRegCache{};
   std::bitset<XfRegCount> xfRegValid;
 
-  void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
+  // Moves at every vertex descriptor or format write (the Vita path's decode cache keys on it).
+  u32 vtxLayoutVersion = 1;
+  void clearVtxSizeCache() {
+    lastVtxFmt = GX_MAX_VTXFMT;
+    ++vtxLayoutVersion;
+  }
 };
 extern GXState g_gxState;
 

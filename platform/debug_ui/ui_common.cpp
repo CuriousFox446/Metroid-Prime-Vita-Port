@@ -22,6 +22,7 @@
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "MetroidPrime/SFX/UI.h"
 
+#include <aurora/aurora.h>
 #include <aurora/imgui.h>
 #include <imgui_internal.h>
 #include <SDL3/SDL_dialog.h>
@@ -36,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <string>
 
 namespace PortDebug {
 
@@ -462,6 +464,87 @@ void RunGpuSelfTestIfRequested() {
   }
 }
 
+#ifdef __vita__
+// The Vita has no keyboard. A text field that becomes active (the settings search, a seed, an
+// address) opens the system's, which Aurora draws over the frame; while it is up, and until the
+// button that closed it is let go, the pad does not reach the overlay. Confirmed, its text
+// replaces the field's as typing would, and Enter closes the field; cancelled, the field closes as
+// it was. SDL used to open the system keyboard itself without vitaGL ever drawing it, and the field
+// waited for typing that could not come: the search box held on to the pad, and the overlay could
+// not be left (tallon7). True while the overlay should not see the pad.
+static bool UpdateSystemKeyboard(bool padHeld) {
+  enum class Step { Idle, Up, Applying, Releasing };
+  static Step sStep = Step::Idle;
+  static ImGuiID sField = 0;
+  static int sFrames = 0;
+  ImGuiContext& g = *ImGui::GetCurrentContext();
+  ImGuiIO& io = ImGui::GetIO();
+  switch (sStep) {
+  case Step::Idle: {
+    const ImGuiInputTextState* state = io.WantTextInput ? ImGui::GetInputTextState(g.ActiveId) : nullptr;
+    if (state == nullptr) {
+      return false;
+    }
+    const std::string text(state->TextA.Data, static_cast< size_t >(state->TextLen));
+    if (!aurora_open_system_keyboard(text.c_str(), static_cast< uint32_t >(std::max(state->BufCapacity - 1, 1)))) {
+      ImGui::ClearActiveID(); // no keyboard: the field must not wait for one
+      return false;
+    }
+    sField = g.ActiveId;
+    sStep = Step::Up;
+    return true;
+  }
+  case Step::Up: {
+    static char sText[3 * 2048 + 1];
+    const int result = aurora_system_keyboard_result(sText, sizeof(sText));
+    if (result == 0) {
+      return true;
+    }
+    if (g.ActiveId == sField) {
+      if (result > 0) {
+        // Everything selected, then the text (or a delete, for none), then Enter.
+        io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        io.AddKeyEvent(ImGuiKey_A, true);
+        io.AddKeyEvent(ImGuiKey_A, false);
+        io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        if (sText[0] != '\0') {
+          io.AddInputCharactersUTF8(sText);
+        } else {
+          io.AddKeyEvent(ImGuiKey_Delete, true);
+          io.AddKeyEvent(ImGuiKey_Delete, false);
+        }
+        io.AddKeyEvent(ImGuiKey_Enter, true);
+        io.AddKeyEvent(ImGuiKey_Enter, false);
+      } else {
+        ImGui::ClearActiveID();
+      }
+    }
+    sStep = Step::Applying;
+    sFrames = 0;
+    return true;
+  }
+  case Step::Applying:
+    // The keys land over a few frames. A field still active after them (one that takes the focus
+    // back after Enter) is closed, so the keyboard does not come straight back.
+    if (g.ActiveId == sField && ++sFrames < 30) {
+      return true;
+    }
+    if (g.ActiveId == sField) {
+      ImGui::ClearActiveID();
+    }
+    sStep = Step::Releasing;
+    [[fallthrough]];
+  case Step::Releasing:
+    if (padHeld) {
+      return true;
+    }
+    sStep = Step::Idle;
+    return false;
+  }
+  return false;
+}
+#endif
+
 void UpdateControllerNav() {
   EnsureInitialized();
   // Registered here rather than in EnsureInitialized so the event system is only
@@ -528,10 +611,24 @@ void UpdateControllerNav() {
   // player's, queues two changes a frame where ImGui applies one.
   const s32 padIndex = PADGetIndexForPort(PAD_CHAN0);
   SDL_Gamepad* pad = PADGetSDLGamepadForIndex(padIndex >= 0 ? static_cast< u32 >(padIndex) : 0);
+#ifdef __vita__
+  const auto anyHeld = [pad] {
+    for (int button = 0; pad != nullptr && button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+      if (SDL_GetGamepadButton(pad, static_cast< SDL_GamepadButton >(button))) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const bool keyboard = UpdateSystemKeyboard(anyHeld());
+#else
+  constexpr bool keyboard = false;
+#endif
   // While the Controls tab captures a pad input, the pad binds instead of
   // navigating (releasing everything here also ends any nav press in progress).
-  // A pad that went away releases everything the same way.
-  const bool capturing = pad == nullptr || PortInputRemap::Capturing();
+  // A pad that went away releases everything the same way, as does the Vita's
+  // system keyboard while it is up.
+  const bool capturing = pad == nullptr || PortInputRemap::Capturing() || keyboard;
   const auto held = [pad, capturing](SDL_GamepadButton button) {
     return !capturing && SDL_GetGamepadButton(pad, button);
   };
@@ -561,6 +658,10 @@ void UpdateControllerNav() {
 
 void Toggle() {
   EnsureInitialized();
+  // Metroid Prime Demo has no port menu: it does not open, whatever asks.
+  if (!sVisible && Demo()) {
+    return;
+  }
   sVisible = !sVisible;
   SetMouseCaptured(false);
   // A press that never got its release (seen on the Android tablet with a mouse

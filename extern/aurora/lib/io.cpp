@@ -1,4 +1,5 @@
 #include "io.hpp"
+#include "internal.hpp"
 
 #include <array>
 #include <atomic>
@@ -12,6 +13,9 @@
 
 namespace aurora::io {
 namespace {
+#if defined(__vita__)
+constexpr Module Log{"aurora::io"};
+#endif
 
 std::atomic<uint64_t> s_temporaryFileCounter = 0;
 
@@ -229,6 +233,17 @@ bool AtomicFileWriter::commit() noexcept {
 
   if (!SDL_RenamePath(m_temporaryPath.c_str(), m_targetPath.c_str())) {
     const std::string error{SDL_GetError()};
+#if defined(__vita__)
+    // The Vita's rename removes the target before it renames (VitaSDK's _rename_r): failed after
+    // that, the temporary file holds the only copy of either, so it is kept, not discarded.
+    if (!SDL_GetPathInfo(m_targetPath.c_str(), nullptr)) {
+      Log.error("could not replace {}: {}; its new contents are kept in {}", m_targetPath, error, m_temporaryPath);
+      m_temporaryPath.clear();
+      m_targetPath.clear();
+      restore_error(error);
+      return false;
+    }
+#endif
     discard();
     restore_error(error);
     return false;

@@ -12,6 +12,7 @@
 #include "../../webgpu/gpu.hpp"
 #include "../../webgpu/gpu_prof.hpp"
 
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstring>
@@ -544,11 +545,43 @@ void GXPortSetPerformance(u32 flags) { sPerformance.store(flags & GX_PORT_PERF_A
 
 u32 GXPortGetPerformance(void) { return sPerformance.load(std::memory_order_relaxed); }
 
-void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+// The draw tag only names draws in Aurora's warnings, so it is sent with the next draw
+// (flush_draw_tag) and only when it changed: the game tags every surface and clears the tag
+// after it, two commands a surface otherwise.
+static std::array<u32, 3> sWantedDrawTag{0, UINT32_MAX, 0};
+static std::array<u32, 3> sSentDrawTag{0, UINT32_MAX, 0};
+
+static void write_draw_tag(const std::array<u32, 3>& tag) {
   GX_WRITE_AURORA(GX_AURORA_SET_DRAW_TAG);
-  GX_WRITE_U32(asset);
-  GX_WRITE_U32(model);
-  GX_WRITE_U32(material);
+  GX_WRITE_U32(tag[0]);
+  GX_WRITE_U32(tag[1]);
+  GX_WRITE_U32(tag[2]);
+}
+
+void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+  if (aurora::gx::fifo::in_display_list()) {
+    // Into the list as it is: the list's draws carry it wherever it is called.
+    write_draw_tag({asset, model, material});
+    return;
+  }
+  sWantedDrawTag = {asset, model, material};
+}
+
+extern "C++" {
+namespace aurora::gx::draw_tag {
+void flush() noexcept {
+#ifdef AURORA_VITA_GL
+  // The Vita path reads no tag, and Aurora's warnings that would name a draw with it come from
+  // its WebGPU draws: some 1500 tags a heavy frame, each written here and read on the FIFO thread.
+  return;
+#endif
+  if (sWantedDrawTag == sSentDrawTag || fifo::in_display_list()) {
+    return;
+  }
+  sSentDrawTag = sWantedDrawTag;
+  write_draw_tag(sSentDrawTag);
+}
+} // namespace aurora::gx::draw_tag
 }
 
 void GXPortSetDrawSerial(u32 serial) {
@@ -573,6 +606,12 @@ void GXPortDrawLog(GXBool on) { aurora::gx::set_draw_shader_log(on != GX_FALSE);
 u64 GXPortDrawShader(u32 serial) { return aurora::gx::draw_shader_hash(serial); }
 
 GXBool GXPortShaderOverridden(u64 hash) { return aurora::gx::shader_overridden(hash) ? GX_TRUE : GX_FALSE; }
+
+void GXPortVfxCaptureScene(GXBool again) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_VFX_CAPTURE_SCENE);
+  GX_WRITE_U8(again ? 1 : 0);
+  aurora::gx::fifo::publish();
+}
 
 void GXCopyProbeFace(u32 face) {
   GX_WRITE_AURORA(GX_AURORA_COPY_PROBE_FACE);

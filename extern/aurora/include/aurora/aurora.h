@@ -233,6 +233,21 @@ void aurora_set_present_sharpness(float sharpness);
 void aurora_set_graphics_quality(uint32_t msaa, uint16_t maxTextureAnisotropy);
 /** Evaluates GX lighting per pixel instead of per vertex (default off); lit pipelines rebuild on next use. */
 void aurora_set_per_pixel_lighting(bool enabled);
+/**
+ * PS Vita: the system keyboard for a text field, drawn over the frame. Opens it with the field's text
+ * (UTF-8, at most max_length characters); false where there is none, or while one is up.
+ */
+bool aurora_open_system_keyboard(const char* text, uint32_t max_length);
+/**
+ * The system keyboard's outcome: 0 while it is up, 1 confirmed (its text copied to `out`, UTF-8, cut to
+ * `size` bytes), -1 cancelled or not opened, -2 none asked.
+ */
+int aurora_system_keyboard_result(char* out, size_t size);
+/**
+ * PS Vita: the generated programs sent to its shader compiler since the start, and those it has finished
+ * (compiled or failed); both 0 elsewhere. Their difference is what is still waiting or compiling.
+ */
+void aurora_get_program_compiles(uint32_t* sent, uint32_t* finished);
 /** Sets the clock timescale. Default 1.0f. 0.0f is paused. Range 0.0f-16.0f. */
 void aurora_set_timescale(float scale);
 

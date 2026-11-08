@@ -2,6 +2,7 @@
 #include "../../device.hpp"
 #include "../../internal.hpp"
 #include "../../io.hpp"
+#include "../../window.hpp"
 #include <dolphin/pad.h>
 #include <dolphin/si.h>
 #include <SDL3/SDL_mouse.h>
@@ -131,6 +132,23 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsNSOGamecube{{
     {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
     {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_X},
     {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
+    {SDL_GAMEPAD_BUTTON_BACK, PAD_TRIGGER_Z},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, PAD_TRIGGER_L},
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_R},
+    {SDL_GAMEPAD_BUTTON_DPAD_UP, PAD_BUTTON_UP},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, PAD_BUTTON_DOWN},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, PAD_BUTTON_LEFT},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
+}};
+
+// The Vita's pad: no analog triggers, so L and R on the shoulders and Z on Select. Cross fires,
+// circle jumps, square morphs and triangle fires missiles.
+std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsVita{{
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
     {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
     {SDL_GAMEPAD_BUTTON_BACK, PAD_TRIGGER_Z},
@@ -502,6 +520,12 @@ static void UnbindMissingTriggerClick(aurora::input::GameController* controller)
 
 void __PADSetDefaultMapping(aurora::input::GameController* controller) /*  NOLINT(*-reserved-identifier) */
 {
+#ifdef __vita__
+  // The Vita's pad (SDL calls it a standard one) has no analog triggers, so the standard layout
+  // left L and R on axes that never move and Z on the R button.
+  controller->m_buttonMapping = g_defaultButtonsVita;
+  return;
+#endif
   switch (SDL_GetGamepadType(controller->m_controller)) {
   case SDL_GAMEPAD_TYPE_XBOX360:
     controller->m_buttonMapping = g_defaultButtonsXBox360;
@@ -997,11 +1021,23 @@ u32 PADRead(PADStatus* status) {
           {SDL_GAMEPAD_BUTTON_TOUCHPAD, PAD_BUTTON_TOUCHPAD},
       }};
 
-      for (const auto& [native, button] : kExtButtonMappings) {
-        if (SDL_GetGamepadButton(controller->m_controller, native)) {
-          status[i].extButton |= button;
+      // As PADGetRawState: the pad's buttons stand until the next event pump.
+      static uint64_t sExtGeneration[PAD_CHANMAX] = {};
+      static const void* sExtController[PAD_CHANMAX] = {};
+      static u32 sExtButtons[PAD_CHANMAX] = {};
+      const uint64_t generation = aurora::window::pump_generation();
+      if (generation == 0 || sExtGeneration[i] != generation || sExtController[i] != controller) {
+        u32 ext = 0;
+        for (const auto& [native, button] : kExtButtonMappings) {
+          if (SDL_GetGamepadButton(controller->m_controller, native)) {
+            ext |= button;
+          }
         }
+        sExtGeneration[i] = generation;
+        sExtController[i] = controller;
+        sExtButtons[i] = ext;
       }
+      status[i].extButton |= sExtButtons[i];
 
       if (!overridden) {
         const u16 buttonsBefore = status[i].button;
@@ -1168,6 +1204,25 @@ BOOL PADGetRawState(const u32 port, PADRawState* state) {
     return FALSE;
   }
   EnsureMappingLoaded(controller);
+  // SDL's pad state changes only when events are pumped, but a game polls once a tick, several
+  // times between two pumps when its ticks catch up: the last read stands until the next pump
+  // (a Vita spent about 1 ms a tick on these SDL calls).
+  struct Cached {
+    uint64_t generation = 0;
+    const void* controller = nullptr;
+    u16 leftActivation = 0;
+    u16 rightActivation = 0;
+    PADRawState state{};
+  };
+  static Cached sCached[PAD_CHANMAX];
+  const uint64_t generation = aurora::window::pump_generation();
+  Cached& cached = sCached[port];
+  if (generation != 0 && cached.generation == generation && cached.controller == controller &&
+      cached.leftActivation == controller->m_deadZones.leftTriggerActivationZone &&
+      cached.rightActivation == controller->m_deadZones.rightTriggerActivationZone) {
+    *state = cached.state;
+    return TRUE;
+  }
   static_assert(SDL_GAMEPAD_BUTTON_COUNT <= PAD_RAW_BUTTON_TRIGGER_LEFT);
   for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
     if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(b))) {
@@ -1192,6 +1247,13 @@ BOOL PADGetRawState(const u32 port, PADRawState* state) {
   if (tr > controller->m_deadZones.rightTriggerActivationZone) {
     state->buttons |= 1u << PAD_RAW_BUTTON_TRIGGER_RIGHT_CLICK;
   }
+  cached = Cached{
+      .generation = generation,
+      .controller = controller,
+      .leftActivation = static_cast<u16>(controller->m_deadZones.leftTriggerActivationZone),
+      .rightActivation = static_cast<u16>(controller->m_deadZones.rightTriggerActivationZone),
+      .state = *state,
+  };
   return TRUE;
 }
 
@@ -1991,6 +2053,13 @@ void PADGetDefaultMapping(PADDefaultMapping* mapping, const PADControllerType ty
   case PAD_TYPE_NSO_GAMECUBE: buttons = &g_defaultButtonsNSOGamecube; break;
   default: break;
   }
+#ifdef __vita__
+  // As __PADSetDefaultMapping: the Vita's layout whatever SDL calls the pad. The menus' own
+  // button rows take their defaults from here (port_input_devices.cpp), and the standard layout
+  // gave them no L or R (they were on analog triggers the Vita lacks): L and R did nothing in the
+  // pause screen.
+  buttons = &g_defaultButtonsVita;
+#endif
   std::copy(buttons->begin(), buttons->end(), mapping->buttons);
   std::copy(g_defaultAxes.begin(), g_defaultAxes.end(), mapping->axes);
 }

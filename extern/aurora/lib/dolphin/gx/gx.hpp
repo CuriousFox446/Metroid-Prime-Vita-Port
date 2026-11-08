@@ -7,6 +7,24 @@ static aurora::Module Log("aurora::gx");
 
 using aurora::gx::g_gxState;
 
+namespace aurora::gx::source {
+// For aurora_take_gx_source_counts (GXDispList.cpp): an immediate primitive sent now.
+void count_begin(u16 vertices) noexcept;
+} // namespace aurora::gx::source
+
+namespace aurora::gx::draw_tag {
+// Sends the tag GXSetDrawTag last set, if it changed since it was sent (GXExtra.cpp). Called
+// before each draw goes into the FIFO: GXBegin and GXCallDisplayList.
+void flush() noexcept;
+} // namespace aurora::gx::draw_tag
+
+namespace aurora::gx::sent_arrays {
+// The PS Vita: GXSetArray leaves out an array the FIFO thread already has as it was sent last
+// (GXGeometry.cpp). Forgets what was sent, for a display list sent as its bytes, which may set
+// arrays itself (GXCallDisplayList).
+void forget() noexcept;
+} // namespace aurora::gx::sent_arrays
+
 static inline aurora::Vec4<float> from_gx_color(GXColor color) {
   return {
       static_cast<float>(color.r) / 255.f,

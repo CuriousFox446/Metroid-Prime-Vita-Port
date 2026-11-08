@@ -68,6 +68,11 @@ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxHash::xx
 target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 Tracy::TracyClient PNG::PNG)
 target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
 
+if (VITA)
+    # The Vita's draws through vitaGL (lib/gx/vita_draw.hpp, docs/VITA_PHASE2.md).
+    target_sources(aurora_gx PRIVATE lib/gx/vita_draw.cpp lib/gx/vita_tev.cpp)
+endif ()
+
 if (AURORA_ENABLE_RMLUI)
     target_sources(aurora_gx PRIVATE
         lib/rmlui/pipeline.cpp

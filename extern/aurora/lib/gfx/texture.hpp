@@ -7,6 +7,10 @@
 
 #include "types.hpp"
 
+namespace aurora::vita_gl {
+class Texture;
+} // namespace aurora::vita_gl
+
 namespace aurora::gfx {
 struct TextureUpload {
   wgpu::TexelCopyBufferLayout layout;
@@ -52,6 +56,9 @@ struct TextureRef {
   std::shared_ptr<const std::vector<uint8_t>> cpuBytes;
   // The creation label (interned, so it outlives the texture), for the live-texture breakdown.
   const char* label = nullptr;
+  // The PS Vita's own copy, which its draws sample (vita_gl.hpp); null elsewhere, and for textures
+  // the Vita path does not copy yet (render targets, dynamic textures).
+  std::shared_ptr<vita_gl::Texture> vitaTexture;
 
   TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
              wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat,
@@ -86,6 +93,20 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
                                  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined) noexcept;
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept;
 void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept;
+
+#ifdef AURORA_VITA_GL
+// While one is alive (FIFO thread), new static textures get a PS Vita copy: the Vita path holds
+// one around resolving its draws' textures.
+struct VitaCopyScope {
+  VitaCopyScope() noexcept;
+  ~VitaCopyScope();
+  VitaCopyScope(const VitaCopyScope&) = delete;
+  VitaCopyScope& operator=(const VitaCopyScope&) = delete;
+};
+// A GX texture's first level as a PS Vita copy (vita_gl.hpp), or null for a format it does not take.
+std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t height, u32 format,
+                                                    ArrayRef<uint8_t> data) noexcept;
+#endif
 }; // namespace aurora::gfx
 
 struct GXTexObj_ {

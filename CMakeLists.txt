@@ -15,6 +15,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
+# PS Vita (VitaSDK toolchain): a headless build. Aurora's renderer runs against a
+# null WebGPU and the disc is read by a plain GCM reader (extern/aurora/platforms/
+# vita), so the game and the GX translation can be timed on the device before a
+# real graphics backend exists. Packaged as a VPK at the end of this file.
+if(VITA)
+    # A Vita executable is position-dependent; vita-elf-create relocates it.
+    set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+    set(MP_BUILD_TESTS OFF CACHE BOOL "Build native-port regression tests" FORCE)
+    set(MP_EMBED_RESOURCES OFF CACHE BOOL "Embed resources" FORCE)
+    # VitaSDK's GNU ld supports a rescanned group, which Aurora's core/gx cycle needs;
+    # CMake only knows that for its Linux platform.
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    # The game is written for 32-bit enums, as MWCC sized them and every other host
+    # does: it reads disc data in place into structs with enum members (CMapArea's
+    # CMappableObject, which crashed on hardware) and hashes and compares structs
+    # bytewise. ARM EABI's default sizes an enum by its values, so everything built
+    # here, the fetched dependencies and SDL3 included, gets 32-bit enums. The
+    # prebuilt libraries left keep short ones (newlib, libstdc++, whose enums are
+    # scoped or padded to int), so ld's warning about the mix is expected.
+    add_compile_options(-fno-short-enums)
+    add_link_options(-Wl,--no-enum-size-warning)
+    # vita-elf-create appends the module's import and export tables (a few KiB) to the end of
+    # the code segment; VitaSDK's linker script keeps __sce_headroom bytes free there before the
+    # data segment's 64 KiB alignment. Without it the room left is luck, and once it was 1.6 KiB.
+    add_link_options(-Wl,--defsym,__sce_headroom=0x10000)
+    # Built from source with that flag: SDL3 (its structs carry plain enums into the
+    # port, SDL_AudioSpec among them) and the libraries MP_BUNDLED_DEPS covers.
+    set(AURORA_SDL3_PROVIDER vendor CACHE STRING "How to provide SDL3")
+    set(_mp_vita_bundled ON)
+endif()
+
 # Build speed, used only when the tools are installed. ccache makes recompiling
 # unchanged sources nearly free (stashing or setting edits aside rewrites mtimes)
 # and lets a fresh build directory fill from the cache: base_dir rewrites paths
@@ -56,7 +88,7 @@ option(MP_ANDROID_NOD_STUB "Use a non-functional nod stub for Android build prob
 # in statically. SDL3, OpenSSL, zlib and zstd stay as they are: their sonames are
 # stable, and a static OpenSSL would look for CA certificates where the build
 # host's distro keeps them.
-if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR APPLE)
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR APPLE OR _mp_vita_bundled)
     set(_mp_bundled_default ON)
 else()
     set(_mp_bundled_default OFF)
@@ -338,6 +370,7 @@ set(MP_PORT_SOURCES
     platform/port_icy_file.cpp
     platform/port_room_geo.cpp
     platform/port_room_geo_file.cpp
+    platform/port_retail_resident.cpp
     platform/port_room_liquid.cpp
     platform/port_room_effects.cpp
     platform/port_queen_barrier.cpp
@@ -714,6 +747,68 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.odrannnn.metroidpr
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
               ${CMAKE_CURRENT_SOURCE_DIR}/NOTICE
     DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/metroid-prime-port)
+
+if(VITA)
+    # Heap and stack sizes, clocks, and where the disc and saves live (ux0:data).
+    target_sources(metroid_prime_port PRIVATE platform/vita/vita_platform.cpp platform/vita/vita_printf.cpp
+        platform/vita/vita_gx_sources.cpp)
+    # newlib's printf here lacks C99 length modifiers (%zu); every caller goes through
+    # platform/vita/vita_printf.cpp, which rewrites them.
+    target_link_options(metroid_prime_port PRIVATE
+        "LINKER:--wrap=printf,--wrap=fprintf,--wrap=sprintf,--wrap=snprintf"
+        "LINKER:--wrap=vprintf,--wrap=vfprintf,--wrap=vsprintf,--wrap=vsnprintf")
+    # vitaGL's own splash screen (its logo, drawn from vglInit until the first frame) is not
+    # started: the game starts on black (extern/aurora/lib/vita_gl.cpp's
+    # __wrap_invoke_splashscreen).
+    target_link_options(metroid_prime_port PRIVATE "LINKER:--wrap=invoke_splashscreen")
+    # vitashark's compiles take a lock (extern/aurora/lib/vita_gl.cpp): the generated programs
+    # compile on a thread of their own, vitaGL's fixed-function shaders inside the render worker's
+    # draws, which move them to a thread with a stack deep enough.
+    target_link_options(metroid_prime_port PRIVATE
+        "LINKER:--wrap=shark_compile_shader_extended,--wrap=shark_clear_output")
+    target_link_libraries(metroid_prime_port PRIVATE ScePower_stub)
+    # libstdc++ calls pthreads through weak references and treats threading as off
+    # when pthread_cancel is missing; nothing references that (or pthread_once)
+    # strongly, so from a static libpthread they were never linked, and the first
+    # std::call_once threw system_error(-1) before main (the first crash on
+    # hardware). Link all of it.
+    target_link_libraries(metroid_prime_port PRIVATE "-Wl,--whole-archive" pthread "-Wl,--no-whole-archive")
+    include("${VITASDK}/share/vita.cmake" REQUIRED)
+    set(MP_VITA_TITLEID "MPPT00001" CACHE STRING "Vita title ID (4 letters, 5 digits)")
+    # Metroid Prime Demo: the same eboot.bin packaged again under its own title ID, so it
+    # installs beside the game instead of over it. vita_platform.cpp knows it by this ID: the
+    # frigate only, from a new game with no front end, and the frigate's way out starts a new game
+    # again (PortDebug::Demo).
+    set(MP_VITA_DEMO_TITLEID "MPPD00001" CACHE STRING "Metroid Prime Demo's Vita title ID")
+    set_property(SOURCE platform/vita/vita_platform.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS "MP_VITA_DEMO_TITLEID=\"${MP_VITA_DEMO_TITLEID}\"")
+    vita_create_self(eboot.bin metroid_prime_port UNSAFE)
+    # ATTRIBUTE2=12: the extended memory budget. The executable's static data (the
+    # emulated main memory among it) and the heap do not fit the default one.
+    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
+    # vita_create_vpk is a macro that adds its title ID and files to these: the demo's VPK
+    # starts from them as they are here.
+    set(_mp_vita_sfo_flags "${VITA_MKSFOEX_FLAGS}")
+    set(_mp_vita_vpk_flags "${VITA_PACK_VPK_FLAGS}")
+    vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
+        VERSION "00.32"
+        NAME "Metroid Prime"
+        FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
+        FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+        FILE platform/vita/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+    set(VITA_MKSFOEX_FLAGS "${_mp_vita_sfo_flags}")
+    set(VITA_PACK_VPK_FLAGS "${_mp_vita_vpk_flags}")
+    unset(resources)
+    # The demo's icon and LiveArea logo carry a DEMO mark: the home screen's bubbles have no names.
+    vita_create_vpk(metroid_prime_port_demo.vpk ${MP_VITA_DEMO_TITLEID} eboot.bin
+        VERSION "00.32"
+        NAME "Metroid Prime Demo"
+        FILE platform/vita/sce_sys/demo/icon0.png sce_sys/icon0.png
+        FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+        FILE platform/vita/sce_sys/demo/startup.png sce_sys/livearea/contents/startup.png
+        FILE platform/vita/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+endif()
 
 # Source-derived Remastered box/triangle contact geometry (0xc0a180) and its
 # adapter. Linked into the game by the Remastered mover; the tests use it

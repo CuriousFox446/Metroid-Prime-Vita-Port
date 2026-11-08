@@ -51,6 +51,7 @@ namespace PortDebug {
 
 void DrawVideoDisplay() {
   ImGui::SeparatorText("Display");
+#ifndef __vita__ // the Vita's screen is always the game's
   bool fullscreen = sFullscreen;
 #if defined(__ANDROID__)
   if (ImGui::Checkbox("Fullscreen (hide the status and navigation bars)", &fullscreen)) {
@@ -59,6 +60,7 @@ void DrawVideoDisplay() {
 #endif
     SetFullscreen(fullscreen);
   }
+#endif
   bool vsync = sVsyncEnabled;
   if (ImGui::Checkbox("Vsync", &vsync)) {
     SetVsyncEnabled(vsync);
@@ -515,9 +517,20 @@ void DrawVideoQuality() {
   if (ImGui::Checkbox("Show shader compilation", &sShowShaderCompilation)) {
     MarkDirty();
   }
+#ifdef __vita__
+  ImGui::SetItemTooltip("A small progress bar while shaders compile: each material's the first time it is\n"
+                        "drawn. Until its shader is ready it is drawn with a simpler look.");
+#else
   ImGui::SetItemTooltip("A small progress bar while the shader cache compiles at startup (longest on the first\n"
                         "start after an install or update). Draws whose shader isn't ready yet are skipped.");
-  if (ImGui::Checkbox("Show F1 hint at launch", &sShowMenuHint)) {
+#endif
+#ifdef __vita__
+  // The hint names the Vita's buttons; it has no F1.
+  constexpr const char* kMenuHintLabel = "Show the menu hint at launch";
+#else
+  constexpr const char* kMenuHintLabel = "Show F1 hint at launch";
+#endif
+  if (ImGui::Checkbox(kMenuHintLabel, &sShowMenuHint)) {
     MarkDirty();
   }
   ImGui::SetItemTooltip("A note in the top left corner for the first seconds of each launch saying how to\n"
@@ -532,6 +545,9 @@ void DrawVideoQuality() {
       SetAnisotropy(1 << aniso);
     }
     ImGui::SetItemTooltip("Keeps textures sharp at grazing angles. Recommended: 16x.");
+#ifndef __vita__
+    // None of these three reach the Vita's renderer: its programs light per vertex, and its sun
+    // and actor shadows stay off (vita_platform.cpp's MP_SHADOWS, ProjectedShadows).
     bool perPixel = sPerPixelLighting;
     if (ImGui::Checkbox("Per-pixel lighting", &perPixel)) {
       SetPerPixelLighting(perPixel);
@@ -554,6 +570,7 @@ void DrawVideoQuality() {
         "Remastered's actor shadow: each actor casts a shadow straight down onto the\n"
         "floor. Needs the Remastered world geometry; otherwise the original blob shadow\n"
         "is drawn.");
+#endif
   }
 
   // Dynamic resolution's mode is the two saved settings together: Auto draws up to the

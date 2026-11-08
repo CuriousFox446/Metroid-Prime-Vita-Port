@@ -498,8 +498,14 @@ void DrawIcon(ImDrawList* dl, ImVec2 p, float s, Icon icon, ImU32 col) {
 // An input's name without its "kind:" (the icon says it).
 // Pad buttons by raw bit (SDL_GamepadButton, then the triggers' pulls and clicks).
 constexpr const char* kPadButtonLabels[] = {
+#ifdef __vita__
+    // The Vita's own names for them.
+    "Cross",   "Circle",   "Square",   "Triangle", "Select",   "PS",       "Start",     "Left stick",
+    "Right stick", "L",    "R",        "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Share",
+#else
     "A",       "B",        "X",        "Y",        "Back",     "Guide",    "Start",     "Left stick",
     "Right stick", "LB",   "RB",       "D-pad up", "D-pad down", "D-pad left", "D-pad right", "Share",
+#endif
     "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "Touchpad", "Misc 2",   "Misc 3",    "Misc 4",
     "Misc 5",  "Misc 6",   "LT",       "RT",       "LT click", "RT click",
 };
@@ -1445,7 +1451,12 @@ void DrawTable(const SViews& views, bool editorDrawn) {
   ImGui::SameLine();
   ImGui::Checkbox("Only bound", &sOnlyBound);
 
+#ifdef __vita__
+  // The Vita has no keyboard or mouse: their bindings are not listed (they stay in the profile).
+  std::vector<Family> families = {Family::Pad};
+#else
   std::vector<Family> families = {Family::Keyboard, Family::Pad};
+#endif
   if (kShowTouch) families.push_back(Family::Touch);
   const UserProfile* users[3] = {};
   const auto findUsers = [&] {
@@ -1622,7 +1633,7 @@ void DrawTable(const SViews& views, bool editorDrawn) {
 
       ImGui::TableNextColumn();
       if (ImGui::SmallButton("+")) {
-        BeginEdit(kEditNew, Binding{action}, Family::Keyboard);
+        BeginEdit(kEditNew, Binding{action}, families.front());
         StartCapture();
       }
       ImGui::SetItemTooltip("Add a binding for this action and start recording any key, mouse button or "
@@ -1745,7 +1756,9 @@ void DrawReset(const SViews& views) {
   using PortInput::Family;
   if (ImGui::Button("Reset...")) ImGui::OpenPopup("resetDevice");
   if (!ImGui::BeginPopup("resetDevice")) return;
+#ifndef __vita__ // no keyboard there
   ResetSection(views[Family::Keyboard]);
+#endif
   ResetSection(views[Family::Pad]);
   if (kShowTouch) ResetSection(views[Family::Touch]);
   ImGui::Separator();
@@ -1758,7 +1771,11 @@ void DrawReset(const SViews& views) {
 // Ball goes on lock-on instead, as in Remastered (LT, or Q on the keyboard).
 void ApplyBallPreset(PortInput::Family family, std::string_view id) {
   const char* spider = nullptr;
+#ifndef __vita__
+  // The Vita has no LT: its dual-stick layouts leave the row to follow gameplay, where L holds R in
+  // the ball (BindController).
   if (family == PortInput::Family::Pad && (id == "remastered" || id == "modern")) spider = "axis:lefttrigger+";
+#endif
   if (family == PortInput::Family::Keyboard && id == "mouse") spider = "key:20"; // SDL_SCANCODE_Q
   Binding b;
   if (spider == nullptr || !PortInput::InputFromText(spider, b.inputs[0])) return;
@@ -1836,7 +1853,9 @@ void DrawPresets(const SViews& views) {
                         "Remastered, Modern or Southpaw for controllers.");
   if (!ImGui::BeginPopup("presets")) return;
   ImGui::TextDisabled("A preset replaces your own bindings for that device.");
+#ifndef __vita__ // no keyboard there
   PresetRow(views[Family::Keyboard], kKeyPresets, int(std::size(kKeyPresets)));
+#endif
   PresetRow(views[Family::Pad], kPadPresets, int(std::size(kPadPresets)));
   ImGui::Separator();
   if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
@@ -2034,6 +2053,11 @@ std::string BindingsText(PortInput::Action action, const char* separator) {
   std::string text;
   for (const Binding& b : profile.bindings) {
     if (b.action != action || b.count == 0) continue;
+#ifdef __vita__
+    // The Vita has no keyboard or mouse: the hints name its buttons alone (F1, F12 and F8 were
+    // shown there).
+    if (PortInput::BindingFamily(b) != PortInput::Family::Pad) continue;
+#endif
     // A chord bound in both orders is listed once.
     std::vector<Input> set(b.inputs.begin(), b.inputs.begin() + b.count);
     std::sort(set.begin(), set.end(), [](const Input& x, const Input& y) {

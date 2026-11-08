@@ -124,6 +124,58 @@ uint32_t aurora_get_resident_geometry_mib();
 // The bytes of it in use, as of the last frame processed.
 uint64_t aurora_get_resident_geometry_used();
 float aurora_get_fps();
+// Nanoseconds the render worker thread has spent on work items since it started (it
+// processes the GX FIFO and encodes the frame); sampled twice, the difference is its load.
+uint64_t aurora_render_worker_busy_ns();
+// What became of retained display lists' calls (GXPortRetainResident) since the last read:
+// drawn from their resident triangle lists, or sent as they are; and the conversions, with
+// why each that failed did.
+typedef struct {
+  uint32_t calls;          // resident calls the processor took
+  uint32_t drawnResident;  // drawn from the resident triangle lists
+  uint32_t sent;           // processed as sent: not convertible, or no room
+  uint32_t builds;         // conversions tried
+  uint32_t failCommand;    // held a command other than a triangle draw...
+  uint8_t lastCommand;     // ...the last such byte seen
+  uint32_t failIndices;    // a draw that makes no whole triangles, or too many indices
+  uint32_t failVertexSize; // a vertex format the processor has no size for, or a short list
+  uint32_t failRoom;       // no room in the resident buffers
+  uint32_t rebuilds;       // converted again: the vertex format changed since
+} AuroraResidentDlStats;
+void aurora_take_resident_dl_stats(AuroraResidentDlStats* out);
+
+// What the game sent through GX, by a source the game names (game thread only): immediate
+// primitives (GXBegin) and display list calls, sent as they are or resident. Source 0 is
+// whatever is sent with no source set.
+#define AURORA_GX_SOURCES 32
+typedef struct {
+  uint32_t begins;        // GXBegin calls
+  uint32_t beginVertices; // their vertices
+  uint32_t lists;         // GXCallDisplayList calls sent through the FIFO
+  uint32_t listKiB;       // ...and their size, KiB
+  uint32_t residentLists; // calls of retained display lists (drawn from their GPU copy)
+} AuroraGxSourceCounts;
+// Returns the source it replaces.
+uint32_t aurora_gx_set_source(uint32_t source);
+// Copies the counts since the last call and resets them.
+void aurora_take_gx_source_counts(AuroraGxSourceCounts out[AURORA_GX_SOURCES]);
+// Extension commands (GX_AURORA) the FIFO processor has handled since it started, by opcode;
+// opcodes from AURORA_GX_OPCODES - 1 up share the last slot. Any thread.
+#define AURORA_GX_OPCODES 128
+void aurora_read_aurora_op_counts(uint32_t out[AURORA_GX_OPCODES]);
+// fifo::drain calls the game waited in, by call site. caller is the return address in the
+// function that called drain; origin, for GXDrawDone, AuroraGXSync and GXSetDrawSync, the one
+// in their caller (else null). Offsets from aurora_drain_anchor() locate both in the binary.
+#define AURORA_DRAIN_SITES 16
+typedef struct {
+  const void* caller;
+  const void* origin;
+  uint32_t calls;
+  uint64_t waitNs;
+} AuroraDrainSite;
+// Copies the sites since the last call, returns how many, and resets them. Game thread.
+uint32_t aurora_take_drain_sites(AuroraDrainSite out[AURORA_DRAIN_SITES]);
+const void* aurora_drain_anchor(void);
 // Whether the device samples BC and ASTC 4x4 compressed textures (false until it exists).
 void aurora_get_texture_support(bool* bc, bool* astc);
 // A GX texture object's (GXTexObj*) base level decoded to RGBA8 into `out` (cap bytes); false for

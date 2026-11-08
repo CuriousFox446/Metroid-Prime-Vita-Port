@@ -109,6 +109,11 @@ bool BootWorld(uint32_t& worldId, uint32_t& areaAssetId) {
   return sSet;
 }
 
+bool Demo() {
+  static const bool sDemo = port::EnvFlag("MP_DEMO");
+  return sDemo;
+}
+
 bool SkipCutscenes() { return Loaded(sSkipCutscenes); }
 
 float CutsceneSpeed() { return Loaded(sCutsceneSpeed); }
@@ -987,7 +992,17 @@ void SetSunShadows(bool enabled) {
   }
 }
 
-bool ProjectedShadows() { return Loaded(sProjectedShadows); }
+bool ProjectedShadows() {
+#ifdef __vita__
+  // Each shadowed actor draws again into its own map: more than the Vita's FIFO thread has
+  // room for. MP_PROJECTED_SHADOWS=1 lets the setting decide.
+  static const bool allowed = port::EnvFlag("MP_PROJECTED_SHADOWS", false);
+  if (!allowed) {
+    return false;
+  }
+#endif
+  return Loaded(sProjectedShadows);
+}
 void SetProjectedShadows(bool enabled) {
   EnsureInitialized();
   if (sProjectedShadows != enabled) {

@@ -38,6 +38,9 @@ AuroraWindowSize get_window_size();
 // The frame buffer size a render scale would give, without applying it.
 bool get_frame_buffer_size_for_scale(float scale, uint32_t* width, uint32_t* height);
 const AuroraEvent* poll_events();
+// Counts poll_events calls (0 before the first). SDL refreshes its keyboard, mouse and pad
+// state only when events are pumped, so reads of that state repeat between two values.
+uint64_t pump_generation() noexcept;
 SDL_Window* get_sdl_window();
 SDL_Renderer* get_sdl_renderer();
 const void* get_native_window_handle() noexcept;

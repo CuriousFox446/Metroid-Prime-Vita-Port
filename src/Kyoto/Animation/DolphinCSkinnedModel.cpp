@@ -1,4 +1,5 @@
 #include "Kyoto/Animation/CSkinnedModel.hpp"
+#include "port_profile.h"
 #include "port_env.h"
 
 #include "Kyoto/Alloc/CCircularBuffer.hpp"
@@ -271,6 +272,7 @@ void CSkinnedModel::Draw(const float* positions, const float* normals,
 void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
                               const rstl::optional_object< CVertexMorphEffect >& morphEffect,
                               const float* averagedNormals, float* workVerts) {
+  PORT_ZONE_TIMED("CSkinnedModel::Calculate (CPU skinning)");
   size_t alignedNormSize = 0;
   size_t alignedVertSize = 0;
   size_t totalSize = 0;

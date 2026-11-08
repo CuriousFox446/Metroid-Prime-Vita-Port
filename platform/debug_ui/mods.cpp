@@ -739,7 +739,7 @@ void DrawMods() {
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip("Reads the mods folder again and reloads the room, as a save state does.");
   }
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__vita__) // the Vita's opens its web browser
   if (!status.folder.empty()) {
     ImGui::SameLine();
     if (ImGui::Button("Open mods folder")) {

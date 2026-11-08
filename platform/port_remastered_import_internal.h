@@ -77,8 +77,8 @@
 #include <windows.h>
 #else
 #include <sys/resource.h>
-#if !defined(__APPLE__)
-#include <sys/syscall.h>
+#if defined(__linux__)
+#include <sys/syscall.h> // YieldToGame's thread priority
 #endif
 #include <unistd.h>
 #endif

@@ -22,6 +22,14 @@ struct Options {
 // Applies thread options to the current thread
 void set_current(const Options& options) noexcept;
 
+// PS Vita: names the current thread for the thread log (log_cpu) without changing its priority or
+// affinity; set_current names its threads so too. Elsewhere nothing.
+void register_current(const std::string& name) noexcept;
+// PS Vita: logs each named thread's core (its affinity mask, the core it is on and the one it last
+// ran on), priority, the share of the time since the last call it ran, and its moves between cores.
+// Elsewhere nothing.
+void log_cpu() noexcept;
+
 class Thread {
 public:
   Thread() noexcept = default;

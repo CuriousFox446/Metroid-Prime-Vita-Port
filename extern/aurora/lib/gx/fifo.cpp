@@ -1,13 +1,21 @@
 #include "fifo.hpp"
 
 #include "../thread.hpp"
+#include "../vita_fifo_clock.hpp"
 #include "command_processor.hpp"
 
+#include <aurora/gfx.h>
+#include <dolphin/gx/GXAurora.h>
+#include <dolphin/gx/GXCommandList.h>
+
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
 
 #include <tracy/Tracy.hpp>
 
@@ -36,6 +44,30 @@ std::mutex sBufferMutex;
 std::atomic<uint32_t> sWorkerWake{0};
 thread::Thread sWorkerThread;
 std::atomic<DrawDoneCallback> sDrawDoneCallback{nullptr};
+
+// queue_frame_end: the stream position just past the queued frame end (0 when none), and the
+// thread that queued it, the only one finish_frame_end waits on.
+uint64_t sPendingFrameEnd = 0;
+std::thread::id sFrameEndProducer;
+
+// aurora_take_drain_sites: the drains the producer waited in since the last take.
+std::array<AuroraDrainSite, AURORA_DRAIN_SITES> sDrainSites{};
+uint32_t sDrainSiteCount = 0;
+const void* sDrainOrigin = nullptr;
+
+void note_drain(const void* caller, uint64_t waitNs) noexcept {
+  for (uint32_t i = 0; i < sDrainSiteCount; ++i) {
+    auto& site = sDrainSites[i];
+    if (site.caller == caller && site.origin == sDrainOrigin) {
+      ++site.calls;
+      site.waitNs += waitNs;
+      return;
+    }
+  }
+  if (sDrainSiteCount < sDrainSites.size()) {
+    sDrainSites[sDrainSiteCount++] = {.caller = caller, .origin = sDrainOrigin, .calls = 1, .waitNs = waitNs};
+  }
+}
 
 void dispatch_draw_done() noexcept {
   if (const auto callback = sDrawDoneCallback.load(std::memory_order_acquire); callback != nullptr) {
@@ -90,7 +122,9 @@ void worker_main(std::stop_token token) noexcept {
     if (token.stop_requested()) {
       break;
     }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
     sWorkerWake.wait(event, std::memory_order_acquire);
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kIdle);
   }
 }
 
@@ -150,6 +184,45 @@ void end_frame() noexcept {
 }
 
 bool frame_active() noexcept { return sFrameActive; }
+
+void queue_frame_end(std::function<void()> task) {
+  AURORA_ASSERT(kProcessingMode == ProcessingMode::Thread && !detail::sInDisplayList && sFrameActive,
+                "fifo::queue_frame_end: needs an active frame on the FIFO thread");
+  finish_frame_end(); // one in flight at a time
+  auto* queued = new std::function<void()>([task = std::move(task)] {
+    clear_draw_cache(); // command_processor, as end_frame does once drained
+    task();
+  });
+  write_u8(GX_AURORA);
+  write_u16(GX_AURORA_PORT_FIFO_TASK);
+  write_u64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(queued)));
+  publish();
+  sFrameActive = false;
+  sPendingFrameEnd = sStreamBase + detail::sBufferSize;
+  sFrameEndProducer = std::this_thread::get_id();
+}
+
+void finish_frame_end() noexcept {
+  if (sPendingFrameEnd == 0 || std::this_thread::get_id() != sFrameEndProducer) {
+    return;
+  }
+  ZoneScoped;
+  uint64_t processed = sProcessed.load(std::memory_order_acquire);
+  while (processed < sPendingFrameEnd) {
+    sProcessed.wait(processed, std::memory_order_acquire);
+    processed = sProcessed.load(std::memory_order_acquire);
+  }
+  sPendingFrameEnd = 0;
+  // Nothing past the frame end was published (the frame is over), so the processor is idle:
+  // drop what it processed, keeping what the producer wrote since (drain does this otherwise).
+  std::lock_guard lock{sBufferMutex};
+  const auto done = static_cast<uint32_t>(processed - sStreamBase);
+  if (done != 0) {
+    std::memmove(detail::sBufferData, detail::sBufferData + done, detail::sBufferSize - done);
+    detail::sBufferSize -= done;
+    sStreamBase = processed;
+  }
+}
 
 void write_data_grow(const void* data, uint32_t length) {
   const uint64_t needed64 = static_cast<uint64_t>(detail::sBufferSize) + length;
@@ -236,12 +309,16 @@ uint32_t end_display_list() {
 
 bool in_display_list() { return detail::sInDisplayList; }
 
+void set_drain_origin(const void* origin) noexcept { sDrainOrigin = origin; }
+
 void drain() {
   if (detail::sBufferSize == 0) {
     return;
   }
 
   ZoneScoped;
+  const void* caller = __builtin_return_address(0);
+  const auto waitStart = std::chrono::steady_clock::now();
   const uint64_t target = sStreamBase + detail::sBufferSize;
 
   switch (kProcessingMode) {
@@ -271,6 +348,9 @@ void drain() {
     detail::sBufferSize = 0;
   }
   sPendingDraws = 0;
+  note_drain(caller, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::steady_clock::now() - waitStart)
+                                                .count()));
 }
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
@@ -287,3 +367,13 @@ void clear_buffer() {
 }
 
 } // namespace aurora::gx::fifo
+
+uint32_t aurora_take_drain_sites(AuroraDrainSite out[AURORA_DRAIN_SITES]) {
+  using namespace aurora::gx::fifo;
+  const uint32_t count = sDrainSiteCount;
+  std::copy_n(sDrainSites.begin(), count, out);
+  sDrainSiteCount = 0;
+  return count;
+}
+
+const void* aurora_drain_anchor(void) { return reinterpret_cast<const void*>(&aurora_take_drain_sites); }

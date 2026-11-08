@@ -10,11 +10,13 @@
 #include <chrono>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+#include <aurora/gfx.h>
 #include <aurora/phase.hpp>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_timer.h>
 
 #include "port_debug.h"
+#include "port_input_devices.h"
 #include "port_photo.h"
 #include "port_pointer.h"
 #include "port_savestate.h"
@@ -25,6 +27,7 @@
 #include "port_textures.h"
 #include "port_prompts.h"
 #include "port_crash.h"
+#include "port_profile.h"
 #include "port_watchdog.h"
 
 #include "stdint.h"
@@ -576,18 +579,29 @@ bool CGameArchitectureSupport::UpdateTicks() {
       }
       break;
     }
+    PORT_ZONE_TIMED("tick");
     PortDebug::BeginFrameMouse();
     // A tick that doesn't reach CStateManager::Update (paused) leaves every
     // actor's snapshot stale, so actors don't blend between old transforms.
-    CActor::PortBeginTickSnapshot();
-    if (!x30_inputGenerator.Update(tickPeriod, x4_archQueue)) {
-      terminate = true;
+    {
+      PORT_ZONE_TIMED("tick: actor snapshots");
+      CActor::PortBeginTickSnapshot();
+    }
+    {
+      PORT_ZONE_TIMED("tick: input generator");
+      if (!x30_inputGenerator.Update(tickPeriod, x4_archQueue)) {
+        terminate = true;
+      }
     }
     x4_archQueue.Push(MakeMsg::CreateTimerTick(kAMT_Game, tickPeriod));
-    x58_ioWinMgr.PumpMessages(x4_archQueue);
+    {
+      PORT_ZONE_TIMED("tick: PumpMessages (every IOWin)");
+      x58_ioWinMgr.PumpMessages(x4_archQueue);
+    }
     ++sTicksAdvanced;
   }
 
+  PORT_ZONE_TIMED("UpdateTicks: final PumpMessages");
   x58_ioWinMgr.PumpMessages(x4_archQueue);
   return !terminate;
 }
@@ -954,6 +968,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
     // point is where the game's own loading is done.
     uint64_t firstFrameNs = 0;
     const uint64_t loopBeganNs = SDL_GetTicksNS();
+    PORT_PROFILE_SET_MAIN_THREAD();
     unsigned s_frameLog = 0;
     // Frame milestones in the log: where a slow start or a slow device shows up.
     // The counter line above is only the first frame.
@@ -1132,23 +1147,39 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // Port: swap the HD texture set if the active controller changed, and
       // re-icon the prompts if a binding changed.
       PortTextures::Poll();
+      // The ticks below poll the pad once each: the controls profile is built once a frame.
+      PortInputDevices::BeginFrame();
       PortPrompts::Poll();
       const uint64_t inputDoneNs = SDL_GetTicksNS();
       // Port: run ARAM transfer callbacks completed by Aurora's ARQ.
       aurora::phase::set(aurora::phase::Main, "audio and loader polling");
-      ARQPoll();
-      // Port: service the streamed-audio AI DMA callback on the main thread.
-      AIPortPoll();
+      {
+        PORT_ZONE_TIMED("ARQPoll + AIPortPoll");
+        ARQPoll();
+        // Port: service the streamed-audio AI DMA callback on the main thread.
+        AIPortPoll();
+      }
       archSupport->GetStopwatch2().Reset();
       aurora::phase::set(aurora::phase::Main, "resource loading (AsyncIdlePakLoading)");
-      gpResourceFactory->GetResLoader().AsyncIdlePakLoading();
+      {
+        PORT_ZONE_TIMED("AsyncIdlePakLoading");
+        gpResourceFactory->GetResLoader().AsyncIdlePakLoading();
+      }
       if (gpMemoryCard == nullptr && gpResourceFactory->GetResLoader().AreAllPaksLoaded()) {
         MemoryCardInitializePump();
       }
-      CARAMManager::CollectGarbage();
-      CARAMToken::UpdateAllDMAs();
+      {
+        PORT_ZONE_TIMED("ARAM garbage + DMAs");
+        CARAMManager::CollectGarbage();
+        CARAMToken::UpdateAllDMAs();
+      }
       aurora::phase::set(aurora::phase::Main, "game tick (UpdateTicks)");
-      if (!archSupport->UpdateTicks()) {
+      bool ticked;
+      {
+        PORT_ZONE_TIMED("UpdateTicks");
+        ticked = archSupport->UpdateTicks();
+      }
+      if (!ticked) {
         PortSaveState::ResumeQuitCleanly();
         x160_24_finished = true;
       }
@@ -1173,7 +1204,11 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // the bottleneck, and a big area's first load took 20 s and more.
       const double beginSceneStart = archSupport->GetStopwatch2().GetElapsedTime();
       const uint64_t tickDoneNs = SDL_GetTicksNS();
+      // Port: where a drawn frame's time goes, for the MP_TRACE_TIMING breakdown.
+      uint64_t beginSceneDoneNs = tickDoneNs, drawDoneNs = tickDoneNs, idleDoneNs = tickDoneNs,
+               endSceneDoneNs = tickDoneNs;
       if (!x160_26_screenFading && gpRender->BeginScene()) {
+        beginSceneDoneNs = SDL_GetTicksNS();
         const double beginSceneWait =
             archSupport->GetStopwatch2().GetElapsedTime() - beginSceneStart;
         // Port: Aurora frames are bracketed inside CGraphics::Begin/EndScene.
@@ -1201,6 +1236,7 @@ int CMain::RsMain(int argc, const char* const* argv) {
         PortSpeedrunTimer::Draw();
         DrawDebugMetrics(t1, archSupport->GetStopwatch2());
 
+        drawDoneNs = SDL_GetTicksNS();
         double t2 = archSupport->GetStopwatch2().GetElapsedTime();
         AddFrameTime(x104_drawTimes, t2 / dt);
         x11c_averageDrawTime = x104_drawTimes.GetAverage().data();
@@ -1216,8 +1252,10 @@ int CMain::RsMain(int argc, const char* const* argv) {
         else
           idleMicros = 0;
         AsyncIdle(idleMicros);
+        idleDoneNs = SDL_GetTicksNS();
 
         gpRender->EndScene();
+        endSceneDoneNs = SDL_GetTicksNS();
         aurora::phase::set(aurora::phase::Main, "after EndScene");
         presented = true;
 
@@ -1276,6 +1314,72 @@ int CMain::RsMain(int argc, const char* const* argv) {
       // two could never be told apart - which is the only thing worth reporting
       // when a frame overruns its budget.
       const uint64_t workEndNs = SDL_GetTicksNS();
+      // Port: with MP_TRACE_TIMING, once a second, what a frame's work was made of
+      // (main thread, per frame, in ms) and how busy Aurora's render worker was, so a
+      // slow device shows whether the game, its draw calls or the GX translation on
+      // the worker is the bottleneck. begin-wait is BeginScene waiting for the worker.
+      {
+        static const bool sSplit = port::EnvFlag("MP_TRACE_TIMING");
+        if (sSplit) {
+          static uint64_t sSpanStartNs = 0, sWorkerStartNs = 0;
+          static uint64_t sIn = 0, sTick = 0, sWait = 0, sDraw = 0, sIdle = 0, sEnd = 0, sRest = 0;
+          static uint32_t sFrames = 0, sTicks = 0;
+          if (sSpanStartNs == 0) {
+            sSpanStartNs = loopStartNs;
+            sWorkerStartNs = aurora_render_worker_busy_ns();
+          }
+          sIn += inputDoneNs - loopStartNs;
+          sTick += tickDoneNs - inputDoneNs;
+          sTicks += sTicksAdvanced;
+          ++sFrames;
+          if (presented) {
+            sWait += beginSceneDoneNs - tickDoneNs;
+            sDraw += drawDoneNs - beginSceneDoneNs;
+            sIdle += idleDoneNs - drawDoneNs;
+            sEnd += endSceneDoneNs - idleDoneNs;
+            sRest += workEndNs - endSceneDoneNs;
+          } else {
+            sRest += workEndNs - tickDoneNs;
+          }
+          if (workEndNs - sSpanStartNs >= 1000000000ull) {
+            const double frames = static_cast< double >(sFrames);
+            const auto perFrame = [frames](uint64_t ns) { return static_cast< double >(ns) / 1e6 / frames; };
+            const uint64_t workerNow = aurora_render_worker_busy_ns();
+            const double wallNs = static_cast< double >(workEndNs - sSpanStartNs);
+            PortLog::Write("[split] ms/frame: input %.1f, tick %.1f (%.1f ticks), begin-wait %.1f, draw %.1f, "
+                           "loader %.1f, end-scene %.1f, other %.1f | render worker busy %.0f%% (%.1f ms/frame)"
+                           " | resident geometry %.1f MiB\n",
+                           perFrame(sIn), perFrame(sTick), sTicks / frames, perFrame(sWait), perFrame(sDraw),
+                           perFrame(sIdle), perFrame(sEnd), perFrame(sRest),
+                           100.0 * static_cast< double >(workerNow - sWorkerStartNs) / wallNs,
+                           perFrame(workerNow - sWorkerStartNs),
+                           static_cast< double >(aurora_get_resident_geometry_used()) / (1024.0 * 1024.0));
+            // What became of the retained display lists' calls (MP_RETAIL_RESIDENT).
+            AuroraResidentDlStats dl;
+            aurora_take_resident_dl_stats(&dl);
+            if (dl.calls != 0 || dl.builds != 0) {
+              PortLog::Write("[resident] per frame: %.1f calls, %.1f drawn resident, %.1f sent as they are; "
+                             "this second %u conversions (failed: %u command, last 0x%02x; %u indices; "
+                             "%u vertex size; %u room), %u redone for a changed vertex format\n",
+                             dl.calls / frames, dl.drawnResident / frames, dl.sent / frames, dl.builds,
+                             dl.failCommand, dl.lastCommand, dl.failIndices, dl.failVertexSize, dl.failRoom,
+                             dl.rebuilds);
+            }
+            {
+              uint steps, particles, created;
+              CElementGen::PortTakeUpdateStats(steps, particles, created);
+              PortLog::Write("[particles] per frame: %.1f system steps, %.1f particles updated, %.1f created\n",
+                             steps / frames, particles / frames, created / frames);
+            }
+            // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
+            PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });
+            sSpanStartNs = workEndNs;
+            sWorkerStartNs = workerNow;
+            sIn = sTick = sWait = sDraw = sIdle = sEnd = sRest = 0;
+            sFrames = sTicks = 0;
+          }
+        }
+      }
       aurora::phase::set(aurora::phase::Main, "frame pacing");
       // 60 under the 60 FPS cap, else the FPS cap setting (0 = unlimited).
       const int frameRateCap = PortDebug::FrameRateCap();

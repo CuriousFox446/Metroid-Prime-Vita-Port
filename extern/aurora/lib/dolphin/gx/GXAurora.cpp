@@ -48,7 +48,9 @@ void AuroraGetRenderSize(u32* width, u32* height) {
 
 void AuroraGXSync() {
   GXFlush();
+  aurora::gx::fifo::set_drain_origin(__builtin_return_address(0));
   aurora::gx::fifo::drain();
+  aurora::gx::fifo::set_drain_origin(nullptr);
 }
 
 void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {

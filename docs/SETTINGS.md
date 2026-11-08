@@ -1459,6 +1459,10 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   room (MREA 3E6B2BB7) in first person about 5 s after launch, and
   `39F2DE28:B2701146` gives the Landing Site. It needs no smoke build, and the
   console's `status` answers as soon as the room is up.
+- `MP_DEMO=1`: Metroid Prime Demo, which the Vita's second app sets (with
+  `MP_FAST_BOOT`, docs/VITA.md). A world teleporter's way out to another world
+  quits instead, as Quit Game does, so the front end starts a new game on the
+  frigate again; the port menu does not open, and Back + Start is Start.
 - `MP_TURBO[=<ticks>]`: lockstep for automated runs. Every frame runs exactly
   `<ticks>` fixed ticks (default 1, at most 16) with no frame limiter and no
   vsync, so a run goes as fast as the machine renders it; game time per tick

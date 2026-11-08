@@ -40,6 +40,12 @@
 
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_system.h>
+#elif defined(__vita__)
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #elif !defined(_WIN32)
 #include <csignal>
 #include <poll.h>
@@ -83,9 +89,9 @@ bool TakeInstanceLock(const std::filesystem::path& file) {
 #endif
 }
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__vita__)
 // What the file copy takes out of the log (port_log_redact.h). Android's paths
-// name the package, not the person, so it has none.
+// name the package, not the person, so it has none; nor do the Vita's.
 PortLogRedact::Rules MakeRules() {
   PortLogRedact::Rules rules;
 #if defined(_WIN32)
@@ -163,7 +169,7 @@ void WriteAll(int fd, const char* data, ssize_t size) {
 }
 #endif
 
-#if !defined(_WIN32) && !defined(__ANDROID__)
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(__vita__)
 // Writes to the terminal, dropping what it will not take. The terminal copy is
 // opened non-blocking (or is a socket, sent to with MSG_DONTWAIT), so a terminal
 // that stops reading - Ctrl+S, a pager left waiting - loses its copy of the
@@ -358,6 +364,56 @@ int OpenShared(const std::string& path, std::string& opened) {
     }
   }
   return fd;
+}
+#endif
+
+#if defined(__vita__)
+// A write to the memory card takes a millisecond or more, and the once-a-second report
+// (MP_TRACE_TIMING, MP_PROFILE) is some 70 lines: written a line at a time on the threads
+// that logged them, the game's and the GX FIFO thread among them, they held up a frame
+// every second. So the log's streams hand their lines to this ring, and a thread of its own
+// writes them out as soon as it has them. What it had not written when the app crashed or
+// was closed is missing from the file; a crash dump still holds it (sRing).
+constexpr size_t kRingSize = 128 * 1024; // a power of two, so the counters may wrap
+char sRing[kRingSize];
+size_t sQueued = 0;  // bytes ever handed over
+size_t sWritten = 0; // bytes ever written out
+int sFd = -1;
+// Never destroyed: the writer waits on them for as long as the process lives, and a condition
+// variable destroyed at exit with a thread still waiting on it is undefined (glibc waits forever).
+std::mutex& sRingMutex = *new std::mutex;
+std::condition_variable& sRingData = *new std::condition_variable;
+std::condition_variable& sRingRoom = *new std::condition_variable;
+
+// The streams' write function (newlib's FILE::_write), in place of the write to the file.
+_READ_WRITE_RETURN_TYPE QueueWrite(struct _reent*, void*, const char* data, _READ_WRITE_BUFSIZE_TYPE size) {
+  std::unique_lock< std::mutex > lock(sRingMutex);
+  for (size_t left = static_cast< size_t >(size); left > 0;) {
+    // Full only while the card takes no writes for a long time: wait rather than lose lines.
+    sRingRoom.wait(lock, [] { return sQueued - sWritten < kRingSize; });
+    const size_t at = sQueued % kRingSize;
+    const size_t n = std::min({left, kRingSize - (sQueued - sWritten), kRingSize - at});
+    std::memcpy(sRing + at, data, n);
+    data += n;
+    left -= n;
+    sQueued += n;
+    sRingData.notify_one();
+  }
+  return size;
+}
+
+void WriteQueued() {
+  std::unique_lock< std::mutex > lock(sRingMutex);
+  for (;;) {
+    sRingData.wait(lock, [] { return sQueued != sWritten; });
+    const size_t at = sWritten % kRingSize;
+    const size_t n = std::min(sQueued - sWritten, kRingSize - at);
+    lock.unlock();
+    WriteAll(sFd, sRing + at, static_cast< ssize_t >(n));
+    lock.lock();
+    sWritten += n;
+    sRingRoom.notify_all();
+  }
 }
 #endif
 } // namespace
@@ -568,7 +624,17 @@ void WriteRaw(const char* data, size_t size) {
     return;
   }
 #endif
+#if defined(__vita__)
+  // stderr is a reopened stream (Start), not necessarily descriptor 2, whose lines a thread
+  // writes out (QueueWrite): an abort follows, which would stop it, so wait for it (a second at
+  // most).
+  std::fwrite(data, 1, size, stderr);
+  std::fflush(stderr);
+  std::unique_lock< std::mutex > lock(sRingMutex);
+  sRingRoom.wait_for(lock, std::chrono::seconds(1), [] { return sWritten == sQueued; });
+#else
   WriteAll(STDERR_FILENO, data, static_cast< ssize_t >(size));
+#endif
 }
 #endif
 
@@ -739,6 +805,23 @@ bool Start() {
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::thread(CopyStdio, fds[0]).detach();
   }
+#elif defined(__vita__)
+  // No processes, pipes or dup2: stdout and stderr are reopened onto the file
+  // itself, line by line, and each line goes to the ring (QueueWrite), which a thread
+  // writes out through stderr's descriptor.
+  if (std::freopen(path.c_str(), "w", stderr) == nullptr) {
+    return false;
+  }
+  std::setvbuf(stderr, nullptr, _IOLBF, 0);
+  std::fprintf(stderr, "metroid_prime_port log, started %s\n", started);
+  std::fflush(stderr);
+  sFd = fileno(stderr);
+  stderr->_write = QueueWrite;
+  if (std::freopen(path.c_str(), "a", stdout) != nullptr) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    stdout->_write = QueueWrite;
+  }
+  std::thread(WriteQueued).detach();
 #else
   const int out = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
   if (out < 0) {

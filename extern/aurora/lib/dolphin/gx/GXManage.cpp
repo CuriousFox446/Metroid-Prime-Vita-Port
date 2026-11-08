@@ -264,7 +264,9 @@ GXFifoObj* GXInit(void* base, u32 size) {
 void GXDrawDone() {
   GXFlush();
   GX_WRITE_RAS_REG(kDrawDoneCommand);
+  aurora::gx::fifo::set_drain_origin(__builtin_return_address(0));
   aurora::gx::fifo::drain();
+  aurora::gx::fifo::set_drain_origin(nullptr);
 }
 
 void GXSetDrawSync(u16 token) {
@@ -281,7 +283,9 @@ void GXSetDrawSync(u16 token) {
       aurora::gx::fifo::processing_mode() != aurora::gx::fifo::ProcessingMode::Drain) {
     aurora::gx::fifo::publish();
   } else {
+    aurora::gx::fifo::set_drain_origin(__builtin_return_address(0));
     aurora::gx::fifo::drain();
+    aurora::gx::fifo::set_drain_origin(nullptr);
   }
 }
 

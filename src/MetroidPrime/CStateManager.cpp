@@ -1,5 +1,6 @@
 #define CSTATEMANAGER_OUT_OF_LINE_GETPLAYER
 #include "MetroidPrime/CStateManager.hpp"
+#include "port_profile.h"
 #include "port_actor_shadow.h"
 #include "port_apclient.h"
 #include "port_beam_colours.h"
@@ -1582,6 +1583,7 @@ void CStateManager::PortUpdateIceDarkeners(float dt) {
 
 void CStateManager::Update(float dt) {
   if (GetWantsToQuit()) return;
+  PORT_ZONE_TIMED("SM::Update");
 
 #ifdef TARGET_PC
   // The debug free camera can hold the simulation still. The console keeps running.
@@ -1598,6 +1600,7 @@ void CStateManager::Update(float dt) {
   // Port: record the pre-tick transforms that presented frames blend from
   // (CActor::PortPresentedView).
   if (PortDebug::ActorInterpolation()) {
+    PORT_ZONE_TIMED("SM: actor interpolation snapshots");
     CObjectList* actors = x808_objectLists[kOL_Actor].get();
     for (int idx = actors->GetFirstObjectIndex(); idx != -1;
          idx = actors->GetNextObjectIndex(idx)) {
@@ -1637,6 +1640,9 @@ void CStateManager::Update(float dt) {
     CHUDBillboardEffect::PortUpdateVisorOverrides(*this, dt);
   }
 #endif
+  // The port's own per-tick hooks, up to the retail update below.
+  {
+  PORT_ZONE_TIMED("SM: port per-tick hooks");
 #ifdef MP_ENABLE_SMOKE_DRIVER
   PortSmokeAreaReload(*this);
   PortSmokeWorldTeleport(*this);
@@ -1716,11 +1722,13 @@ void CStateManager::Update(float dt) {
   if (PortSaveState::Tick(*this)) {
     return;
   }
+  }
 
   const float deathTime = x84c_player->GetDeathTime();
   const bool isDead = deathTime > 0.f;
 
   if (x904_gameState == kGS_Running) {
+    PORT_ZONE_TIMED("SM: play time, hints, camera filters");
     if (TCastToPtr< CCinematicCamera >(
             const_cast< CGameCamera& >(x870_cameraManager->GetCurrentCamera(*this))) == nullptr) {
       gpGameState->SetTotalPlayTime(dt + gpGameState->GetTotalPlayTime());
@@ -1746,25 +1754,38 @@ void CStateManager::Update(float dt) {
   }
 
   if (x904_gameState != kGS_Paused) {
-    PreThinkObjects(dt);
+    {
+      PORT_ZONE_TIMED("SM: PreThinkObjects");
+      PreThinkObjects(dt);
+    }
+    PORT_ZONE_TIMED("SM: fluid planes");
     x87c_fluidPlaneManager->Update(dt);
   }
 
   if (x904_gameState == kGS_Running) {
     if (!isDead) {
+      PORT_ZONE_TIMED("SM: decals");
       CDecalManager::Update(dt, *this);
     }
 
-    UpdateSortedLists();
+    {
+      PORT_ZONE_TIMED("SM: UpdateSortedLists");
+      UpdateSortedLists();
+    }
 
     if (!isDead) {
+      PORT_ZONE_TIMED("SM: MovePlatforms + MoveDoors");
       MovePlatforms(dt);
       MoveDoors(dt);
     }
 
-    ProcessPlayerInput();
+    {
+      PORT_ZONE_TIMED("SM: ProcessPlayerInput");
+      ProcessPlayerInput();
+    }
 
     if (x904_gameState != kGS_SoftPaused) {
+      PORT_ZONE_TIMED("SM: player collision move");
       CGameCollision::Move(*this, *x84c_player, dt, nullptr);
     }
 #ifdef TARGET_PC
@@ -1773,9 +1794,13 @@ void CStateManager::Update(float dt) {
     x84c_player->PortEndMovementTick(xPortSimTick);
 #endif
 
-    UpdateSortedLists();
+    {
+      PORT_ZONE_TIMED("SM: UpdateSortedLists (after the move)");
+      UpdateSortedLists();
+    }
 
     if (!isDead) {
+      PORT_ZONE_TIMED("SM: CrossTouchActors");
       CrossTouchActors();
     }
   } else {
@@ -1783,16 +1808,22 @@ void CStateManager::Update(float dt) {
   }
 
   if (!isDead && x904_gameState == kGS_Running) {
+    PORT_ZONE_TIMED("SM: actor model particles");
     x884_actorModelParticles->Update(dt, *this);
   }
 
   if (x904_gameState == kGS_Running || x904_gameState == kGS_SoftPaused) {
-    Think(dt);
+    {
+      PORT_ZONE_TIMED("SM: Think (all entities)");
+      Think(dt);
+    }
+    PORT_ZONE_TIMED("SM: PortRoomGeo::Think");
     PortRoomGeo::Think(*this, dt);
     PortRoomEffects::Think(*this, dt);
   }
 
   if (x904_gameState != kGS_SoftPaused) {
+    PORT_ZONE_TIMED("SM: camera manager");
     x870_cameraManager->Update(dt, *this);
 #ifdef TARGET_PC
     PortThirdPerson::Update(*this, dt);
@@ -1810,6 +1841,7 @@ void CStateManager::Update(float dt) {
   }
 
   if (x904_gameState != kGS_Paused) {
+    PORT_ZONE_TIMED("SM: PostUpdatePlayer");
     PostUpdatePlayer(dt);
   }
 #ifdef MP_ENABLE_SMOKE_DRIVER
@@ -1826,14 +1858,21 @@ void CStateManager::Update(float dt) {
     UpdateEscapeSequenceTimer(dt);
   }
 
-  x850_world->Update(dt);
+  {
+    PORT_ZONE_TIMED("SM: world update");
+    x850_world->Update(dt);
+  }
   x88c_rumbleManager->Update(dt);
 
   if (!isDead) {
+    PORT_ZONE_TIMED("SM: environment effects");
     x880_envFxManager->Update(dt, *this);
   }
 
-  UpdateAreaSounds();
+  {
+    PORT_ZONE_TIMED("SM: area sounds");
+    UpdateAreaSounds();
+  }
 
   xf94_24_readyToRender = true;
 
@@ -1849,9 +1888,15 @@ void CStateManager::Update(float dt) {
 
   gpGameState->CurrentWorldState().SetAreaId(x8cc_nextAreaId);
 
-  x850_world->TravelToArea(x8cc_nextAreaId, *this, CWorld::kATT_LoadAdjacent);
+  {
+    PORT_ZONE_TIMED("SM: TravelToArea");
+    x850_world->TravelToArea(x8cc_nextAreaId, *this, CWorld::kATT_LoadAdjacent);
+  }
 
-  ClearGraveyard();
+  {
+    PORT_ZONE_TIMED("SM: ClearGraveyard");
+    ClearGraveyard();
+  }
   // Advance the randomness index in 60 Hz frame units so the same real time
   // yields the same particle/projectile seeds at any simulation rate.
   x8d8_updateFrameIdx += PortDebug::TickPeriod() * 60.f;
@@ -2800,6 +2845,7 @@ void CStateManager::RecursiveDrawTree(TUniqueId uid) const {
 }
 
 void CStateManager::RendererDrawCallback(const void* drawable, const void* context, int type) {
+  PORT_ZONE("CStateManager::RendererDrawCallback");
   const CStateManager& mgr = *static_cast< const CStateManager* >(context);
   switch (type) {
   case 0: {
@@ -2899,6 +2945,7 @@ bool CStateManager::GetVisSetForArea(const TAreaId areaA, const TAreaId areaB, C
 CGameArea::CChainIterator CWorld::AliveAreasEnd() { return skGlobalNonConstEnd; }
 
 void CStateManager::PreRender() {
+  PORT_ZONE("CStateManager::PreRender");
   if (!xf94_24_readyToRender) {
     return;
   }
@@ -3640,6 +3687,7 @@ float CStateManager::PortZoomedFov(float fov) {
 #endif
 
 void CStateManager::DrawWorld() const {
+  PORT_ZONE("CStateManager::DrawWorld");
 #ifdef TARGET_PC
   // A zoomed pass (sharp scan window) draws before the frame's own: the frame's captures and
   // the gun belong to that one.

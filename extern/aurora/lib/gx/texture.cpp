@@ -5,6 +5,9 @@
 #include "../gfx/texture_convert.hpp"
 #include "../gfx/texture_replacement.hpp"
 #include "shader_info.hpp"
+#ifdef AURORA_VITA_GL
+#include "../vita_gl.hpp"
+#endif
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -362,6 +365,14 @@ uint64_t texture_handle_size(const gfx::TextureHandle& handle) noexcept {
   if (!handle) {
     return 0;
   }
+#ifdef AURORA_VITA_GL
+  // The Vita holds its own copy (RGBA8 for most formats: a palette texture's is four times its
+  // source), not the null device's texture: the budget counted that, and a screen making a new
+  // palette texture a frame (the death screen) kept four times the budget, past the GPU's memory.
+  if (handle->vitaTexture) {
+    return vita_gl::texture_bytes(*handle->vitaTexture);
+  }
+#endif
   return gfx::calc_texture_size(handle->format, handle->size.width, handle->size.height, handle->mipCount);
 }
 
@@ -641,9 +652,35 @@ void sweep_object_caches() {
   const auto expired = [](uint64_t lastUsedFrame) {
     return s_frameCount > lastUsedFrame && s_frameCount - lastUsedFrame > texture::ObjectCacheIdleFrames;
   };
+#ifdef AURORA_VITA_GL
+  // On the Vita an object's texture that nothing else holds (the content cache let it go, no slot
+  // binds it) goes after a few idle frames, not 600: the continue screen inits new texture objects
+  // with a new palette texture each frame, some 1 MiB a frame of the Vita's RGBA8 copies, and their
+  // objects kept them past the GPU's memory and then the heap's. Objects sharing a texture (the
+  // same content inited into new objects) hold it between them: only references from outside
+  // the object cache keep it. Every fourth frame.
+  const bool vita = vita_gl::active() && s_frameCount % 4 == 0;
+  absl::flat_hash_map<const gfx::TextureRef*, long> objectRefs;
+  if (vita) {
+    for (const auto& [_, entry] : s_textureObjectCaches) {
+      if (entry.handle) {
+        ++objectRefs[entry.handle.get()];
+      }
+    }
+  }
+  const auto lone = [vita, &objectRefs](const CachedTextureEntry& entry) {
+    if (!vita || !entry.handle || s_frameCount <= entry.lastUsedFrame || s_frameCount - entry.lastUsedFrame <= 4) {
+      return false;
+    }
+    const auto it = objectRefs.find(entry.handle.get());
+    return it != objectRefs.end() && entry.handle.use_count() <= it->second;
+  };
+#else
+  const auto lone = [](const CachedTextureEntry&) { return false; };
+#endif
 
   for (auto it = s_textureObjectCaches.begin(); it != s_textureObjectCaches.end();) {
-    if (expired(it->second.lastUsedFrame)) {
+    if (expired(it->second.lastUsedFrame) || lone(it->second)) {
       const u32 texObjId = it->first;
       const CachedTextureEntry entry = it->second;
       s_textureObjectCaches.erase(it++);
@@ -933,6 +970,49 @@ void end_frame() noexcept {
 }
 
 uint64_t leak_warning_count() noexcept { return s_leak.warnings; }
+
+void log_cache_holdings() noexcept {
+  // Distinct textures, as objects share them and the content cache holds some the objects hold.
+  const auto vita_bytes = [](const gfx::TextureHandle& handle) -> uint64_t {
+#ifdef AURORA_VITA_GL
+    if (handle && handle->vitaTexture) {
+      return vita_gl::texture_bytes(*handle->vitaTexture);
+    }
+#endif
+    return 0;
+  };
+  absl::flat_hash_set<const gfx::TextureRef*> seen;
+  uint64_t contentVita = 0;
+  for (const auto& [_, entry] : s_contentCache) {
+    if (entry.handle && seen.insert(entry.handle.get()).second) {
+      contentVita += vita_bytes(entry.handle);
+    }
+  }
+  const size_t contentTextures = seen.size();
+  uint64_t objectVita = 0;
+  size_t objectTextures = 0;
+  size_t objectOnly = 0;
+  absl::flat_hash_set<const gfx::TextureRef*> objects;
+  for (const auto& [_, entry] : s_textureObjectCaches) {
+    if (entry.handle && objects.insert(entry.handle.get()).second) {
+      ++objectTextures;
+      if (seen.insert(entry.handle.get()).second) {
+        ++objectOnly;
+        objectVita += vita_bytes(entry.handle);
+      }
+    }
+  }
+  size_t paletteTextures = 0;
+  for (const auto& [_, cache] : s_tlutObjectCaches) {
+    paletteTextures += cache.dynamicPaletteTextures.size();
+  }
+  Log.info("caches: content {} entries ({} textures, {:.1f} MiB counted, {:.1f} MiB of Vita copies); objects {} "
+           "entries ({} textures, {} not in the content cache: {:.1f} MiB of Vita copies); {} palettes, {} dynamic "
+           "palette textures",
+           s_contentCache.size(), contentTextures, s_contentCacheBytes / 1048576.0, contentVita / 1048576.0,
+           s_textureObjectCaches.size(), objectTextures, objectOnly, objectVita / 1048576.0, s_tlutObjectCaches.size(),
+           paletteTextures);
+}
 
 void shutdown() noexcept {
   s_textureObjectCaches.clear();

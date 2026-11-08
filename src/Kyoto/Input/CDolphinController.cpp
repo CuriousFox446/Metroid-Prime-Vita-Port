@@ -3,6 +3,7 @@
 #include "port_debug.h"
 #include "port_freecam.h"
 #include "port_input_gate.h"
+#include "port_profile.h"
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
@@ -116,7 +117,10 @@ void CDolphinController::ReadDevices() {
   const PortInputDevices::SPoll devices = PortInputDevices::Poll(held, inputFocused);
   PADSetPortOverride(0, &devices.status);
   PADStatus status[4]{};
-  PADRead(status);
+  {
+    PORT_ZONE_TIMED("input: PADRead");
+    PADRead(status);
+  }
   PADClamp(status);
   for (int i = 0; i < 4; ++i) {
     // One disconnected port must not prevent the other ports updating. Clear
@@ -192,11 +196,12 @@ void CDolphinController::ReadDevices() {
   }
 
   // Start+Back is the debug overlay chord; do not also pause the game with it.
-  // Either alone may be bound to Start (the Remastered preset pauses on Back).
+  // Either alone may be bound to Start (the Remastered preset pauses on Back),
+  // and Back to Z (the Vita's default), which would open the map.
   if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(0)) {
     if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK) &&
         SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START)) {
-      x4_status[0].button &= ~PAD_BUTTON_START;
+      x4_status[0].button &= ~(PAD_BUTTON_START | PAD_TRIGGER_Z);
     }
   }
 

@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__vita__)
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -122,7 +122,8 @@ void Heartbeat(unsigned frame) {
   sBeatNs.store(NowNs(), std::memory_order_relaxed);
   static std::once_flag sStarted;
   std::call_once(sStarted, [] {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__vita__)
+    // No way to ask another thread for its stack (PortCrash::RequestStack).
     sMainThread.store(0);
 #else
 #if defined(__APPLE__)
