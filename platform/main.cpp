@@ -1261,6 +1261,12 @@ int main(int argc, char** argv) {
     // gameplay touches, so whatever reaches SDL here is meant for ImGui.
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
     config.logCallback = AndroidLogCallback;
+#elif defined(__vita__)
+    // The rear touch pad is where the hands holding the Vita rest, and the game wants nothing from
+    // it: its touches reached the menus' pointer gestures (PortPointer takes every touch device)
+    // and, as SDL's touch-made mouse events, the Port menu's mouse. SDL stops reading it; the hint
+    // is read when its video starts (aurora_initialize). The front screen stays.
+    SDL_SetHint(SDL_HINT_VITA_ENABLE_BACK_TOUCH, "0");
 #endif
     // SDL3 reaches for its Wayland backend whenever a Wayland display is
     // reachable, and does so even without WAYLAND_DISPLAY — it falls back to the

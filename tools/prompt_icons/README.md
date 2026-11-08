@@ -76,3 +76,4 @@ them, run both again:
 | `vita_button_start.png`, `vita_button_select.png` | Start and Select (SDL's start and back) |
 | `vita_button_l.png`, `vita_button_r.png` | L and R (SDL's shoulders); the Vita has no triggers or stick clicks, so those keep the game's art |
 | `vita_stick_l*.png`, `vita_stick_r*.png`, `vita_dpad*.png` | the sticks and the D-pad, whole and per direction |
+| `vita_stick_{l,r}_{up,down}_{left,right}.png` | the sticks' diagonals, for the game's diagonal stick frames (`LStickUL`... on the disc), which the map's Rotate and Move prompts turn through; the other sets have no diagonal art and show the whole stick there |

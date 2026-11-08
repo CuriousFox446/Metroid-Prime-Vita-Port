@@ -1989,3 +1989,25 @@ Next: whatever the zones name in those 4.1 ms; then the game's own logic (SM: Th
 CrossTouchActors 0.9 ms) and the Vita draw path's cost per draw, which sets the map's speed (some
 22 us a draw on the FIFO thread and as much on the render worker).
 
+## 0.42.0 test 6: the sticks' diagonals; the rear touch pad off
+
+The user saw the sticks' icons in four directions where the map's Rotate and Move prompts turn
+through eight, and sent photos of the GameCube art doing so. The game has nine frames for each
+stick: the GC disc's GGuiSys.pak names them (read from the user's own image) LStickN at rest,
+LstickU, LStickD, LStickL, LStickR, and the diagonals LStickUL `99F6C3B4`, LStickUR `217C015A`,
+LStickDL `4A414F04`, LStickDR `13A7E65D`; and CStickN... with CStickUL `5400AEEF`, CStickUR
+`63E1497C`, CStickDL `9C8A7FD1`, CStickDR `AB6B9842`. Upstream's table took the diagonals for the
+whole stick, its icon sets (Kenney's) having no diagonal art.
+
+They are prompts of their own now (`PROMPT_STICK_UP_LEFT`... and the C-stick's). A diagonal's icon
+is the two ways' at once, `<device>_stick_l_up_left`, where its vertical and horizontal ways go to
+the one stick and the set has that icon (looked for once per name); otherwise the whole stick, as
+before. The Vita's set has them, from the user's eight diagonal pictures. The other stick frames on
+the table (`2B97F6A0`, `3A446C61` and the rest without a name on the GC disc) keep their kinds.
+
+The rear touch pad is off: `SDL_HINT_VITA_ENABLE_BACK_TOUCH` is "0" before SDL's video starts, so
+SDL no longer reads it. Its touches (the hands holding the Vita) reached the menus' pointer
+gestures, which take every touch device, and the Port menu's mouse. The front screen stays.
+
+Test 6 also carries test 5's change, which the user had not run yet.
+

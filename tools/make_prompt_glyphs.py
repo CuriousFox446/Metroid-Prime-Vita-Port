@@ -117,6 +117,10 @@ PAD_ICONS = {
         # one (or name nothing for them): on the Vita that is its L and R.
         "lt": "vita_button_l.png", "rt": "vita_button_r.png",
         **pad_icons_for_axes("vita"),
+        # The sticks' diagonals too, which the map's Rotate and Move prompts turn through (the
+        # port names them <device>_stick_l_up_left...; sets without them show the whole stick).
+        **{f"stick_{s}_{v}_{h}": f"vita_stick_{s}_{v}_{h}.png"
+           for s in "lr" for v in ("up", "down") for h in ("left", "right")},
     },
     # Keyed by the GameCube button rather than the SDL one: the port names a GC
     # pad's button after the action its default mapping gives it (see

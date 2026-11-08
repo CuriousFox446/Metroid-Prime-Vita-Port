@@ -12,8 +12,8 @@ small. The results are written to tools/prompt_icons/vita_<name>.png.
 
     tools/vita_prompt_icons.py <folder with the art>
 
-The folder's diagonal stick pictures (PS_Vita_L_up_left.png...) are not used: the game's
-prompts have four directions.
+The sticks' diagonal pictures (PS_Vita_L_up_left.png...) serve the game's diagonal stick frames
+(LStickUL... on the disc), which the map's Rotate and Move prompts turn through.
 """
 import os
 import sys
@@ -41,6 +41,11 @@ for way, name in (("Up", "up"), ("Down", "down"), ("Left", "left"), ("Right", "r
     SOURCES[f"ButtonIcon-PSvita-Dpad_{way}.png"] = (f"vita_dpad_{name}", 1.0)
     SOURCES[f"PS_Vita_L_{name}.png"] = (f"vita_stick_l_{name}", 1.0)
     SOURCES[f"PS_Vita_R_{name}.png"] = (f"vita_stick_r_{name}", 1.0)
+for vertical in ("up", "down"):
+    for horizontal in ("left", "right"):
+        way = f"{vertical}_{horizontal}"
+        SOURCES[f"PS_Vita_L_{way}.png"] = (f"vita_stick_l_{way}", 1.0)
+        SOURCES[f"PS_Vita_R_{way}.png"] = (f"vita_stick_r_{way}", 1.0)
 
 
 def square_icon(path, fill):
