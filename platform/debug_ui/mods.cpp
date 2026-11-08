@@ -23,6 +23,7 @@
 #include <SDL3/SDL_misc.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -535,6 +536,31 @@ void DrawDreadSamusImport() {
   }
 }
 
+#if defined(__vita__)
+namespace {
+// The Vita has no file browser, so the Echoes image is the one put in kVitaEchoesFolder: its first
+// .iso or .gcm by name (the Vita's disc reader takes plain GameCube images only), or "" for none.
+constexpr const char* kVitaEchoesFolder = "ux0:data/MetroidPrime2";
+
+std::string FindVitaEchoesDisc() {
+  std::error_code ec;
+  std::vector<std::string> found;
+  for (std::filesystem::directory_iterator it(kVitaEchoesFolder, ec), end; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec)) {
+      continue;
+    }
+    std::string ext = it->path().extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (ext == ".iso" || ext == ".gcm") {
+      found.push_back(it->path().string());
+    }
+  }
+  std::sort(found.begin(), found.end());
+  return found.empty() ? std::string() : found.front();
+}
+} // namespace
+#endif
+
 // The Echoes suits import (port_echoes_suits.h): the Varia, Dark and Light Suit bodies from the
 // player's own Metroid Prime 2: Echoes GameCube or Metroid Prime Trilogy disc into the echoes-suits mod. Same progress, notes
 // and mods reload as the Dread import, with which it shares the one import worker.
@@ -590,6 +616,21 @@ void DrawEchoesSuitsImport() {
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped("Android may close the game while you pick a file. The pick is kept: open this page again.");
     ImGui::PopStyleColor();
+#elif defined(__vita__)
+    // Looked for again every two seconds while the page is open, so one copied in meanwhile shows.
+    static std::string sFound;
+    static double sLooked = -10.0;
+    if (ImGui::GetTime() - sLooked > 2.0) {
+      sFound = FindVitaEchoesDisc();
+      sLooked = ImGui::GetTime();
+    }
+    std::snprintf(sImage, sizeof(sImage), "%s", sFound.c_str());
+    if (sFound.empty()) {
+      ImGui::TextWrapped("Put your Metroid Prime 2: Echoes (GameCube) disc image, an .iso or .gcm, in %s.",
+                         kVitaEchoesFolder);
+    } else {
+      ImGui::TextWrapped("Disc image: %s", sFound.c_str());
+    }
 #else
     const ImGuiStyle& style = ImGui::GetStyle();
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -756,11 +797,7 @@ void DrawMods() {
     ImGui::TextColored(ThemeBadColor(), "%s", message.c_str());
   }
 
-  // Not on the Vita: importing Prime Remastered's models, Dread's Samus or Echoes' suits from a
-  // Switch or Wii dump, and drawing them, is beyond it (the Remastered tab was hidden there too).
-#ifndef __vita__
   DrawBuiltinMods();
-#endif
 
   // The mods folder's other mods: the port's own are the sections above.
   ImGui::SeparatorText("Other mods");

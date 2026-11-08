@@ -11,6 +11,9 @@
 
 #include <cctype>
 #include <cstring>
+#if defined(__vita__)
+#include <pthread.h>
+#endif
 
 namespace PortRemastered {
 namespace ImportDetail {
@@ -269,6 +272,36 @@ void RunEchoes(std::string imagePath, fs::path mods) {
   Finish(true, message);
 }
 
+#if defined(__vita__)
+// The Vita gives a std::thread 32 KiB of stack, little for an import that reads PAK tables,
+// inflates LZO and writes through std::filesystem and the log: there the import runs on a thread
+// of its own with kStack, the import's std::thread waiting for it.
+void RunEchoesOnLargeStack(std::string imagePath, fs::path mods) {
+  constexpr size_t kStack = 512 * 1024;
+  struct Job {
+    std::string imagePath;
+    fs::path mods;
+  };
+  Job job{std::move(imagePath), std::move(mods)};
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, kStack);
+  pthread_t thread;
+  const auto run = [](void* arg) -> void* {
+    Job& j = *static_cast<Job*>(arg);
+    RunEchoes(std::move(j.imagePath), std::move(j.mods));
+    return nullptr;
+  };
+  const bool started = pthread_create(&thread, &attr, run, &job) == 0;
+  pthread_attr_destroy(&attr);
+  if (started) {
+    pthread_join(thread, nullptr);
+  } else {
+    run(&job); // no thread for it: on this one, as elsewhere
+  }
+}
+#endif
+
 }  // namespace
 
 bool ApplyPendingEchoesImport() {
@@ -307,7 +340,11 @@ bool StartEchoesSuitsImport(const std::string& imagePath) {
   sCancel = false;
   sState.running = true;
   sState.message = "Starting";
+#if defined(__vita__)
+  sThread = std::thread(RunEchoesOnLargeStack, imagePath, Utf8Path(mods));
+#else
   sThread = std::thread(RunEchoes, imagePath, Utf8Path(mods));
+#endif
   return true;
 }
 

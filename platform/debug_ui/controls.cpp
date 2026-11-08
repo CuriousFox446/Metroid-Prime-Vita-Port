@@ -550,6 +550,15 @@ void DrawControlsTouchGyro() {
   }
   ItemHelp("Moves the face buttons (and the classic C-stick) further in from the edge.");
   ImGui::EndDisabled();
+#elif defined(__vita__)
+  // The Vita has no touch overlay, but its front screen takes the minimap tap
+  // (PortDebug::MinimapTapEvent).
+  ImGui::SeparatorText("Touch screen");
+  bool touchMapTap = sInput.touchMapTap;
+  if (ImGui::Checkbox("Tap minimap for map", &touchMapTap)) {
+    SetTouchMapTap(touchMapTap);
+  }
+  ItemHelp("Tap the minimap on the front screen to open the map, as Z does.");
 #endif
 
   ImGui::SeparatorText("Gyro aim");

@@ -1848,3 +1848,33 @@ about 11 MiB of the heap was free in play). The first start compiles every progr
 flick stick, toggles) have not run on a Vita; GX state 0.42.0 adds for the Remastered imports and
 the beam colours (clip planes, colour matrices, the shell) is not drawn by the Vita path.
 
+## 0.42.0 test 2: the minimap tap and the Echoes suits
+
+**Test 1** (6cdeb57, the user's log of Nov 7) ran 21 minutes without a crash or GPU hang, and the
+map opened many times (31 log windows draw its outlines). The card's `vita_programs` was empty, so
+every program compiled at its first draw (276 s on the compiler thread); presented FPS had a
+median of 26 over the first third of the run and 32 over the last. The heap peaked at 177 MiB in
+use of 207 MiB taken. vitaGL's cache check deleted 4 broken fixed-function shaders.
+
+The user asked for two things:
+
+- **Tap minimap for map.** The 0.32.0 Vita builds never had it: the setting and the tap (the touch
+  overlay's) were Android's, and the Vita's settings search only listed the name. Now the front
+  screen takes it. `PortDebug::MinimapTapEvent`, on SDL's event watch beside `PhotoTouchEvent`,
+  takes a finger put down on the front panel (`SDL_TOUCH_DEVICE_DIRECT`; the back panel is
+  indirect) and lifted within 0.4 s, less than 3% of the screen from where it landed, on the
+  minimap's rect as the HUD publishes it (`PublishMinimapRect`, framebuffer fractions, as the
+  overlay's own test reads them) while it is drawn and the Port menu is closed. That asks
+  `RequestMapTap`: one poll of Z, through the stock `kTouchMapTap` binding. Its setting is
+  Controls > Touch & gyro > Touch screen, "Tap minimap for map" (`touch_map_tap`, on by default).
+- **Echoes suits.** On the Vita the Mods page's built-in mods are Metroid Prime 2: Echoes' alone
+  (Prime Remastered's and Dread's imports stay out). The disc image is the first `.iso` or `.gcm` by
+  name in `ux0:data/MetroidPrime2`, looked for again every 2 s while the page is open; Import
+  converts the Varia, Dark and Light Suit bodies into `mods/echoes-suits`, as elsewhere, and the
+  image is not needed after. The Vita's disc reader takes plain GameCube images only (no `.rvz`,
+  `.ciso`, `.wbfs` or NKit, and no Trilogy). The import runs on a thread of its own with a 512 KiB
+  stack, its std::thread waiting for it: a std::thread gets `PTHREAD_STACK_MIN`, 32 KiB, there.
+
+Not known yet: the import's time and memory on the Vita, and how the Echoes suit models draw
+through the Vita path.
+
