@@ -5,7 +5,9 @@
 // disc's mutex: the DVD worker and the main thread read concurrently.
 
 #include <nod.h>
+#include <strings.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -332,6 +334,71 @@ void nod_partition_iterate_fst(const NodHandle* partition, NodFstCallback callba
     }
     i = next;
   }
+}
+
+uint32_t nod_partition_find_file(const NodHandle* partition, const char* path, NodNodeKind* kind, uint32_t* size) {
+  if (partition == nullptr || partition->kind != Kind::Partition || path == nullptr) {
+    return NOD_FST_STOP;
+  }
+  const Partition& p = *partition->partition;
+  // Down from the root a component at a time: a directory's entries run from the one after it to
+  // its end index, and a subdirectory not taken is stepped over whole.
+  uint32_t first = 1;
+  uint32_t end = p.entryCount;
+  const char* part = path;
+  while (*part == '/') {
+    ++part;
+  }
+  while (*part != '\0') {
+    const char* stop = part;
+    while (*stop != '\0' && *stop != '/') {
+      ++stop;
+    }
+    const size_t partLength = static_cast<size_t>(stop - part);
+    const char* next = stop;
+    while (*next == '/') {
+      ++next;
+    }
+    uint32_t found = NOD_FST_STOP;
+    for (uint32_t i = first; i < end;) {
+      const uint8_t* entry = fstEntry(p, i);
+      const size_t nameOffset = p.stringTable + (be32(entry) & 0x00FFFFFF);
+      if (nameOffset >= p.fst.size()) {
+        return NOD_FST_STOP;
+      }
+      const char* name = reinterpret_cast<const char*>(p.fst.data() + nameOffset);
+      if (strnlen(name, p.fst.size() - nameOffset) == partLength && strncasecmp(name, part, partLength) == 0) {
+        found = i;
+        break;
+      }
+      const uint32_t after = entry[0] != 0 ? be32(entry + 8) : i + 1;
+      if (after <= i) {
+        return NOD_FST_STOP;
+      }
+      i = after;
+    }
+    if (found == NOD_FST_STOP) {
+      return NOD_FST_STOP;
+    }
+    const uint8_t* entry = fstEntry(p, found);
+    const bool isDir = entry[0] != 0;
+    if (*next == '\0') {
+      if (kind != nullptr) {
+        *kind = isDir ? NOD_NODE_KIND_DIRECTORY : NOD_NODE_KIND_FILE;
+      }
+      if (size != nullptr) {
+        *size = be32(entry + 8);
+      }
+      return found;
+    }
+    if (!isDir) {
+      return NOD_FST_STOP;
+    }
+    first = found + 1;
+    end = std::min(be32(entry + 8), p.entryCount);
+    part = next;
+  }
+  return NOD_FST_STOP;
 }
 
 bool nod_partition_is_wii(const NodHandle* partition) {

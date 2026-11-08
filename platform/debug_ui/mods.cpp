@@ -756,7 +756,11 @@ void DrawMods() {
     ImGui::TextColored(ThemeBadColor(), "%s", message.c_str());
   }
 
+  // Not on the Vita: importing Prime Remastered's models, Dread's Samus or Echoes' suits from a
+  // Switch or Wii dump, and drawing them, is beyond it (the Remastered tab was hidden there too).
+#ifndef __vita__
   DrawBuiltinMods();
+#endif
 
   // The mods folder's other mods: the port's own are the sections above.
   ImGui::SeparatorText("Other mods");

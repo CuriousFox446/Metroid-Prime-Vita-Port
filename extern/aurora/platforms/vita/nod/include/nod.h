@@ -94,6 +94,10 @@ int64_t nod_seek(NodHandle* handle, int64_t offset, int32_t whence);
 NodResult nod_disc_header(const NodHandle* disc, NodDiscHeader* out);
 NodResult nod_partition_meta(const NodHandle* partition, NodPartitionMeta* out);
 void nod_partition_iterate_fst(const NodHandle* partition, NodFstCallback callback, void* user_data);
+// The FST entry at `path` ('/'-separated from the root, ASCII case ignored as the DVD's lookup
+// does), its kind and its size (a file's length, a directory's end index); NOD_FST_STOP when there
+// is none.
+uint32_t nod_partition_find_file(const NodHandle* partition, const char* path, NodNodeKind* kind, uint32_t* size);
 bool nod_partition_is_wii(const NodHandle* partition);
 
 #ifdef __cplusplus

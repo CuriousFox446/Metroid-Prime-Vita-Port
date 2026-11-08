@@ -76,6 +76,10 @@ bool TakeInstanceLock(const std::filesystem::path& file) {
   const HANDLE handle = CreateFileW(lock.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
   return handle != INVALID_HANDLE_VALUE || GetLastError() != ERROR_SHARING_VIOLATION;
+#elif defined(__vita__)
+  // One app runs at a time on the Vita, and its newlib has no flock: always free.
+  (void)lock;
+  return true;
 #else
   const int fd = open(lock.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
   if (fd < 0) {

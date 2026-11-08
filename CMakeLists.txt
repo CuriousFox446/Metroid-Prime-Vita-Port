@@ -790,8 +790,24 @@ if(VITA)
     # starts from them as they are here.
     set(_mp_vita_sfo_flags "${VITA_MKSFOEX_FLAGS}")
     set(_mp_vita_vpk_flags "${VITA_PACK_VPK_FLAGS}")
+    # APP_VER is "MM.mm": the release's major and minor (versionName, as the game's version string).
+    file(STRINGS android/app/build.gradle _mp_vita_version_line REGEX "versionName \"[0-9]+\\.[0-9]+")
+    string(REGEX REPLACE ".*versionName \"([0-9]+)\\.([0-9]+).*" "\\1;\\2" _mp_vita_version "${_mp_vita_version_line}")
+    list(GET _mp_vita_version 0 _mp_vita_major)
+    list(GET _mp_vita_version 1 _mp_vita_minor)
+    math(EXPR _mp_vita_major "${_mp_vita_major}" OUTPUT_FORMAT DECIMAL)
+    math(EXPR _mp_vita_minor "${_mp_vita_minor}" OUTPUT_FORMAT DECIMAL)
+    string(LENGTH "${_mp_vita_major}" _mp_len)
+    if(_mp_len LESS 2)
+        set(_mp_vita_major "0${_mp_vita_major}")
+    endif()
+    string(LENGTH "${_mp_vita_minor}" _mp_len)
+    if(_mp_len LESS 2)
+        set(_mp_vita_minor "0${_mp_vita_minor}")
+    endif()
+    set(MP_VITA_APP_VER "${_mp_vita_major}.${_mp_vita_minor}")
     vita_create_vpk(metroid_prime_port.vpk ${MP_VITA_TITLEID} eboot.bin
-        VERSION "00.32"
+        VERSION "${MP_VITA_APP_VER}"
         NAME "Metroid Prime"
         FILE platform/vita/sce_sys/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
@@ -802,7 +818,7 @@ if(VITA)
     unset(resources)
     # The demo's icon and LiveArea logo carry a DEMO mark: the home screen's bubbles have no names.
     vita_create_vpk(metroid_prime_port_demo.vpk ${MP_VITA_DEMO_TITLEID} eboot.bin
-        VERSION "00.32"
+        VERSION "${MP_VITA_APP_VER}"
         NAME "Metroid Prime Demo"
         FILE platform/vita/sce_sys/demo/icon0.png sce_sys/icon0.png
         FILE platform/vita/sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
