@@ -345,8 +345,9 @@ void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept {
 
 class Texture : public Kept {
 public:
-  Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> level0) noexcept
-  : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {
+  Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> texels, uint32_t levels) noexcept
+  : m_cpu(std::move(texels)), m_width(width), m_height(height), m_format(format),
+    m_levels(format == TexelFormat::BC1 ? std::max(levels, 1u) : 1) {
     m_pending = static_cast<int64_t>(m_cpu.size());
     if (m_pending != 0) {
       g_pendingCount.fetch_add(1, std::memory_order_relaxed);
@@ -387,9 +388,14 @@ public:
   }
 
   uint64_t bytes() const noexcept {
-    const uint64_t width = m_width;
-    const uint64_t height = m_height;
-    return m_format == TexelFormat::BC1 ? ((width + 3) / 4) * ((height + 3) / 4) * 8 : width * height * 4;
+    if (m_format != TexelFormat::BC1) {
+      return uint64_t{m_width} * m_height * 4;
+    }
+    uint64_t total = 0;
+    for (uint32_t level = 0; level < m_levels; ++level) {
+      total += bc1_level_bytes(level);
+    }
+    return total;
   }
 
   // Render worker: true when binding it again with `sampler` would change nothing.
@@ -415,8 +421,18 @@ public:
       const auto width = static_cast<GLsizei>(m_width);
       const auto height = static_cast<GLsizei>(m_height);
       if (m_format == TexelFormat::BC1) {
-        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, width, height, 0,
-                               static_cast<GLsizei>(m_cpu.size()), m_cpu.data());
+        // Level by level from the first: vitaGL grows the texture's mip chain for each.
+        size_t offset = 0;
+        for (uint32_t level = 0; level < m_levels; ++level) {
+          const auto size = static_cast<size_t>(bc1_level_bytes(level));
+          if (offset + size > m_cpu.size()) {
+            break;
+          }
+          glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                                 std::max(width >> level, 1), std::max(height >> level, 1), 0,
+                                 static_cast<GLsizei>(size), m_cpu.data() + offset);
+          offset += size;
+        }
       } else {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
       }
@@ -432,7 +448,7 @@ public:
     if (!m_samplerSet || !(sampler == m_sampler)) {
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, sampler.wrapS);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, sampler.wrapT);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, sampler.minFilter);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(sampler.minFilter));
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sampler.magFilter);
       m_sampler = sampler;
       m_samplerSet = true;
@@ -522,6 +538,29 @@ private:
     return false;
   }
 
+  // A BC1 level's bytes: its 4x4 blocks, 8 bytes each.
+  uint64_t bc1_level_bytes(uint32_t level) const noexcept {
+    const uint64_t width = std::max(m_width >> level, 1u);
+    const uint64_t height = std::max(m_height >> level, 1u);
+    return ((width + 3) / 4) * ((height + 3) / 4) * 8;
+  }
+
+  // A sampler's min filter as this texture takes it: a mipmapped one samples its first level alone
+  // where it has no others (vitaGL would look for levels it was never given).
+  GLint min_filter(uint16_t filter) const noexcept { return m_levels > 1 ? filter : plain_filter(filter); }
+  static GLint plain_filter(uint16_t filter) noexcept {
+    switch (filter) {
+    case GL_NEAREST_MIPMAP_NEAREST:
+    case GL_NEAREST_MIPMAP_LINEAR:
+      return GL_NEAREST;
+    case GL_LINEAR_MIPMAP_NEAREST:
+    case GL_LINEAR_MIPMAP_LINEAR:
+      return GL_LINEAR;
+    default:
+      return filter;
+    }
+  }
+
   void settle_pending() noexcept {
     if (m_pending != 0) {
       g_pendingCount.fetch_sub(1, std::memory_order_relaxed);
@@ -535,6 +574,7 @@ private:
   uint32_t m_width;
   uint32_t m_height;
   TexelFormat m_format;
+  uint32_t m_levels; // a BC1 texture's levels in m_cpu (and on the GPU); 1 for the rest
   GLuint m_id = 0;
   int64_t m_bytes = 0;
   Sampler m_sampler{};
@@ -545,12 +585,12 @@ private:
 };
 
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
-                                      std::vector<uint8_t> level0) noexcept {
-  return std::make_shared<Texture>(width, height, format, std::move(level0));
+                                      std::vector<uint8_t> texels, uint32_t levels) noexcept {
+  return std::make_shared<Texture>(width, height, format, std::move(texels), levels);
 }
 
 std::shared_ptr<Texture> make_copy_texture() noexcept {
-  return std::make_shared<Texture>(0, 0, TexelFormat::RGBA8, std::vector<uint8_t>());
+  return std::make_shared<Texture>(0, 0, TexelFormat::RGBA8, std::vector<uint8_t>(), 1);
 }
 
 uint64_t texture_bytes(const Texture& texture) noexcept { return texture.bytes(); }

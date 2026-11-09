@@ -1696,6 +1696,21 @@ constexpr SPreset kKeyPresets[] = {
 constexpr SPreset kPadPresets[] = {
     {"GameCube", "gamecube",
      "The default layout: the face buttons and shoulder as on a GameCube pad.\nTurns off Twin Stick Aim."},
+#if defined(__vita__)
+    // The Vita's own Remastered and Modern layouts (port_controls.cpp, ApplyPresetMapping): no
+    // triggers or stick clicks there, so R fires, L locks on, and there is no free look button.
+    {"Remastered", "remastered",
+     "Metroid Prime Remastered's Dual Sticks scheme on the Vita's buttons: R fire,\n"
+     "L lock on, Cross jump, Square morph ball, Circle missile, Start map, Select\n"
+     "pause. D-pad: up Combat, right Scan, left X-Ray, down Thermal visor; hold\n"
+     "Triangle for up Power, right Wave, left Plasma, down Ice beam; in morph ball\n"
+     "Triangle springs (with Spring Ball on) and L is Spider Ball. Turns on Twin\n"
+     "Stick Aim and the Scan/X-Ray swap."},
+    {"Modern", "modern",
+     "R fire, L lock on, Cross jump, Circle morph ball, Square missile, Select map,\n"
+     "Start pause; in morph ball L is Spider Ball. Turns on Twin Stick Aim; hold\n"
+     "Triangle and press the D-pad to change beams."},
+#else
     {"Remastered", "remastered",
      "Metroid Prime Remastered's Dual Sticks scheme (Xbox labels): RT or B\n"
      "fire, LT lock on, A or LB jump, X morph ball, RB missile, Menu map,\n"
@@ -1707,6 +1722,7 @@ constexpr SPreset kPadPresets[] = {
      "RT fire, LT lock on, A jump, B morph ball, RB missile, Y map,\n"
      "right stick click free look; in morph ball LT is Spider Ball.\n"
      "Turns on Twin Stick Aim; hold LB and press the D-pad to change beams."},
+#endif
     {"Southpaw", "southpaw", "The GameCube layout with the two sticks swapped.\nTurns off Twin Stick Aim."},
 };
 
@@ -1849,8 +1865,13 @@ void PresetRow(const SView& v, const SPreset* presets, int count) {
 void DrawPresets(const SViews& views) {
   using PortInput::Family;
   if (ImGui::Button("Presets...")) ImGui::OpenPopup("presets");
+#if defined(__vita__) // no keyboard there (the keyboard's presets are left out below)
+  ImGui::SetItemTooltip("Ready-made layouts for the Vita's buttons: GameCube, Remastered, Modern or\n"
+                        "Southpaw.");
+#else
   ImGui::SetItemTooltip("Ready-made layouts: Classic or Mouse & keyboard for the keyboard; GameCube,\n"
                         "Remastered, Modern or Southpaw for controllers.");
+#endif
   if (!ImGui::BeginPopup("presets")) return;
   ImGui::TextDisabled("A preset replaces your own bindings for that device.");
 #ifndef __vita__ // no keyboard there

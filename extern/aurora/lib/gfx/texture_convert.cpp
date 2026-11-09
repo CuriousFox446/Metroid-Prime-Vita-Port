@@ -761,11 +761,34 @@ ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, ui
 }
 
 ByteBuffer convert_cmpr_level0_to_bc1(uint32_t width, uint32_t height, ArrayRef<uint8_t> data) {
-  if (width % 4 != 0 || height % 4 != 0 || data.size() < width * height / 2 ||
-      CMPRHasTransparentTexels(width, height, 1, data.data())) {
+  uint32_t levels = 0;
+  return convert_cmpr_to_bc1(width, height, 1, data, levels);
+}
+
+ByteBuffer convert_cmpr_to_bc1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data,
+                               uint32_t& levels) {
+  levels = 0;
+  if (width % 4 != 0 || height % 4 != 0) {
     return {};
   }
-  return BuildBC1FromCMPR(width, height, 1, data.data());
+  // The leading levels with no transparent texels, each read whole (8x8 tiles, as ForEachCMPRBlock reads).
+  size_t offset = 0;
+  uint32_t w = width;
+  uint32_t h = height;
+  for (uint32_t mip = 0; mip < std::min(mips, 16u); ++mip) {
+    const size_t size = size_t{(w + 7) / 8 * 8} * ((h + 7) / 8 * 8) / 2;
+    if (offset + size > data.size() || CMPRHasTransparentTexels(w, h, 1, data.data() + offset)) {
+      break;
+    }
+    offset += size;
+    ++levels;
+    w = std::max(w / 2, 1u);
+    h = std::max(h / 2, 1u);
+  }
+  if (levels == 0) {
+    return {};
+  }
+  return BuildBC1FromCMPR(width, height, levels, data.data());
 }
 
 ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data) {

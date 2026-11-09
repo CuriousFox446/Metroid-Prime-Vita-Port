@@ -96,17 +96,19 @@ struct FrameMesh {
   MeshPrimitive primitive = MeshPrimitive::Triangles;
 };
 
-// A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): its first
-// level only for now, as RGBA8 or as BC1 (DXT1, from an opaque CMPR texture). Uploaded on the
-// render worker at its first draw; freed there once nothing holds it.
+// A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): as RGBA8,
+// its first level only; or as BC1 (DXT1, from an opaque CMPR texture), `levels` of them back to
+// back in `texels` (each level's blocks in rows, halving down). Uploaded on the render worker at
+// its first draw; freed there once nothing holds it. One with a single level samples it with a
+// sampler's mipmapped filters as with their plain ones.
 enum class TexelFormat : uint8_t { RGBA8, BC1 };
 class Texture;
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
-                                      std::vector<uint8_t> level0) noexcept;
+                                      std::vector<uint8_t> texels, uint32_t levels = 1) noexcept;
 // An EFB copy's texture: drawn into from the screen on the GPU, at each copy draw to it (render
 // worker); transparent black before its first.
 std::shared_ptr<Texture> make_copy_texture() noexcept;
-// The memory a texture's level holds (on the GPU once uploaded), for Aurora's cache budgets.
+// The memory a texture's levels hold (on the GPU once uploaded), for Aurora's cache budgets.
 uint64_t texture_bytes(const Texture& texture) noexcept;
 
 // How an EFB copy reads the screen into its RGBA texture, from GX's copy format: the colour

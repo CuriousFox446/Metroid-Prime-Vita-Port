@@ -61,5 +61,10 @@ ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data
 // An opaque CMPR texture's first level as BC1 (sides multiples of 4), whatever the WebGPU device
 // supports; empty otherwise. For the PS Vita's own copy (vita_gl.hpp).
 ByteBuffer convert_cmpr_level0_to_bc1(uint32_t width, uint32_t height, ArrayRef<uint8_t> data);
+// The same for a CMPR texture's first `mips` levels, back to back, as far as levels without
+// transparent texels go (BC1 draws those black: CMPRHasTransparentTexels); `levels` says how many.
+// Empty: not even the first.
+ByteBuffer convert_cmpr_to_bc1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data,
+                               uint32_t& levels);
 GXTexFmt tlut_texture_format(GXTlutFmt format) noexcept;
 } // namespace aurora::gfx

@@ -51,10 +51,18 @@ void DrawControlsOptions() {
     PortInputRemap::ApplyPreset(PortInput::Family::Pad, "remastered");
   }
   ImGui::EndDisabled();
+#if defined(__vita__)
+  // The Vita's Remastered layout (port_controls.cpp, ApplyPresetMapping): no triggers or stick clicks.
+  ItemHelp("Turns on Twin Stick Aim and the Remastered layout: left stick moves, right stick aims, R "
+           "fires, L locks on, Cross jumps, Square morph ball, Circle missile, Start map, Select pause; "
+           "hold Triangle and press the D-pad to change beams. Replaces your own controller bindings; "
+           "Controls > Remap > Presets... has Modern and the others.");
+#else
   ItemHelp("Turns on Twin Stick Aim and the Remastered layout for all controllers: left stick moves, "
            "right stick aims, RT fire, LT lock on, A jump, X morph ball, right stick click free look. "
            "Replaces your own controller bindings; Controls > Remap > Presets... has Modern and the "
            "others. Not for a GameCube controller, which has no right stick click.");
+#endif
   SameLineAfterHelp();
   ImGui::TextDisabled(PadTwinStick() ? "Twin-stick aim is on." : "Twin-stick aim is off.");
 

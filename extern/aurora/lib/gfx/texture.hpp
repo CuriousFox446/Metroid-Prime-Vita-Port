@@ -103,9 +103,10 @@ struct VitaCopyScope {
   VitaCopyScope(const VitaCopyScope&) = delete;
   VitaCopyScope& operator=(const VitaCopyScope&) = delete;
 };
-// A GX texture's first level as a PS Vita copy (vita_gl.hpp), or null for a format it does not take.
+// A GX texture as a PS Vita copy (vita_gl.hpp), or null for a format it does not take: a CMPR one
+// with its `mips` levels down to 4x4 (as BC1), anything else its first level alone.
 std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t height, u32 format,
-                                                    ArrayRef<uint8_t> data) noexcept;
+                                                    ArrayRef<uint8_t> data, uint32_t mips = 1) noexcept;
 #endif
 }; // namespace aurora::gfx
 

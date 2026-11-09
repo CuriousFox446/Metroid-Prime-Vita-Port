@@ -2156,3 +2156,38 @@ ask: it has neither); the Port menu's search no longer lists it there either.
 What to look for in test 9's log: the heavy room's frame rate and the FIFO processor's busy share
 there (over 81%?), and the preemption counts of the threads on core 0 against core 2's.
 
+## 0.42.0 test 10: Phendrana's snow, and every level of a CMPR texture
+
+**Test 9** (989aaac, the user's log of Nov 8) ran 27.5 minutes (24,964 frames) and quit cleanly.
+Its first ten minutes were the shader warm-up a new build brings (tallon25 deletes another build's
+program binaries): 437 programs compiled in 591 s, the front end at 2 to 20 FPS meanwhile. The
+counters answered test 8's question: core 0 takes the interrupts. The render worker there was
+preempted by interrupts 10,577 times in 20.7 s (about 510 a second), against 75 for the FIFO
+processor on core 2 and 813 for the game on core 1; and on core 2 the FIFO processor ran 87% of
+the time in its heaviest stretch (on core 0 in test 8: 81% at most). The play was in Phendrana
+Drifts, heavier than tests 7 and 8's room (the world's draw 24 ms a frame, 4.1 ticks, about 14.5
+FPS), so the frame rates do not compare.
+
+**No snow in Phendrana** (the user's report). `CEnvFxManager` draws each flake as a quad sampling
+`TXTR_SnowFlake` (CMPR, 64x64, four levels), times a gradient by height, added to the screen. Before
+the first snow draw the game zeroes the flake's first level (`BlankFirstSnowflakeMip`): a flake
+near the camera is large on screen and samples that level, so it vanishes, while the far ones
+sample levels 1 to 3. The Vita's texture copies had their first level alone, so every flake sampled
+the blanked one: black, added to the screen, nothing. Now a CMPR texture's Vita copy carries its
+levels down to 4x4 (as BC1, as far as levels without transparent texels go:
+`gfx::convert_cmpr_to_bc1`), uploaded level by level (vitaGL grows the mip chain for each), and
+the samplers take the game's own filters (`GX_LIN_MIP_LIN` as `GL_LINEAR_MIPMAP_LINEAR`); a copy
+with one level samples it as before. The rest of the world's CMPR textures get their levels too:
+distant surfaces sample the game's smaller levels, as on the GameCube, rather than shimmering on
+the first, for about a third more BC1 memory (2 to 7 MiB of BC1 in play).
+
+**Controls texts for the Vita** (the user's ask): Quick setup's "Use twin-stick controller" help
+names the Vita's Remastered layout (R fire, L lock on, Cross jump, Square morph ball, Circle
+missile, Start map, Select pause, Triangle with the D-pad for beams); Remap's Presets... tooltip
+names the Vita's four layouts (its keyboard presets were already left out); and the Remastered and
+Modern presets' own descriptions name the Vita's buttons, not Xbox ones.
+
+What to look for: snow falling in Phendrana Drifts (the nearest flakes fading out, as on the
+GameCube); distant floors and walls steadier; the presents lines' BC1 megabytes; nothing drawn
+wrong on far surfaces (noise there would mean a level uploaded wrong).
+

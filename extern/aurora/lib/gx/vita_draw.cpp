@@ -38,6 +38,10 @@ constexpr TexAttrs kNoTexAttrs{kNoTexAttr, kNoTexAttr, kNoTexAttr, kNoTexAttr};
 // GL's enums for the samplers and state (vitaGL.h is not included here).
 constexpr u16 kGlNearest = 0x2600;
 constexpr u16 kGlLinear = 0x2601;
+constexpr u16 kGlNearestMipmapNearest = 0x2700;
+constexpr u16 kGlLinearMipmapNearest = 0x2701;
+constexpr u16 kGlNearestMipmapLinear = 0x2702;
+constexpr u16 kGlLinearMipmapLinear = 0x2703;
 constexpr u16 kGlRepeat = 0x2901;
 constexpr u16 kGlClampToEdge = 0x812F;
 constexpr u16 kGlMirroredRepeat = 0x8370;
@@ -1027,7 +1031,7 @@ void add_missing_copy(gfx::TextureRef& ref, const GXTexObj_& obj) noexcept {
   }
   const size_t bytes = texture::texture_source_size(format, obj.width(), obj.height(), obj.mip_count());
   ref.vitaTexture = gfx::make_vita_texture(obj.width(), obj.height(), format,
-                                           {static_cast<const u8*>(obj.data), bytes});
+                                           {static_cast<const u8*>(obj.data), bytes}, obj.mip_count());
   ++sStats.lateCopies;
 }
 
@@ -1318,13 +1322,28 @@ vita_gl::Sampler sampler_for(const GXTexObj_& obj) noexcept {
       return kGlRepeat;
     }
   };
-  // Only the first level is copied for now, so mipmapped filters sample it alone.
-  const GXTexFilter minFilter = obj.min_filter();
-  const bool minLinear = minFilter == GX_LINEAR || minFilter == GX_LIN_MIP_NEAR || minFilter == GX_LIN_MIP_LIN;
+  // GX's min filter as it is, mipmapped ones too: a CMPR texture's Vita copy has its levels (down
+  // to 4x4), and a copy with its first level alone samples that (vita_gl.cpp, Texture::min_filter).
+  const auto minFilter = [](GXTexFilter filter) -> u16 {
+    switch (filter) {
+    case GX_NEAR:
+      return kGlNearest;
+    case GX_NEAR_MIP_NEAR:
+      return kGlNearestMipmapNearest;
+    case GX_LIN_MIP_NEAR:
+      return kGlLinearMipmapNearest;
+    case GX_NEAR_MIP_LIN:
+      return kGlNearestMipmapLinear;
+    case GX_LIN_MIP_LIN:
+      return kGlLinearMipmapLinear;
+    default:
+      return kGlLinear;
+    }
+  };
   return {
       .wrapS = wrap(obj.wrap_s()),
       .wrapT = wrap(obj.wrap_t()),
-      .minFilter = minLinear ? kGlLinear : kGlNearest,
+      .minFilter = minFilter(obj.min_filter()),
       .magFilter = obj.mag_filter() == GX_LINEAR ? kGlLinear : kGlNearest,
   };
 }

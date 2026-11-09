@@ -144,15 +144,26 @@ VitaCopyScope::VitaCopyScope() noexcept { t_vitaCopies = true; }
 VitaCopyScope::~VitaCopyScope() { t_vitaCopies = false; }
 
 std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t height, u32 format,
-                                                    ArrayRef<uint8_t> data) noexcept {
+                                                    ArrayRef<uint8_t> data, uint32_t mips) noexcept {
   ZoneScoped;
   std::vector<uint8_t> level0;
+  uint32_t levels = 1;
   auto texelFormat = vita_gl::TexelFormat::RGBA8;
   if (format == GX_TF_CMPR) {
-    const ByteBuffer bc1 = convert_cmpr_level0_to_bc1(width, height, data);
+    // With its levels down to 4x4, sampled as the game's filters ask (vita_draw.cpp, sampler_for):
+    // the game draws some of its own. Phendrana's snowflake has its first level blanked
+    // (CEnvFxManager::BlankFirstSnowflakeMip), so the flakes near the camera, large on screen and
+    // sampling it, vanish; with the first level alone, as every copy had, all of them did.
+    uint32_t wanted = 0;
+    while (wanted < std::max(mips, 1u) && (width >> wanted) >= 4 && (height >> wanted) >= 4) {
+      ++wanted;
+    }
+    const ByteBuffer bc1 = convert_cmpr_to_bc1(width, height, std::max(wanted, 1u), data, levels);
     if (!bc1.empty()) {
       level0.assign(bc1.data(), bc1.data() + bc1.size());
       texelFormat = vita_gl::TexelFormat::BC1;
+    } else {
+      levels = 1;
     }
   }
   if (level0.empty()) {
@@ -172,7 +183,7 @@ std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t hei
     }
     level0.assign(texels.data(), texels.data() + level0Bytes);
   }
-  return vita_gl::make_texture(width, height, texelFormat, std::move(level0));
+  return vita_gl::make_texture(width, height, texelFormat, std::move(level0), levels);
 }
 
 // The PS Vita draws with its own copy of a static texture (make_vita_texture), made only for the
@@ -184,7 +195,7 @@ static TextureHandle new_vita_static_texture_2d(uint32_t width, uint32_t height,
                                                 ArrayRef<uint8_t> data, bool tlut, const char* label) noexcept {
   auto handle = new_texture_2d(width, height, mips, format, to_wgpu(format), label);
   if (t_vitaCopies && !tlut) {
-    handle->vitaTexture = make_vita_texture(width, height, format, data);
+    handle->vitaTexture = make_vita_texture(width, height, format, data, mips);
   }
   return handle;
 }
