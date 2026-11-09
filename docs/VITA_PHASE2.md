@@ -2217,3 +2217,12 @@ log a line ("BC1 texture WxH uploaded with N levels").
 What to look for in test 11: no crash at the first room; those four lines in the log; then test
 10's list (snow in Phendrana, steadier distant surfaces, nothing drawn wrong).
 
+**Test 11** (6e99d09, the user's log of Nov 8: "crash has been fixed") ran 24 minutes (34,365
+frames) and quit cleanly. The four chains logged went up whole (256x128 with 4 levels, 64x32 with
+2, two 128x64 with 3). With the levels the BC1 textures took 8.9 MiB at most (535 of them) beside
+24 to 32 MiB of RGBA8, and VRAM kept 36 to 45 MiB free of its 96. vitaGL's fixed-function cache
+had 4 GXPs that were not whole (test 10's crash left them half written); the start-up check
+deleted them. In the slow stretch (523 windows at 12 to 18 FPS) the game thread set the pace, the
+FIFO thread waiting on it (67 ms a frame against 50): the ticks 35.9 ms (3.6 of them: `SM: Think`
+14.6, particles 6.8, the HUD 3.9) and the draw 24 ms (`DrawWorld` 18.2).
+
