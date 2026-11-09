@@ -2071,3 +2071,58 @@ place, those copies go. Then the skinned lists' path, and the game's per-tick lo
 `CrossTouchActors`, the HUD's update), which the catch-up multiplies where the main thread is the
 slower one.
 
+## 0.42.0 test 8: a core each, and draws that hold nothing
+
+**Test 7** (ac8c2bd, the user's log of Nov 8) ran 68.8 minutes (125,529 frames) and quit cleanly.
+The pad's reads came down as planned. In play (the 2,008 windows over 28 FPS) [split]'s input fell
+from 3.1 to 1.7 ms a frame: "frame: UpdateControllerNav" 2.65 to 1.25 ms, its own part 1.24 to 0.07
+ms, "frame: Port actions (PollPortActions)" 1.42 to 1.19 ms (about half of it the pump's one read of
+the pad, the rest its bindings engine); "input: PADRead" 0.44 to 0.007 ms a call; the ticks'
+"input: controller Poll" 1.35 to 0.50 ms a frame. The heavy stretch after loading (some 17 minutes,
+the same numbers every second, as in test 6) went from 16.7 to 17.7 FPS. Over the run, the [timing]
+lines' presented FPS: median 28.1; 45% of the seconds at 31 or more, 26% at 12 to 18.
+
+The plan, as the user settled it after test 7: there is no Phase 3. Milestone 6 is Phase 2's last;
+after it the port is done, and what is left is optimisation. `docs/VITA.md`'s target after Phase 2
+stands: 20 to 25 FPS in the heaviest rooms, 30 in the lighter ones.
+
+**The heavy room is the FIFO thread's.** There, per frame: 1,155 draws, and the FIFO thread busy
+62.4 ms by its own clock in the frames it times. Its marks are kernel calls (some 0.4 us each,
+16,500 in a timed frame), so the frames it does not time take about 55.7 ms; the main thread waits
+4.6 ms a frame for it, and fills the rest with 3.4 catch-up ticks. By section, for the timed frames:
+recording 14.1 ms, skinned calls 13.2, state 8.0, materials 6.4, Aurora's commands 4.8, immediate
+draws 4.5, dispatch 3.5, other draws 2.8, lookup 2.1, mesh 1.5. And the [threads] line for that
+stretch: the FIFO processor ran 86% of the time while its clock says it was at work about 97% of
+it. The frame reaper (6%, at its priority), the DVD worker (4%, above it) and a texture worker had
+last run on its core; the render worker had core 2 at 36%. The Vita's scheduler runs a thread till
+it waits or a higher one is ready, whatever else of its priority waits: a frame's destruction ran
+through while the FIFO thread waited.
+
+**Cores** (Aurora's `thread::Options` gains `vitaCore` and `vitaPriority`, set in `set_current`):
+the main thread keeps to core 1, the FIFO processor to core 0, the render worker to core 2. The
+helpers at their priority or above share core 2: the frame reaper (now priority 170, just below the
+render worker and above the program compiler), the DVD worker (high, as it was: the music stream's
+refills) and the program cache thread. The compiler and the texture workers (low) still go wherever
+a core is free: they cannot take one from the busy threads.
+
+**Draws hold nothing.** A `vita_gl::Draw` held its mesh, its units' and its program's textures, its
+program and a copy's destination as shared pointers: up to 13, each copy an atomic count change
+behind two barriers on the FIFO thread, and another as the reaper let it go. Now the frame being
+recorded holds each of those once (`vita_gl::keep`, by the frame's serial in the object), and a
+draw points at them: a `Draw` is trivially copyable and destroyed with its frame's vector at once
+(`DrawUnit` is a draw's unit; a material's `TexUnit` keeps its texture as before). `record` takes
+the draw without a copy, `record_draw` takes its mesh by reference, the viewport and scissor
+rectangles are worked out only when they change (four `std::lround` calls each, library calls
+here), a program's constant rows go into the frame as one block, and the skinned calls' posing
+buffer only grows.
+
+Two more FIFO sections split the largest ones: "rows" (a program draw's vertex rows and constants,
+until now part of "record") and "skinned copy" (a skinned call's posed vertices into the frame,
+until now part of "skinned").
+
+What to look for in test 8's log: the [threads] lines (main 1, FIFO 0, render worker 2, and the
+reaper, DVD worker and program cache on 2; no "could not keep to core" warnings), the heavy room's
+frame rate, and the [fifo path] sections ("record", "rows", "skinned", "skinned copy"). On screen,
+nothing should change: textures, the EFB copies (the thermal visor's palette pass, the pause
+screen's blurred backdrop), the Port menu.
+

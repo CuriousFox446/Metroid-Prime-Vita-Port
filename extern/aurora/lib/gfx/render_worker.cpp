@@ -207,6 +207,7 @@ void initialize() {
   g_thread = thread::Thread{{
                                 .name = "Aurora render worker",
                                 .affinity = thread::Affinity::SharedCache,
+                                .vitaCore = 2,
                             },
                             worker_main};
 }

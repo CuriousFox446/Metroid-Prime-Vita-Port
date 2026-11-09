@@ -27,6 +27,7 @@
 #include "internal.hpp"
 
 #include <fmt/format.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #endif
@@ -317,6 +318,28 @@ void set_current(const Options& options) noexcept {
   if (options.affinity == Affinity::SharedCache) {
     pin_shared_cache();
   }
+#if defined(__vita__)
+  // The Vita's scheduler moves a thread between cores as it likes, and runs one till it waits or
+  // one of a higher priority is ready, whatever else of its priority waits. In 0.42.0 test 7's heavy
+  // room the FIFO processor was busy 97% of each frame by its own clock but ran 86%: the frame reaper
+  // (its priority, 6%), the DVD worker (above it, 4%) and a texture worker had last run on its core.
+  // So the three busy threads each keep a core (game 1, FIFO 0, render worker 2) and the helpers that
+  // can take one from them share the render worker's, which is busy about a third of the time.
+  const SceUID self = sceKernelGetThreadId();
+  if (options.vitaCore >= 0 && options.vitaCore <= 2) {
+    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << options.vitaCore);
+    if (result < 0) {
+      Log.warn("{}: could not keep to core {} ({:#x})", options.name, options.vitaCore, static_cast<uint32_t>(result));
+    }
+  }
+  if (options.vitaPriority != 0) {
+    const int result = sceKernelChangeThreadPriority(self, options.vitaPriority);
+    if (result < 0) {
+      Log.warn("{}: could not take priority {} ({:#x})", options.name, options.vitaPriority,
+               static_cast<uint32_t>(result));
+    }
+  }
+#endif
 }
 
 void register_current(const std::string& name) noexcept {

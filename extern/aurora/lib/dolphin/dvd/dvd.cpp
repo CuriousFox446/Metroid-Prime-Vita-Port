@@ -551,8 +551,10 @@ private:
 #if defined(__vita__)
     // Above the game's threads: a read from the memory card is mostly waiting, and a music
     // stream's refill must not wait for a core while the game keeps all three busy. Its
-    // completion also takes the MusyX lock, which the mixer (as high) then waits on.
-    aurora::thread::set_current({.name = "Aurora DVD worker", .priority = aurora::thread::Priority::High});
+    // completion also takes the MusyX lock, which the mixer (as high) then waits on. On the render
+    // worker's core (thread.cpp, set_current): above the FIFO processor or the game, it took theirs.
+    aurora::thread::set_current(
+        {.name = "Aurora DVD worker", .priority = aurora::thread::Priority::High, .vitaCore = 2});
 #else
     aurora::thread::register_current("Aurora DVD worker");
 #endif

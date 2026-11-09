@@ -16,10 +16,13 @@ enum Section : uint8_t {
   kDispatch,    // a draw command up to the Vita path: its reading, a list call's find of its list
   kMaterial,    // the Vita path: a draw's material (current_material: texture copies, programs)
   kLookup,      // the Vita path: a list call's cached triangles found (decoded first when none match)
-  kSkinned,     // the Vita path: a skinned list call's triangles, from its template or decoded whole
+  kSkinned,     // the Vita path: a skinned list call's template found and its vertices posed (or the
+                // call decoded whole)
+  kSkinnedCopy, // the Vita path: a skinned call's posed vertices copied into the frame
   kImmediate,   // the Vita path: an immediate or indexed draw's vertices decoded and triangulated
   kMesh,        // the Vita path: the mesh made of them (or a cached list's taken) for record_draw
-  kRecord,      // the Vita path: record_draw (matrices, constants, the draw into the frame)
+  kRecord,      // the Vita path: record_draw (state, matrices, rectangles, units, the draw into the frame)
+  kRows,        // the Vita path: record_draw's program rows (vertex rows, constants, into the frame's)
   kOtherDraws,  // the rest of a draw command: draws the Vita path did not take, to Aurora's WebGPU path
   kAurora,      // Aurora's other extension commands (texture and array loads, resident lists' retains...)
   kEndVita,     // the frame end: the Vita frame handed over (end_frame_draws), the stats logs

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <imgui.h>
@@ -149,6 +150,15 @@ struct TexUnit {
   uint8_t coord = 0;         // the mesh's texture coordinate set
 };
 
+// A TexUnit as a draw takes it: its texture (null: unit off) held by the draw's frame (keep).
+struct DrawUnit {
+  Texture* texture = nullptr;
+  float matrix[8];
+  Sampler sampler;
+  uint16_t envMode = 0x2100; // GL_MODULATE
+  uint8_t coord = 0;         // the mesh's texture coordinate set
+};
+
 // A draw's fixed-function state, as GL enums (gx/vita_draw.cpp maps GX's to these): blending,
 // the alpha test, depth, the colour mask and culling. The defaults are an opaque, depth-tested draw.
 struct RenderState {
@@ -197,10 +207,11 @@ constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5;
 // vertex and fragment constants are among its frame's constant rows (record_constants; as many as
 // the program declares), and the fixed-function state it draws with (the program does the alpha
 // test). A draw that repeats its program's last constants in the frame points at the same rows,
-// and the render worker, seeing the rows it sent last, sends nothing.
+// and the render worker, seeing the rows it sent last, sends nothing. The program and the
+// textures are held by the draw's frame (keep).
 struct ProgramInputs {
-  std::shared_ptr<Program> program;
-  std::shared_ptr<Texture> textures[kSamplers];
+  Program* program = nullptr;
+  Texture* textures[kSamplers] = {};
   Sampler samplers[kSamplers];
   uint32_t vertexAt = 0;
   uint32_t constantsAt = 0;
@@ -222,12 +233,17 @@ struct ProgramInputs {
 // the screen's alpha read where `copyAlpha` (the EFB has alpha), else one. With a palette kind, a
 // copy's conversion instead: units[0]'s texture (a copy) through units[1]'s (its palette, one row)
 // into `copyTo`, at the copy's size.
+// What it draws with (its mesh, textures and program) is held by its frame, once for all the draws
+// using it (keep): held by each draw instead, as shared pointers, a draw took up to 13 of them,
+// each copy an atomic count change behind two barriers on the FIFO thread and another as the
+// reaper let it go (0.42.0 test 7's heavy room: some 1,150 draws a frame, the FIFO thread the one
+// that set the frame rate).
 struct Draw {
-  std::shared_ptr<Mesh> mesh;
+  Mesh* mesh = nullptr;
   FrameMesh frameMesh;
   float modelView[12];
   float projection[16];
-  TexUnit units[kTexUnits];
+  DrawUnit units[kTexUnits];
   RenderState state;
   ProgramInputs program;
   ScreenRect viewport;
@@ -239,11 +255,13 @@ struct Draw {
   bool clearDepth = false;
   float clearRgba[4] = {};
   float clearZ = 1.f;
-  std::shared_ptr<Texture> copyTo;
+  Texture* copyTo = nullptr;
   CopyKind copyKind = CopyKind::Rgb;
   bool copyHalf = false;
   bool copyAlpha = false;
 };
+// Nothing to let go of: a frame's draws are freed as one block.
+static_assert(std::is_trivially_destructible_v<Draw> && std::is_trivially_copyable_v<Draw>);
 
 #ifdef AURORA_VITA_GL
 // Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
@@ -257,8 +275,14 @@ void shutdown_imgui() noexcept;
 void fonts_changed() noexcept;
 // FIFO thread: a draw of the frame being processed, and that frame's end (its draws go to the
 // render worker's next present).
-void record(Draw draw) noexcept;
+void record(Draw&& draw) noexcept;
 void end_frame_draws() noexcept;
+// FIFO thread: the frame being recorded holds on to `object` till the render worker has drawn it
+// and the reaper lets the frame go (once each frame, however many of its draws use it); returns
+// the pointer a Draw takes. Null stays null.
+Mesh* keep(const std::shared_ptr<Mesh>& object) noexcept;
+Texture* keep(const std::shared_ptr<Texture>& object) noexcept;
+Program* keep(const std::shared_ptr<Program>& object) noexcept;
 // FIFO thread: rows of four floats added to the frame being recorded, for its draws' program
 // constants; returns where they start. The rows recorded at `at` in that frame, and the frame's
 // serial (a new one each frame).

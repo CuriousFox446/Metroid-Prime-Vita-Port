@@ -1295,10 +1295,10 @@ std::shared_ptr<vita_gl::Texture> copy_texture_for(const GXTexObj_& obj) noexcep
   const u32 version = sCopyVersions[obj.data];
   if (copy.palette != palette || copy.version != version) {
     vita_gl::Draw draw;
-    draw.copyTo = copy.texture;
+    draw.copyTo = vita_gl::keep(copy.texture);
     draw.copyKind = format == GX_TF_C4 ? vita_gl::CopyKind::Palette4 : vita_gl::CopyKind::Palette8;
-    draw.units[0].texture = source;
-    draw.units[1].texture = palette;
+    draw.units[0].texture = vita_gl::keep(source);
+    draw.units[1].texture = vita_gl::keep(palette);
     vita_gl::record(std::move(draw));
     copy.palette = std::move(palette);
     copy.version = version;
@@ -1723,6 +1723,22 @@ const Material& current_material() noexcept {
 // the screen (a scissor's or a clear's; a viewport may reach past it).
 vita_gl::ScreenRect screen_rect(float left, float top, float width, float height, bool clamp) noexcept {
   const auto [fbWidth, fbHeight] = logical_fb_size();
+  // The last one of each kind (a viewport's; a scissor's or a clear's), by what it was worked out
+  // from: every draw asks for both, they change seldom between draws, and each is four std::lround
+  // calls (library calls here).
+  struct Memo {
+    float in[4];
+    u32 fb[2];
+    vita_gl::ScreenRect out;
+    bool valid = false;
+  };
+  static Memo sMemo[2];
+  Memo& memo = sMemo[clamp ? 1 : 0];
+  if (memo.valid && memo.in[0] == left && memo.in[1] == top && memo.in[2] == width && memo.in[3] == height &&
+      memo.fb[0] == fbWidth && memo.fb[1] == fbHeight) {
+    return memo.out;
+  }
+  memo.valid = false;
   const float sx = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
   const float sy = fbHeight != 0 ? static_cast<float>(vita_gl::kScreenHeight) / static_cast<float>(fbHeight) : 1.f;
   long x0 = std::lround(left * sx);
@@ -1735,8 +1751,10 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
     y0 = std::clamp<long>(y0, 0, vita_gl::kScreenHeight);
     y1 = std::clamp<long>(y1, y0, vita_gl::kScreenHeight);
   }
-  return {static_cast<int16_t>(x0), static_cast<int16_t>(vita_gl::kScreenHeight - y1),
-          static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+  const vita_gl::ScreenRect rect{static_cast<int16_t>(x0), static_cast<int16_t>(vita_gl::kScreenHeight - y1),
+                                 static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+  memo = {.in = {left, top, width, height}, .fb = {fbWidth, fbHeight}, .out = rect, .valid = true};
+  return rect;
 }
 
 // GX's line width or point size (sixths of a pixel of its framebuffer) in the screen's whole pixels,
@@ -1763,10 +1781,11 @@ u8 line_width() noexcept {
 // matrices and the material's units and state, TEV's alpha folded in where it is a constant (its
 // inputs are constants that change between draws). A line or point mesh is drawn `width` pixels
 // wide (a line's line_width, points' screen_width).
-void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
+void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& material,
                  const vita_gl::FrameMesh& frameMesh = {}, u8 width = 1) noexcept {
   // For the FIFO thread's timing: since the triangles, the mesh made of them (the caller's
-  // argument; none for a mesh of the frame's own); from here to the return, the draw's recording.
+  // argument; none for a mesh of the frame's own); from here to the return, the draw's recording,
+  // its program's rows apart.
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMesh);
   struct Recorded {
     ~Recorded() { vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord); }
@@ -1785,7 +1804,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
     }
   }
   drop_plain_blend(state);
-  vita_gl::Draw draw{.mesh = std::move(mesh), .frameMesh = frameMesh};
+  vita_gl::Draw draw{.mesh = vita_gl::keep(mesh), .frameMesh = frameMesh};
   draw.width = width;
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
   std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
@@ -1813,17 +1832,23 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
                              static_cast<float>(sc.height), true);
   sStats.cornered += draw.viewport == vita_gl::ScreenRect{} ? 0 : 1;
   for (int unit = 0; unit < material.unitCount; ++unit) {
-    draw.units[unit] = material.units[unit];
+    const vita_gl::TexUnit& from = material.units[unit];
+    vita_gl::DrawUnit& to = draw.units[unit];
+    to.texture = vita_gl::keep(from.texture);
+    to.sampler = from.sampler;
+    to.envMode = from.envMode;
+    to.coord = from.coord;
     // Texture matrices animate (scrolling, pulsing): read for every draw.
-    tex_matrix(*material.tcgs[unit], draw.units[unit].matrix);
-    sStats.additiveUnits += draw.units[unit].envMode == kGlAdd ? 1 : 0;
+    tex_matrix(*material.tcgs[unit], to.matrix);
+    sStats.additiveUnits += to.envMode == kGlAdd ? 1 : 0;
   }
   draw.state = state;
   if (material.program != nullptr) {
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord);
     vita_gl::ProgramInputs& inputs = draw.program;
-    inputs.program = material.program->program;
+    inputs.program = vita_gl::keep(material.program->program);
     for (int m = 0; m < kSamplers; ++m) {
-      inputs.textures[m] = material.programTextures[m];
+      inputs.textures[m] = vita_gl::keep(material.programTextures[m]);
       inputs.samplers[m] = material.programSamplers[m];
     }
     // The projection times the position matrix (a 3x4 with (0, 0, 0, 1) below), here on the FIFO
@@ -1865,6 +1890,7 @@ void record_draw(std::shared_ptr<vita_gl::Mesh> mesh, const Material& material,
     inputs.constantsAt = program.constantsAt;
     inputs.state = material.programState;
     ++sStats.withProgram;
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRows);
   }
   sStats.blended += draw.state.blend ? 1 : 0;
   sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
@@ -2012,8 +2038,11 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   const float nrmScale = component_scale(nrmFmt.frac);
   const bool allNormalsInside =
       normals && (u64{t.maxNrm} + nrmArray.baseIndex) * nrmArray.stride + 3 * nrmStep <= nrmArray.size;
-  // Each distinct pair posed once, then copied to the vertices that read it.
-  sPosed.resize(t.distinct.size());
+  // Each distinct pair posed once, then copied to the vertices that read it. Grown only (each pair
+  // is written below): resized down and up again, a vector clears what it adds back.
+  if (sPosed.size() < t.distinct.size()) {
+    sPosed.resize(t.distinct.size());
+  }
   for (size_t d = 0; d < t.distinct.size(); ++d) {
     const VertexIndices& v = t.distinct[d];
     PosedVertex& posed = sPosed[d];
@@ -2030,6 +2059,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       }
     }
   }
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
   // A program's draw takes the unique vertices, every corner otherwise (the face's shading).
   const bool byIndex = program && t.order != nullptr;
   const std::vector<vita_gl::Vertex>& source = byIndex ? t.unique : t.vertices;
@@ -2060,6 +2090,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   sStats.skinnedIndexed += byIndex ? 1 : 0;
   sStats.skinnedCorners += t.vertices.size();
   sStats.skinnedVertices += count;
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinnedCopy);
   return true;
 }
 } // namespace
@@ -2369,7 +2400,7 @@ void record_copy() noexcept {
   }
   ++sCopyVersions[dest];
   vita_gl::Draw draw;
-  draw.copyTo = texture;
+  draw.copyTo = vita_gl::keep(texture);
   draw.copyKind = kind;
   draw.copyHalf = half;
   // The EFB's alpha is GX's only with an alpha pixel format (the game's has none, so reads one).

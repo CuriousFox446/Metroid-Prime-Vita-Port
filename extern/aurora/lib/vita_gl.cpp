@@ -238,6 +238,8 @@ struct Frame {
   std::vector<std::array<float, 4>> constants;
   FrameArray<Vertex> vertices;
   FrameArray<uint16_t> indices;
+  // What its draws draw with, each held once (keep), let go with the frame.
+  std::vector<std::shared_ptr<const void>> kept;
   uint32_t serial = 0;
   uint32_t copies = 0;
   uint32_t merged = 0; // draws joined to the one before (merge_into_last)
@@ -271,7 +273,13 @@ GLenum gl_mode(MeshPrimitive primitive) {
 }
 } // namespace
 
-class Mesh {
+// What a frame's draws draw with (Mesh, Texture, Program): the serial of the last frame that keep
+// held it for (FIFO thread), so a frame holds each once.
+struct Kept {
+  uint32_t keptIn = 0;
+};
+
+class Mesh : public Kept {
 public:
   Mesh(std::vector<Vertex> triangles, MeshKind kind, bool clientMemory, MeshPrimitive primitive) noexcept
   : m_cpu(std::move(triangles)), m_count(static_cast<GLsizei>(m_cpu.size())), m_kind(kind), m_client(clientMemory),
@@ -335,7 +343,7 @@ void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept {
   }
 }
 
-class Texture {
+class Texture : public Kept {
 public:
   Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> level0) noexcept
   : m_cpu(std::move(level0)), m_width(width), m_height(height), m_format(format) {
@@ -677,8 +685,9 @@ constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aNrm"
 // there is work.
 class JobThread {
 public:
-  JobThread(const char* name, thread::Priority priority, size_t stack) noexcept
-  : m_name(name), m_priority(priority), m_stack(stack) {}
+  // `core`: the Vita core it keeps to (thread::Options::vitaCore; -1, any).
+  JobThread(const char* name, thread::Priority priority, size_t stack, int core = -1) noexcept
+  : m_name(name), m_priority(priority), m_stack(stack), m_core(core) {}
 
   // False when no thread could be started: the job is not taken.
   bool submit(std::function<void()> job) noexcept {
@@ -703,7 +712,7 @@ public:
 private:
   static void* run(void* arg) {
     JobThread& self = *static_cast<JobThread*>(arg);
-    thread::set_current({.name = self.m_name, .priority = self.m_priority});
+    thread::set_current({.name = self.m_name, .priority = self.m_priority, .vitaCore = self.m_core});
     for (;;) {
       std::function<void()> job;
       {
@@ -722,6 +731,7 @@ private:
   const char* m_name;
   thread::Priority m_priority;
   size_t m_stack;
+  int m_core;
   std::mutex m_mutex;
   std::deque<std::function<void()>> m_jobs;
   bool m_running = false;
@@ -746,7 +756,8 @@ JobThread& compiler_thread() noexcept {
 // with the game streaming a room from the disc image on the same card each waited behind its
 // reads: 250 to 850 ms stalls at room changes (a run through Tallon Overworld, 7dfaad5).
 JobThread& card_thread() noexcept {
-  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024);
+  // On the render worker's core, as the other helpers at the busy threads' priority (thread.cpp).
+  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024, 2);
   return jobs;
 }
 
@@ -1235,7 +1246,7 @@ bool program_binary(GLuint program, GLenum& format, std::vector<uint8_t>& binary
 }
 } // namespace
 
-class Program {
+class Program : public Kept {
 public:
   Program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept
   : m_vertexSource(std::move(vertexSource)), m_fragmentSource(std::move(fragmentSource)), m_key(key) {}
@@ -1647,7 +1658,7 @@ void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource)
 }
 
 namespace {
-bool same_unit(const TexUnit& a, const TexUnit& b) noexcept {
+bool same_unit(const DrawUnit& a, const DrawUnit& b) noexcept {
   return a.texture == b.texture && std::memcmp(a.matrix, b.matrix, sizeof(a.matrix)) == 0 && a.sampler == b.sampler &&
          a.envMode == b.envMode && a.coord == b.coord;
 }
@@ -1718,20 +1729,38 @@ bool merge_into_last(const Draw& draw) noexcept {
 }
 } // namespace
 
-void record(Draw draw) noexcept {
+void record(Draw&& draw) noexcept {
   if (merge_into_last(draw)) {
     ++g_recording.merged;
     return;
   }
   g_recording.copies += draw.copyTo != nullptr ? 1 : 0;
-  g_recording.draws.push_back(std::move(draw));
+  g_recording.draws.push_back(draw);
 }
 
-uint32_t record_constants(const float (*rows)[4], int count) noexcept {
-  const auto at = static_cast<uint32_t>(g_recording.constants.size());
-  for (int i = 0; i < count; ++i) {
-    g_recording.constants.push_back({rows[i][0], rows[i][1], rows[i][2], rows[i][3]});
+namespace {
+template <typename T>
+T* keep_in_frame(const std::shared_ptr<T>& object) noexcept {
+  T* const raw = object.get();
+  if (raw != nullptr && raw->keptIn != g_recording.serial) {
+    raw->keptIn = g_recording.serial;
+    g_recording.kept.push_back(object);
   }
+  return raw;
+}
+} // namespace
+
+Mesh* keep(const std::shared_ptr<Mesh>& object) noexcept { return keep_in_frame(object); }
+Texture* keep(const std::shared_ptr<Texture>& object) noexcept { return keep_in_frame(object); }
+Program* keep(const std::shared_ptr<Program>& object) noexcept { return keep_in_frame(object); }
+
+uint32_t record_constants(const float (*rows)[4], int count) noexcept {
+  // As one block: a lit program's rows are 30 or more a draw.
+  std::vector<std::array<float, 4>>& constants = g_recording.constants;
+  const auto at = static_cast<uint32_t>(constants.size());
+  static_assert(sizeof(std::array<float, 4>) == sizeof(float[4]));
+  constants.resize(at + static_cast<size_t>(count));
+  std::memcpy(constants[at].data(), rows, sizeof(float[4]) * static_cast<size_t>(count));
   return at;
 }
 
@@ -1754,6 +1783,7 @@ uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept {
 void end_frame_draws() noexcept {
   const size_t drawn = g_recording.draws.size();
   const size_t rows = g_recording.constants.size();
+  const size_t kept = g_recording.kept.size();
   const uint32_t vertices = g_recording.vertices.size();
   const uint32_t indices = g_recording.indices.size();
   const uint32_t serial = g_recording.serial;
@@ -1769,6 +1799,7 @@ void end_frame_draws() noexcept {
   g_recording.serial = serial + 1 != 0 ? serial + 1 : 1;
   g_recording.draws.reserve(drawn);
   g_recording.constants.reserve(rows);
+  g_recording.kept.reserve(kept);
   g_recording.vertices.reserve(vertices);
   g_recording.indices.reserve(indices);
 }
@@ -1823,7 +1854,11 @@ private:
   static constexpr size_t kBehind = 2;
 
   void run() noexcept {
-    thread::set_current({.name = "frame reaper", .priority = thread::Priority::Normal});
+    // On the render worker's core, just below it (and above the compiler): at the FIFO processor's
+    // priority it took the FIFO's core 6% of the time (0.42.0 test 7), each frame's destruction run
+    // through while the FIFO waited.
+    thread::set_current({.name = "frame reaper", .priority = thread::Priority::Normal, .vitaCore = 2,
+                         .vitaPriority = 170});
     for (;;) {
       Frame frame;
       {
@@ -2473,7 +2508,7 @@ void draw_world(const Frame& frame) {
       glPointSize(static_cast<GLfloat>(draw.width));
       width = draw.width;
     }
-    Program* program = draw.program.program.get();
+    Program* program = draw.program.program;
     if (program != nullptr) {
       const int budgetBefore = buildBudget;
       const bool ready = program->ready(buildBudget);
@@ -2511,7 +2546,7 @@ void draw_world(const Frame& frame) {
     }
     g_clock.mark(kFixedPointers);
     for (int unit = 0; unit < kTexUnits; ++unit) {
-      const TexUnit& texUnit = draw.units[unit];
+      const DrawUnit& texUnit = draw.units[unit];
       const bool on = texUnit.texture != nullptr;
       if (!on && !unitOn[unit]) {
         continue;
@@ -2943,8 +2978,8 @@ void remove_texture(ImTextureID id) noexcept {
 namespace fifo_clock {
 namespace {
 constexpr const char* kNames[kSectionCount] = {
-    "idle", "state",  "copies",      "dispatch", "material", "lookup", "skinned", "immediate", "mesh",
-    "record", "other draws", "aurora", "vita",     "textures", "finish", "frame"};
+    "idle",   "state", "copies",      "dispatch", "material", "lookup",   "skinned", "skinned copy", "immediate",
+    "mesh",   "record", "rows",       "other draws", "aurora", "vita",    "textures", "finish",      "frame"};
 constexpr uint32_t kTimedEvery = 8;
 
 uint64_t g_last = 0;

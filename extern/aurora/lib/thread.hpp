@@ -17,6 +17,10 @@ struct Options {
   std::string name;
   Priority priority = Priority::Normal;
   Affinity affinity = Affinity::None;
+  // PS Vita: the core the thread keeps to (0 to 2; -1: whichever the scheduler picks), and a Vita
+  // priority of its own (lower is sooner; 0: `priority`'s), set after it. Elsewhere unused.
+  int vitaCore = -1;
+  int vitaPriority = 0;
 };
 
 // Applies thread options to the current thread

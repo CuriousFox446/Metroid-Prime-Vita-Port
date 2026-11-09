@@ -326,6 +326,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   thread::set_current({
       .name = "Main thread",
       .affinity = thread::Affinity::SharedCache,
+      .vitaCore = 1,
   });
 
 #ifdef AURORA_ENABLE_GX
