@@ -108,8 +108,9 @@ void Report(uint32_t frames, void (*write)(const char* line)) {
   std::sort(other.begin(), other.end(), byTime);
   const double perFrame = 1.0 / static_cast<double>(frames);
   char line[512];
-  // Room for the game tick's zones beside the draw's.
-  constexpr size_t kMainRows = 32;
+  // Room for the game tick's zones beside the draw's, and for the tick's parts within them (the
+  // player's input, the HUD, the camera: 0.42.0 test 12).
+  constexpr size_t kMainRows = 48;
   for (size_t i = 0; i < main.size() && i < kMainRows; ++i) {
     std::snprintf(line, sizeof(line), "[zones]   %6.2f ms %7.1f calls  %s\n",
                   static_cast<double>(main[i].ns) / 1e6 * perFrame, main[i].calls * perFrame, main[i].name);

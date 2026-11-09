@@ -1384,10 +1384,14 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
     PortRadial::TakePick(PortRadial::kBeam);
     PortRadial::TakePick(PortRadial::kVisor);
   } else {
+    PORT_ZONE_TIMED("input: direct actions");
     RouteDirectActions(out);
   }
 
-  r.status = Synthesize(out);
+  {
+    PORT_ZONE_TIMED("input: the pad status");
+    r.status = Synthesize(out);
+  }
   if (r.status.substickX != 0 || r.status.substickY != 0) {
     r.cStickX = std::clamp(out.Value(Action::CRight) - out.Value(Action::CLeft), -1.f, 1.f);
     r.cStickY = std::clamp(out.Value(Action::CUp) - out.Value(Action::CDown), -1.f, 1.f);
@@ -1463,16 +1467,20 @@ void PollPortActions() {
   }
 
   PortInput::RawState raw;
-  ReadRaw(raw);
-  for (size_t w = 0; w < std::size(sKeyDowns); ++w) {
-    uint64_t bits = sKeyDowns[w].exchange(0, std::memory_order_relaxed);
-    while (bits != 0) {
-      const int bit = std::countr_zero(bits);
-      bits &= bits - 1;
-      raw.keys.set(w * 64 + static_cast< size_t >(bit));
+  {
+    PORT_ZONE_TIMED("input: the Port actions' devices");
+    ReadRaw(raw);
+    for (size_t w = 0; w < std::size(sKeyDowns); ++w) {
+      uint64_t bits = sKeyDowns[w].exchange(0, std::memory_order_relaxed);
+      while (bits != 0) {
+        const int bit = std::countr_zero(bits);
+        bits &= bits - 1;
+        raw.keys.set(w * 64 + static_cast< size_t >(bit));
+      }
     }
   }
   const uint16_t contexts = GameContexts();
+  PORT_ZONE_TIMED("input: the Port actions' engine");
   const PortInput::Output& out = sRuntime.Poll(raw, contexts, static_cast< double >(SDL_GetTicksNS()) / 1e6,
                                                QuietContexts(sRuntime.ActiveContexts(), contexts));
   // The F1 Remap page is recording an input: a bound PortMenu would close it.

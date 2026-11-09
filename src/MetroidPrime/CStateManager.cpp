@@ -1478,6 +1478,7 @@ void CStateManager::Think(float dt) {
         }
 
         if (camList->GetObjectById(ent->GetUniqueId()) == nullptr) {
+          PORT_THINK_SCOPE(*ent, kThink);
           ent->Think(dt, *this);
         }
       }
@@ -1508,6 +1509,7 @@ void CStateManager::PreThinkObjects(float dt) {
     for (int i = allList->GetFirstObjectIndex(); i != -1; i = allList->GetNextObjectIndex(i)) {
       CEntity* ent = (*allList)[i];
       if (ent != nullptr && camList->GetObjectById(ent->GetUniqueId()) == nullptr) {
+        PORT_THINK_SCOPE(*ent, kPreThink);
         ent->PreThink(dt, *this);
       }
     }

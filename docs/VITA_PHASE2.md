@@ -2229,3 +2229,31 @@ FIFO thread waiting on it (67 ms a frame against 50): the ticks 35.9 ms (3.6 of 
 And the snow falls in Phendrana Drifts again (the user: "there were snow"): the flakes take the
 snowflake texture's levels 1 and 2, the near ones its blanked first, as on the GameCube.
 
+## 0.42.0 test 12: the game's tick, measured part by part
+
+The next round is the game thread's tick, which the catch-up multiplies: in test 11's slow stretch
+a tick took 8.3 ms (`SM::Update`) and a frame ran 3.6 of them. By zone, per tick: `SM: Think (all
+entities)` 4.06 ms (particle systems about half of it: `CElementGen::Update` 88 us a call, some 21
+a tick), the HUD (`CInGameGuiManager::Update`) 1.08, the environment effects (the snow) 0.63, the
+camera manager 0.61, the player's collision move 0.60, MovePlatforms and MoveDoors 0.54, the
+player's input 0.53, CrossTouchActors 0.52, PreThinkObjects 0.51, PostUpdatePlayer 0.41,
+UpdateSortedLists 0.35, and the input poll 0.49. No one of them is most of it, and the largest,
+Think, is one zone over every entity.
+
+So test 12 measures before cutting:
+
+- `PortThinkProfile` (`platform/vita/vita_think_profile.cpp`) times each entity's Think and
+  PreThink by its class (`typeid`), sampled as the zones are (a class's first 32 calls in a report
+  window, then one in eight, weighted): the report's `[think]` lines give the 14 classes that took
+  the most, ms and calls a frame (`~/tools/think.py <log> <lo> <hi>` averages them by FPS).
+- Zones inside the player's input (scanning, grapple, movement or the ball's, free look, the orbit
+  targets, the gun and visor state, the gun's own input), the HUD (faceplate and reflection, the
+  player visor, `CSamusHud::Update`, the auto mapper), the camera manager (its hints, its cameras)
+  and the two input polls (the direct actions, the pad status; the Port actions' devices and their
+  engine). The report lists 48 of the game thread's zones, not 32, to hold them.
+
+The game's own simulation rate (Performance > "Simulation rate (very experimental)", `sim_rate`)
+would halve the ticks at 30 Hz, but upstream calls 60 Hz "console-accurate and the only supported
+rate": other rates "can break physics, enemy behaviour, cutscenes and scripted events". It stays at
+60 unless the user chooses otherwise.
+
