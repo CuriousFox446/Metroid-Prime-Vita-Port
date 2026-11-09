@@ -685,9 +685,10 @@ constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aNrm"
 // there is work.
 class JobThread {
 public:
-  // `core`: the Vita core it keeps to (thread::Options::vitaCore; -1, any).
-  JobThread(const char* name, thread::Priority priority, size_t stack, int core = -1) noexcept
-  : m_name(name), m_priority(priority), m_stack(stack), m_core(core) {}
+  // `core` and `vitaPriority`: the Vita core it keeps to and its own priority there
+  // (thread::Options::vitaCore, vitaPriority; -1 and 0: any core, `priority`'s).
+  JobThread(const char* name, thread::Priority priority, size_t stack, int core = -1, int vitaPriority = 0) noexcept
+  : m_name(name), m_priority(priority), m_stack(stack), m_core(core), m_vitaPriority(vitaPriority) {}
 
   // False when no thread could be started: the job is not taken.
   bool submit(std::function<void()> job) noexcept {
@@ -712,7 +713,8 @@ public:
 private:
   static void* run(void* arg) {
     JobThread& self = *static_cast<JobThread*>(arg);
-    thread::set_current({.name = self.m_name, .priority = self.m_priority, .vitaCore = self.m_core});
+    thread::set_current(
+        {.name = self.m_name, .priority = self.m_priority, .vitaCore = self.m_core, .vitaPriority = self.m_vitaPriority});
     for (;;) {
       std::function<void()> job;
       {
@@ -732,6 +734,7 @@ private:
   thread::Priority m_priority;
   size_t m_stack;
   int m_core;
+  int m_vitaPriority;
   std::mutex m_mutex;
   std::deque<std::function<void()>> m_jobs;
   bool m_running = false;
@@ -756,8 +759,10 @@ JobThread& compiler_thread() noexcept {
 // with the game streaming a room from the disc image on the same card each waited behind its
 // reads: 250 to 850 ms stalls at room changes (a run through Tallon Overworld, 7dfaad5).
 JobThread& card_thread() noexcept {
-  // On the render worker's core, as the other helpers at the busy threads' priority (thread.cpp).
-  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024, 2);
+  // On the render worker's core, as the other helpers at the busy threads' priority (thread.cpp), and
+  // just below it there as the frame reaper is: at its priority a card read held the core for as long
+  // as it ran (test 8: 16% busy while the room's programs loaded).
+  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024, 0, 170);
   return jobs;
 }
 
@@ -1857,7 +1862,7 @@ private:
     // On the render worker's core, just below it (and above the compiler): at the FIFO processor's
     // priority it took the FIFO's core 6% of the time (0.42.0 test 7), each frame's destruction run
     // through while the FIFO waited.
-    thread::set_current({.name = "frame reaper", .priority = thread::Priority::Normal, .vitaCore = 2,
+    thread::set_current({.name = "frame reaper", .priority = thread::Priority::Normal, .vitaCore = 0,
                          .vitaPriority = 170});
     for (;;) {
       Frame frame;

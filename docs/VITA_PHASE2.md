@@ -2126,3 +2126,33 @@ frame rate, and the [fifo path] sections ("record", "rows", "skinned", "skinned 
 nothing should change: textures, the EFB copies (the thermal visor's palette pass, the pause
 screen's blurred backdrop), the Port menu.
 
+## 0.42.0 test 9: the FIFO thread off core 0; no mouse and keyboard set-up
+
+**Test 8** (7cdd6d2, the user's log of Nov 8) ran 32.4 minutes (45,440 frames) and quit cleanly.
+Every thread kept to its core (no warnings, no moves). The heavy stretch came at the end this time:
+16.4 FPS for 1,209 draws a frame (test 7's: 17.7 FPS for 1,155). Per draw the FIFO thread took
+what it took in test 7, about 50 us: by section for its timed frames, skinned calls 11.3 ms and
+their copy 3.6, state 8.2, recording 7.9 and the program rows 6.1 (14.1 for both in test 7, with a
+mark a draw fewer), materials 6.4, Aurora's commands 4.9, immediate draws 4.6, dispatch 3.7, other
+draws 3.3, lookup 1.9, mesh 1.4. So the shared pointers' count changes were no large cost, and the
+split shows where recording goes: the program rows about 5 us a draw (a lit program's lights and
+matrices), the rest 6.5; a skinned call's posing about 155 us, its copy 49.
+
+The cores told something else. Alone on core 0, the FIFO processor ran no more than 81% of the time
+all run (78 to 81% in the heavy room it held back), while its own clock had it busy 93% of each
+frame: with no thread of its priority or above left on its core, core 0 seems to give some of its
+time elsewhere (the system's interrupts or threads), or the FIFO thread waits on something inside
+its sections. In test 7, moving between cores, it ran 86%.
+
+So test 9 swaps them: the FIFO processor keeps to core 2, the render worker (busy about a third of
+the time) to core 0 with the helpers (the frame reaper, the DVD worker, the program cache thread,
+which now runs just below the render worker too, as the reaper does), the game to core 1. And the
+[threads] lines count, for each thread since the last line, its preemptions by interrupts and by
+other threads, and its waits: core 0's interrupts, if that is where the time goes, show there.
+
+The Controls page's Quick setup no longer offers "Use mouse & keyboard" on the Vita (the user's
+ask: it has neither); the Port menu's search no longer lists it there either.
+
+What to look for in test 9's log: the heavy room's frame rate and the FIFO processor's busy share
+there (over 81%?), and the preemption counts of the threads on core 0 against core 2's.
+

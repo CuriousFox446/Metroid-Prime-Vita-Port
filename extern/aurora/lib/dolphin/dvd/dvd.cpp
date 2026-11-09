@@ -554,7 +554,7 @@ private:
     // completion also takes the MusyX lock, which the mixer (as high) then waits on. On the render
     // worker's core (thread.cpp, set_current): above the FIFO processor or the game, it took theirs.
     aurora::thread::set_current(
-        {.name = "Aurora DVD worker", .priority = aurora::thread::Priority::High, .vitaCore = 2});
+        {.name = "Aurora DVD worker", .priority = aurora::thread::Priority::High, .vitaCore = 0});
 #else
     aurora::thread::register_current("Aurora DVD worker");
 #endif

@@ -133,7 +133,7 @@
   takes a manual `render_scale` under 1.
 - `MP_ASPECT=4:3|16:9|window` (default `window`, persisted as `aspect`); the legacy `MP_WIDESCREEN` selects 16:9.
 - Quick setup (Controls > Options): "Use mouse & keyboard" turns on mouse aim (with twin stick) and applies
-  the Mouse & keyboard layout; "Use twin-stick controller" turns on twin stick and applies the
+  the Mouse & keyboard layout (not on the PS Vita, which has neither); "Use twin-stick controller" turns on twin stick and applies the
   Remastered layout to all controllers (greyed out with a GameCube adapter). Both replace your own
   bindings for that device (Remap > Presets...) and are saved. "Save current as..." in Remap > My presets...
   keeps your bindings as a preset of your own (see Control presets).

@@ -34,6 +34,8 @@ namespace PortDebug {
 void DrawControlsOptions() {
   const bool locked = BeginOriginalLocked();
   ImGui::SeparatorText("Quick setup");
+#if !defined(__vita__)
+  // The Vita has no mouse or keyboard to set up.
   if (ImGui::Button("Use mouse & keyboard")) {
     PortInputRemap::ApplyPreset(PortInput::Family::Keyboard, "mouse");
   }
@@ -42,6 +44,7 @@ void DrawControlsOptions() {
            "Controls > Remap > Presets... has the others.");
   SameLineAfterHelp();
   ImGui::TextDisabled(sInput.mouseAim ? "Mouse aim is on." : "Mouse aim is off.");
+#endif
   // A GameCube pad has no right stick click for the dual-stick layout (as Remap's Presets...).
   ImGui::BeginDisabled(PADIsGCAdapter(0) != 0);
   if (ImGui::Button("Use twin-stick controller")) {

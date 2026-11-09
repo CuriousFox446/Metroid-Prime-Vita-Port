@@ -37,14 +37,18 @@ namespace {
 #if defined(__vita__)
 constexpr Module Log{"aurora::thread"};
 
-// The threads named so far (register_current), for log_cpu: each one's time run and moves between
-// cores at the last log (seen: it has been logged once).
+// The threads named so far (register_current), for log_cpu: each one's time run, moves between
+// cores, preemptions (by interrupts, by other threads) and waits ended at the last log (seen: it
+// has been logged once).
 struct Named {
   std::string name;
   SceUID id = 0;
   bool seen = false;
   uint64_t run = 0;
   int32_t moves = 0;
+  uint32_t interrupts = 0;
+  uint32_t preempted = 0;
+  uint32_t waits = 0;
 };
 std::mutex sNamedMutex;
 std::vector<Named> sNamed;
@@ -323,8 +327,12 @@ void set_current(const Options& options) noexcept {
   // one of a higher priority is ready, whatever else of its priority waits. In 0.42.0 test 7's heavy
   // room the FIFO processor was busy 97% of each frame by its own clock but ran 86%: the frame reaper
   // (its priority, 6%), the DVD worker (above it, 4%) and a texture worker had last run on its core.
-  // So the three busy threads each keep a core (game 1, FIFO 0, render worker 2) and the helpers that
-  // can take one from them share the render worker's, which is busy about a third of the time.
+  // So the three busy threads each keep a core and the helpers that can take one from them share
+  // the render worker's, which is busy about a third of the time. Test 8 had the FIFO processor on
+  // core 0 alone, and it still ran no more than 81% of the time in the room it held back (its clock:
+  // 93% busy): core 0 seems to give some of its time elsewhere (the system's interrupts, its own
+  // threads; log_cpu counts the preemptions). So the render worker, with time to spare, takes core
+  // 0 and the helpers, the FIFO processor core 2, the game core 1.
   const SceUID self = sceKernelGetThreadId();
   if (options.vitaCore >= 0 && options.vitaCore <= 2) {
     const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << options.vitaCore);
@@ -377,15 +385,23 @@ void log_cpu() noexcept {
     const std::string busy = it->seen && span != 0
                                  ? fmt::format("{:.0f}%", 100.0 * static_cast<double>(run - it->run) / static_cast<double>(span))
                                  : std::string("new");
-    // Its ID too: a crash dump names threads by theirs.
-    threads += fmt::format("{}{} ({:#x}): core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves",
+    // Its ID too: a crash dump names threads by theirs. Then, since the last log, how often an
+    // interrupt or another thread took its core while it ran, and how many of its waits ended.
+    const auto since = [&](uint32_t now, uint32_t last) { return it->seen ? now - last : now; };
+    threads += fmt::format("{}{} ({:#x}): core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves, preempted by "
+                           "interrupts {} and threads {}, {} waits",
                            threads.empty() ? "" : " | ", it->name, static_cast<uint32_t>(it->id), info.currentCpuId,
                            info.lastExecutedCpuId,
                            static_cast<uint32_t>(info.currentCpuAffinityMask), info.currentPriority, busy,
-                           it->seen ? info.changeCpuCount - it->moves : info.changeCpuCount);
+                           it->seen ? info.changeCpuCount - it->moves : info.changeCpuCount,
+                           since(info.intrPreemptCount, it->interrupts), since(info.threadPreemptCount, it->preempted),
+                           since(info.threadReleaseCount, it->waits));
     it->seen = true;
     it->run = run;
     it->moves = info.changeCpuCount;
+    it->interrupts = info.intrPreemptCount;
+    it->preempted = info.threadPreemptCount;
+    it->waits = info.threadReleaseCount;
     ++it;
   }
   Log.info("[threads] over {:.1f} s: {}", static_cast<double>(span) / 1e6, threads);
