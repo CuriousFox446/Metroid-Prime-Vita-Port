@@ -150,15 +150,17 @@ std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t hei
   uint32_t levels = 1;
   auto texelFormat = vita_gl::TexelFormat::RGBA8;
   if (format == GX_TF_CMPR) {
-    // With its levels down to 4x4, sampled as the game's filters ask (vita_draw.cpp, sampler_for):
+    // With its levels down to 16x16, sampled as the game's filters ask (vita_draw.cpp, sampler_for):
     // the game draws some of its own. Phendrana's snowflake has its first level blanked
     // (CEnvFxManager::BlankFirstSnowflakeMip), so the flakes near the camera, large on screen and
-    // sampling it, vanish; with the first level alone, as every copy had, all of them did.
-    uint32_t wanted = 0;
-    while (wanted < std::max(mips, 1u) && (width >> wanted) >= 4 && (height >> wanted) >= 4) {
+    // sampling it, vanish; with the first level alone, as every copy had, all of them did. The
+    // levels under 16x16 are left out: each is copied in by a GPU transfer (vita_gl.cpp,
+    // Texture::bind), and those few blocks wide add nothing seen.
+    uint32_t wanted = 1;
+    while (wanted < mips && (width >> wanted) >= 16 && (height >> wanted) >= 16) {
       ++wanted;
     }
-    const ByteBuffer bc1 = convert_cmpr_to_bc1(width, height, std::max(wanted, 1u), data, levels);
+    const ByteBuffer bc1 = convert_cmpr_to_bc1(width, height, wanted, data, levels);
     if (!bc1.empty()) {
       level0.assign(bc1.data(), bc1.data() + bc1.size());
       texelFormat = vita_gl::TexelFormat::BC1;

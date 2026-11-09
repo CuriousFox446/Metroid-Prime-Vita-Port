@@ -2191,3 +2191,29 @@ What to look for: snow falling in Phendrana Drifts (the nearest flakes fading ou
 GameCube); distant floors and walls steadier; the presents lines' BC1 megabytes; nothing drawn
 wrong on far surfaces (noise there would mean a level uploaded wrong).
 
+## 0.42.0 test 11: the mip levels uploaded one transfer at a time
+
+**Test 10** (6b6386f, the user's log and dump of Nov 8) crashed at the first room it loaded, a few
+minutes in: the log stops at a new pipeline after the save loaded, and the front end before it had
+drawn no BC1 texture at all (its textures are RGBA8). The dump (`psp2core-1794190372-…`, cut short:
+no stacks) has one stopped thread, the render worker (`0x400102fd`), on a data abort inside
+SceLibKernel, with a register at `0x62000010`: the start of vitaGL's VRAM heap. Its other threads
+were where they wait (the game in `C_MTXConcat` under `CGraphics::SetViewMatrix`, simply running).
+
+What test 10 added there: every mipmapped CMPR texture's levels went up one `glCompressedTexImage2D`
+each. vitaGL grows the texture's chain for each level with `vgl_realloc`, which on VRAM is
+`sceClibMspaceRealloc`: where the chain cannot grow in place it moves, and the old block is freed at
+once. And a power-of-two level is copied in by `sceGxmTransferCopy`, a GPU transfer nothing waits
+for. So a chain moved while its last level's transfer was still writing, and the write landed in a
+freed block: the heap keeps its bookkeeping in its free blocks, and the next allocation or free
+that read it broke. The first room with mipmapped textures did that dozens of times.
+
+Now each level after the first waits for the transfers before it (`sceGxmTransferFinish`: small
+copies all, a few microseconds a level), so nothing is writing when the chain moves; and the levels
+under 16x16 are left out (one or two 4x4 blocks wide, a transfer of their own each, nothing seen of
+them). The snowflake keeps three levels: 64 (blanked), 32 and 16. The first four chains uploaded
+log a line ("BC1 texture WxH uploaded with N levels").
+
+What to look for in test 11: no crash at the first room; those four lines in the log; then test
+10's list (snow in Phendrana, steadier distant surfaces, nothing drawn wrong).
+

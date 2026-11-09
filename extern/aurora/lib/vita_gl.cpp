@@ -421,17 +421,33 @@ public:
       const auto width = static_cast<GLsizei>(m_width);
       const auto height = static_cast<GLsizei>(m_height);
       if (m_format == TexelFormat::BC1) {
-        // Level by level from the first: vitaGL grows the texture's mip chain for each.
+        // Level by level from the first: vitaGL grows the texture's mip chain for each, moving it
+        // (sceClibMspaceRealloc) where it cannot grow in place, and copies a power-of-two level in
+        // with a GPU transfer it does not wait for. A chain moved while that transfer still wrote
+        // left the write landing in a freed block of vitaGL's VRAM heap, whose bookkeeping lives in
+        // its free blocks: the heap broke (0.42.0 test 10, a data abort in SceLibKernel's heap code
+        // on the render worker at the first room with mipmapped textures). So each level after the
+        // first waits for the transfers before it, small copies all.
         size_t offset = 0;
+        uint32_t uploaded = 0;
         for (uint32_t level = 0; level < m_levels; ++level) {
           const auto size = static_cast<size_t>(bc1_level_bytes(level));
           if (offset + size > m_cpu.size()) {
             break;
           }
+          if (level != 0) {
+            sceGxmTransferFinish();
+          }
           glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
                                  std::max(width >> level, 1), std::max(height >> level, 1), 0,
                                  static_cast<GLsizei>(size), m_cpu.data() + offset);
           offset += size;
+          ++uploaded;
+        }
+        static int sChainsLogged = 0;
+        if (uploaded > 1 && sChainsLogged < 4) {
+          ++sChainsLogged;
+          Log.info("BC1 texture {}x{} uploaded with {} levels ({} bytes)", m_width, m_height, uploaded, offset);
         }
       } else {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
