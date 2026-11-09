@@ -2193,9 +2193,9 @@ wrong on far surfaces (noise there would mean a level uploaded wrong).
 
 ## 0.42.0 test 11: the mip levels uploaded one transfer at a time
 
-**Test 10** (6b6386f, the user's log and dump of Nov 8) crashed at the first room it loaded, a few
-minutes in: the log stops at a new pipeline after the save loaded, and the front end before it had
-drawn no BC1 texture at all (its textures are RGBA8). The dump (`psp2core-1794190372-…`, cut short:
+**Test 10** (6b6386f, the user's log and dump of Nov 8) crashed at the first room it loaded, under
+a minute in (39 profile windows): the log stops at a new pipeline just as the game's own ticks and
+draws begin, and the front end before it had drawn no BC1 texture at all (its textures are RGBA8). The dump (`psp2core-1794190372-…`, cut short:
 no stacks) has one stopped thread, the render worker (`0x400102fd`), on a data abort inside
 SceLibKernel, with a register at `0x62000010`: the start of vitaGL's VRAM heap. Its other threads
 were where they wait (the game in `C_MTXConcat` under `CGraphics::SetViewMatrix`, simply running).
