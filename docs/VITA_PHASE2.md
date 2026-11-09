@@ -2356,3 +2356,46 @@ right (the HUD, the visor effects, the map, the pause screen, reflections, the m
 shadow, the thermal and X-ray visors, all of which use copies); with dynamic resolution, its
 `port: dynamic resolution` lines and the Video page's "GPU ... of ... ms a frame".
 
+**Test 14** (4d1ac59, the user's log of Nov 9) played at the screen's size throughout (no scale
+was set). The GPU's busy time came out at 5 to 19 ms a frame in most stretches and 34 to 42 ms in
+the heaviest, 16% to 59% of the time: the GPU set the pace nowhere. Magmoor Caverns, the user's
+"slow" (and not the lava fix's doing), ran 12 to 18 FPS in 188 of its 265 windows, bound by the
+game thread: 67 ms a frame, the main thread busy 65.8 of them and the FIFO thread 38. The ticks
+took 37 ms (2.5 a frame), and in them `SM: Think` 21 ms, of which `CPuffer` 11.5 (19 Thinks a
+frame at 601 us each: some 7.6 Puffers a tick). Their cost is particles:
+`CAnimData::AdvanceParticles` 13.8 ms (33 calls), `CElementGen::Update` 14.7 ms (276 updates),
+and the `[particles]` line's 311 system steps a frame for only 1,316 particles, some 45 us a step
+whatever its particles. A Puffer has fourteen gas jets (`GasJet01`-`14`, effects on its model),
+and turns on only those facing away from where it moves (all of them off when it stands), but
+`CParticleDatabase::UpdateParticleGenDB` updates every effect of a model, on or off, and a jet's
+generator stepped in full every tick with nothing in it.
+
+## 0.42.0 test 15: idle particle systems, and the system keyboard's text
+
+**Idle systems.** `CElementGen::PortIsIdle` finds a system with nothing to step: no particle and
+none to come this update (no emission, or past its lifetime, or spawned by code alone), no child
+or per-particle system, no light, no shutdown countdown, no translation element to evaluate, no
+motion blur, no Remastered frame; and a description that spawns no child at a frame (ICTS, IITS,
+KSSM, IDTS, SSWH, SELC, the extra swooshes, Remastered's spawns), varies no system value, scale or
+time scale, moves no emitter and has no fixed bounds. Such a system's steps change nothing but its
+time and draw no random number, so `PortIdleUpdate` does what `InternalUpdate` would leave: the
+same frame and time arithmetic step by step, the bounds and particle count reset, the frame the
+children's update notes (`x84_prevFrame`), the port's step bookkeeping and the bounds built; then
+`Update` goes on as before (KILL). The `[particles]` line counts those steps ("of systems with
+nothing to step").
+
+**The system keyboard.** The user: typing in the Port menu's fields (a suit colour's hex, the
+teleport section's room filter) "doesn't register". The bridge (`UpdateSystemKeyboard` in
+`ui_common.cpp`) put the keyboard's text in as key presses (Ctrl+A, the characters, Enter), and
+took it only when the keyboard closed with its Enter key. Now its text stands however the keyboard
+closed (Enter or its close button, as SDL's own Vita keyboard takes it), and goes straight into the
+field's edit buffer (`ImGuiInputTextState`), filtered as the field's flags filter typing (decimal,
+hexadecimal, upper case, no blanks), before an Enter that closes the field: ImGui copies the edit
+buffer to the field's own before it lets the field go. The log has a line for each keyboard ("the
+system keyboard closed (Enter or its close button)", "port: system keyboard closed with its text
+(N bytes)", or that the field had closed meanwhile). And the room list no longer opens the keyboard
+the moment it opens (as on Android): select its filter to type.
+
+What to look for in test 15: Magmoor's frame rate (and the `[particles]` lines' share of idle
+steps; `CPuffer`'s Think in `[think]`); typing in the menu's fields taking.
+

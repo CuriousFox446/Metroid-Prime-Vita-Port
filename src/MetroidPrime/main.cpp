@@ -1385,10 +1385,11 @@ int CMain::RsMain(int argc, const char* const* argv) {
                              dl.rebuilds);
             }
             {
-              uint steps, particles, created;
-              CElementGen::PortTakeUpdateStats(steps, particles, created);
-              PortLog::Write("[particles] per frame: %.1f system steps, %.1f particles updated, %.1f created\n",
-                             steps / frames, particles / frames, created / frames);
+              uint steps, idle, particles, created;
+              CElementGen::PortTakeUpdateStats(steps, idle, particles, created);
+              PortLog::Write("[particles] per frame: %.1f system steps (%.1f of systems with nothing to step), %.1f "
+                             "particles updated, %.1f created\n",
+                             steps / frames, idle / frames, particles / frames, created / frames);
             }
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });

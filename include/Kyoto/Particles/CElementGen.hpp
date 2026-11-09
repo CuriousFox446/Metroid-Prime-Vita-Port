@@ -217,8 +217,9 @@ public:
   static void ShutDown();
 #ifdef TARGET_PC
   // For the Vita profile's [particles] line: system steps (one a generator per 60 Hz frame
-  // it advances), particles updated and particles created since the last call.
-  static void PortTakeUpdateStats(uint& steps, uint& particles, uint& created);
+  // it advances), of them those of systems with nothing to step (PortIdleUpdate), particles
+  // updated and particles created since the last call.
+  static void PortTakeUpdateStats(uint& steps, uint& idle, uint& particles, uint& created);
 #endif
 
   void SetGlobalOrientAndTrans(const CTransform4f& xf);
@@ -620,6 +621,10 @@ public:
   float PortSortBias() const { return x28_loadedGenDesc->xPortSortBias; }
 
 private:
+  // A system with nothing to step this update, and its update: InternalUpdate's outcome for it,
+  // without its steps (CElementGen.cpp).
+  bool PortIsIdle() const;
+  bool PortIdleUpdate(double dt);
   bool PortHasMover() const;
   void PortInitMover();
   void PortEvalSys(bool init);

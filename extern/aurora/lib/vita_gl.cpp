@@ -3280,7 +3280,15 @@ bool update_keyboard() noexcept {
   SceImeDialogResult result{};
   sceImeDialogGetResult(&result);
   sceImeDialogTerm();
-  k.state = result.button == SCE_IME_DIALOG_BUTTON_ENTER ? Keyboard::State::Confirmed : Keyboard::State::Cancelled;
+  // Its text stands however it was closed, with Enter or its close button, as SDL's own Vita
+  // keyboard takes it (SDL_vitavideo.c): only a dialog that ended without one gives nothing.
+  const bool withText = result.button == SCE_IME_DIALOG_BUTTON_ENTER || result.button == SCE_IME_DIALOG_BUTTON_CLOSE;
+  Log.info("the system keyboard closed ({}, result {:#x})",
+           result.button == SCE_IME_DIALOG_BUTTON_ENTER   ? "Enter"
+           : result.button == SCE_IME_DIALOG_BUTTON_CLOSE ? "its close button"
+                                                          : "no button",
+           static_cast<uint32_t>(result.result));
+  k.state = withText ? Keyboard::State::Confirmed : Keyboard::State::Cancelled;
   return false;
 }
 } // namespace

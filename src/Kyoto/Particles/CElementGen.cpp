@@ -922,6 +922,7 @@ void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
 #ifdef TARGET_PC
 // PortTakeUpdateStats: counted on the game thread, where particles update.
 static uint sPortStatSteps = 0;
+static uint sPortStatIdleSteps = 0;
 static uint sPortStatParticles = 0;
 static uint sPortStatCreated = 0;
 #endif
@@ -987,7 +988,7 @@ const bool CElementGen::Update(double dt) {
   }
 
 #ifdef TARGET_PC
-  const bool ret = InternalUpdate(dt);
+  const bool ret = PortIsIdle() ? PortIdleUpdate(dt) : InternalUpdate(dt);
   // KILL (0x24620c), after the tick: true sets +0xa0 bit 0 (deletable) and clears +0x208 bit 3, so
   // the deletable check that follows sets bit 1 too.
   if (x28_loadedGenDesc->xPortKill) {
@@ -1181,11 +1182,91 @@ bool CElementGen::InternalUpdate(double dt) {
 }
 
 #ifdef TARGET_PC
-void CElementGen::PortTakeUpdateStats(uint& steps, uint& particles, uint& created) {
+// A system with nothing to step: no particle and none to come this update (no emission, or past
+// its lifetime, or spawned by code alone), no child or per-particle system, no light, no shutdown
+// countdown, no translation element to evaluate (POFS/SSPO/SEPO animated), no motion blur, no
+// Remastered frame; and a description that spawns no child at a frame (ICTS, IITS, KSSM, IDTS,
+// SSWH, SELC, extra swooshes, Remastered's spawns), varies no system value, scale or time scale,
+// moves no emitter and has no fixed bounds. Its steps change nothing but its time, which
+// PortIdleUpdate keeps as InternalUpdate would; no random number is drawn by them.
+// Puffers have fourteen gas jets each, most off and empty at any moment, and every one was stepped
+// in full every tick (0.42.0 test 14: some 310 system steps a frame in Magmoor, ~45 us each).
+bool CElementGen::PortIsIdle() const {
+  if (!x30_particles.empty() || !x290_activePartChildren.empty() || !xPortPsps.empty() ||
+      !xPortKssmChildren.empty()) {
+    return false;
+  }
+  const CGenDescription& d = *x28_loadedGenDesc;
+  if (x88_particleEmission && x74_curFrame < x268_PSLT && !d.xPortCodeSpawn) {
+    return false;
+  }
+  if (x308_lightType != kLT_None || xPortShutdownCountdown > 0 || x26c_24_translationDirty || x26c_30_MBLR ||
+      xPortIntFrame || !xPortMoverInit) {
+    return false;
+  }
+  if (d.x8_PSTS != nullptr || d.x78_ICTS || d.x90_IDTS || d.xa4_IITS || d.xbc_KSSM.get() != nullptr || d.xc0_SSWH ||
+      d.xd8_SELC || !d.xPortExtraSwooshes.empty() || d.xPortIrnd || d.xPortVfx || d.xPortFixedBounds || d.xPortSys ||
+      d.xPortIntScale != nullptr || d.xPortSpawnScale != nullptr || d.xPortXfmd == kPortXfmdSystem ||
+      d.xPortPemv != 0 || d.xPortKssm || PortHasMover()) {
+    return false;
+  }
+  return true;
+}
+
+// InternalUpdate for an idle system (PortIsIdle): its steps one by one in the same arithmetic,
+// each resetting the bounds gathered and the particle count, noting its frame as the children's
+// update does (x84_prevFrame) and moving to the next frame; then what follows the steps.
+bool CElementGen::PortIdleUpdate(double dt) {
+  int frameUpdateCount = 0;
+  double t = x74_curFrame * kTickTime;
+  const double dt1 = close_enough(dt, kTickTime) ? kTickTime : dt;
+  x78_curSeconds += dt1;
+  while (t < x78_curSeconds && !close_enough(t, x78_curSeconds)) {
+    x84_prevFrame = x74_curFrame;
+    ++frameUpdateCount;
+    t += kTickTime;
+    ++x74_curFrame;
+  }
+  if (frameUpdateCount != 0) {
+    x2d4_aabbMin = CVector3f(FLT_MAX, FLT_MAX, FLT_MAX);
+    x2e0_aabbMax = CVector3f(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    x2ec_maxSize = 0.0f;
+    x25c_activeParticleCount = 0;
+  }
+  if (close_enough(t, x78_curSeconds)) {
+    x78_curSeconds = t;
+    x80_timeDeltaScale = 1.0f;
+  } else {
+    // UpdateChildParticleSystems for the rest of the time: with no child, it notes the frame.
+    if (!close_enough(dt1 - (double)frameUpdateCount * kTickTime, 0.0, 1e-7)) {
+      x84_prevFrame = x74_curFrame;
+    }
+    x80_timeDeltaScale = 1.0f - static_cast< float >((t - x78_curSeconds) / kTickTime);
+  }
+  if (frameUpdateCount == 1 && x80_timeDeltaScale == 1.0f) {
+    xPortStepGeneration = CActor::PortTickGeneration();
+  } else if (frameUpdateCount != 0 || x80_timeDeltaScale != 1.0f) {
+    xPortStepGeneration = 0;
+  }
+  if (frameUpdateCount != 0) {
+    xPortPrevSpawnTranslation = xPortSpawnTranslation;
+    xPortPrevSpawnGeneration = xPortSpawnGeneration;
+    xPortSpawnTranslation = xdc_translation;
+    xPortSpawnGeneration = frameUpdateCount == 1 ? xPortStepGeneration : 0;
+  }
+  BuildParticleSystemBounds();
+  x2cc = 0.f;
+  sPortStatSteps += static_cast< uint >(frameUpdateCount);
+  sPortStatIdleSteps += static_cast< uint >(frameUpdateCount);
+  return false;
+}
+
+void CElementGen::PortTakeUpdateStats(uint& steps, uint& idle, uint& particles, uint& created) {
   steps = sPortStatSteps;
+  idle = sPortStatIdleSteps;
   particles = sPortStatParticles;
   created = sPortStatCreated;
-  sPortStatSteps = sPortStatParticles = sPortStatCreated = 0;
+  sPortStatSteps = sPortStatIdleSteps = sPortStatParticles = sPortStatCreated = 0;
 }
 #endif
 
