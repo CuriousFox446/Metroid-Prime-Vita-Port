@@ -10,6 +10,7 @@
 #include "vita_tev.hpp"
 
 #include <dolphin/gx/GXCommandList.h>
+#include <fmt/format.h>
 
 #include <tracy/Tracy.hpp>
 #include <xxhash.h>
@@ -292,6 +293,9 @@ struct Stats {
   u32 indirectMaterials = 0;
   u32 indirectUnsupported = 0;
   u32 indirectWithoutCopy = 0;
+  // Materials worked out, indirect or not, whose layout no program can draw: drawn fixed-function,
+  // which has no TEV (Magmoor's lava drew black so before emboss coordinates, 0.42.0 test 13).
+  u32 layoutUnsupported = 0;
   // Draws recorded with a generated program (vita_tev.hpp), and their constant arrays (vertex and
   // fragment) put in the frame's rows, and pointed at the last ones as they repeated them.
   u32 withProgram = 0;
@@ -1362,10 +1366,12 @@ int resolve_units(vita_gl::TexUnit units[kTexUnits], const TcgConfig* tcgs[kTexU
   if (layout.supported) {
     // The slots past the mesh's sets are made from the position or the normal (tev_layout).
     for (int c = 0; c < std::min(layout.coordCount, kTexCoords); ++c) {
-      // A set made from the position or the normal has no coordinates of its own in the mesh.
+      // A set made from the position or the normal has no coordinates of its own in the mesh, nor
+      // an emboss one (whose src GX_TG_TEX0 it does not read).
       const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
-      texAttrs[c] = tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 ? static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))
-                                                                  : kNoTexAttr;
+      texAttrs[c] = !emboss_texgen(tcg) && tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7
+                        ? static_cast<u8>(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))
+                        : kNoTexAttr;
     }
   }
   int unitCount = 0;
@@ -1517,6 +1523,12 @@ PipelineKey pipeline_key() noexcept {
     usedMaps |= ind.texMapId < MaxTextures ? 1u << ind.texMapId : 0;
     usedCoords |= ind.texCoordId < MaxTexCoord ? 1u << ind.texCoordId : 0;
   }
+  // An emboss coordinate's source too, read or not (vita_tev.hpp, emboss_texgen).
+  for (u32 i = 0; i < MaxTexCoord; ++i) {
+    if ((usedCoords & (1u << i)) != 0 && emboss_texgen(s.tcgs[i]) && s.tcgs[i].embossSrc < MaxTexCoord) {
+      usedCoords |= 1u << s.tcgs[i].embossSrc;
+    }
+  }
   PipelineKey key;
   key.usedMaps = usedMaps;
   TcgConfig coords[MaxTexCoord]{};
@@ -1526,7 +1538,7 @@ PipelineKey pipeline_key() noexcept {
     }
     coords[i] = s.tcgs[i];
     const GXTexGenSrc src = s.tcgs[i].src;
-    if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7) {
+    if (!emboss_texgen(s.tcgs[i]) && src >= GX_TG_TEX0 && src <= GX_TG_TEX7) {
       key.texSources |= 1u << (src - GX_TG_TEX0);
     }
   }
@@ -1621,6 +1633,32 @@ u64 material_hash(u8 changed, u64 generation, bool& readsCopy) noexcept {
   return XXH3_64bits(words, sizeof(words));
 }
 
+// The first materials a program cannot draw, for the log: each stage's coordinate generator (GX's
+// GXTexGenType and GXTexGenSrc numbers; an emboss one's source set) and texture.
+void log_unsupported_layout() noexcept {
+  static int sLogged = 0;
+  if (sLogged >= 6) {
+    return;
+  }
+  ++sLogged;
+  const GXState& s = g_gxState;
+  std::string stages;
+  for (u32 i = 0; i < std::min<u32>(s.numTevStages, MaxTevStages); ++i) {
+    const TevStage& stage = s.tevStages[i];
+    if (stage.texCoordId >= MaxTexCoord) {
+      stages += fmt::format(" {}: none;", i);
+      continue;
+    }
+    const TcgConfig& tcg = s.tcgs[stage.texCoordId];
+    stages += fmt::format(" {}: set {} (type {}, src {}{}) map {};", i, static_cast<int>(stage.texCoordId),
+                          static_cast<int>(tcg.type), static_cast<int>(tcg.src),
+                          emboss_texgen(tcg) ? fmt::format(", from set {}", tcg.embossSrc) : std::string{},
+                          static_cast<int>(stage.texMapId));
+  }
+  Log.info("a material no program can draw, drawn fixed-function ({} stages, {} indirect, {} generators):{}",
+           static_cast<int>(s.numTevStages), static_cast<int>(s.numIndStages), static_cast<int>(s.numTexGens), stages);
+}
+
 // The Material for the current GX state: the last draw's while none of the registers it reads has
 // been written since, else from the cache, else worked out.
 const Material& current_material() noexcept {
@@ -1670,6 +1708,10 @@ const Material& current_material() noexcept {
   const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
   sStats.indirectMaterials += layout.indirect ? 1 : 0;
   sStats.indirectUnsupported += layout.indirect && !layout.supported ? 1 : 0;
+  if (!layout.supported && tev_enabled()) {
+    ++sStats.layoutUnsupported;
+    log_unsupported_layout();
+  }
   material.unitCount = resolve_units(material.units, material.tcgs, material.texAttrs, layout);
   if (material.unitCount < 0) {
     sStats.indirectWithoutCopy += layout.indirect && layout.supported ? 1 : 0;
@@ -2608,9 +2650,10 @@ void log_stats() noexcept {
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
   Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
-           "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}",
+           "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}; "
+           "{} materials worked out in all with a layout a program cannot draw",
            s.indirectMaterials, s.indirectUnsupported + s.indirectWithoutCopy, s.indirectUnsupported,
-           s.indirectWithoutCopy, tev_indirect_program_count(), tev_program_count());
+           s.indirectWithoutCopy, tev_indirect_program_count(), tev_program_count(), s.layoutUnsupported);
   Log.info("immediate draws: {} drawn, {} lines ({} of them GX's wider than a pixel, drawn a pixel wide), {} "
            "points, {} not decodable; list calls with positions made each frame: {} decoded and drawn, {} not "
            "decodable",

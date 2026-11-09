@@ -4,13 +4,15 @@
 // compile them here (precompile.py) rather than on the Vita. Built by build.sh.
 //
 //   precompile_sources <materials.bin> <out dir>
-//   precompile_sources --self-test
+//   precompile_sources --self-test [lava [out dir]]
 //
 // Writes <key>.vcg and <key>.fcg (the vertex and fragment programs; key as the card names a
 // program's binary, 16 hex digits) for each program the records make, once each, and manifest.txt
 // (one line a program: key, the two sources' lengths). Records of another build's layout, and
 // materials no program draws, are counted and left out. --self-test makes a textured, vertex
-// coloured, fogged material's record and prints the program it makes again.
+// coloured, fogged material's record and prints the program it makes again; with `lava`, the
+// bump-mapped lava's (CFluidPlaneCPU::RenderSetup, kFT_Lava: an emboss coordinate), and with an out
+// dir its sources and manifest there too, for precompile.py to compile.
 
 #include "gx/vita_tev.hpp"
 
@@ -51,22 +53,80 @@ bool write_file(const std::filesystem::path& path, const std::string& text) {
   return static_cast<bool>(out);
 }
 
-int self_test() {
+// The bump-mapped lava's state as CFluidPlaneCPU::RenderSetup leaves it (kFT_Lava with a bump map):
+// three textures from the position, the bump map from the position and again through an emboss
+// coordinate (GX_TG_BUMP3 from set 3), the emboss difference in register 0 scaling the colour.
+void lava_state(aurora::gx::GXState& s) {
+  using namespace aurora::gx;
+  s.numTevStages = 6;
+  s.numTexGens = 5;
+  s.numChans = 2;
+  const auto stage = [&s](int i, TevPass<GXTevColorArg, GX_CC_ZERO> color, GXTexCoordID coord, GXTexMapID map,
+                          GXChannelID channel) -> TevStage& {
+    TevStage& st = s.tevStages[i];
+    st.colorPass = color;
+    st.texCoordId = coord;
+    st.texMapId = map;
+    st.channelId = channel;
+    return st;
+  };
+  stage(0, {GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_RASC}, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0).kcSel =
+      GX_TEV_KCSEL_K0;
+  stage(1, {GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_RASC}, GX_TEXCOORD1, GX_TEXMAP1, GX_COLOR0A0);
+  stage(2, {GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_CPREV}, GX_TEXCOORD2, GX_TEXMAP2, GX_COLOR_NULL);
+  TevStage& half = stage(3, {GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_HALF}, GX_TEXCOORD3, GX_TEXMAP3, GX_COLOR_NULL);
+  half.colorOp.clamp = false;
+  half.colorOp.outReg = GX_TEVREG0;
+  TevStage& sub = stage(4, {GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_C0}, GX_TEXCOORD4, GX_TEXMAP3, GX_COLOR_NULL);
+  sub.colorOp.op = GX_TEV_SUB;
+  sub.colorOp.outReg = GX_TEVREG0;
+  TevStage& last = stage(5, {GX_CC_ZERO, GX_CC_CPREV, GX_CC_C0, GX_CC_ZERO}, GX_TEXCOORD_NULL, GX_TEXMAP_NULL,
+                         GX_COLOR_NULL);
+  last.colorOp.scale = GX_CS_SCALE_2;
+  last.alphaPass = {GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST};
+  last.kaSel = GX_TEV_KASEL_K0_A;
+  for (int i = 0; i < 4; ++i) {
+    s.tcgs[i].type = GX_TG_MTX2x4;
+    s.tcgs[i].src = GX_TG_POS;
+  }
+  // As GXSetTexCoordGen2 writes an emboss generator: its src GX_TG_TEX0 (row 5), read from set 3.
+  s.tcgs[4].type = GX_TG_BUMP3;
+  s.tcgs[4].src = GX_TG_TEX0;
+  s.tcgs[4].embossSrc = 3;
+  // Channel 0 lit by no light (its raster colour black), channel 1 by the bump light (no stage
+  // reads it).
+  for (const int part : {GX_COLOR0, GX_ALPHA0, GX_COLOR1, GX_ALPHA1}) {
+    ColorChannelConfig& cfg = s.colorChannelConfig[part];
+    cfg.lightingEnabled = true;
+    cfg.matSrc = part == GX_COLOR0 || part == GX_ALPHA0 ? GX_SRC_VTX : GX_SRC_REG;
+    cfg.ambSrc = GX_SRC_REG;
+    cfg.diffFn = GX_DF_CLAMP;
+    cfg.attnFn = GX_AF_SPOT;
+  }
+  s.colorChannelState[GX_COLOR1].lightMask.set(3);
+  s.colorChannelState[GX_ALPHA1].lightMask.set(3);
+}
+
+int self_test(bool lava, const char* outDir) {
   using namespace aurora::gx;
   GXState& s = g_gxState;
-  s.numTevStages = 1;
-  TevStage& stage = s.tevStages[0];
-  stage.colorPass = {GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO};
-  stage.alphaPass = {GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO};
-  stage.texCoordId = GX_TEXCOORD0;
-  stage.texMapId = GX_TEXMAP0;
-  stage.channelId = GX_COLOR0A0;
-  s.tcgs[0].type = GX_TG_MTX2x4;
-  s.tcgs[0].src = GX_TG_TEX0;
-  s.vtxDesc[GX_VA_TEX0] = GX_DIRECT;
-  s.colorChannelConfig[GX_COLOR0].matSrc = GX_SRC_VTX;
-  s.colorChannelConfig[GX_ALPHA0].matSrc = GX_SRC_VTX;
-  s.fog.type = GX_FOG_PERSP_LIN;
+  if (lava) {
+    lava_state(s);
+  } else {
+    s.numTevStages = 1;
+    TevStage& stage = s.tevStages[0];
+    stage.colorPass = {GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO};
+    stage.alphaPass = {GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO};
+    stage.texCoordId = GX_TEXCOORD0;
+    stage.texMapId = GX_TEXMAP0;
+    stage.channelId = GX_COLOR0A0;
+    s.tcgs[0].type = GX_TG_MTX2x4;
+    s.tcgs[0].src = GX_TG_TEX0;
+    s.vtxDesc[GX_VA_TEX0] = GX_DIRECT;
+    s.colorChannelConfig[GX_COLOR0].matSrc = GX_SRC_VTX;
+    s.colorChannelConfig[GX_ALPHA0].matSrc = GX_SRC_VTX;
+    s.fog.type = GX_FOG_PERSP_LIN;
+  }
   const std::vector<uint8_t> record = vita::tev_capture_material();
   // What the record stands in for is put back after: clear it, so a match shows the record made it.
   s = GXState{};
@@ -79,16 +139,34 @@ int self_test() {
   }
   std::printf("record %zu bytes, key %016llx\n-- vertex --\n%s-- fragment --\n%s", record.size(),
               static_cast<unsigned long long>(key), vertexSource.c_str(), fragmentSource.c_str());
+  if (outDir != nullptr) {
+    char name[17];
+    std::snprintf(name, sizeof(name), "%016llx", static_cast<unsigned long long>(key));
+    const std::filesystem::path dir{outDir};
+    std::filesystem::create_directories(dir);
+    std::ofstream manifest{dir / "manifest.txt"};
+    manifest << name << ' ' << vertexSource.size() << ' ' << fragmentSource.size() << '\n';
+    if (!write_file(dir / (std::string{name} + ".vcg"), vertexSource) ||
+        !write_file(dir / (std::string{name} + ".fcg"), fragmentSource) || !manifest) {
+      std::fprintf(stderr, "cannot write the sources to %s\n", outDir);
+      return 1;
+    }
+  }
   return s.numTevStages == 0 && s.fog.type == GX_FOG_NONE ? 0 : 1;
 }
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc == 2 && std::strcmp(argv[1], "--self-test") == 0) {
-    return self_test();
+  if (argc >= 2 && std::strcmp(argv[1], "--self-test") == 0) {
+    const bool lava = argc >= 3 && std::strcmp(argv[2], "lava") == 0;
+    if (argc > (lava ? 4 : 2)) {
+      std::fprintf(stderr, "usage: %s --self-test [lava [out dir]]\n", argv[0]);
+      return 2;
+    }
+    return self_test(lava, lava && argc == 4 ? argv[3] : nullptr);
   }
   if (argc != 3) {
-    std::fprintf(stderr, "usage: %s <materials.bin> <out dir> | --self-test\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <materials.bin> <out dir> | --self-test [lava [out dir]]\n", argv[0]);
     return 2;
   }
   std::ifstream in{argv[1], std::ios::binary};

@@ -318,6 +318,16 @@ bool projective(const TcgConfig& tcg) noexcept { return tcg.type == GX_TG_MTX3x4
 
 const char* coord_type(const TcgConfig& tcg) noexcept { return projective(tcg) ? "float3" : "float2"; }
 
+// A coordinate generator's slot in the layout, or -1.
+int slot_of(const TevLayout& layout, u32 id) noexcept {
+  for (int c = 0; c < layout.coordCount; ++c) {
+    if (layout.coords[c] == id) {
+      return c;
+    }
+  }
+  return -1;
+}
+
 // A coordinate slot's coordinates in the fragment program (a projective set's divided).
 std::string fragment_uv(const TevLayout& layout, int coord) {
   return projective(g_gxState.tcgs[layout.coords[coord]]) ? fmt::format("(vUv{0}.xy / vUv{0}.z)", coord)
@@ -674,6 +684,30 @@ std::string texgen_input(const TcgConfig& tcg, int c) {
   return fmt::format("float4(aUv{}, 1.0, 1.0)", c);
 }
 
+// The vertex program's emboss coordinate in slot `c` (emboss_texgen), as GX makes one and Aurora's
+// shaders do (shader.cpp): its source's coordinates plus its light's direction (from the view-space
+// position `mv`; the light's position in row `lightRow`) along the vertex's tangent and binormal,
+// both through the normal matrix (rows from `nrmRow`) and not normalised: the lava scales its normal
+// matrix by its bump scale for this. A vertex here has its normal alone, so the binormal and the
+// tangent are made from it as the fluids make theirs (CFluidPlaneRender's GX_NRM_NBT vertices: the
+// normal (x, y, z), then (x, z, -y) and (z, y, -x)), the only ones GX_TG_BUMP draws in this game.
+std::string emboss_code(const TevLayout& layout, int c, int lightRow, int nrmRow) {
+  const TcgConfig& tcg = g_gxState.tcgs[layout.coords[c]];
+  const int source = slot_of(layout, tcg.embossSrc);
+  const std::string from = projective(g_gxState.tcgs[tcg.embossSrc]) ? fmt::format("(tc{0}.xy / tc{0}.z)", source)
+                                                                       : fmt::format("tc{}.xy", source);
+  return fmt::format("  {{ // coordinate {0}: coordinate {1}'s, embossed by light {2}\n"
+                     "    float3 ldir = normalize(uVert[{3}].xyz - mv);\n"
+                     "    float4 bn = float4(aNrm.x, aNrm.z, -aNrm.y, 0.0);\n"
+                     "    float4 tn = float4(aNrm.z, aNrm.y, -aNrm.x, 0.0);\n"
+                     "    float3 b = float3(dot(uVert[{4}], bn), dot(uVert[{5}], bn), dot(uVert[{6}], bn));\n"
+                     "    float3 t = float3(dot(uVert[{4}], tn), dot(uVert[{5}], tn), dot(uVert[{6}], tn));\n"
+                     "    vUv{0} = {7} + float2(dot(ldir, t), dot(ldir, b));\n"
+                     "  }}\n",
+                     c, source, static_cast<int>(tcg.type - GX_TG_BUMP0), lightRow, nrmRow, nrmRow + 1, nrmRow + 2,
+                     from);
+}
+
 // The program for the current GX state with `layout`: its sources, `info` (all but its Program) and
 // the key naming it (its binary on the card too). Made by tev_program, and by the warm-up for the
 // material records of the sessions before (tev_warm_up_step), which make none returning
@@ -737,6 +771,12 @@ MaterialRecord capture_material(size_t& length) noexcept {
   for (u32 i = 0; i < r.numIndStages; ++i) {
     r.indStages[i] = s.indStages[i];
     usedCoords |= s.indStages[i].texCoordId < MaxTexCoord ? 1u << s.indStages[i].texCoordId : 0;
+  }
+  // An emboss coordinate's source too (one a stage reads itself or not).
+  for (u32 i = 0; i < MaxTexCoord; ++i) {
+    if ((usedCoords & (1u << i)) != 0 && emboss_texgen(s.tcgs[i]) && s.tcgs[i].embossSrc < MaxTexCoord) {
+      usedCoords |= 1u << s.tcgs[i].embossSrc;
+    }
   }
   for (u32 i = 0; i < MaxTexCoord; ++i) {
     if ((usedCoords & (1u << i)) == 0) {
@@ -841,9 +881,9 @@ TevLayout tev_layout() noexcept {
   layout.indCoord.fill(-1);
   layout.indMap.fill(-1);
   // A coordinate generator's slot (taken at its first use), or -1 where a program cannot make its
-  // coordinates (colours, binormals, another generator or a bump map as the source: not yet) or
-  // the slots are full.
-  const auto coord_slot = [&s, &layout](u32 id) -> int {
+  // coordinates (colours, binormals, another generator as the source but an emboss one's: not
+  // yet) or the slots are full.
+  const auto plain_slot = [&s, &layout](u32 id) -> int {
     if (id >= MaxTexCoord) {
       return -1;
     }
@@ -868,8 +908,8 @@ TevLayout tev_layout() noexcept {
     // A set from a vertex attribute needs one of the mesh's sets: it takes the first of those slots
     // made from the position or the normal, which moves to the new slot.
     for (int c = 0; c < kTexCoords; ++c) {
-      const GXTexGenSrc src = s.tcgs[layout.coords[c]].src;
-      if (src == GX_TG_POS || src == GX_TG_NRM) {
+      const TcgConfig& other = s.tcgs[layout.coords[c]];
+      if (!emboss_texgen(other) && (other.src == GX_TG_POS || other.src == GX_TG_NRM)) {
         std::swap(layout.coords[c], layout.coords[slot]);
         for (s8& coord : layout.stageCoord) {
           coord = coord == c ? static_cast<s8>(slot) : coord;
@@ -882,6 +922,26 @@ TevLayout tev_layout() noexcept {
     }
     --layout.coordCount;
     return -1;
+  };
+  // An emboss coordinate (emboss_texgen) takes its source's slot first: one made from the position,
+  // the normal or a vertex attribute, not another emboss one. The program makes it after them all.
+  const auto coord_slot = [&s, &layout, &plain_slot](u32 id) -> int {
+    if (id >= MaxTexCoord || !emboss_texgen(s.tcgs[id])) {
+      return plain_slot(id);
+    }
+    for (int c = 0; c < layout.coordCount; ++c) {
+      if (layout.coords[c] == id) {
+        return c;
+      }
+    }
+    const u32 source = s.tcgs[id].embossSrc;
+    if (source >= MaxTexCoord || emboss_texgen(s.tcgs[source]) || plain_slot(source) < 0 ||
+        layout.coordCount == kProgramCoords) {
+      return -1;
+    }
+    const int slot = layout.coordCount++;
+    layout.coords[slot] = static_cast<GXTexCoordID>(id);
+    return slot;
   };
   const auto map_slot = [&layout](u32 id) -> int {
     if (id >= MaxTextures) {
@@ -956,8 +1016,10 @@ const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha) noexc
   for (int c = 0; c < layout.coordCount; ++c) {
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
+    // An emboss coordinate by its source's slot too.
+    const u32 embossed = emboss_texgen(tcg) ? static_cast<u32>(slot_of(layout, tcg.embossSrc) + 1) : 0;
     fixed[kCoordKeys + c] = (static_cast<u32>(tcg.type) + 1) | source << 8 | (tcg.normalize ? 1u : 0u) << 12 |
-                            (has_post(tcg) ? 1u : 0u) << 13;
+                            (has_post(tcg) ? 1u : 0u) << 13 | embossed << 16;
   }
   for (int part = 0; part < 4; ++part) {
     fixed[kLightKeys + part] = static_cast<u32>(program_lights(light_count(part)));
@@ -1029,9 +1091,16 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
     }
   }
   bool normals = lit;
+  bool emboss = false;
   for (int c = 0; c < layout.coordCount; ++c) {
-    normals = normals || s.tcgs[layout.coords[c]].src == GX_TG_NRM;
+    const TcgConfig& tcg = s.tcgs[layout.coords[c]];
+    normals = normals || tcg.src == GX_TG_NRM;
+    emboss = emboss || emboss_texgen(tcg);
   }
+  // An emboss coordinate's tangent and binormal are made from the normal (emboss_code), through the
+  // normal matrix, and its light's direction from the view-space position.
+  normals = normals || emboss;
+  info.matrices = lit || emboss;
 
   // uVert (vita_gl::kProgramVertexConstants, tev_vertex_rows): the projection times the position
   // matrix; the coordinate sets' matrix rows (and post-transform rows); for lighting the position
@@ -1054,11 +1123,20 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
   if (normals) {
     add(vertexParams, "float3 aNrm");
   }
+  int lightRows[kProgramCoords] = {};
   for (int c = 0; c < layout.coordCount; ++c) {
     // As GX generates a coordinate: the source times the matrix (z 1 after a 2x4 one), normalised
     // when asked, then the post-transform matrix (Aurora's shader.cpp does the same).
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const char* type = coord_type(tcg);
+    if (emboss_texgen(tcg)) {
+      // Made after every other coordinate and the matrices (emboss_code); its row is its light's
+      // position.
+      add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
+      add(fragmentParams, fmt::format("{} vUv{} : TEXCOORD{}", type, c, c));
+      lightRows[c] = row++;
+      continue;
+    }
     if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
       add(vertexParams, fmt::format("float2 aUv{}", c));
     }
@@ -1094,13 +1172,19 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
     vertexBody += "  vFog = float2(dot(uVert[2], p), dot(uVert[3], p));\n";
     add(fragmentParams, fmt::format("float2 vFog : TEXCOORD{}", fogVarying));
   }
-  if (lit) {
-    // The view-space position and normal (a zero normal stays zero), then each lit channel's lights.
+  if (info.matrices) {
+    // The view-space position and normal (a zero normal stays zero), then the emboss coordinates and
+    // each lit channel's lights.
     vertexBody += fmt::format("  float3 mv = float3(dot(uVert[{0}], p), dot(uVert[{1}], p), dot(uVert[{2}], p));\n"
                               "  float4 nn = float4(aNrm, 0.0);\n"
                               "  float3 n = float3(dot(uVert[{3}], nn), dot(uVert[{4}], nn), dot(uVert[{5}], nn));\n"
                               "  n = dot(n, n) > 1e-10 ? normalize(n) : n;\n",
                               row, row + 1, row + 2, row + 3, row + 4, row + 5);
+    for (int c = 0; c < layout.coordCount; ++c) {
+      if (emboss_texgen(s.tcgs[layout.coords[c]])) {
+        vertexBody += emboss_code(layout, c, lightRows[c], row + 3);
+      }
+    }
     row += 6;
     // The lit channels' sums go in the TEXCOORD varyings past the coordinate slots': 5 and 6 with
     // four slots or fewer, where they were, so the programs made before keep their sources.
@@ -1210,6 +1294,12 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
   int row = 4;
   for (int c = 0; c < coordCount; ++c) {
     const TcgConfig& tcg = *coords[c];
+    if (emboss_texgen(tcg)) {
+      // Its light's position, in view space (a directional light's far off: CGraphics::LoadLight).
+      std::memcpy(out[row], &s.lights[tcg.type - GX_TG_BUMP0].pos, sizeof(float[4]));
+      ++row;
+      continue;
+    }
     const float* rows = kIdentity;
     if (tcg.mtx != GX_IDENTITY) {
       // GX numbers the position matrices first, then the texture matrices, three rows apiece.
@@ -1230,11 +1320,7 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
       row += 3;
     }
   }
-  bool lit = false;
-  for (const u8 count : program.lightCounts) {
-    lit = lit || count != 0;
-  }
-  if (!lit) {
+  if (!program.matrices) {
     return row;
   }
   const PnMtx& matrices = s.pnMtx[s.currentPnMtx];

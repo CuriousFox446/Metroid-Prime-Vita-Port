@@ -4,10 +4,10 @@
 // on the FIFO thread when a material is worked out (vita_draw.cpp). A program evaluates the TEV
 // stages as GX does: colour and alpha combiners (lerp, add, subtract, compares, bias, scale,
 // clamp) over the registers, konst colours, textures and raster colours, the swap tables, the
-// indirect stages (offset coordinates, bump alpha) and the alpha compare. What it cannot do yet
-// (texture coordinates made from colours, binormals or another generator, more than eight textures
-// or seven coordinate sets, more than four of those from vertex attributes) leaves the material
-// without one, to the fixed-function draw.
+// indirect stages (offset coordinates, bump alpha), emboss coordinates and the alpha compare. What
+// it cannot do yet (texture coordinates made from colours, binormals or another generator but an
+// emboss one's, more than eight textures or seven coordinate sets, more than four of those from
+// vertex attributes) leaves the material without one, to the fixed-function draw.
 
 #include "gx.hpp"
 #include "../vita_gl.hpp"
@@ -51,6 +51,9 @@ struct TevProgram {
   // first ones in order (none: the position and normal matrices are left out too).
   std::array<bool, vita_gl::kProgramCoords> post{};
   std::array<u8, 4> lightCounts{};
+  // The position and normal matrices follow the coordinates' rows: for a lit channel, or an emboss
+  // coordinate (emboss_texgen), whose rows hold its light's position.
+  bool matrices = false;
   // It reads an indirect stage (for the log).
   bool indirect = false;
   // FIFO thread (record_draw): where its last draw's constants went among the rows of the frame
@@ -59,6 +62,13 @@ struct TevProgram {
   mutable u32 vertexAt = 0;
   mutable u32 constantsAt = 0;
 };
+
+// GX's emboss coordinates (GX_TG_BUMP0-7; the lava's bump map, CFluidPlaneCPU): another set's
+// coordinates (TcgConfig::embossSrc) moved by a light's direction along the vertex's tangent and
+// binormal. GXSetTexCoordGen2 leaves such a generator's src GX_TG_TEX0, which it does not read.
+constexpr bool emboss_texgen(const TcgConfig& tcg) noexcept {
+  return tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7;
+}
 
 // The layout of the current GX state (supported false when a program cannot draw it).
 TevLayout tev_layout() noexcept;

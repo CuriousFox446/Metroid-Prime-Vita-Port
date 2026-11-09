@@ -2257,3 +2257,41 @@ would halve the ticks at 30 Hz, but upstream calls 60 Hz "console-accurate and t
 rate": other rates "can break physics, enemy behaviour, cutscenes and scripted events". It stays at
 60 unless the user chooses otherwise.
 
+**Test 12** (4df215d, the user's log of Nov 8) ran into Magmoor Caverns. In its 300 windows at 12 to
+18 FPS the `[think]` lines put first: `CScriptPickup` 2.15 ms a frame (44.6 calls, 48 us each, for a
+Think that is little code: next to read), `CEnergyProjectile` 1.76 (192 us each), `CScriptEffect`
+1.55 (23 us each), `CExplosion` 1.06 (271 us each), `CAtomicAlpha` 0.97 (1.5 ms a call), then
+`CBabygoth`, `CPlayer`, `CParasite`, `CScriptActor` (110 calls) and `CFlickerBat`, 0.5 to 0.75 each.
+And the user found Magmoor's lava black: test 13.
+
+## 0.42.0 test 13: Magmoor's lava (emboss coordinates)
+
+The lava with a bump map (`CFluidPlaneCPU::RenderSetup`, `kFT_Lava`) is the game's one user of
+GX's emboss coordinates: a second set for the bump map, `GX_TG_BUMP3`, made from set 3 moved along
+the bump light's direction, and two stages taking the difference of the two samples (plus a half,
+unclamped, into register 0) to scale the lava's colour by twice it. The Vita's program generator had
+no emboss coordinates (`vita_tev.cpp`: "a bump map as the source: not yet"), so the whole six-stage
+material had no program and went to the fixed-function draw, which has no TEV: the vertex colour
+(the wavecaps' intensity, near zero on lava) times the first texture. Black.
+
+Emboss coordinates are made now, as GX makes them and Aurora's own shaders do (`shader.cpp`): the
+source set's coordinates plus the light's direction (from the view-space position to the light's
+position, a row of its own) dotted with the vertex's tangent and binormal, both through the normal
+matrix and not normalised (the lava scales its normal matrix by its bump scale for this). The
+Vita's vertices hold the normal alone, so the tangent and binormal are made from it as the fluids
+make theirs (`CFluidPlaneRender`: the normal (x, y, z), then (x, z, -y), then (z, y, -x)); no other
+draw in the game uses `GX_TG_BUMP`. The layout takes the source's slot first; the material key and
+the warm-up's record include the source; a generator's `src` (`GX_TG_TEX0` for an emboss one, which
+`GXSetTexCoordGen2` writes and nothing reads) no longer asks the mesh for a coordinate set.
+
+The precompile tool's self-test makes the lava's program (`precompile_sources --self-test lava
+<dir>`), and the Vita's compiler compiles it on the PC (`precompile.py compile`: vertex 496 bytes,
+fragment 860). Every other program's source is as before, so the card's binaries still serve.
+
+The log names what is still left fixed-function: the "indirect textures" line counts every material
+worked out whose layout no program can draw, and the first six of them get a line each ("a material
+no program can draw", each stage's coordinate generator and texture).
+
+What to look for in test 13: the lava lit and moving in Magmoor (its colour and bump), nothing
+black where it was; in the log the new count, and any "no program can draw" lines.
+
