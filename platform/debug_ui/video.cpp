@@ -575,13 +575,20 @@ void DrawVideoQuality() {
 
   // Dynamic resolution's mode is the two saved settings together: Auto draws up to the
   // window's own scale (auto render scale), User up to the resolution scale set.
+#ifdef __vita__
+  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), up to twice it
+  // (aurora's vita_gl::kMaxRenderScale): more is beyond its GPU and its video memory.
+  constexpr float kScaleMax = 2.f;
+#else
+  constexpr float kScaleMax = 4.f;
+#endif
   int dynMode = !sDynamicRes ? 0 : sRenderScale <= 0.f ? 1 : 2;
   if (ImGui::Combo("Dynamic resolution", &dynMode, "Off\0" "Auto\0" "User\0")) {
     sDynamicRes = dynMode != 0;
     if (dynMode == 1) {
       SetRenderScale(0.f);
     } else if (dynMode == 2 && sRenderScale <= 0.f) {
-      SetRenderScale(std::clamp(std::round(BaseRenderScale() * 4.f) / 4.f, 1.f, 4.f));
+      SetRenderScale(std::clamp(std::round(BaseRenderScale() * 4.f) / 4.f, 1.f, kScaleMax));
     }
     ResetDynamicRes();
     MarkDirty();
@@ -608,17 +615,24 @@ void DrawVideoQuality() {
     float scale = sPendingScale > 0.f ? sPendingScale : sRenderScale;
     char label[32];
     std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
-    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, 4.f, label)) {
+    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, kScaleMax,
+                           label)) {
       sPendingScale = scale;
     }
     if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
-      SetRenderScale(sPendingScale);
+      SetRenderScale(std::min(sPendingScale, kScaleMax));
       MarkDirty();
       sPendingScale = 0.f;
     }
+#ifdef __vita__
+    ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the Vita's screen (1x is\n"
+                          "its 960x544). Above 1x it supersamples: sharper edges, but each step costs\n"
+                          "much more GPU time and video memory.");
+#else
     ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
                           "higher values use more GPU memory. Above 2x it supersamples, and each step\n"
                           "costs much more GPU time.");
+#endif
   } else if (sRenderScale <= 0.f) {
     ImGui::TextDisabled("Window resolution: %.2fx (%dp)", BaseRenderScale(), DrawnLines(0.f));
   }
@@ -637,9 +651,14 @@ void DrawVideoQuality() {
       ResetDynamicRes();
       MarkDirty();
     }
+#ifdef __vita__
+    ImGui::SetItemTooltip("The lowest it drops to. Below 1x it draws fewer pixels than the Vita's screen\n"
+                          "and looks softer; at 1x it never draws below the screen's own resolution.");
+#else
     ImGui::SetItemTooltip("The lowest it drops to. Below 1x it draws fewer pixels than the GameCube did\n"
                           "and looks softer, which lets a phone reach 90 or 120 fps; the lowest values are\n"
                           "for very high resolution displays.");
+#endif
     // The left end is "Display" (saved as 0).
     constexpr int kTargetMin = 30;
     constexpr int kTargetMax = kFpsCapMax;
@@ -656,8 +675,14 @@ void DrawVideoQuality() {
       ResetDynamicRes();
       MarkDirty();
     }
+#ifdef __vita__
+    ImGui::SetItemTooltip("Display (all the way left): the screen's 60 Hz. On the Vita 30 fps suits most\n"
+                          "rooms: it lowers the scale only where the GPU keeps the game below the target,\n"
+                          "and raises it (up to the maximum) where the GPU has time to spare at it.");
+#else
     ImGui::SetItemTooltip("Display (all the way left): the screen's refresh rate. Never above the frame\n"
                           "rate cap: with the 60 FPS cap on it aims for 60. Ctrl+click to type a value.");
+#endif
     if (DynamicResTop() <= sDynamicResMin) {
       ImGui::PushTextWrapPos(0.f);
       ImGui::TextColored(ThemeWarnColor(), "Not lowering: the minimum is not below the top scale (%.2fx). "

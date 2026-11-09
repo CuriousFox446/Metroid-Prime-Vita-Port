@@ -31,6 +31,11 @@ struct Sample {
   // Pipelines were queued or building: their compiles stall the CPU (under GL they
   // hold the one context the frame needs), so the frame rate says nothing about pixels.
   bool compiling = false;
+  // The GPU counts as what holds the frame back only while it is busy for most of the
+  // frames' own time too, not just of the budget (the PS Vita: its GPU time is a busy
+  // time, and its CPU sets the pace well below 60 fps while the GPU is busy for more
+  // than 80% of a 60 fps frame).
+  bool busyShare = false;
   float top = 1.f;        // the configured scale: the most it draws at
   float bottom = 1.f;     // the lowest scale allowed
 };

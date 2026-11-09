@@ -812,6 +812,10 @@ void aurora_set_resampler(AuroraSampler sampler) {
 }
 
 void aurora_set_present_sharpness(float sharpness) {
+#if defined(AURORA_VITA_GL)
+  // The Vita's frame drawn up from a lower scale (vita_gl.cpp, draw_world_to_display).
+  aurora::vita_gl::set_present_sharpness(sharpness);
+#endif
 #ifdef AURORA_ENABLE_GX
   aurora::webgpu::set_present_sharpness(sharpness);
 #else

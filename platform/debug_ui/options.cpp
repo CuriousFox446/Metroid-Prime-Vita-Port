@@ -275,6 +275,11 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sample.compiling = pipelines.pending > 0;
   sample.top = top;
   sample.bottom = bottom;
+#ifdef __vita__
+  // The Vita's GPU time is a busy time (vita_gl.cpp's GpuClock), and its CPU sets the pace below
+  // 60 fps however busy the GPU is for a 60 fps frame's worth.
+  sample.busyShare = true;
+#endif
   if (gpuTimes) {
     float total = 0.f;
     float span = 0.f;
@@ -426,6 +431,12 @@ int DrawnLines(float scale) {
 
 void SetCaptureRenderScale(float scale) {
   EnsureInitialized();
+#ifdef __vita__
+  // No supersampled photo on the Vita: it takes no captures, and its frames go up to twice its
+  // screen at most (vita_gl::kMaxRenderScale).
+  (void)scale;
+  return;
+#endif
   const float next = scale > 0.f ? scale : 0.f;
   if (sCaptureScale == next) {
     return;

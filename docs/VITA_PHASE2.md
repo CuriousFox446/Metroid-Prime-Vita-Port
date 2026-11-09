@@ -2295,3 +2295,64 @@ no program can draw", each stage's coordinate generator and texture).
 What to look for in test 13: the lava lit and moving in Magmoor (its colour and bump), nothing
 black where it was; in the log the new count, and any "no program can draw" lines.
 
+**Test 13** (947caae, the user's log of Nov 9): the log names two materials still left
+fixed-function. One has five stages, each sampling a coordinate set of its own from a vertex
+attribute (3x4 matrices, `GX_TG_TEX0` to `TEX4`): more sets from vertex attributes than the
+mesh's four. The other is a seven-stage filter, every stage sampling texture 7 through a set of
+its own made from `GX_TG_TEX0` (each its own matrix: a blur's taps), which needs seven mesh sets
+for one attribute. The count of such materials worked out reached 300 a window in 32 windows,
+about once a frame: likely the filter, if texture 7 is an EFB copy (a material reading one is
+worked out again as the copy changes). Both are for later: a layout that lets sets from one
+attribute share the mesh's set would take the second.
+
+## 0.42.0 test 14: resolution scale and dynamic resolution
+
+The user asked for the two settings that did nothing on the Vita: "Resolution scale" and
+"Dynamic resolution" (F1 > Video > Quality). Aurora's frame buffer scale never reached the Vita's
+renderer, which drew every frame into the display's back buffer at 960x544.
+
+Now a scale other than 1x draws the frame into a framebuffer of its own at that size
+(`vita_gl.cpp`, `WorldTarget`), and draws it to the display at the frame's end
+(`draw_world_to_display`): linear, through the copy program as an opaque copy, or sharpened (CAS's
+cross of five texels) where it is drawn up from fewer pixels and "Sharpen when upscaled" is on.
+On the Vita a scale is a multiple of its screen (Aurora's `window.cpp` gives the Vita's sizes:
+1x and Auto are 960x544; widths a multiple of 8, heights of 2; 0.25x to 2x, the slider to 2x),
+so the settings saved so far (`render_scale=1`) draw exactly as before, on the display, with no
+pass added. The draws' viewports and scissors, given in the screen's pixels, are scaled as they are
+set; points are as wide in the frame's pixels; lines stay one pixel (GXM's wide lines hang the
+GPU). The EFB copies read the frame's texture (vitaGL draws a framebuffer upside down: its first
+row is the frame's bottom) and copy at the frame's scale; the depth kept across a frame's copies
+is its framebuffer's (vitaGL's `framebuffer` object, mirrored at 104 bytes, gives its depth
+surface). Its render target is sized for the display's 8 scenes a frame. A new size is made at the
+next present (a stutter, and on that first frame the depth after its first copy is not kept),
+and back at 1x the framebuffer goes. A size whose texture cannot be had (no video memory) is not
+tried again till another is asked for: the frame stays at the screen's size, and the log says so.
+
+Dynamic resolution needs the GPU's time a frame, and the Vita's GPU has no timestamp queries. But
+every scene vitaGL sends ends with its fence (`query_fence`: the number of the last scene sent, and
+the last the GPU has finished, written as its fragments are done), so the GPU is busy while the
+two differ (`GpuClock`): the render worker looks every fourth draw, after each copy and around the
+swap, and times the moments that changes; a frame finished while the render worker waited for the
+next one is timed by the display callback (`vglSetDisplayCallback`, as GXM's display thread sees
+the frame drawn). `GXPortGetGpuTimes` gives that busy time a frame over each half second. A scene's
+vertex work while it is still being recorded is not seen, so it is mostly the pixels' time: what
+the scale changes. And the controller (`port_dynamic_res.cpp`) counts the Vita's GPU as the limit
+only while it is busy for most of each frame's own time too (`Sample::busyShare`): its CPU sets the
+pace well below 60 fps while the GPU may be busy for more than 80% of a 60 fps frame's 16.7 ms.
+
+The log's "presents:" line adds the GPU's busy time a frame and its share of the time, and the size
+frames are drawn at; each new size logs a line and vitaGL's memory.
+
+How to use it on the Vita (the settings as they were saved keep 960x544):
+- Sharper: "Resolution scale" above 1x (dynamic resolution off). Each step costs GPU time.
+- Steady: "Dynamic resolution" User, "Maximum resolution scale" 1.5x, "Minimum resolution scale"
+  1x (never below the screen), "Frame rate target" 30: it supersamples where the GPU has time to
+  spare at 30 fps and comes back down where it has not.
+- Faster where the GPU is the limit: the same with the minimum below 1x (0.75x, say).
+
+What to look for in test 14: at the saved settings, nothing changed (and the "presents:" lines
+give the GPU's busy time: how much room there is); with a scale above or below 1x, the frame drawn
+right (the HUD, the visor effects, the map, the pause screen, reflections, the morph ball's
+shadow, the thermal and X-ray visors, all of which use copies); with dynamic resolution, its
+`port: dynamic resolution` lines and the Video page's "GPU ... of ... ms a frame".
+

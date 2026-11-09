@@ -131,6 +131,15 @@
   stretched image in the present resample (not AMD's CAS proper, which scales and
   sharpens in one filter), and only to a frame smaller than the window. The file also
   takes a manual `render_scale` under 1.
+  On the PS Vita the scales are multiples of its screen instead: 1x (and Auto) is its 960x544,
+  the slider goes to 2x (1920x1088, the most its GPU and video memory take), and a scale other
+  than 1x draws the frame into a framebuffer of that size, drawn to the screen at the frame's end
+  (sharpened as above when drawn up). Its GPU time is the time the GPU has a scene to finish, from
+  the fence each scene ends with (no timestamp queries there), and the GPU counts as the limit only
+  while it is busy for most of each frame's own time too: the Vita's CPU sets the pace below
+  60 fps however busy the GPU is for a 60 fps frame's worth. A "Frame rate target" of 30 suits it:
+  at 30 fps it raises the scale (up to the maximum) where the GPU has time to spare. The Vita
+  takes no supersampled photos (photo mode keeps the scale).
 - `MP_ASPECT=4:3|16:9|window` (default `window`, persisted as `aspect`); the legacy `MP_WIDESCREEN` selects 16:9.
 - Quick setup (Controls > Options): "Use mouse & keyboard" turns on mouse aim (with twin stick) and applies
   the Mouse & keyboard layout (not on the PS Vita, which has neither); "Use twin-stick controller" turns on twin stick and applies the

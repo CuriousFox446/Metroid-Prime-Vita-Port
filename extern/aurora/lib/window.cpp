@@ -22,6 +22,10 @@
 #include <SDL3/SDL_pixels.h>
 #include <tracy/Tracy.hpp>
 
+#if defined(AURORA_VITA_GL)
+#include "vita_gl.hpp"
+#endif
+
 #if defined(SDL_PLATFORM_ANDROID)
 #include <jni.h>
 extern "C" void Android_LockActivityMutex(void);
@@ -487,6 +491,16 @@ void shutdown() {
 namespace {
 // The frame buffer size a render scale gives for a window of native_fb_w x native_fb_h pixels.
 Vec2<int> frame_buffer_size_for_scale(int native_fb_w, int native_fb_h, float frameBufferScale) {
+#if defined(AURORA_VITA_GL)
+  // The Vita's frames: a multiple of its own screen (1 and "native" both its 960x544), as its
+  // renderer draws them (vita_gl.cpp, set_world_target).
+  (void)native_fb_w;
+  (void)native_fb_h;
+  int vitaW = 0;
+  int vitaH = 0;
+  vita_gl::render_size_for_scale(frameBufferScale, vitaW, vitaH);
+  return {vitaW, vitaH};
+#else
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
   if (frameBufferScale > 0.f) {
@@ -507,6 +521,7 @@ Vec2<int> frame_buffer_size_for_scale(int native_fb_w, int native_fb_h, float fr
     }
   }
   return {fb_w, fb_h};
+#endif
 }
 } // namespace
 
@@ -686,6 +701,9 @@ void set_frame_buffer_scale(float scale) {
     return;
   }
   g_frameBufferScale = scale;
+#if defined(AURORA_VITA_GL)
+  vita_gl::set_render_scale(scale);
+#endif
   request_frame_buffer_resize();
 }
 

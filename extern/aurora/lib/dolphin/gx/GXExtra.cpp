@@ -11,6 +11,9 @@
 #include "../../gfx/xray.hpp"
 #include "../../webgpu/gpu.hpp"
 #include "../../webgpu/gpu_prof.hpp"
+#if defined(AURORA_VITA_GL)
+#include "../../vita_gl.hpp"
+#endif
 
 #include <array>
 #include <atomic>
@@ -1068,6 +1071,25 @@ void GXSetPBRLightScale(f32 diffuse, f32 f0, f32 alpha, GXBool alphaReplaces) {
 }
 }
 
+#if defined(AURORA_VITA_GL)
+// The Vita's GPU has no timestamp queries; its renderer times how long the GPU has a scene to finish
+// (vita_gl.cpp's GpuClock), always on: the busy time a frame, as both the span and the total, and no
+// passes of its own.
+void GXPortSetGpuTimes(GXBool) {}
+
+GXBool GXPortGpuTimesSupported(void) { return GX_TRUE; }
+
+u32 GXPortGetGpuTimes(GXPortGpuTime*, u32, float* totalMs, float* spanMs) {
+  const float busy = aurora::vita_gl::gpu_busy_ms();
+  if (totalMs != nullptr) {
+    *totalMs = busy;
+  }
+  if (spanMs != nullptr) {
+    *spanMs = busy;
+  }
+  return 0;
+}
+#else
 void GXPortSetGpuTimes(GXBool on) { aurora::webgpu::gpu_prof::set_enabled(on != GX_FALSE); }
 
 GXBool GXPortGpuTimesSupported(void) { return aurora::webgpu::gpu_prof::supported() ? GX_TRUE : GX_FALSE; }
@@ -1089,3 +1111,4 @@ u32 GXPortGetGpuTimes(GXPortGpuTime* out, u32 max, float* totalMs, float* spanMs
   }
   return out == nullptr ? u32(result.entries.size()) : count;
 }
+#endif

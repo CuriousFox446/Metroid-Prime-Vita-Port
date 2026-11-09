@@ -21,12 +21,18 @@
 // surfaces (each one's backgroundTex is the texture GXM loads it with at a scene's start), the one
 // the frame draws into, and the display's depth and stencil surface. The EFB copies read the
 // first (copy_on_gpu) and keep the last across the scenes they end (keep_depth).
-// And its shader patcher, whose heaps the log reports (log_memory).
+// And its shader patcher, whose heaps the log reports (log_memory). The fence each scene ends with
+// (its scene_end: `value` the number of the last scene sent, `*address` the last one the GPU has
+// finished, written as its fragments are done), which times the GPU (GpuClock); and the
+// framebuffer object bound for drawing (its `framebuffer *`), whose depth surface a frame drawn at
+// another scale keeps across its copies (WorldTarget).
 extern "C" {
 extern SceGxmColorSurface gxm_color_surfaces[];
 extern unsigned int gxm_back_buffer_index;
 extern SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 extern SceGxmShaderPatcher* gxm_shader_patcher;
+extern SceGxmNotification query_fence;
+extern void* active_write_fb;
 }
 
 #include <cstdio>
@@ -2165,6 +2171,27 @@ constexpr std::string_view kPaletteFragment =
 constexpr uint64_t kPaletteProgramKey = fnv1a(kPaletteFragment, fnv1a(kCopyVertex));
 std::shared_ptr<Program> g_paletteProgram;
 
+// A frame drawn from fewer pixels than the screen's, sharpened as it is drawn up
+// (draw_world_to_display): AMD's contrast adaptive sharpening (CAS) on its cross of texels, less
+// where they already differ (no halos), more where they are flat and soft. uConst[0]: a texel's
+// size (x, y) and the weight's peak (z: -1 / lerp(8, 5, sharpness)). Built as the copy program is.
+constexpr std::string_view kSharpenFragment =
+    "float4 main(float2 vUv0 : TEXCOORD0, uniform sampler2D uTex0 : TEXUNIT0, uniform float4 uConst[1]) : COLOR {\n"
+    "  float2 d = uConst[0].xy;\n"
+    "  float3 c = tex2D(uTex0, vUv0).rgb;\n"
+    "  float3 n = tex2D(uTex0, vUv0 + float2(0.0, d.y)).rgb;\n"
+    "  float3 s = tex2D(uTex0, vUv0 - float2(0.0, d.y)).rgb;\n"
+    "  float3 e = tex2D(uTex0, vUv0 + float2(d.x, 0.0)).rgb;\n"
+    "  float3 w = tex2D(uTex0, vUv0 - float2(d.x, 0.0)).rgb;\n"
+    "  float3 lo = min(c, min(min(n, s), min(e, w)));\n"
+    "  float3 hi = max(c, max(max(n, s), max(e, w)));\n"
+    "  float3 amp = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, float3(0.0001))));\n"
+    "  float3 weight = amp * uConst[0].z;\n"
+    "  return float4((c + (n + s + e + w) * weight) / (1.0 + 4.0 * weight), 1.0);\n"
+    "}\n";
+constexpr uint64_t kSharpenProgramKey = fnv1a(kSharpenFragment, fnv1a(kCopyVertex));
+std::shared_ptr<Program> g_sharpenProgram;
+
 // The copy program's colour matrix for a copy (render worker): the output's r, g, b and a, each the
 // dot product of a row with the screen's texel, then the fifth row added. GX's copies to intensity
 // formats take the YUV luma, 16 for black to 235 for white. Where the EFB has no alpha (`alpha`
@@ -2225,6 +2252,261 @@ void copy_rows(CopyKind kind, bool alpha, float rows[5][4]) noexcept {
   }
 }
 
+// vitaGL's framebuffer object (its shared.h's `framebuffer`, as VitaSDK's library is built: 104 bytes,
+// no HAVE_ACCURATE_MSAA), for the depth surface it gives a framebuffer at its first scene.
+struct VglFramebuffer {
+  uint8_t active;
+  uint8_t isFloat;
+  uint8_t depthbufferState;
+  SceGxmRenderTarget* target;
+  SceGxmColorSurface colorbuffer;
+  SceGxmDepthStencilSurface depthbuffer;
+  SceGxmDepthStencilSurface* depthbufferPtr;
+  SceGxmTextureFormat format;
+  int width;
+  int height;
+  int stride;
+  void* data;
+  void* tex;
+};
+static_assert(sizeof(VglFramebuffer) == 104 && offsetof(VglFramebuffer, depthbuffer) == 56);
+
+// A coordinate rounded to the nearest pixel, halves away from zero (std::lround is a library call).
+int round_px(float v) noexcept { return v >= 0.f ? static_cast<int>(v + 0.5f) : -static_cast<int>(0.5f - v); }
+
+// Where a frame's draws go (render worker, set at each present by set_world_target): the display,
+// or at another resolution scale (set_render_scale) a framebuffer of that size of its own, drawn to
+// the display at the frame's end (draw_world_to_display). Draws carry their rectangles in the
+// screen's pixels (ScreenRect), scaled to its pixels here (rect). vitaGL draws a framebuffer upside
+// down, so that its texture's first row is the frame's bottom row (copy_on_gpu reads it so); its
+// viewport, scissor and culling it turns itself. Its depth surface is made at its first scene.
+struct WorldTarget {
+  bool scaled = false;
+  int width = kScreenWidth;
+  int height = kScreenHeight;
+  float sx = 1.f; // its pixels a screen pixel
+  float sy = 1.f;
+  GLuint texture = 0;
+  GLuint framebuffer = 0; // 0: the display
+  VglFramebuffer* vgl = nullptr;
+
+  ScreenRect rect(const ScreenRect& r) const noexcept {
+    if (!scaled) {
+      return r;
+    }
+    const int x0 = round_px(static_cast<float>(r.x) * sx);
+    const int x1 = round_px(static_cast<float>(r.x + r.width) * sx);
+    const int y0 = round_px(static_cast<float>(r.y) * sy);
+    const int y1 = round_px(static_cast<float>(r.y + r.height) * sy);
+    return {static_cast<int16_t>(x0), static_cast<int16_t>(y0), static_cast<int16_t>(x1 - x0),
+            static_cast<int16_t>(y1 - y0)};
+  }
+  // The depth surface its draws test against: the display's, or its framebuffer's.
+  SceGxmDepthStencilSurface* depth() const noexcept {
+    return scaled && vgl != nullptr ? &vgl->depthbuffer : &gxm_depth_stencil_surface;
+  }
+};
+WorldTarget g_world;
+
+// The frame size asked for (set_render_scale: width << 16 | height), and the last one that could not
+// be made (not tried again till another is asked for).
+std::atomic<uint32_t> g_renderSize{static_cast<uint32_t>(kScreenWidth) << 16 | kScreenHeight};
+uint32_t g_renderSizeFailed = 0;
+std::atomic<float> g_sharpness{0.f};
+
+// The scenes vitaGL sizes a render target for (vglSetupRenderTargetScenesNum): the display's, which
+// takes a frame's copies (record_copy makes 7 a frame at most) and one, and a copy's framebuffer's.
+// A frame drawn at another scale takes the display's for its framebuffer, made with it.
+constexpr uint8_t kDisplayScenes = 8;
+constexpr uint8_t kCopyScenes = 4;
+
+void release_world_target() noexcept {
+  WorldTarget& t = g_world;
+  if (t.framebuffer != 0 || t.texture != 0) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &t.framebuffer);
+    glDeleteTextures(1, &t.texture);
+  }
+  t = {};
+}
+
+// The frame's framebuffer at `width` x `height` (render worker), its texture sampled linear (the
+// copies set their own filter: bind_world_texture). False when its texture could not be had.
+bool make_world_target(int width, int height) noexcept {
+  const uint64_t start = sceKernelGetProcessTimeWide();
+  WorldTarget& t = g_world;
+  glGenTextures(1, &t.texture);
+  glBindTexture(GL_TEXTURE_2D, t.texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  if (vglGetTexDataPointer(GL_TEXTURE_2D) == nullptr) {
+    glDeleteTextures(1, &t.texture);
+    t = {};
+    return false;
+  }
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glGenFramebuffers(1, &t.framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, t.framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.texture, 0);
+  t.vgl = static_cast<VglFramebuffer*>(active_write_fb);
+  t.scaled = true;
+  t.width = width;
+  t.height = height;
+  t.sx = static_cast<float>(width) / static_cast<float>(kScreenWidth);
+  t.sy = static_cast<float>(height) / static_cast<float>(kScreenHeight);
+  Log.info("frames drawn at {}x{} ({:.2f}x the screen), drawn to it at the end: their framebuffer made in {} us", width,
+           height, t.sx, sceKernelGetProcessTimeWide() - start);
+  return true;
+}
+
+// The frame's target for this present (render worker), bound: the display, or the framebuffer at the
+// size asked for, made (again) here for a new size. True when the framebuffer is new: its first
+// scene (the frame's clear) makes its render target and depth surface.
+bool set_world_target() noexcept {
+  const uint32_t size = g_renderSize.load(std::memory_order_relaxed);
+  const int width = static_cast<int>(size >> 16);
+  const int height = static_cast<int>(size & 0xFFFF);
+  WorldTarget& t = g_world;
+  if ((width == kScreenWidth && height == kScreenHeight) || size == g_renderSizeFailed) {
+    if (t.scaled) {
+      release_world_target();
+      Log.info("frames drawn at the screen's {}x{} again", kScreenWidth, kScreenHeight);
+      log_memory("screen size");
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return false;
+  }
+  bool fresh = false;
+  if (!t.scaled || t.width != width || t.height != height) {
+    release_world_target();
+    if (!make_world_target(width, height)) {
+      g_renderSizeFailed = size;
+      Log.warn("frames not drawn at {}x{}: no room for its framebuffer; at the screen's size instead", width, height);
+      log_memory("no frame buffer");
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      return false;
+    }
+    g_renderSizeFailed = 0;
+    log_memory("frame buffer");
+    fresh = true;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, t.framebuffer);
+  return fresh;
+}
+
+// The frame's target bound again for drawing (after a copy into another framebuffer).
+void bind_world() noexcept { glBindFramebuffer(GL_FRAMEBUFFER, g_world.framebuffer); }
+
+// The GPU's busy time (render worker), for dynamic resolution and the log. GXM gives no timestamps
+// here, but each scene vitaGL sends ends with its fence (query_fence), so the GPU is busy from a
+// scene sent while it had none till the last one sent is done. The render worker looks every few
+// draws, at each copy and around the swap (two loads), and times the moments it changes. A frame's
+// last scene done while the render worker waited for the next frame is timed by the display
+// callback (vglSetDisplayCallback: GXM's display thread, once the frame is drawn, before its flip).
+// A scene's vertex work while it is being recorded is not seen: what it times is mostly pixels.
+struct GpuClock {
+  static constexpr uint32_t kRing = 8;
+  bool busy = false;
+  uint64_t since = 0;
+  uint64_t busyUs = 0; // this window's
+  uint32_t frames = 0;
+  uint64_t windowStart = 0;
+  uint32_t swaps = 0;
+  uint32_t swapScene[kRing] = {}; // each swap's last scene (the display's)
+  bool callbackOff = false;       // the display callbacks ran ahead of the swaps: not used
+  // Since the last report (present's log line).
+  uint64_t reportBusyUs = 0;
+  uint64_t reportUs = 0;
+  uint32_t reportFrames = 0;
+};
+GpuClock g_gpu;
+std::atomic<uint32_t> g_displayed{0};
+std::atomic<uint64_t> g_displayedAt[GpuClock::kRing];
+std::atomic<float> g_gpuMs{0.f};
+
+// GXM's display thread: each frame's callback, once it is drawn, in the swaps' order.
+void on_display(void*) {
+  const uint32_t n = g_displayed.load(std::memory_order_relaxed);
+  g_displayedAt[n % GpuClock::kRing].store(sceKernelGetProcessTimeWide(), std::memory_order_relaxed);
+  g_displayed.store(n + 1, std::memory_order_release);
+}
+
+void gpu_changed(bool busy, uint32_t sent) noexcept {
+  uint64_t now = sceKernelGetProcessTimeWide();
+  GpuClock& g = g_gpu;
+  if (busy) {
+    g.busy = true;
+    g.since = now;
+    return;
+  }
+  // Done: when the display callback says, if the last scene sent was a swap's (the render worker may
+  // have been waiting for the next frame since).
+  const uint32_t swaps = g.swaps;
+  if (swaps != 0 && !g.callbackOff && g.swapScene[(swaps - 1) % GpuClock::kRing] == sent) {
+    const uint32_t displayed = g_displayed.load(std::memory_order_acquire);
+    if (displayed > swaps) {
+      g.callbackOff = true;
+      Log.warn("GPU clock: {} display callbacks for {} swaps; timing at the render worker's looks alone", displayed,
+               swaps);
+    } else if (displayed == swaps) {
+      const uint64_t at = g_displayedAt[(swaps - 1) % GpuClock::kRing].load(std::memory_order_relaxed);
+      if (at >= g.since && at < now) {
+        now = at;
+      }
+    }
+  }
+  g.busyUs += now - g.since;
+  g.busy = false;
+}
+
+// A look at the fence (render worker).
+inline void gpu_watch() noexcept {
+  const uint32_t sent = query_fence.value;
+  const bool busy = *query_fence.address != sent;
+  if (busy != g_gpu.busy) {
+    gpu_changed(busy, sent);
+  }
+}
+
+// After a swap: the frame counted, its display scene noted; once half a second has gone the window's
+// busy time a frame published (an open busy stretch counted to now, and on into the next window).
+void gpu_swapped(uint64_t swapStart) noexcept {
+  GpuClock& g = g_gpu;
+  g.swapScene[g.swaps % GpuClock::kRing] = query_fence.value;
+  ++g.swaps;
+  // The swap sent the display's scene: a GPU idle till then is busy from the swap's start.
+  if (!g.busy && *query_fence.address != query_fence.value) {
+    g.busy = true;
+    g.since = swapStart;
+  }
+  gpu_watch();
+  ++g.frames;
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  if (g.windowStart == 0) {
+    g.windowStart = now;
+    g.busyUs = 0;
+    g.frames = 0;
+    return;
+  }
+  if (now - g.windowStart < 500000 || g.frames < 4) {
+    return;
+  }
+  uint64_t busy = g.busyUs;
+  if (g.busy) {
+    busy += now - g.since;
+    g.since = now;
+  }
+  g_gpuMs.store(static_cast<float>(static_cast<double>(busy) / 1000.0 / g.frames), std::memory_order_relaxed);
+  g.reportBusyUs += busy;
+  g.reportUs += now - g.windowStart;
+  g.reportFrames += g.frames;
+  g.busyUs = 0;
+  g.frames = 0;
+  g.windowStart = now;
+}
+
 // A GL texture that is the display's back buffer as the frame's draws so far left it (render
 // worker): the EFB copies' source, sampled linear for a halved copy. vitaGL binds a texture's GXM
 // texture as it holds it (no sampler object is ever bound here), so its GXM texture is set to that
@@ -2250,6 +2532,19 @@ void bind_screen_texture(bool linear) noexcept {
   *vglGetGxmTexture(GL_TEXTURE_2D) = screen;
 }
 
+// The frame as its draws so far left it, bound (render worker): the display's back buffer, or a
+// scaled frame's texture (its framebuffer's), sampled linear for a halved copy.
+void bind_world_texture(bool linear) noexcept {
+  if (!g_world.scaled) {
+    bind_screen_texture(linear);
+    return;
+  }
+  glBindTexture(GL_TEXTURE_2D, g_world.texture);
+  const GLint filter = linear ? GL_LINEAR : GL_NEAREST;
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+}
+
 // The display's depth and stencil across a frame's scenes (render worker, between two scenes: GXM
 // takes a surface's modes at a scene's start). Each EFB copy ends the display's scene: the copy is
 // drawn into its texture's framebuffer, and the next draw starts the display's next scene. GXM
@@ -2260,13 +2555,16 @@ void bind_screen_texture(bool linear) noexcept {
 // each scene a copy ends, and the scene after loads it. The mask bit, which vitaGL's scissor keeps
 // in the depth surface, is loaded with it: this vitaGL clears it again at the scene's first scissor
 // update (later ones skip that at a scene's start, assuming a fresh surface: kept, it would leak).
-void keep_depth(bool load, bool store) noexcept {
-  sceGxmDepthStencilSurfaceSetForceLoadMode(&gxm_depth_stencil_surface, load ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED
-                                                                             : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
-  sceGxmDepthStencilSurfaceSetForceStoreMode(&gxm_depth_stencil_surface,
-                                             store ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
-                                                   : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
+// A frame drawn at another scale keeps its framebuffer's depth so (WorldTarget::depth); vitaGL makes
+// that surface at the framebuffer's first scene, as it starts, so a new one's first frame keeps none.
+void keep_depth_of(SceGxmDepthStencilSurface* surface, bool load, bool store) noexcept {
+  sceGxmDepthStencilSurfaceSetForceLoadMode(surface, load ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED
+                                                          : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+  sceGxmDepthStencilSurfaceSetForceStoreMode(surface, store ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
+                                                            : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
 }
+
+void keep_depth(bool load, bool store) noexcept { keep_depth_of(g_world.depth(), load, store); }
 
 // An EFB copy, made on the GPU (render worker): the display's back buffer, as the draws so far left
 // it, drawn through the copy program into the destination's texture (its framebuffer), with
@@ -2277,7 +2575,9 @@ void keep_depth(bool load, bool store) noexcept {
 // False when there was nothing to copy.
 bool copy_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn, RenderState& current,
                  bool moreCopies) noexcept {
-  const ScreenRect& src = draw.scissor;
+  // In the frame's pixels: a frame drawn at another scale copies at that scale too (its destination
+  // as many texels smaller or larger; GX's coordinates sample it as a whole all the same).
+  const ScreenRect src = g_world.rect(draw.scissor);
   const int step = draw.copyHalf && src.width > 1 && src.height > 1 ? 2 : 1;
   const int width = src.width / step;
   const int height = src.height / step;
@@ -2290,25 +2590,35 @@ bool copy_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32
   draw.copyTo->target(width, height);
   glViewport(0, 0, width, height);
   glActiveTexture(GL_TEXTURE0);
-  bind_screen_texture(step == 2);
+  bind_world_texture(step == 2);
   float rows[5][4];
   copy_rows(draw.copyKind, draw.copyAlpha, rows);
   program.set_rows(rows, 5);
-  // The rectangle's texels in the display's texture, whose rows run down from the screen's top
-  // (GL's rectangle up from its bottom). vitaGL keeps a framebuffer's texture the right way up for
-  // sampling: its first row is the draw's bottom (y -1), and takes the rectangle's top, as a GX copy
-  // starts with it. Halved, each pixel samples its 2x2 block's middle, linear: GX's box filter.
-  const float u0 = static_cast<float>(src.x) / kWidth;
-  const float u1 = static_cast<float>(src.x + width * step) / kWidth;
-  const float v0 = static_cast<float>(kHeight - (src.y + src.height)) / kHeight;
-  const float v1 = v0 + static_cast<float>(height * step) / kHeight;
+  // The rectangle's texels in the frame's texture: the display's, whose rows run down from the
+  // screen's top (GL's rectangle up from its bottom), or a scaled frame's framebuffer's, whose rows
+  // run up from its bottom. vitaGL keeps a framebuffer's texture the right way up for sampling: its
+  // first row is the draw's bottom (y -1), and takes the rectangle's top, as a GX copy starts with
+  // it. Halved, each pixel samples its 2x2 block's middle, linear: GX's box filter.
+  const auto frameWidth = static_cast<float>(g_world.width);
+  const auto frameHeight = static_cast<float>(g_world.height);
+  const float u0 = static_cast<float>(src.x) / frameWidth;
+  const float u1 = static_cast<float>(src.x + width * step) / frameWidth;
+  float v0 = 0.f;
+  float v1 = 0.f;
+  if (g_world.scaled) {
+    v0 = static_cast<float>(src.y + src.height) / frameHeight;
+    v1 = v0 - static_cast<float>(height * step) / frameHeight;
+  } else {
+    v0 = static_cast<float>(g_world.height - (src.y + src.height)) / frameHeight;
+    v1 = v0 + static_cast<float>(height * step) / frameHeight;
+  }
   const float quad[4][4] = {{-1.f, -1.f, u0, v0}, {1.f, -1.f, u1, v0}, {-1.f, 1.f, u0, v1}, {1.f, 1.f, u1, v1}};
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glVertexAttribPointer(program.attr(kAttrPos), 2, GL_FLOAT, GL_FALSE, sizeof(quad[0]), &quad[0][0]);
   glVertexAttribPointer(program.attr(kAttrUv0), 2, GL_FLOAT, GL_FALSE, sizeof(quad[0]), &quad[0][2]);
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   keep_depth(true, moreCopies);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  bind_world();
   glEnable(GL_SCISSOR_TEST);
   g_presentStats.copyPixels += static_cast<uint64_t>(width) * height;
   return true;
@@ -2354,7 +2664,7 @@ bool palette_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uin
   glVertexAttribPointer(program.attr(kAttrUv0), 2, GL_FLOAT, GL_FALSE, sizeof(kQuad[0]), &kQuad[0][2]);
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   keep_depth(true, moreCopies);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  bind_world();
   glEnable(GL_SCISSOR_TEST);
   g_presentStats.copyPixels += static_cast<uint64_t>(width) * height;
   return true;
@@ -2435,8 +2745,8 @@ void draw_world(const Frame& frame) {
   GLuint usedProgram = 0;
   uint32_t attribsOn = 0;
   // The copy and palette programs, built ahead of the copies that need them (a program just linked
-  // is left in use).
-  for (Program* copier : {g_copyProgram.get(), g_paletteProgram.get()}) {
+  // is left in use); and the sharpening one, for a frame drawn at a lower scale.
+  for (Program* copier : {g_copyProgram.get(), g_paletteProgram.get(), g_sharpenProgram.get()}) {
     if (!copier->settled()) {
       const int budgetBefore = buildBudget;
       copier->ready(buildBudget);
@@ -2481,33 +2791,47 @@ void draw_world(const Frame& frame) {
   float lastTexMatrix[kTexUnits][8];
   bool haveTexMatrix[kTexUnits] = {};
   BoundTextures bound;
-  // GX's viewport and scissor as the draws carry them, set where they change; the scissor test
-  // stays on through the draws (present's clear and the overlay run without it).
+  // GX's viewport and scissor as the draws carry them (the screen's pixels), set where they change,
+  // in the frame's own pixels (WorldTarget::rect); the scissor test stays on through the draws
+  // (present's clear and the overlay run without it).
   ScreenRect viewport;
   ScreenRect scissor;
-  glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
-  glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
+  const auto apply_rects = [&viewport, &scissor]() {
+    const ScreenRect v = g_world.rect(viewport);
+    const ScreenRect s = g_world.rect(scissor);
+    glViewport(v.x, v.y, v.width, v.height);
+    glScissor(s.x, s.y, s.width, s.height);
+  };
+  apply_rects();
   glEnable(GL_SCISSOR_TEST);
   // The line and point width, set where a line or point draw changes it (GXM's context keeps it,
-  // for the programs and the fixed-function path alike).
+  // for the programs and the fixed-function path alike). Points in the frame's pixels; lines stay a
+  // pixel wide (line_width in gx/vita_draw.cpp: GXM's wide lines hang the GPU).
   uint8_t width = 1;
   glLineWidth(1.f);
   glPointSize(1.f);
   const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
     if (!(v == viewport)) {
-      glViewport(v.x, v.y, v.width, v.height);
+      const ScreenRect r = g_world.rect(v);
+      glViewport(r.x, r.y, r.width, r.height);
       viewport = v;
     }
     if (!(s == scissor)) {
-      glScissor(s.x, s.y, s.width, s.height);
+      const ScreenRect r = g_world.rect(s);
+      glScissor(r.x, r.y, r.width, r.height);
       scissor = s;
     }
   };
+  uint32_t drawIndex = 0;
   g_clock.mark(kSetup);
   if (g_clock.on) {
     g_clock.draws += draws.size();
   }
   for (const Draw& draw : draws) {
+    // The GPU's clock: whether the scenes sent so far are done, every few draws (GpuClock).
+    if ((++drawIndex & 3) == 0) {
+      gpu_watch();
+    }
     if (draw.clear) {
       // An EFB copy's clear: its rectangle (the whole screen for the viewport, so the clear is
       // the scissor's alone), with the masks GX's updates give, then the draws' masks again.
@@ -2548,8 +2872,9 @@ void draw_world(const Frame& frame) {
         ++g_presentStats.copiesWaiting;
       } else if (palette ? palette_on_gpu(draw, copier, usedProgram, attribsOn, current, copiesLeft > 0)
                          : copy_on_gpu(draw, copier, usedProgram, attribsOn, current, copiesLeft > 0)) {
-        glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
-        glScissor(scissor.x, scissor.y, scissor.width, scissor.height);
+        // The copy's draw sent the frame's scene to the GPU.
+        gpu_watch();
+        apply_rects();
         bound = {};
         haveProjection = false;
         for (bool& have : haveTexMatrix) {
@@ -2566,7 +2891,9 @@ void draw_world(const Frame& frame) {
     const MeshPrimitive primitive = draw.mesh != nullptr ? draw.mesh->primitive() : draw.frameMesh.primitive;
     if (primitive != MeshPrimitive::Triangles && draw.width != width) {
       glLineWidth(static_cast<GLfloat>(draw.width));
-      glPointSize(static_cast<GLfloat>(draw.width));
+      const int point = g_world.scaled ? std::clamp(round_px(static_cast<float>(draw.width) * g_world.sx), 1, 16)
+                                       : draw.width;
+      glPointSize(static_cast<GLfloat>(point));
       width = draw.width;
     }
     Program* program = draw.program.program;
@@ -2679,6 +3006,63 @@ void draw_world(const Frame& frame) {
   glLoadIdentity();
 }
 
+// A frame drawn at another scale, drawn to the display (render worker, after draw_world): its
+// texture over the whole screen, linear (a frame twice the screen's size so takes each 2x2 block's
+// mean), through the copy program as an opaque copy, or sharpened where it is drawn up from fewer
+// pixels and sharpening is on (aurora_set_present_sharpness). This starts the display's scene,
+// which keeps no depth. Till the copy program is built the display shows what its scene loads.
+void draw_world_to_display() noexcept {
+  keep_depth_of(&gxm_depth_stencil_surface, false, false);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, kWidth, kHeight);
+  glDisable(GL_SCISSOR_TEST);
+  int budget = 1;
+  const float sharpness = g_world.width < kWidth ? g_sharpness.load(std::memory_order_relaxed) : 0.f;
+  Program* program = nullptr;
+  if (sharpness > 0.f && g_sharpenProgram->ready(budget)) {
+    program = g_sharpenProgram.get();
+  } else if (g_copyProgram->ready(budget)) {
+    program = g_copyProgram.get();
+  }
+  if (program == nullptr || program->attr(kAttrPos) < 0 || program->attr(kAttrUv0) < 0) {
+    return;
+  }
+  GLuint usedProgram = 0;
+  uint32_t attribsOn = 0;
+  use_program(*program, usedProgram, attribsOn);
+  RenderState current;
+  apply_state(RenderState{.depthTest = false, .depthWrite = false}, current, true);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, g_world.texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  if (program == g_sharpenProgram.get()) {
+    const float peak = -1.f / (8.f + (5.f - 8.f) * std::clamp(sharpness, 0.f, 1.f));
+    const float rows[1][4] = {{1.f / static_cast<float>(g_world.width), 1.f / static_cast<float>(g_world.height), peak,
+                               0.f}};
+    program->set_rows(rows, 1);
+  } else {
+    float rows[5][4];
+    copy_rows(CopyKind::Rgb, true, rows);
+    program->set_rows(rows, 5);
+  }
+  // The framebuffer's texture is the right way up (its first row the frame's bottom), as the
+  // display's bottom (y -1) takes it.
+  constexpr float kQuad[4][4] = {{-1.f, -1.f, 0.f, 0.f}, {1.f, -1.f, 1.f, 0.f}, {-1.f, 1.f, 0.f, 1.f}, {1.f, 1.f, 1.f, 1.f}};
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glVertexAttribPointer(program->attr(kAttrPos), 2, GL_FLOAT, GL_FALSE, sizeof(kQuad[0]), &kQuad[0][0]);
+  glVertexAttribPointer(program->attr(kAttrUv0), 2, GL_FLOAT, GL_FALSE, sizeof(kQuad[0]), &kQuad[0][2]);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  // Back to the fixed-function path, as draw_world leaves it for the overlay.
+  for (int i = 0; i < 32; ++i) {
+    if ((attribsOn & (1u << i)) != 0) {
+      glDisableVertexAttribArray(i);
+    }
+  }
+  glUseProgram(0);
+  apply_state(RenderState{.depthTest = false}, current, true);
+}
+
 } // namespace
 
 bool initialize() noexcept {
@@ -2733,6 +3117,9 @@ bool initialize() noexcept {
   use_compiler_heap();
   g_copyProgram = make_program(std::string(kCopyVertex), std::string(kCopyFragment), kCopyProgramKey);
   g_paletteProgram = make_program(std::string(kCopyVertex), std::string(kPaletteFragment), kPaletteProgramKey);
+  g_sharpenProgram = make_program(std::string(kCopyVertex), std::string(kSharpenFragment), kSharpenProgramKey);
+  // The GPU's clock: each frame's end, as the display thread sees it drawn (GpuClock).
+  vglSetDisplayCallback(on_display);
   g_active = true;
   if (clamped) {
     Log.warn("vitaGL started at the display's maximum size, not {}x{}", kWidth, kHeight);
@@ -2744,6 +3131,30 @@ bool initialize() noexcept {
 }
 
 bool active() noexcept { return g_active; }
+
+void render_size_for_scale(float scale, int& width, int& height) noexcept {
+  if (!(scale > 0.f)) {
+    width = kScreenWidth;
+    height = kScreenHeight;
+    return;
+  }
+  scale = std::clamp(scale, 0.25f, kMaxRenderScale);
+  width = std::max(8, static_cast<int>(static_cast<float>(kScreenWidth) * scale / 8.f + 0.5f) * 8);
+  height = std::max(2, static_cast<int>(static_cast<float>(kScreenHeight) * scale / 2.f + 0.5f) * 2);
+}
+
+void set_render_scale(float scale) noexcept {
+  int width = 0;
+  int height = 0;
+  render_size_for_scale(scale, width, height);
+  g_renderSize.store(static_cast<uint32_t>(width) << 16 | static_cast<uint32_t>(height), std::memory_order_relaxed);
+}
+
+void set_present_sharpness(float sharpness) noexcept {
+  g_sharpness.store(std::clamp(sharpness, 0.f, 1.f), std::memory_order_relaxed);
+}
+
+float gpu_busy_ms() noexcept { return g_gpuMs.load(std::memory_order_relaxed); }
 
 void init_imgui() noexcept {
   // No GL calls: the backend makes its font texture at its first NewFrame (present).
@@ -2953,7 +3364,12 @@ void present(ImDrawData* overlay) noexcept {
     ImGui_ImplOpenGL2_DestroyFontsTexture();
   }
   ImGui_ImplOpenGL2_NewFrame();
-  glViewport(0, 0, kWidth, kHeight);
+  Frame frame = take_frame();
+  // A scene the GPU finished while this waited for the frame (timed by the display callback).
+  gpu_watch();
+  // The display, or the framebuffer of a frame drawn at another scale (set_render_scale).
+  const bool freshTarget = set_world_target();
+  glViewport(0, 0, g_world.width, g_world.height);
   glDisable(GL_SCISSOR_TEST);
   // Black, as the GameCube's frame starts (a dark blue told this path's screen apart at first), and
   // alpha 0, the game's clear colour's (CCubeRenderer::BeginScene), which an EFB with alpha starts
@@ -2963,11 +3379,20 @@ void present(ImDrawData* overlay) noexcept {
   // The clear follows the masks; a draw's state may have left them off.
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glDepthMask(GL_TRUE);
-  Frame frame = take_frame();
-  // The clear starts the frame's first scene: it loads no depth, and stores it for a copy to come.
+  // The clear starts the frame's first scene: it loads no depth, and stores it for a copy to come. A
+  // new framebuffer's render target is made at it, sized for the scenes a frame's copies make.
   keep_depth(false, frame.copies != 0);
+  if (freshTarget) {
+    vglSetupRenderTargetScenesNum(kDisplayScenes, kDisplayScenes);
+  }
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  if (freshTarget) {
+    vglSetupRenderTargetScenesNum(kDisplayScenes, kCopyScenes);
+  }
   draw_world(frame);
+  if (g_world.scaled) {
+    draw_world_to_display();
+  }
   warm_up_step();
   g_clock.mark(kBuild);
   g_reaper.reap(std::move(frame));
@@ -2981,7 +3406,8 @@ void present(ImDrawData* overlay) noexcept {
              "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
              "failed, {} built or being built by their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
              "textures bound/kept: {}/{}; EFB copies made on the GPU: {} ({:.0f} kpixels written, {:.1f} ms on "
-             "the render worker, {:.2f} ms each), {} before the copy program was built",
+             "the render worker, {:.2f} ms each), {} before the copy program was built; the GPU busy {:.1f} ms a "
+             "frame ({:.0f}% of the time); frames drawn at {}x{}",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.merged) / g_presentStats.framesWithDraws : 0.0,
@@ -2996,7 +3422,14 @@ void present(ImDrawData* overlay) noexcept {
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
              g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
              g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
-             g_presentStats.copiesWaiting);
+             g_presentStats.copiesWaiting,
+             g_gpu.reportFrames != 0 ? static_cast<double>(g_gpu.reportBusyUs) / 1000.0 / g_gpu.reportFrames : 0.0,
+             g_gpu.reportUs != 0 ? 100.0 * static_cast<double>(g_gpu.reportBusyUs) / static_cast<double>(g_gpu.reportUs)
+                                 : 0.0,
+             g_world.width, g_world.height);
+    g_gpu.reportBusyUs = 0;
+    g_gpu.reportUs = 0;
+    g_gpu.reportFrames = 0;
     g_presentStats = {};
     g_uniformStats = {};
     log_memory("presents");
@@ -3008,7 +3441,10 @@ void present(ImDrawData* overlay) noexcept {
   }
   g_clock.mark(kOverlay);
   // A system keyboard that is up (open_keyboard) draws over the frame at the swap.
+  gpu_watch();
+  const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
+  gpu_swapped(swapStart);
   g_clock.mark(kSwap);
   if (g_clock.on) {
     ++g_clock.frames;

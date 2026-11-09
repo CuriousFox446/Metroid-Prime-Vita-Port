@@ -326,6 +326,19 @@ bool keyboard_open() noexcept;
 // Any thread: the generated programs sent to the compiler thread since the start, and those it
 // has finished (compiled or failed); the warm-up's waiting their turn count as sent.
 void program_compiles(uint32_t& sent, uint32_t& finished) noexcept;
+// The resolution the game's frames are drawn at: Aurora's frame buffer scale (window.cpp), on the
+// Vita a multiple of its screen (1, and 0 for "native": 960x544). Any other is a framebuffer of its
+// own, drawn to the screen at each frame's end (vita_gl.cpp, draw_world_to_display). The size a
+// scale gives (its width a multiple of eight, its height of two; from a quarter of the screen to
+// kMaxRenderScale times it), and the scale asked for (any thread; the next present takes it).
+constexpr float kMaxRenderScale = 2.f;
+void render_size_for_scale(float scale, int& width, int& height) noexcept;
+void set_render_scale(float scale) noexcept;
+// Sharpening of a frame drawn up from fewer pixels (aurora_set_present_sharpness; 0 off, to 1).
+void set_present_sharpness(float sharpness) noexcept;
+// The GPU's busy time a frame over the last half second or so, ms (vita_gl.cpp's GpuClock); 0
+// before the first. Any thread.
+float gpu_busy_ms() noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -356,5 +369,13 @@ inline bool open_keyboard(const char*, uint32_t) noexcept { return false; }
 inline int keyboard_result(std::string&) noexcept { return -2; }
 inline bool keyboard_open() noexcept { return false; }
 inline void program_compiles(uint32_t& sent, uint32_t& finished) noexcept { sent = finished = 0; }
+constexpr float kMaxRenderScale = 2.f;
+inline void render_size_for_scale(float, int& width, int& height) noexcept {
+  width = kScreenWidth;
+  height = kScreenHeight;
+}
+inline void set_render_scale(float) noexcept {}
+inline void set_present_sharpness(float) noexcept {}
+inline float gpu_busy_ms() noexcept { return -1.f; }
 #endif
 } // namespace aurora::vita_gl
