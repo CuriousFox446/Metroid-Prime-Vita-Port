@@ -2226,3 +2226,6 @@ deleted them. In the slow stretch (523 windows at 12 to 18 FPS) the game thread 
 FIFO thread waiting on it (67 ms a frame against 50): the ticks 35.9 ms (3.6 of them: `SM: Think`
 14.6, particles 6.8, the HUD 3.9) and the draw 24 ms (`DrawWorld` 18.2).
 
+And the snow falls in Phendrana Drifts again (the user: "there were snow"): the flakes take the
+snowflake texture's levels 1 and 2, the near ones its blanked first, as on the GameCube.
+
