@@ -2399,3 +2399,24 @@ the moment it opens (as on Android): select its filter to type.
 What to look for in test 15: Magmoor's frame rate (and the `[particles]` lines' share of idle
 steps; `CPuffer`'s Think in `[think]`); typing in the menu's fields taking.
 
+## 0.42.0 test 16: the catch-up, raised on the Vita
+
+The user saw Magmoor in slow motion, as the Metroid Prime 2 port runs on their Galaxy S7. Both
+ports slow the game when it cannot keep 60 ticks a second, rather than drop frames without end.
+The MP2 port keeps Echoes' own rule (`src/MetroidPrime/main.cpp`: a frame over 35 ms runs one tick
+and drops the rest of the time), so a phone short of about 28 FPS runs slow at once (a third of
+the speed at 20 FPS). This port catches up with whole ticks but stops a frame's ticks once they
+have taken two periods (33 ms) of it, upstream's guard against the spiral of issue #54
+(`CGameArchitectureSupport::UpdateTicks`). In test 14's Magmoor a tick took some 15 ms, so 2 or 3
+fitted in a frame where real time wanted 4 or more: 2.5 a frame at 15 FPS, the game at 62% speed.
+
+"Catch-up" (`catch_up`, F1 > Video > Frame rate, 2 to 8 frames' worth) now sets that bound, 4 by
+default on the Vita (67 ms), 2 elsewhere (upstream's) and under Original experience. At 4, a frame
+of Magmoor's 15 ms ticks takes up to 5 of them: nearer the game's own speed, and fewer frames a
+second (about 10 at test 14's costs); as test 15 makes the ticks cheaper, more of them fit in both
+the bound and real time. Where ticks keep up (most rooms) nothing changes.
+
+What to look for in test 16: Magmoor's speed (the `[split]` lines' ticks a frame against its
+frame rate: 60 ticks a second is full speed; F1 > Video > Frame rate shows "Simulation N ticks/s")
+and whether the lower frame rate there is worth it; "Catch-up" back at 2 gives test 15's behaviour.
+

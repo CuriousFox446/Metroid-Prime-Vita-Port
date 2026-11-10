@@ -581,6 +581,15 @@ const SettingKey kSettingKeys[] = {
      },
      [](std::ostream& out) { out << sSimRate; }, false, "30", "120"},
     BoolKey< &sSimAdaptive >("sim_adaptive"),
+    {"catch_up",
+     [](const std::string& value) {
+       const long frames = std::strtol(value.c_str(), nullptr, 10);
+       if (frames >= static_cast< long >(PortDebug::kCatchUpMin) &&
+           frames <= static_cast< long >(PortDebug::kCatchUpMax)) {
+         sCatchUpFrames = static_cast< unsigned >(frames);
+       }
+     },
+     [](std::ostream& out) { out << sCatchUpFrames; }, false, "2", "6"},
     {"smooth_frames",
      [](const std::string& value) {
        sSmoothFrames = ParseBool(value);

@@ -562,9 +562,11 @@ bool CGameArchitectureSupport::UpdateTicks() {
   // Catching up must not cost more wall time than it recovers: when ticks are
   // slower than real time (front-end THP decode on a slow CPU, issue #54), each
   // long frame queued more ticks and the menu spiralled into multi-second
-  // frames. Past ~2 periods of tick work, drop the rest and run slow instead.
+  // frames. Past the catch-up's periods of tick work (PortDebug::CatchUpFrames:
+  // 2 upstream, 4 on the Vita), drop the rest and run slow instead.
   const bool budgeted = !PortDebug::Turbo() && !PortDebug::TickHold();
-  const double tickBudget = std::max(2.0 * period, 1.0 / 30.0);
+  const double catchUp = static_cast< double >(PortDebug::CatchUpFrames());
+  const double tickBudget = std::max(catchUp * period, catchUp / 60.0);
   const auto tickStart = std::chrono::steady_clock::now();
   for (unsigned tick = 0; tick < ticks; ++tick) {
     if (budgeted && tick > 0 &&

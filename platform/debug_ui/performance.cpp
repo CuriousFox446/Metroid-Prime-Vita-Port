@@ -6,6 +6,8 @@
 #include <aurora/imgui.h>
 #include <imgui_internal.h>
 
+#include <cstdio>
+
 
 namespace PortDebug {
 
@@ -51,6 +53,21 @@ void DrawPerformanceTab() {
   }
   ItemHelp("With the FPS cap off, smooths mouse, gyro and twin-stick look and moving objects "
            "between the game's 60 Hz ticks. Aim and shots are unchanged.");
+
+  {
+    int catchUp = static_cast< int >(sCatchUpFrames);
+    char format[48];
+    std::snprintf(format, sizeof(format), "%%d frames (%.0f ms)", catchUp * 1000.0 / 60.0);
+    if (ImGui::SliderInt("Catch-up", &catchUp, static_cast< int >(kCatchUpMin), static_cast< int >(kCatchUpMax),
+                         format, ImGuiSliderFlags_AlwaysClamp)) {
+      sCatchUpFrames = static_cast< unsigned >(catchUp);
+      MarkDirty();
+    }
+    ItemHelp("When the game's ticks fall behind (a heavy room on a slow CPU), how much of a frame they "
+             "may take to catch up, in 60 Hz frames' worth. Past it the game runs slow (slow motion) "
+             "rather than drop further. More keeps the game nearer its full speed, at a lower frame "
+             "rate. 2 is upstream's; the PS Vita starts at 4.");
+  }
 
   ImGui::SeparatorText("Simulation rate (very experimental)");
   ImGui::TextColored(ThemeWarnColor(), "For testing only. The game was written for 60 Hz: other rates can\n"

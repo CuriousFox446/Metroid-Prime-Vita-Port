@@ -148,6 +148,11 @@ unsigned TurboTicks() {
 
 void SetSimAdaptive(bool enabled) { StoreSetting(sSimAdaptive, enabled); }
 
+unsigned CatchUpFrames() {
+  EnsureInitialized();
+  return sOriginalExperience ? kCatchUpMin : sCatchUpFrames;
+}
+
 float TickPeriod() { return Loaded(sTickPeriod); }
 
 void SetTickPeriod(float dt) {
