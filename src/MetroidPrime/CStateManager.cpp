@@ -1351,7 +1351,10 @@ void CStateManager::MovePlatforms(float dt) {
     CPhysicsActor* actor = static_cast< CPhysicsActor* >((*platformAndDoorList)[i]);
     if (CPlatformAndDoorList::IsPlatform(actor) && actor != nullptr && actor->GetActive() &&
         actor->GetMass() != 0.f) {
-      CGameCollision::Move(*this, *actor, dt, 0);
+      {
+        PORT_THINK_SCOPE(*actor, kMove);
+        CGameCollision::Move(*this, *actor, dt, 0);
+      }
 #ifdef TARGET_PC
       if (CScriptPlatform* const platform = TCastToPtr< CScriptPlatform >(actor)) {
         platform->PortNoteStepEnd(PortSimTick());
@@ -1391,6 +1394,7 @@ void CStateManager::MoveDoors(float dt) {
       }
 
       if (actor != x84c_player && !CPlatformAndDoorList::IsPlatform(actor)) {
+        PORT_THINK_SCOPE(*actor, kMove);
         CGameCollision::Move(*this, *actor, dt, 0);
       }
     }
@@ -1405,6 +1409,7 @@ void CStateManager::CrossTouchActors() {
   for (int i = actorList->GetFirstObjectIndex(); i != -1; i = actorList->GetNextObjectIndex(i)) {
     CActor* actor = static_cast< CActor* >((*actorList)[i]);
     if (actor != nullptr && actor->GetActive() && actor->GetCallTouch()) {
+      PORT_THINK_SCOPE(*actor, kTouch);
       const rstl::optional_object< CAABox > touchBounds = actor->GetTouchBounds();
       if (!touchBounds) {
         continue;

@@ -452,6 +452,11 @@ void GXPortSideJobWait(u32 job);
 // (GX_AURORA_PORT_SIDE_JOB_FENCE). False when nothing can be written there (a display list is being
 // recorded): wait with GXPortSideJobWait instead.
 GXBool GXPortSideJobFence(u32 job);
+// Port extension: the calling thread, one aurora did not make (an SDL thread), keeps to the PS
+// Vita's fourth core at the Vita priority given (lower is sooner; 0 leaves it), and is named for
+// the [threads] log. Returns the core it keeps to (3), or -1 when the core is closed (no CapUnlocker)
+// and the thread stays where it was, only named. Elsewhere -1.
+int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority);
 
 void GXColor4f32(float r, float g, float b, float a);
 

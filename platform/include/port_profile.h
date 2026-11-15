@@ -19,7 +19,9 @@
 #include <typeinfo>
 
 namespace PortThinkProfile {
-enum Pass : uint8_t { kPreThink, kThink, kPassCount };
+// kMove: CGameCollision::Move in MovePlatforms/MoveDoors; kTouch: CrossTouchActors per actor
+// (0.42.0 test 22: a fight's physics moves took 5 ms a tick in test 21).
+enum Pass : uint8_t { kPreThink, kThink, kMove, kTouch, kPassCount };
 
 // Times what its scope runs under the entity class `type`, sampled as the zone profiler's sites
 // are (a class's first calls in a report window, then one in eight, weighted). Game thread only.

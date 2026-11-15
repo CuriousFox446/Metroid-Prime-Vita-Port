@@ -76,6 +76,7 @@ extern bool PortSmokeFrame(unsigned frame);
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "Kyoto/Particles/CElementGen.hpp"
 #include "MetroidPrime/CParticleDatabase.hpp"
+#include <musyx/port_voices.h>
 #include "Kyoto/Streams/CMemoryInStream.hpp"
 #include "Kyoto/Streams/CMemoryStreamOut.hpp"
 #include "Kyoto/Streams/CZipInputStream.hpp"
@@ -1399,6 +1400,23 @@ int CMain::RsMain(int argc, const char* const* argv) {
                              "%.1f waited for (%.2f ms)\n",
                              steps / frames, idle / frames, particles / frames, created / frames, async / frames,
                              waited / frames, waitUs / 1000.0 / frames);
+            }
+            {
+              // 0.42.0 test 22: MusyX's lock, which the mixer held through its whole mix and every
+              // sound call of the game's takes: the mixer's time and the other threads' waits.
+              MusyxPortMixStats mix;
+              MusyxPortTakeMixStats(&mix);
+              const double secs = wallNs / 1e9;
+              const auto perSecMs = [secs](uint64_t ns) { return static_cast< double >(ns) / 1e6 / secs; };
+              PortLog::Write("[audio] per second: %.0f frames mixed (%.1f voices each, at most %u); the mixer held "
+                             "MusyX's lock %.1f ms, rendered %.1f ms with the lock %s, waited %.2f ms (%.0f times) "
+                             "for it; the other threads took it %.0f times, waited %.0f times (%.2f ms in all, at "
+                             "most %.2f ms); mixer on core %d\n",
+                             mix.frames / secs, mix.frames != 0 ? static_cast< double >(mix.voices) / mix.frames : 0.0,
+                             mix.maxVoices, perSecMs(mix.lockedNs), perSecMs(mix.renderNs),
+                             mix.unlockedRender != 0 ? "open" : "held", perSecMs(mix.mixWaitNs), mix.mixWaits / secs,
+                             mix.apiTakes / secs, mix.apiWaits / secs, perSecMs(mix.apiWaitNs),
+                             static_cast< double >(mix.apiMaxWaitNs) / 1e6, mix.core);
             }
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });

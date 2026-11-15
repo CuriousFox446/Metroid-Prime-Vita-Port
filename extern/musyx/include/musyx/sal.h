@@ -75,6 +75,14 @@ void salFree(void* addr);
 void salBuildCommandList(s16* dest, u32 nsDelay);
 void salStartDsp(u16* cmdList);
 void salCtrlDsp(s16* dest);
+#if MUSY_TARGET == MUSY_TARGET_PC
+// The PC mix in three parts (hw_pc.c, 0.42.0 test 22): the control pass and the finish under the
+// lock, the render between them with it open unless salPortUnlockedRender says otherwise.
+void salCtrlDspControl(void);
+void salCtrlDspRender(void);
+void salCtrlDspFinish(s16* dest);
+int salPortUnlockedRender(void);
+#endif
 u32 salSynthSendMessage(DSPvoice* dsp_vptr, u32 mesg);
 void salHandleAuxProcessing();
 

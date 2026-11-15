@@ -15,7 +15,10 @@
 #include "../../vita_gl.hpp"
 #endif
 #if defined(__vita__)
+#include "../../thread.hpp"
 #include "../../vita_side_jobs.hpp"
+
+#include <psp2/kernel/threadmgr.h>
 #endif
 
 #include <array>
@@ -657,6 +660,30 @@ GXBool GXPortSideJobFence(u32 job) {
   GX_WRITE_AURORA(GX_AURORA_PORT_SIDE_JOB_FENCE);
   GX_WRITE_U32(job);
   return GX_TRUE;
+}
+
+int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority) {
+#if defined(__vita__)
+  const std::string threadName = name != nullptr ? name : "unnamed";
+  aurora::thread::register_current(threadName);
+  if (!aurora::thread::vita_core3_available()) {
+    return -1;
+  }
+  const SceUID self = sceKernelGetThreadId();
+  const int result =
+      sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << aurora::thread::kVitaSystemCore);
+  if (result < 0) {
+    return -1;
+  }
+  if (vitaPriority != 0) {
+    sceKernelChangeThreadPriority(self, vitaPriority);
+  }
+  return aurora::thread::kVitaSystemCore;
+#else
+  (void)name;
+  (void)vitaPriority;
+  return -1;
+#endif
 }
 
 void GXCopyProbeFace(u32 face) {

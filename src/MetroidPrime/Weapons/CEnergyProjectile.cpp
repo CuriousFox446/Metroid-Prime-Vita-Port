@@ -21,6 +21,8 @@
 #include "Weapons/CCollisionResponseData.hpp"
 #include "Weapons/CWeaponDescription.hpp"
 
+#include "port_profile.h"
+
 #ifdef TARGET_PC
 #define PORT_REMASTERED_PROJECTILE(p) ((p).PortIsRemastered())
 #else
@@ -338,10 +340,15 @@ void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
   if (GetCurrentAreaId() != mgr.GetWorld()->GetCurrentAreaId() && HasAttrib(kPA_ArmCannon)) {
     mgr.SetActorAreaId(*this, mgr.GetWorld()->GetCurrentAreaId());
   }
-  UpdateProjectileMovement(dt, mgr);
+  // 0.42.0 test 22: where a projectile's Think goes (test 21: ~750 us each in a fight).
+  {
+    PORT_ZONE_TIMED("projectile: movement (CProjectileWeapon::Update)");
+    UpdateProjectileMovement(dt, mgr);
+  }
   TUniqueId id = kInvalidUniqueId;
   const CRayCastResult result = DoCollisionCheck(id, mgr);
   if (result.IsValid()) {
+    PORT_ZONE_TIMED("projectile: hit (resolve with an actor or the world)");
     if (CActor* actor = TCastToPtr< CActor >(mgr.ObjectById(id))) {
       ResolveCollisionWithActor(result, *actor, mgr);
     } else {
@@ -349,7 +356,10 @@ void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
     }
   }
   CProjectileWeapon& projectile = Projectile();
-  projectile.UpdateParticleFX();
+  {
+    PORT_ZONE_TIMED("projectile: particle effects (UpdateParticleFX)");
+    projectile.UpdateParticleFX();
+  }
   if (x2e4_24_active && x3d0_26_) {
     Explode(GetTranslation(), CVector3f::Up(), kWCR_Default, mgr,
             CDamageVulnerability::NormalVulnerability(), kInvalidUniqueId);
@@ -363,6 +373,7 @@ void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
   }
 #endif
   if (GetProjectileLightId() != kInvalidUniqueId) {
+    PORT_ZONE_TIMED("projectile: light");
     if (CGameLight* light = TCastToPtr< CGameLight >(mgr.ObjectById(GetProjectileLightId()))) {
       light->SetTransform(GetTransform());
       light->SetTranslation(GetTranslation());
@@ -372,12 +383,16 @@ void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
     }
   }
 #ifdef TARGET_PC
-  xPortNestedLights.Update(mgr, projectile.GetAttachedPS1(),
-                           GetActive() && (x2e4_24_active || portRemastered),
-                           GetUniqueId(), GetCurrentAreaId(),
-                           rstl::string_l("ProjectilePHDR_GameProjectile"), x2cc_wpscId, 0);
+  {
+    PORT_ZONE_TIMED("projectile: nested lights");
+    xPortNestedLights.Update(mgr, projectile.GetAttachedPS1(),
+                             GetActive() && (x2e4_24_active || portRemastered),
+                             GetUniqueId(), GetCurrentAreaId(),
+                             rstl::string_l("ProjectilePHDR_GameProjectile"), x2cc_wpscId, 0);
+  }
 #endif
   if (x2e8_sfx) {
+    PORT_ZONE_TIMED("projectile: sound (UpdateEmitter, PitchBend)");
     CSfxManager::UpdateEmitter(x2e8_sfx, projectile.GetTranslation(), projectile.GetVelocity(),
                                255);
     CSfxManager::PitchBend(x2e8_sfx, x2e4_26_waterUpdate ? 0 : 8192);

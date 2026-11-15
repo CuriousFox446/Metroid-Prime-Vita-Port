@@ -94,13 +94,14 @@ void Report(uint32_t frames, void (*write)(const char* line)) {
   }
   std::sort(rows.begin(), rows.end(),
             [](const Row& a, const Row& b) { return a.type->ns[a.pass] > b.type->ns[b.pass]; });
-  constexpr size_t kShown = 14;
+  constexpr size_t kShown = 20;
+  static const char* const kPassNames[kPassCount] = {"PreThink", "Think", "Move", "Touch"};
   char line[192];
   for (size_t i = 0; i < std::min(rows.size(), kShown); ++i) {
     const Row& row = rows[i];
     std::snprintf(line, sizeof(line), "[think] %8.3f ms %7.2f calls  %s %s\n",
                   static_cast<double>(row.type->ns[row.pass]) / 1e6 / frames,
-                  static_cast<double>(row.type->calls[row.pass]) / frames, row.pass == kThink ? "Think" : "PreThink",
+                  static_cast<double>(row.type->calls[row.pass]) / frames, kPassNames[row.pass],
                   readable(row.type->info->name()));
     write(line);
   }

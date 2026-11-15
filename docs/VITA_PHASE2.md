@@ -2633,3 +2633,83 @@ no faster than core 3 decodes it, ~25 to 30 frames a second); `movie: THP video 
 worker, core 3)` in `[zones] other`; Magmoor's frame rate and the `[particles]` waits against test
 20's (4.8 ms a frame); the movies' pictures in step with their sound.
 
+**Test 21** (53e62eb; the user's log of Nov 16, ~12 minutes: the title and file select, Magmoor,
+Phendrana, fights). The user: "The main menu running near full speed is a huge improvement", and
+"There are slowdowns during combat though".
+
+- The title and file select ran 39 to 123 FPS (11 to 50 in test 20).
+- The drain waited at most 1.5 to 2 times a frame, 3 ms at most (4.8 ms a frame in test 20).
+- Magmoor ran mostly 12 to 22 FPS, 3.7 ticks a frame at ~10.5 ms each.
+- Phendrana stayed under 12 FPS, held back by the FIFO processor (98 to 113 ms a frame; its
+  immediate draws 32 to 39 of them, the snow's ~27,000 vertices a frame in 64 draws). The game thread
+  took 82 ms a frame.
+- The worst fight, against flying pirates, ran ~2 minutes at 8.6 to 11 FPS, the game itself at 43% to
+  85% of its speed:
+  - each projectile's Think took ~750 µs (13 alive, ~10 ms a tick);
+  - the physics moves (`MovePlatforms + MoveDoors`) took 5 ms a tick;
+  - the game thread ran only 61% of the time while it held the frame rate back, and waited ~450 times
+    a second (71% to 78% busy in calm Magmoor).
+- Magmoor's fights against its calm stretches cost 1.5 ms more a tick. Part of it is the particles
+  the game thread still updates itself (explosions, effects, projectiles): 1.16 ms a tick against
+  0.30.
+
+The waits have a cause in MusyX's PC mixer (`extern/musyx/src/musyx/runtime/hw_pc.c`):
+
+- `snd_handle_irq` mixes every voice (ADPCM decode, resample, nine volume ramps) holding MusyX's lock
+  (`hwIRQEnterCritical`, an SDL mutex): ~2 ms of each 5 ms frame at 30 voices.
+- Every sound call of the game's takes that lock (`hwDisableIrq`): emitter updates, pitch bends, starts.
+  A fight has the most voices, so the longest mix, and the most calls.
+- `CSfxManager::PitchBend` runs the whole `CSfxManager::Update(0)` for an emitter that is not playing,
+  and every projectile with a sound calls it every tick.
+- SDL's audio thread floats on cores 0 to 2 at priority 159, just above the game's threads, and polls
+  the device every millisecond.
+
+## 0.42.0 test 22: the sound's mix off the game thread's way, on the fourth core
+
+**The mix in three parts** (`salCtrlDspControl`, `salCtrlDspRender`, `salCtrlDspFinish`):
+
+- **The control pass**, under the lock as before, settles in the whole mix's order what the game and
+  the synth change: the break cleanup, a new voice's start, each subframe's control step and ADSR,
+  the volume ramps. It copies what the render reads (the sample, its ADPCM coefficients and loop
+  state, each subframe's pitch and envelope, the filter). The `changed` bits it read are cleared with
+  it, before the lock opens: one a sound call writes meanwhile is kept for the next frame, as when the
+  call waited.
+- **The render** decodes, resamples and mixes the voices with the lock open, as the GameCube's DSP
+  mixed the parameter blocks the CPU had built. It reads samples from aurora's ARAM buffer and writes
+  the studio buffers MusyX made at its start, both kept for the run.
+- **The finish**, under the lock again, writes the play positions back and retires a voice whose
+  sample ran out. A voice the game stopped or started again meanwhile keeps nothing but its sound in
+  this frame. The finish then runs the studio inputs, the aux effects (reverb, whose settings the
+  game changes under the lock) and the downmix.
+
+The output is the whole mix's. `MP_AUDIO_LOCKED_MIX=1` keeps the lock through the render, as before.
+
+**The mixer on the fourth core.** On its first frame the mixer's thread (SDL's audio device thread)
+moves to core 3 when CapUnlocker opens it (`MusyxPortOnMixThread`, `GXPortKeepThreadToFourthCore`)
+at priority 127, above the side worker's 128: a long side job, a movie frame's decode, must not hold
+the mix past the device's buffer. It is named in `[threads]` ("MusyX mixer (SDL audio)").
+
+**The `[audio]` line**, each second after `[particles]`:
+
+- the frames mixed and the voices in each;
+- the mixer's time holding the lock and rendering;
+- the other threads' lock takes, and their waits for it (count, ms in all, the longest);
+- the mixer's core.
+
+**The fights, measured.**
+
+- `[zones]` time a projectile's Think in parts (`projectile: movement`, `collision check`, `near
+  list`, `the near list's actors`, `hit`, `particle effects`, `light`, `nested lights`, `sound`) and
+  `sound: CSfxManager::Update`.
+- The `[think]` lines add `Move` (each physics actor's `CGameCollision::Move`) and `Touch`
+  (`CrossTouchActors` per actor) by class, 20 rows.
+
+What to look for in test 22:
+
+- The `[audio]` line: the other threads' waits near 0 ms a second, the mixer on core 3.
+- The sound as before: no crackles, no sound cut short or left playing (the charge beam's hum, rapid
+  fire, the music, the movies).
+- The fights' frame rate against test 21's, and the game thread's busy share in `[threads]`.
+- `[side jobs]`: the FIFO processor's waits, since the mixer now runs above the side worker on its core.
+- Where a projectile's 750 µs go.
+

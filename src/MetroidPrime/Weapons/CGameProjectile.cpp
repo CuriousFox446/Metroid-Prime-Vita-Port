@@ -26,6 +26,8 @@
 
 #include <Collision/CMaterialFilter.hpp>
 
+#include "port_profile.h"
+
 const float CGameProjectile::kProjectileBoxAllowance = 0.1f;
 
 static CTransform4f clear_transform(const CTransform4f& xf) {
@@ -223,6 +225,8 @@ CRayCastResult CGameProjectile::RayCollisionCheckWithWorld(TUniqueId& idOut, con
     bestMag = worldResult.GetTime();
     result = worldResult;
   }
+  // 0.42.0 test 22: the near list's actors, apart from the world ray before them.
+  PORT_ZONE_TIMED("projectile: the near list's actors (CanCollideWith, rays)");
   for (AUTO(it, nearList.begin()); it != nearList.end(); ++it) {
     if (CActor* actor = static_cast< CActor* >(mgr.ObjectById(*it))) {
       CProjectileTouchResult touch = CanCollideWith(*actor, mgr);
@@ -335,12 +339,16 @@ void CGameProjectile::ApplyDamageToActors(CStateManager& mgr, const CDamageInfo&
 }
 
 CRayCastResult CGameProjectile::DoCollisionCheck(TUniqueId& idOut, CStateManager& mgr) {
+  PORT_ZONE_TIMED("projectile: collision check (near list, world ray, actors)");
   CRayCastResult result = CRayCastResult();
   if (x2e4_24_active) {
     const CVector3f delta = GetTranslation() - x298_previousPos;
     TEntityList nearList;
-    mgr.BuildNearList(nearList, GetProjectileBounds(),
-                      CMaterialFilter::MakeExclude(CMaterialList(kMT_ProjectilePassthrough)), this);
+    {
+      PORT_ZONE_TIMED("projectile: near list (BuildNearList)");
+      mgr.BuildNearList(nearList, GetProjectileBounds(),
+                        CMaterialFilter::MakeExclude(CMaterialList(kMT_ProjectilePassthrough)), this);
+    }
     result = RayCollisionCheckWithWorld(idOut, x298_previousPos, GetTranslation(),
                                         delta.Magnitude(), nearList, mgr);
   }

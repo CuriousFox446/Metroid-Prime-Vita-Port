@@ -11,6 +11,8 @@
 #include "types.h"
 #include <Kyoto/Audio/CSfxManager.hpp>
 
+#include "port_profile.h"
+
 float CSfxManager::mReverbAmount = 1.f;
 float CSfxManager::mReverbScale = 0.1f;
 CSfxManager::EAuxEffect CSfxManager::mCurrentAuxEffect = kAE_None;
@@ -516,6 +518,8 @@ CSfxHandle CSfxManager::LocateHandle(const short id) {
 }
 
 void CSfxManager::Update(float dt) {
+  // 0.42.0 test 22: per tick, and from PitchBend for each emitter that is not playing.
+  PORT_ZONE_TIMED("sound: CSfxManager::Update");
   short i;
   ushort uVar21 = 0;
   CSfxChannel& chan = mChannels[mCurrentChannel];
