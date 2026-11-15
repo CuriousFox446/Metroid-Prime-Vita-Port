@@ -452,6 +452,12 @@ void GXPortSideJobWait(u32 job);
 // (GX_AURORA_PORT_SIDE_JOB_FENCE). False when nothing can be written there (a display list is being
 // recorded): wait with GXPortSideJobWait instead.
 GXBool GXPortSideJobFence(u32 job);
+// The side worker's background lane (0.42.0 test 23): a second thread on the fourth core, below
+// MusyX's mixer and the side worker, for long jobs nobody waits for soon (a movie frame's decode). Its
+// job numbers are its own (0: no lane; the caller does the work).
+u32 GXPortBackgroundJobSubmit(GXPortSideJobFn fn, void* data);
+GXBool GXPortBackgroundJobDone(u32 job);
+void GXPortBackgroundJobWait(u32 job);
 // Port extension: the calling thread, one aurora did not make (an SDL thread), keeps to the PS
 // Vita's fourth core at the Vita priority given (lower is sooner; 0 leaves it), and is named for
 // the [threads] log. Returns the core it keeps to (3), or -1 when the core is closed (no CapUnlocker)

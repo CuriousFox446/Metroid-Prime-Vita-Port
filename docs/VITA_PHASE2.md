@@ -2713,3 +2713,49 @@ What to look for in test 22:
 - `[side jobs]`: the FIFO processor's waits, since the mixer now runs above the side worker on its core.
 - Where a projectile's 750 µs go.
 
+**Test 22** (bc13bf5; the user's log of Nov 16, 6.5 minutes, 11,281 frames, a clean exit: the
+menus, Magmoor, a flying-pirate fight). The user: "It's good to see that the 4th core is being
+utilized".
+
+- The mixer kept to core 3 (`[audio]`: "mixer on core 3"), busy 26% to 50% of it: renders of 166 to
+  367 ms a second with the lock open, the lock held 67 to 103 ms a second (its control pass, the
+  reverb, the downmix, the synth's own passes).
+- The other threads took the lock 150 to 600 times a second and waited for it 0.5 to 5 ms a second
+  in all. The game thread ran 78% to 92% of the time in play (61% to 78% in test 21).
+- The flying-pirate fight kept the game's speed: 55 to 61 ticks a second (26 to 51 in test 21's),
+  9 to 20 FPS, mostly 11 to 15 (8.6 to 11). A projectile's Think took ~100 µs (~750 in test 21):
+  `UpdateParticleFX` 80 of them, the collision check 13, the movement 6.
+- But the mixer at 127, above the side worker, made its jobs wait:
+  - Magmoor's `[particles]` waits grew to 8.0 ms a frame (0.73 in test 21), the drain to 2.8 (0.29);
+  - in the fight they reached 6 to 32 ms a frame;
+  - the FIFO processor waited for the side worker 27 to 100 ms a second (~4 in test 21).
+
+## 0.42.0 test 23: the fourth core's order; the mixer's ramps in 32 bits
+
+**The fourth core, in order.**
+
+- The side worker first (128): the FIFO processor and the game thread wait for its short jobs.
+- MusyX's mixer next (129).
+- Then the side worker's background lane (130), a second thread for long jobs nobody waits for soon:
+  the movies' video decode, 15 to 40 ms a frame (`GXPortBackgroundJobSubmit`, `Done`, `Wait`; its job
+  numbers are its own). A decode can no longer hold the mix past the audio device's buffer, and the
+  mixer no longer holds the side worker's jobs back.
+- Then the helpers (the program compiler, the texture workers).
+
+`[side jobs]` gets a second line for the background lane.
+
+**The mixer's ramps.** A voice's nine volume ramps of a subframe (`salMixRamps`) take
+`mixRampChannel`'s arithmetic, the envelope worked out once for all nine. When every decoded sample is
+within [-32768, 32768] and the ramp within ±65535 over the subframe, `vol * env` and `src * mixVol`
+stay below 2^31, so the 64-bit steps run in 32 bits with the same results; otherwise the ramp takes
+`mixRampChannel` itself. Checked on the PC against the old code, bit for bit: 400,000 subframes with
+edge cases, 2.4 million ramps on the 32-bit path, no difference.
+
+What to look for in test 23:
+
+- `[particles]`: waits back near test 21's (under 1 ms a frame).
+- `[side jobs]`: the FIFO processor's waits back to a few ms a second.
+- `[threads]`: the mixer's busy share against test 22's 26% to 50%.
+- The sound clean everywhere, the movies' screens above all (the title, the file select).
+- The fights' frame rate against test 22's.
+

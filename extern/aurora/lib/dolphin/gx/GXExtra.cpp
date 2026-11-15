@@ -662,6 +662,33 @@ GXBool GXPortSideJobFence(u32 job) {
   return GX_TRUE;
 }
 
+u32 GXPortBackgroundJobSubmit(GXPortSideJobFn fn, void* data) {
+#if defined(__vita__)
+  return aurora::side_jobs::submit_background(fn, data);
+#else
+  (void)fn;
+  (void)data;
+  return 0;
+#endif
+}
+
+GXBool GXPortBackgroundJobDone(u32 job) {
+#if defined(__vita__)
+  return aurora::side_jobs::done_background(job) ? GX_TRUE : GX_FALSE;
+#else
+  (void)job;
+  return GX_TRUE;
+#endif
+}
+
+void GXPortBackgroundJobWait(u32 job) {
+#if defined(__vita__)
+  aurora::side_jobs::wait_background(job);
+#else
+  (void)job;
+#endif
+}
+
 int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority) {
 #if defined(__vita__)
   const std::string threadName = name != nullptr ? name : "unnamed";

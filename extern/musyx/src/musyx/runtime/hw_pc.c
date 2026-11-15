@@ -368,6 +368,55 @@ static inline void mixRampChannel(s32* dest, const s32* src, int nSamples, s16 s
   }
 }
 
+/* dest + add, saturated to 32 bits: mixRampChannel's musyxPcClamp32((int64_t)dest + add). */
+static inline s32 salSatAdd32(s32 dest, s32 add) {
+#if defined(__GNUC__) || defined(__clang__)
+  s32 sum;
+  if (__builtin_add_overflow(dest, add, &sum))
+    return add > 0 ? INT32_MAX : INT32_MIN;
+  return sum;
+#else
+  return musyxPcClamp32((int64_t)dest + add);
+#endif
+}
+
+/* A subframe's nine ramps for one voice (0.42.0 test 23: the render's most of the mixer's time,
+ * which took a third of core 3 in test 22). mixRampChannel's arithmetic, with the envelope worked
+ * out once for all nine; and with every decoded sample within [-32768, 32768] and the ramp within
+ * +-65535 over the subframe, vol * env and src * mixVol both stay below 2^31, so its 64-bit steps
+ * give the same results in 32 bits (and its clamps none). Otherwise the ramp takes
+ * mixRampChannel itself. */
+static void salMixRamps(s32* const dest[9], const s32* src, int nSamples, const s16 startVol[9],
+                        const s16 deltaVol[9], s16 envStart, s16 envDelta) {
+  s32 env[SAL_SAMPLES_PER_SUBFRAME];
+  int fits = nSamples > 0 && nSamples <= SAL_SAMPLES_PER_SUBFRAME;
+  if (fits) {
+    for (int i = 0; i < nSamples; ++i) {
+      env[i] = CLAMP((s32)envStart + (s32)envDelta * i, 0, 0x7FFF);
+      if (src[i] < -32768 || src[i] > 32768)
+        fits = 0;
+    }
+  }
+
+  for (int k = 0; k < 9; ++k) {
+    s32* const d = dest[k];
+    const s16 startV = startVol[k];
+    const s16 deltaV = deltaVol[k];
+    if (d == NULL || (startV == 0 && deltaV == 0))
+      continue;
+    const s32 lastV = (s32)startV + (s32)deltaV * (nSamples - 1);
+    if (!fits || lastV < -65535 || lastV > 65535) {
+      mixRampChannel(d, src, nSamples, startV, deltaV, envStart, envDelta);
+      continue;
+    }
+    for (int i = 0; i < nSamples; ++i) {
+      const s32 vol = (s32)startV + (s32)deltaV * i;
+      const s32 mixVol = (vol * env[i]) >> 15;
+      d[i] = salSatAdd32(d[i], (src[i] * mixVol) >> 15);
+    }
+  }
+}
+
 static inline void addThreeChannelBuffer(s32* dst, const s32* src, u16 vol) {
   if (dst == NULL || src == NULL || vol == 0)
     return;
@@ -700,11 +749,14 @@ static int salRenderVoiceSubframe(SalVoiceRender* r, const SalStudioRender* sr, 
       auxBCur ? auxBCur + SAL_SAMPLES_PER_FRAME : NULL,
       auxBCur ? auxBCur + SAL_SAMPLES_PER_FRAME * 2 : NULL,
   };
+  s32* channelDest[9];
+  s16 channelStart[9];
   for (int k = 0; k < 9; ++k) {
-    mixRampChannel(dest[k] ? dest[k] + frameOffset : NULL, voiceDecodeBuf, nSamples,
-                   (s16)(r->startVol[k] + r->dVol[k] * frameOffset), r->dVol[k],
-                   (s16)r->adsrStart[subframe], r->adsrDelta[subframe]);
+    channelDest[k] = dest[k] ? dest[k] + frameOffset : NULL;
+    channelStart[k] = (s16)(r->startVol[k] + r->dVol[k] * frameOffset);
   }
+  salMixRamps(channelDest, voiceDecodeBuf, nSamples, channelStart, r->dVol, (s16)r->adsrStart[subframe],
+              r->adsrDelta[subframe]);
 
   return voiceDone;
 }

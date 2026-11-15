@@ -21,6 +21,12 @@ bool done(uint32_t job) noexcept;
 // Waits until the job has run, at most half a second (a hang, which is logged, then let go).
 // `fifo`: the FIFO processor's wait, which the log counts apart from the others.
 void wait(uint32_t job, bool fifo) noexcept;
-// The log's [side jobs] line: what the worker ran and who waited for it, since the last line.
+// The background lane (0.42.0 test 23): a second thread on the fourth core, below MusyX's mixer, for
+// long jobs nobody waits for soon (a movie frame's decode). Its own numbers: a job of one lane means
+// nothing to the other's done and wait.
+uint32_t submit_background(Fn fn, void* data) noexcept;
+bool done_background(uint32_t job) noexcept;
+void wait_background(uint32_t job) noexcept;
+// The log's [side jobs] lines: what each worker ran and who waited for it, since the last lines.
 void log_stats() noexcept;
 } // namespace aurora::side_jobs

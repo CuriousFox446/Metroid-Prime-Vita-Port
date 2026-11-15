@@ -29,10 +29,15 @@ constexpr Module Log{"aurora::side_jobs"};
 constexpr uint32_t kSlots = 256;
 // Its jobs are plain computations.
 constexpr size_t kStack = 256 * 1024;
-// Its priority on the fourth core: above the helpers there with it (the program compiler and the
-// texture workers, 191), since the FIFO processor may be waiting for it, and below the system's own
-// threads, which the core is for.
+// The side worker's priority on the fourth core: first there, since the FIFO processor and the game
+// thread wait for its short jobs (0.42.0 test 22 put MusyX's mixer above it, and those waits grew
+// tenfold); then the mixer (129: platform/vita/vita_platform.cpp), then the background lane, then the
+// helpers (the program compiler and the texture workers, 191). The system's own threads, which the
+// core is for, stay above them all.
 constexpr int kPriority = 128;
+// The background lane's (0.42.0 test 23): long jobs nobody waits for soon (a movie frame's decode,
+// 15 to 40 ms), below the mixer, which must not miss the audio device's buffer for one of them.
+constexpr int kBackgroundPriority = 130;
 // The longest anyone waits for a job. The worker's take a millisecond or less, so past this it has
 // hung: that is logged, and the waiter goes on without it.
 constexpr uint64_t kWaitLimitUs = 500 * 1000;
@@ -43,6 +48,9 @@ struct Job {
 };
 
 struct Worker {
+  const char* name = "side worker";
+  int priority = kPriority;
+  bool sideStack = false; // exports its stack for the per-thread statics (the side worker only)
   std::array<Job, kSlots> ring{};
   std::mutex submitMutex; // submitters one at a time
   std::atomic<uint32_t> submitted{0};
@@ -65,6 +73,7 @@ struct Worker {
 };
 
 std::atomic<Worker*> sWorker{nullptr};
+std::atomic<Worker*> sBackground{nullptr};
 
 uint64_t now_us() noexcept { return sceKernelGetProcessTimeWide(); }
 
@@ -95,16 +104,18 @@ bool wait_until(Worker& w, const Ready& ready) noexcept {
 
 void* run(void* arg) {
   Worker& w = *static_cast<Worker*>(arg);
-  // Every frame the jobs make lies below this one, in the stack's kStack bytes from about here down:
-  // the range leaves out its last 16 KiB, which more than covers what started the thread above us.
-  uintptr_t sp;
-  __asm__ volatile("mov %0, sp" : "=r"(sp));
-  gPortSideStackLow = sp - (kStack - 16 * 1024);
-  gPortSideStackSpan = kStack - 16 * 1024;
-  thread::set_current({.name = "side worker",
+  if (w.sideStack) {
+    // Every frame the jobs make lies below this one, in the stack's kStack bytes from about here
+    // down: the range leaves out its last 16 KiB, which more than covers what started the thread.
+    uintptr_t sp;
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    gPortSideStackLow = sp - (kStack - 16 * 1024);
+    gPortSideStackSpan = kStack - 16 * 1024;
+  }
+  thread::set_current({.name = w.name,
                        .priority = thread::Priority::High,
                        .vitaCore = thread::kVitaSystemCore,
-                       .vitaPriority = kPriority});
+                       .vitaPriority = w.priority});
   uint32_t next = 1;
   for (;;) {
     uint32_t submitted = w.submitted.load(std::memory_order_acquire);
@@ -127,36 +138,49 @@ void* run(void* arg) {
   return nullptr;
 }
 
-// The worker, started at the first submit; none without the fourth core.
-Worker* worker() noexcept {
-  static Worker* const started = []() -> Worker* {
-    if (!thread::vita_core3_available()) {
-      return nullptr;
-    }
-    auto* w = new Worker();
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, kStack);
-    pthread_t handle;
-    const int result = pthread_create(&handle, &attr, &run, w);
-    pthread_attr_destroy(&attr);
-    if (result != 0) {
-      Log.warn("side worker: not started ({}): the game thread keeps its work", result);
-      delete w;
-      return nullptr;
-    }
-    pthread_detach(handle);
-    sWorker.store(w, std::memory_order_release);
-    Log.info("side worker: started on core 3 (CPU skinning, which the FIFO processor waits for where a model's "
-             "draws begin; the actors' particle steps, which the game thread finishes by the end of the tick)");
-    return w;
-  }();
+// A worker thread on the fourth core; none without it.
+Worker* start_worker(const char* name, int priority, bool sideStack, std::atomic<Worker*>& slot,
+                     const char* what) noexcept {
+  if (!thread::vita_core3_available()) {
+    return nullptr;
+  }
+  auto* w = new Worker();
+  w->name = name;
+  w->priority = priority;
+  w->sideStack = sideStack;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, kStack);
+  pthread_t handle;
+  const int result = pthread_create(&handle, &attr, &run, w);
+  pthread_attr_destroy(&attr);
+  if (result != 0) {
+    Log.warn("{}: not started ({}): the game thread keeps its work", name, result);
+    delete w;
+    return nullptr;
+  }
+  pthread_detach(handle);
+  slot.store(w, std::memory_order_release);
+  Log.info("{}: started on core 3 at priority {} ({})", name, priority, what);
+  return w;
+}
+
+// Each started at its first submit.
+Worker* side_worker() noexcept {
+  static Worker* const started =
+      start_worker("side worker", kPriority, true, sWorker,
+                   "CPU skinning, which the FIFO processor waits for where a model's draws begin; the actors' "
+                   "particle steps, which the game thread finishes as the frame's draw begins");
   return started;
 }
-} // namespace
 
-uint32_t submit(Fn fn, void* data) noexcept {
-  Worker* const w = worker();
+Worker* background_worker() noexcept {
+  static Worker* const started = start_worker("side worker (background lane)", kBackgroundPriority, false,
+                                              sBackground, "the movies' video decode");
+  return started;
+}
+
+uint32_t submit_to(Worker* w, Fn fn, void* data) noexcept {
   if (w == nullptr || fn == nullptr) {
     return 0;
   }
@@ -166,7 +190,7 @@ uint32_t submit(Fn fn, void* data) noexcept {
   // worker has hung: the caller does the work itself, and the slot stays as it is.
   if (job > kSlots && !has_run(*w, job - kSlots) && !wait_until(*w, [&] { return has_run(*w, job - kSlots); })) {
     if (w->hangs.fetch_add(1, std::memory_order_relaxed) == 0) {
-      Log.error("side worker: job {} has not run after {} ms; the game thread does its work itself", job - kSlots,
+      Log.error("{}: job {} has not run after {} ms; the game thread does its work itself", w->name, job - kSlots,
                 kWaitLimitUs / 1000);
     }
     return 0;
@@ -177,13 +201,9 @@ uint32_t submit(Fn fn, void* data) noexcept {
   return job;
 }
 
-bool done(uint32_t job) noexcept {
-  const Worker* const w = sWorker.load(std::memory_order_acquire);
-  return job == 0 || w == nullptr || has_run(*w, job);
-}
+bool done_in(const Worker* w, uint32_t job) noexcept { return job == 0 || w == nullptr || has_run(*w, job); }
 
-void wait(uint32_t job, bool fifo) noexcept {
-  Worker* const w = sWorker.load(std::memory_order_acquire);
+void wait_in(Worker* w, uint32_t job, bool fifo) noexcept {
   if (job == 0 || w == nullptr || has_run(*w, job)) {
     return;
   }
@@ -202,13 +222,12 @@ void wait(uint32_t job, bool fifo) noexcept {
     w->otherWaitUs.fetch_add(waited, std::memory_order_relaxed);
   }
   if (!ok && w->hangs.fetch_add(1, std::memory_order_relaxed) == 0) {
-    Log.error("side worker: job {} has not run after {} ms (the worker has run {}): going on without it", job,
+    Log.error("{}: job {} has not run after {} ms (the worker has run {}): going on without it", w->name, job,
               kWaitLimitUs / 1000, w->finished.load(std::memory_order_relaxed));
   }
 }
 
-void log_stats() noexcept {
-  Worker* const w = sWorker.load(std::memory_order_acquire);
+void log_worker(Worker* w, const char* lane) noexcept {
   if (w == nullptr) {
     return;
   }
@@ -227,12 +246,30 @@ void log_stats() noexcept {
     return;
   }
   const double seconds = static_cast<double>(span) / 1e6;
-  Log.info("[side jobs] over {:.1f} s: {} jobs ({:.0f} a second) ran on core 3, busy {:.1f} ms a second ({:.0f}%); "
+  Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core 3, busy {:.1f} ms a second ({:.0f}%); "
            "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms), the other threads for {} "
            "({:.1f} ms); {} hung",
-           seconds, jobs, jobs / seconds, static_cast<double>(busyUs) / 1000.0 / seconds,
+           lane, seconds, jobs, jobs / seconds, static_cast<double>(busyUs) / 1000.0 / seconds,
            100.0 * static_cast<double>(busyUs) / static_cast<double>(span), fifoWaits,
            static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, otherWaits,
            static_cast<double>(otherWaitUs) / 1000.0, hangs);
+}
+} // namespace
+
+uint32_t submit(Fn fn, void* data) noexcept { return submit_to(side_worker(), fn, data); }
+
+bool done(uint32_t job) noexcept { return done_in(sWorker.load(std::memory_order_acquire), job); }
+
+void wait(uint32_t job, bool fifo) noexcept { wait_in(sWorker.load(std::memory_order_acquire), job, fifo); }
+
+uint32_t submit_background(Fn fn, void* data) noexcept { return submit_to(background_worker(), fn, data); }
+
+bool done_background(uint32_t job) noexcept { return done_in(sBackground.load(std::memory_order_acquire), job); }
+
+void wait_background(uint32_t job) noexcept { wait_in(sBackground.load(std::memory_order_acquire), job, false); }
+
+void log_stats() noexcept {
+  log_worker(sWorker.load(std::memory_order_acquire), "");
+  log_worker(sBackground.load(std::memory_order_acquire), " background lane");
 }
 } // namespace aurora::side_jobs

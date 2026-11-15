@@ -421,10 +421,11 @@ void CMoviePlayer::DecodeFromRead(const void* ptr) {
       const uint videoBytes = CBasics::SwapBytes(sizes[0]);
       // 0.42.0 test 21: on the side worker where there is one (25 to 50 ms a frame of the game
       // thread's in test 20's title and file select screens). The slot's last decode runs out first;
-      // the bytes are copied with 32 spare for the bit reader, as the read buffer has them.
+      // the bytes are copied with 32 spare for the bit reader, as the read buffer has them. Test 23:
+      // in its background lane, below MusyX's mixer, which a 15 to 40 ms decode must not hold up.
       SPortDecode& decode = xPortDecodes[xcc_decodedTexSlot];
       if (decode.job != 0) {
-        GXPortSideJobWait(decode.job);
+        GXPortBackgroundJobWait(decode.job);
         decode.job = 0;
       }
       decode.bytes.assign(data, data + videoBytes);
@@ -435,7 +436,7 @@ void CMoviePlayer::DecodeFromRead(const void* ptr) {
       decode.v = texture.V();
       decode.width = x6c_videoInfo.mXSize;
       decode.height = x6c_videoInfo.mYSize;
-      decode.job = GXPortSideJobSubmit(&CMoviePlayer::PortDecodeJob, &decode);
+      decode.job = GXPortBackgroundJobSubmit(&CMoviePlayer::PortDecodeJob, &decode);
       if (decode.job == 0) {
         THPVideoDecodeBounded(data, videoBytes, texture.Y(), texture.U(), texture.V(),
                               x6c_videoInfo.mXSize, x6c_videoInfo.mYSize);
@@ -619,7 +620,7 @@ void CMoviePlayer::Rewind() {
 #ifdef TARGET_PC
 bool CMoviePlayer::PortSlotDecoded(int slot) {
   SPortDecode& decode = xPortDecodes[slot];
-  if (decode.job != 0 && GXPortSideJobDone(decode.job)) {
+  if (decode.job != 0 && GXPortBackgroundJobDone(decode.job)) {
     decode.job = 0;
   }
   return decode.job == 0;
@@ -628,14 +629,14 @@ bool CMoviePlayer::PortSlotDecoded(int slot) {
 void CMoviePlayer::PortWaitDecodes() {
   for (SPortDecode& decode : xPortDecodes) {
     if (decode.job != 0) {
-      GXPortSideJobWait(decode.job);
+      GXPortBackgroundJobWait(decode.job);
       decode.job = 0;
     }
   }
 }
 
 void CMoviePlayer::PortDecodeJob(void* data) {
-  PORT_ZONE_TIMED("movie: THP video decode (side worker, core 3)");
+  PORT_ZONE_TIMED("movie: THP video decode (background lane, core 3)");
   const SPortDecode& decode = *static_cast< const SPortDecode* >(data);
   THPVideoDecodeBounded(decode.bytes.data(), decode.size, decode.y, decode.u, decode.v, decode.width,
                         decode.height);

@@ -320,11 +320,13 @@ __attribute__((constructor(101))) void vitaSetup() {
 
 // MusyX's mixer thread (SDL's audio device thread), on its first frame (extern/musyx hw_pc.c):
 // onto the fourth core when CapUnlocker opens it (0.42.0 test 22). SDL made it at priority 159,
-// just above the game's threads, free to run on cores 0 to 2. There it takes 127, above the side
-// worker's 128: a long side job (a movie frame's decode) must not hold the mix past the audio
-// device's buffer.
+// just above the game's threads, free to run on cores 0 to 2. There it takes 129 (test 23): below
+// the side worker's 128, whose short jobs the FIFO processor and the game thread wait for (above
+// them, as 127 in test 22, the mixer made those waits ten times longer), and above the side
+// worker's background lane (130), whose long jobs (a movie frame's decode) must not hold the mix
+// past the audio device's buffer.
 extern "C" int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority);
-extern "C" int MusyxPortOnMixThread(void) { return GXPortKeepThreadToFourthCore("MusyX mixer (SDL audio)", 127); }
+extern "C" int MusyxPortOnMixThread(void) { return GXPortKeepThreadToFourthCore("MusyX mixer (SDL audio)", 129); }
 
 void* operator new(std::size_t size) { return allocate(size, __builtin_return_address(0)); }
 void* operator new[](std::size_t size) { return allocate(size, __builtin_return_address(0)); }
