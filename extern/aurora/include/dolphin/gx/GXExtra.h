@@ -435,6 +435,24 @@ void GXPortSetRoomLights(const f32* records, u32 count);
 // Game-thread snapshot, at most 64 records, for scoped UI lighting overrides.
 u32 GXPortGetRoomLights(f32 records[64 * 16]);
 
+// Port extension: the side worker, a thread on the PS Vita's fourth core (the system's, which the
+// CapUnlocker plugin opens to games), for work the game thread hands off whose results only the
+// FIFO processor reads. Its jobs run one at a time, in the order they were submitted. Elsewhere, and
+// on a Vita without CapUnlocker, there is none: GXPortSideJobSubmit returns 0 and the caller does
+// the work itself.
+typedef void (*GXPortSideJobFn)(void* data);
+// Queues fn(data); its number (above 0), or 0 when there is no worker. `data` must live until the
+// job has run.
+u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data);
+// Whether the job has run (true for 0, no job).
+GXBool GXPortSideJobDone(u32 job);
+// The calling thread waits until the job has run.
+void GXPortSideJobWait(u32 job);
+// The FIFO processor waits for the job before it takes what is written after this
+// (GX_AURORA_PORT_SIDE_JOB_FENCE). False when nothing can be written there (a display list is being
+// recorded): wait with GXPortSideJobWait instead.
+GXBool GXPortSideJobFence(u32 job);
+
 void GXColor4f32(float r, float g, float b, float a);
 
 #ifdef __cplusplus

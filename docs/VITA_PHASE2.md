@@ -2458,3 +2458,72 @@ access), so the old cost is on record beside the new.
 What to look for in test 17: that line; Magmoor's `CElementGen::Update` and `CPuffer` Think against
 test 16's (32.6 ms a frame, 615 us); its frame rate and ticks a frame.
 
+**Test 17** (fc4f92b, the user's log of Nov 14: Magmoor, then Phendrana). The clock costs, in us a
+call: OSGetTime 7.47, steady_clock::now 5.66, sceKernelGetProcessTimeWide 0.70, a shared_mutex read
+lock and unlock 0.73, a mutex 0.28, a thread_local access 0.48. Magmoor: 32% of its windows under 12
+FPS (61% in test 16); in those at 0 to 18 FPS a frame ran 4.65 ticks, `CElementGen::Update` took
+13.0 ms a frame for 572 updates (23 us each; 32.6 ms in test 16) and `CPuffer`'s Think 304 us (615).
+The game thread is still the limit (at 0 to 12 FPS it was busy 97 of a frame's 98 ms, the FIFO
+processor 33). The thread log: no thread ever on core 3; the texture worker and the program
+compiler, free to float, moved between cores 0 to 2 thousands of times a minute. The user: "the
+Vita's 4th core barely goes above 20%, which means we're not taking full advantage of the
+CapUnlocker plugin that unlocks it".
+
+## 0.42.0 test 18: the fourth core
+
+The kernel keeps core 3 for the system: it refuses a game thread that core's mask, and a thread
+left to float (mask 0) is placed on cores 0 to 2 alone. CapUnlocker patches that check
+(`isIllegalAffinity` in SceKernelThreadMgr) to pass, so a thread may ask for core 3; none of the
+port's did, so the core ran the system's own work (the ~20% the user saw) and nothing else.
+
+**What can go there.** The game is one thread, as on the GameCube: a tick's entities, physics and
+particles, then the frame's draw, each step reading what the one before wrote. Only work whose
+results that thread does not read itself can run beside it. In test 17's heaviest windows:
+
+- CPU skinning, 2.4 to 2.9 ms a frame (5 to 8 models, ~350 us each). The posed vertices are read by
+  the FIFO processor alone: the game hands GX their address, and the processor reads them when it
+  draws. This test moves it.
+- The particles' updates, 13 ms a frame in Magmoor. They share the particle globals
+  (`CParticleGlobals`), the global random number generator, the token counts and the allocator with
+  the rest of the game thread, so that state must be made per thread before they can move: a later
+  step, not this test.
+- The audio mix (~1 ms a frame in play): the mixer is not thread-safe, and the port's
+  `OSDisableInterrupts` (its critical sections on the GameCube) does nothing.
+- The input polls (~4 ms): on a thread of their own they would read the pad a frame late.
+
+**Test 18.**
+
+- `thread::Options::vitaCore` takes 3 (`thread::kVitaSystemCore`); without CapUnlocker a thread asking
+  for it takes `vitaCoreFallback` instead (-1: it floats, as before). Whether core 3 is open is asked
+  once, by moving the first thread that wants it there and back, and logged ("core 3 (the system's)
+  is open to the game (CapUnlocker)..." or "...is closed to the game...").
+- The program compiler and the texture workers keep to core 3: a new build's warm-up compiles on a
+  core of its own, not in the game's and the FIFO processor's spare time, and the texture worker no
+  longer takes the FIFO processor's core while it waits.
+- The side worker (`extern/aurora/lib/vita_side_jobs.cpp`; `GXPortSideJob*` in `GXExtra.h`): one
+  thread on core 3 (priority 128, above the compiler's and the texture workers' 191) that runs the
+  jobs the game hands it, one at a time, in order. CPU skinning is its first: `CSkinnedModel::
+  Calculate` builds the bones' transforms as before, copies them (every instance of a model shares
+  its skin rules' bones, and the next instance rewrites them), and queues the points and normals
+  (`CSkinRules::PortSubmitPointsAndNormals`: the same arithmetic, so the same bits). The model's
+  draws write `GX_AURORA_PORT_SIDE_JOB_FENCE` before themselves, and the FIFO processor waits there
+  until the job has run; the game thread waits itself only where it must (a display list being
+  recorded, the workspace written again or freed). On the game thread still: models a morph, a
+  point generator or the verify run reads at once, the swarms' shared workspaces, models under 64
+  points, and those the helper threads split (`MP_SKIN_THREAD_MIN`). Without CapUnlocker there is
+  no side worker, and every model skins as before.
+- Aurora's native clock, behind every OSGetTime, reads `sceKernelGetProcessTimeWide` on the Vita
+  (0.70 us a call, against steady_clock's 5.66).
+
+The log has a `[side jobs]` line beside `[threads]`: the jobs a second, the worker's share of core 3,
+and how often and how long the FIFO processor or the game thread waited for one. A job that never
+ran (none should) is logged as an error after half a second, and its waiter goes on.
+
+What to look for in test 18: the "core 3" line at the start; `[threads]` showing the program
+compiler, the texture worker and the side worker on core 3 (mask 0x80000); the `[side jobs]` line's
+FIFO waits (few and short: the vertices were ready before their draws); the game thread's
+`CSkinnedModel::Calculate (CPU skinning)` zone (2.4 to 2.9 ms a frame in test 17) beside
+`CSkinnedModel: skinning (side worker, core 3)` in `[zones] other`; how long a new build's warm-up
+takes; and skinned models drawn whole (a torn or exploded one would be a draw that read its
+vertices before its job ran).
+

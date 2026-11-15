@@ -26,6 +26,12 @@ public:
   // Port: skins straight from the model's big-endian arrays into plain memory,
   // without the locked-cache emulation; same arithmetic as BuildPoints/Normals.
   void PortBuildPointsAndNormals(const CModel& model, float* points, float* normals) const;
+  // Port (PS Vita, 0.42.0 test 18): as PortBuildPointsAndNormals, then `padBytes` zeroes at `pad`,
+  // on the side worker (the fourth core) when there is one, from a copy of the bones as
+  // BuildAccumulatedTransforms left them. Returns the side job (GXPortSideJob*), or 0 once done
+  // here (no worker, or a model the threads split).
+  uint PortSubmitPointsAndNormals(const CModel& model, float* points, float* normals, uchar* pad,
+                                  uint padBytes) const;
 #endif
   int GetNumPoints() const { return x10_vertexCount; }
   int GetNumNormals() const { return x14_normalCount; }

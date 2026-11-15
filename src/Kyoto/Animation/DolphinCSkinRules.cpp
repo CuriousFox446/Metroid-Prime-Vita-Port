@@ -8,6 +8,8 @@
 
 #ifdef TARGET_PC
 #include "Kyoto/Basics/CBasics.hpp"
+#include "port_profile.h"
+#include <dolphin/gx/GXExtra.h>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -167,7 +169,9 @@ static void FinishTangentFrame(const uchar* src, float* out, int vecs) {
 // normal arrays. The expressions match CTransform4f/CMatrix3f's operator*, so
 // the output is bit-identical to the retail path.
 // `vecs` is the vectors per normal entry (1, or 3 for N, B, T, or 5 with a second frame); all rotate alike.
-static void BuildBoneRange(const CVirtualBone* bones, int first, int end, int offset,
+// `Bone`: CVirtualBone, or a copy of what this reads of one (PortSkinJobs::Bone).
+template < typename Bone >
+static void BuildBoneRange(const Bone* bones, int first, int end, int offset,
                            const uchar* srcPoints, const uchar* srcNormals, float* points,
                            float* normals, int vecs) {
   const uchar* src = srcPoints + offset * 12;
@@ -352,6 +356,95 @@ void CSkinRules::PortBuildPointsAndNormals(const CModel& model, float* points,
                    points, normals, nbt);
   };
   SkinPool::Get().Run(count, job);
+}
+
+#if defined(__vita__)
+// 0.42.0 test 18: the PS Vita's fourth core (CapUnlocker) skins the models while the game thread
+// goes on. Only the FIFO processor reads a skinned model's vertices (the draws hand GX their
+// arrays' addresses), and it waits for the model's job where its draws begin (CSkinnedModel's
+// PortFenceSkinJob). CPU skinning was 2.4 to 2.9 ms of the game thread's frame in the heavy rooms of
+// test 17's log (Phendrana, Magmoor: 5 to 8 models a frame, ~350 us each).
+namespace PortSkinJobs {
+// A virtual bone as BuildBoneRange reads it, copied when the job is queued: the bones are the skin
+// rules' own, shared by every instance of the model, and the next instance's
+// BuildAccumulatedTransforms rewrites them on the game thread while this job may still run.
+struct Bone {
+  CTransform4f xf;
+  CMatrix3f rot;
+  int count;
+  const CTransform4f& GetTransform() const { return xf; }
+  const CMatrix3f& GetRotation() const { return rot; }
+  int GetNumIndices() const { return count; }
+};
+
+struct Job {
+  std::vector< Bone > bones; // grows to the biggest model's and stays
+  const uchar* srcPoints = nullptr;
+  const uchar* srcNormals = nullptr;
+  float* points = nullptr;
+  float* normals = nullptr;
+  int nbt = 1;
+  uchar* pad = nullptr;
+  uint padBytes = 0;
+  uint id = 0; // its side job while it may not have run
+};
+
+// Jobs in flight at most (the game thread's alone): a slot is taken again once its job has run.
+const int kJobs = 64;
+Job sJobs[kJobs];
+int sNextJob = 0;
+// Set at the first submit the side worker refuses (no fourth core): every model skins here.
+bool sNoWorker = false;
+
+void Run(void* data) {
+  PORT_ZONE_TIMED("CSkinnedModel: skinning (side worker, core 3)");
+  const Job& job = *static_cast< const Job* >(data);
+  BuildBoneRange(job.bones.data(), 0, static_cast< int >(job.bones.size()), 0, job.srcPoints,
+                 job.srcNormals, job.points, job.normals, job.nbt);
+  if (job.padBytes != 0) {
+    memset(job.pad, 0, job.padBytes);
+  }
+}
+} // namespace PortSkinJobs
+#endif
+
+uint CSkinRules::PortSubmitPointsAndNormals(const CModel& model, float* points, float* normals,
+                                            uchar* pad, uint padBytes) const {
+#if defined(__vita__)
+  // The models the helper threads split (MP_SKIN_THREAD_MIN) stay with them.
+  if (!PortSkinJobs::sNoWorker && x10_vertexCount < ThreadThreshold()) {
+    PortSkinJobs::Job& job = PortSkinJobs::sJobs[PortSkinJobs::sNextJob];
+    if (job.id != 0) {
+      GXPortSideJobWait(job.id);
+      job.id = 0;
+    }
+    job.bones.clear();
+    for (int i = 0; i < x0_virtualBones.size(); ++i) {
+      const CVirtualBone& bone = x0_virtualBones[i];
+      job.bones.push_back(
+          PortSkinJobs::Bone{bone.GetTransform(), bone.GetRotation(), bone.GetNumIndices()});
+    }
+    job.srcPoints = static_cast< const uchar* >(model.GetCubeModel()->GetPositions());
+    job.srcNormals = static_cast< const uchar* >(model.GetCubeModel()->GetNormals());
+    job.points = points;
+    job.normals = normals;
+    job.nbt = static_cast< int >(model.GetCubeModel()->NormalVecs());
+    job.pad = pad;
+    job.padBytes = padBytes;
+    const uint id = GXPortSideJobSubmit(&PortSkinJobs::Run, &job);
+    if (id != 0) {
+      job.id = id;
+      PortSkinJobs::sNextJob = (PortSkinJobs::sNextJob + 1) % PortSkinJobs::kJobs;
+      return id;
+    }
+    PortSkinJobs::sNoWorker = true;
+  }
+#endif
+  PortBuildPointsAndNormals(model, points, normals);
+  if (padBytes != 0) {
+    memset(pad, 0, padBytes);
+  }
+  return 0;
 }
 #endif
 

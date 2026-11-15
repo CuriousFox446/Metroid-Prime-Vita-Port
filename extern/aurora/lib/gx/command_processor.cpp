@@ -22,6 +22,9 @@
 #include "texture.hpp"
 #include "vita_draw.hpp"
 #include "../vita_gl.hpp"
+#if defined(__vita__)
+#include "../vita_side_jobs.hpp"
+#endif
 
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
@@ -1788,6 +1791,14 @@ void handle_aurora(ByteReader& reader) noexcept {
     std::unique_ptr<std::function<void()>> task{
         reinterpret_cast<std::function<void()>*>(static_cast<uintptr_t>(reader.read<u64>()))};
     (*task)();
+  } else if (subCmd == GX_AURORA_PORT_SIDE_JOB_FENCE) {
+    // What follows reads what the side worker makes (a skinned model's vertices): wait for it.
+    const u32 job = reader.read<u32>();
+#if defined(__vita__)
+    side_jobs::wait(job, true);
+#else
+    (void)job;
+#endif
   } else if (subCmd == GX_AURORA_PORT_VFX_CAPTURE_SCENE) {
     gfx::vfx::capture_scene_now(reader.read<u8>() != 0);
   } else if (subCmd == GX_AURORA_PORT_COPY_SCENE) {

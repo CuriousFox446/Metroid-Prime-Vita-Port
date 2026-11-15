@@ -73,6 +73,12 @@ private:
 #ifdef TARGET_PC
   void PortBuildLegacy(volatile void* pipe) const;
   void PortVerify(const float* verts, size_t size) const;
+  // PS Vita (0.42.0 test 18): the side job making this model's vertices (CSkinRules::
+  // PortSubmitPointsAndNormals), 0 when none may be running. The FIFO processor is told to wait
+  // for it before the model's draws (PortFenceSkinJob); the game thread waits itself before the
+  // workspace is written again or freed (PortWaitSkinJob).
+  void PortFenceSkinJob() const;
+  void PortWaitSkinJob() const;
 #endif
 
   TLockedToken< CModel > x4_model;
@@ -82,6 +88,9 @@ private:
   mutable rstl::auto_ptr< float[] > x30_normalWorkspace;
   bool x38_owned;
   bool x39_disableWorkspaces;
+#ifdef TARGET_PC
+  mutable uint xPortSkinJob = 0;
+#endif
 };
 
 class CSkinnedModelWithAvgNormals {

@@ -1,5 +1,6 @@
 #include "vita_gl.hpp"
 #include "vita_fifo_clock.hpp"
+#include "vita_side_jobs.hpp"
 
 #include "gfx/render_worker.hpp"
 #include "internal.hpp"
@@ -750,9 +751,12 @@ constexpr const char* kAttrNames[kAttrCount] = {"aPos", "aRaw", "aShade", "aNrm"
 class JobThread {
 public:
   // `core` and `vitaPriority`: the Vita core it keeps to and its own priority there
-  // (thread::Options::vitaCore, vitaPriority; -1 and 0: any core, `priority`'s).
-  JobThread(const char* name, thread::Priority priority, size_t stack, int core = -1, int vitaPriority = 0) noexcept
-  : m_name(name), m_priority(priority), m_stack(stack), m_core(core), m_vitaPriority(vitaPriority) {}
+  // (thread::Options::vitaCore, vitaPriority; -1 and 0: any core, `priority`'s); `fallback`, the
+  // core it takes when `core` is the system's and the game may not use it (vitaCoreFallback).
+  JobThread(const char* name, thread::Priority priority, size_t stack, int core = -1, int vitaPriority = 0,
+            int fallback = -1) noexcept
+  : m_name(name), m_priority(priority), m_stack(stack), m_core(core), m_vitaPriority(vitaPriority)
+  , m_fallback(fallback) {}
 
   // False when no thread could be started: the job is not taken.
   bool submit(std::function<void()> job) noexcept {
@@ -777,8 +781,11 @@ public:
 private:
   static void* run(void* arg) {
     JobThread& self = *static_cast<JobThread*>(arg);
-    thread::set_current(
-        {.name = self.m_name, .priority = self.m_priority, .vitaCore = self.m_core, .vitaPriority = self.m_vitaPriority});
+    thread::set_current({.name = self.m_name,
+                         .priority = self.m_priority,
+                         .vitaCore = self.m_core,
+                         .vitaPriority = self.m_vitaPriority,
+                         .vitaCoreFallback = self.m_fallback});
     for (;;) {
       std::function<void()> job;
       {
@@ -799,6 +806,7 @@ private:
   size_t m_stack;
   int m_core;
   int m_vitaPriority;
+  int m_fallback;
   std::mutex m_mutex;
   std::deque<std::function<void()>> m_jobs;
   bool m_running = false;
@@ -813,8 +821,12 @@ constexpr size_t kCompileStack = 2 * 1024 * 1024;
 // took (a run through Tallon Overworld: 16 of them, 27 s). A program's two sources compile on a
 // thread of their own at a low priority, one program at a time, to GXPs; the render worker links
 // them once done, the program's draws fixed-function meanwhile.
+// 0.42.0 test 18: on the fourth core where CapUnlocker opens it. Free to float, it ran on whichever of
+// the game's and the FIFO processor's cores was idle (test 17's thread log: core 1 or 2), at the
+// lowest priority, so a new build's warm-up compiled only in those cores' spare time.
 JobThread& compiler_thread() noexcept {
-  static JobThread& jobs = *new JobThread("program compiler", thread::Priority::Low, kCompileStack);
+  static JobThread& jobs =
+      *new JobThread("program compiler", thread::Priority::Low, kCompileStack, thread::kVitaSystemCore);
   return jobs;
 }
 
@@ -3484,6 +3496,7 @@ void present(ImDrawData* overlay) noexcept {
     g_uniformStats = {};
     log_memory("presents");
     thread::log_cpu();
+    side_jobs::log_stats();
   }
   g_clock.mark(kOther);
   if (overlay != nullptr && overlay->CmdListsCount > 0) {

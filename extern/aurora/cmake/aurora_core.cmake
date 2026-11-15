@@ -32,6 +32,8 @@ if (VITA)
     target_include_directories(aurora_core PUBLIC platforms/vita/profile)
     # The screen through vitaGL (lib/vita_gl.hpp, docs/VITA_PHASE2.md); vitaGL comes with VitaSDK.
     target_sources(aurora_core PRIVATE lib/vita_gl.cpp)
+    # The side worker on the fourth core (CapUnlocker): lib/vita_side_jobs.hpp.
+    target_sources(aurora_core PRIVATE lib/vita_side_jobs.cpp)
     target_compile_definitions(aurora_core PUBLIC AURORA_VITA_GL)
     target_link_libraries(aurora_core PUBLIC
             vitaGL vitashark SceShaccCgExt mathneon taihen_stub SceShaccCg_stub SceKernelDmacMgr_stub

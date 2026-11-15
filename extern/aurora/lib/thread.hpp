@@ -17,14 +17,25 @@ struct Options {
   std::string name;
   Priority priority = Priority::Normal;
   Affinity affinity = Affinity::None;
-  // PS Vita: the core the thread keeps to (0 to 2; -1: whichever the scheduler picks), and a Vita
-  // priority of its own (lower is sooner; 0: `priority`'s), set after it. Elsewhere unused.
+  // PS Vita: the core the thread keeps to (0 to 3; -1: whichever the scheduler picks), and a Vita
+  // priority of its own (lower is sooner; 0: `priority`'s), set after it. Core 3 is the system's
+  // own, which a game may use only with the CapUnlocker plugin: without it the thread takes
+  // `vitaCoreFallback` (-1: whichever core) instead. Elsewhere unused.
   int vitaCore = -1;
   int vitaPriority = 0;
+  int vitaCoreFallback = -1;
 };
+
+// The PS Vita's fourth core, which the system keeps for itself unless the CapUnlocker plugin lets a
+// game's threads onto it.
+inline constexpr int kVitaSystemCore = 3;
 
 // Applies thread options to the current thread
 void set_current(const Options& options) noexcept;
+
+// PS Vita: whether a thread may keep to the fourth core (kVitaSystemCore): asked of the kernel once,
+// by moving the calling thread there and back, and logged. Elsewhere false.
+bool vita_core3_available() noexcept;
 
 // PS Vita: names the current thread for the thread log (log_cpu) without changing its priority or
 // affinity; set_current names its threads so too. Elsewhere nothing.

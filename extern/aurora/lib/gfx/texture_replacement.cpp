@@ -954,10 +954,13 @@ void start_worker_pool() {
   const uint32_t workerCount =
       s_workerCountOverride != 0 ? s_workerCountOverride : std::clamp(hardwareThreads / 2, 1u, 4u);
   for (uint32_t i = 0; i < workerCount; ++i) {
+    // PS Vita (0.42.0 test 18): the fourth core where CapUnlocker opens it; free to float, the worker
+    // took the FIFO processor's core whenever it waited (test 17: thousands of moves a minute).
     s_workers.emplace_back(
         thread::Options{
             .name = fmt::format("Aurora texture worker {}", i),
             .priority = thread::Priority::Low,
+            .vitaCore = thread::kVitaSystemCore,
         },
         worker_main);
   }

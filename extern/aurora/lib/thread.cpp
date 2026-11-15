@@ -333,11 +333,16 @@ void set_current(const Options& options) noexcept {
   // 93% busy): core 0 seems to give some of its time elsewhere (the system's interrupts, its own
   // threads; log_cpu counts the preemptions). So the render worker, with time to spare, takes core
   // 0 and the helpers, the FIFO processor core 2, the game core 1.
+  // 0.42.0 test 18: the fourth core (CapUnlocker) takes work off the others, where it can have it.
   const SceUID self = sceKernelGetThreadId();
-  if (options.vitaCore >= 0 && options.vitaCore <= 2) {
-    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << options.vitaCore);
+  int core = options.vitaCore;
+  if (core == kVitaSystemCore && !vita_core3_available()) {
+    core = options.vitaCoreFallback;
+  }
+  if (core >= 0 && core <= kVitaSystemCore) {
+    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << core);
     if (result < 0) {
-      Log.warn("{}: could not keep to core {} ({:#x})", options.name, options.vitaCore, static_cast<uint32_t>(result));
+      Log.warn("{}: could not keep to core {} ({:#x})", options.name, core, static_cast<uint32_t>(result));
     }
   }
   if (options.vitaPriority != 0) {
@@ -347,6 +352,29 @@ void set_current(const Options& options) noexcept {
                static_cast<uint32_t>(result));
     }
   }
+#endif
+}
+
+bool vita_core3_available() noexcept {
+#if defined(__vita__)
+  // The kernel refuses a game thread the system's core (its affinity check), unless CapUnlocker has
+  // patched that check out. Asked by trying: the calling thread moves there and straight back.
+  static const bool available = [] {
+    const SceUID self = sceKernelGetThreadId();
+    const int before = sceKernelGetThreadCpuAffinityMask(self);
+    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << kVitaSystemCore);
+    if (result >= 0) {
+      sceKernelChangeThreadCpuAffinityMask(self, before >= 0 ? before : 0);
+      Log.info("core 3 (the system's) is open to the game (CapUnlocker): the helpers that can use it keep to it");
+    } else {
+      Log.info("core 3 (the system's) is closed to the game ({:#x}; no CapUnlocker): its helpers stay on cores 0 to 2",
+               static_cast<uint32_t>(result));
+    }
+    return result >= 0;
+  }();
+  return available;
+#else
+  return false;
 #endif
 }
 

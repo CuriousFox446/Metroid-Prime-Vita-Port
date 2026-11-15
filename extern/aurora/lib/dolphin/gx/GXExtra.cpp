@@ -14,6 +14,9 @@
 #if defined(AURORA_VITA_GL)
 #include "../../vita_gl.hpp"
 #endif
+#if defined(__vita__)
+#include "../../vita_side_jobs.hpp"
+#endif
 
 #include <array>
 #include <atomic>
@@ -614,6 +617,46 @@ void GXPortVfxCaptureScene(GXBool again) {
   GX_WRITE_AURORA(GX_AURORA_PORT_VFX_CAPTURE_SCENE);
   GX_WRITE_U8(again ? 1 : 0);
   aurora::gx::fifo::publish();
+}
+
+u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data) {
+#if defined(__vita__)
+  return aurora::side_jobs::submit(fn, data);
+#else
+  (void)fn;
+  (void)data;
+  return 0;
+#endif
+}
+
+GXBool GXPortSideJobDone(u32 job) {
+#if defined(__vita__)
+  return aurora::side_jobs::done(job) ? GX_TRUE : GX_FALSE;
+#else
+  (void)job;
+  return GX_TRUE;
+#endif
+}
+
+void GXPortSideJobWait(u32 job) {
+#if defined(__vita__)
+  aurora::side_jobs::wait(job, false);
+#else
+  (void)job;
+#endif
+}
+
+GXBool GXPortSideJobFence(u32 job) {
+  if (job == 0) {
+    return GX_TRUE;
+  }
+  // A display list keeps what is written for every later call: the job's wait belongs to this one.
+  if (aurora::gx::fifo::in_display_list()) {
+    return GX_FALSE;
+  }
+  GX_WRITE_AURORA(GX_AURORA_PORT_SIDE_JOB_FENCE);
+  GX_WRITE_U32(job);
+  return GX_TRUE;
 }
 
 void GXCopyProbeFace(u32 face) {

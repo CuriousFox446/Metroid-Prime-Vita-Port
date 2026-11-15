@@ -8,12 +8,24 @@
 #include <cmath>
 #include <mutex>
 
+#if defined(__vita__)
+#include <psp2/kernel/processmgr.h>
+#endif
+
 namespace aurora::time {
 namespace {
 
 native_clock::time_point default_native_now() noexcept {
+#if defined(__vita__)
+  // The process's own microsecond clock, steady from its start. 0.42.0 test 17's clock costs (a call,
+  // on the Vita): sceKernelGetProcessTimeWide 0.70 us, steady_clock::now 5.66, and OSGetTime (this,
+  // behind the game clock) 7.47. The game reads it thousands of times a frame. Every reader takes
+  // differences or anchors to it, so its epoch is free to differ from steady_clock's.
+  return native_clock::time_point{std::chrono::microseconds(static_cast<int64_t>(sceKernelGetProcessTimeWide()))};
+#else
   const auto elapsed = std::chrono::steady_clock::now().time_since_epoch();
   return native_clock::time_point{std::chrono::duration_cast<native_clock::duration>(elapsed)};
+#endif
 }
 
 std::atomic<internal::NowFunction> s_nativeNow{default_native_now};

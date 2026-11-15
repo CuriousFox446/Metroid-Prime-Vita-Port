@@ -366,6 +366,10 @@ extern "C" {
 // Internal: work queued for the FIFO thread (fifo::queue_frame_end). Payload: u64 pointer to a
 // heap std::function<void()>, which the processor runs and deletes.
 #define GX_AURORA_PORT_FIFO_TASK 0x0076
+// Port extension: the processor waits until the side worker has run a job before it takes what
+// follows (GXPortSideJobFence: a skinned model's vertices, made on the PS Vita's fourth core).
+// Payload: u32 the job's number.
+#define GX_AURORA_PORT_SIDE_JOB_FENCE 0x0077
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
