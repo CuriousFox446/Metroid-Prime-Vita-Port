@@ -1216,7 +1216,7 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
 
   // The key also names the program's binary on the memory card (vita_gl.cpp); the seed changes
   // when what a source compiles to could (the compiler's options, the attribute layout).
-  constexpr u64 kBinaryVersion = 3;
+  constexpr u64 kBinaryVersion = vita_gl::kProgramBinaryVersion;
   key = XXH3_64bits_withSeed(vertexSource.data(), vertexSource.size(), kBinaryVersion);
   key = XXH3_64bits_withSeed(fragmentSource.data(), fragmentSource.size(), key);
 }

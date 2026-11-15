@@ -190,6 +190,10 @@ struct RenderState {
 // saved there. Until it is ready, or if it fails, its draws use the fixed-function path.
 class Program;
 std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept;
+// The binaries' format: the seed of a generated program's key (gx/vita_tev.cpp), changed when the same
+// sources would compile to other binaries (the compiler's options, the attribute layout). The card's
+// binaries are kept from build to build while it stays the same (0.42.0 test 20).
+inline constexpr uint64_t kProgramBinaryVersion = 3;
 
 // The constants a generated program may read, as vec4s: the konst colours (4), the TEV registers
 // (PREV, REG0-2), the two channels' material and ambient colours (mat0, amb0, mat1, amb1), and

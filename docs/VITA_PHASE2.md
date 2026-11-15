@@ -2578,3 +2578,20 @@ waits in `[particles]` (few and short: the steps were done before anything read 
 effects that look as before (the Puffers' gas, lava, sparks; a misplaced or missing one would be a
 step that read something the game thread changed); and no crash.
 
+## 0.42.0 test 20: the shaders kept from build to build
+
+Test 20 is test 19 with this alone. Since tallon25 a new build deleted every program binary the
+last one left on the card ("The map's GPU crash: stale shaders"), so every build began with the
+warm-up compiling some 890 programs again, ~23 minutes (test 18). The user chose to keep them. A
+binary's name is its key, a hash of both its sources seeded with the binaries' format
+(`kProgramBinaryVersion`, 3 since before tallon25): a build whose generated sources are the same
+reads the same files, and one that generates others asks for other keys and leaves the old files
+unread. `vita_programs/build` now names that format ("binaries 3"); binaries of another format, or
+on a card with no such file (from before tallon25), are still deleted. The first run of test 20
+finds a build's revision there (tallon25 to test 19 wrote theirs), keeps the binaries and rewrites
+the file: "program binaries on the card from build ...: N kept".
+
+What to look for in test 20: that line at the start, and no warm-up (the "Compiling shaders" toast
+for a moment at most); the map and every room drawn as before (the stale-shader GPU crash came back
+would be a crash on the map with this build's binaries kept); and everything test 19 asks.
+

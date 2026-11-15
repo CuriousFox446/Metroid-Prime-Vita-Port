@@ -1138,14 +1138,16 @@ void index_card() noexcept {
   }
 }
 
-// The build that wrote the card's program binaries (vita_programs/build), and this one. The user
-// found the map's GPU crash came from the shaders an earlier build had left in vita_programs after
-// a new build was installed, and went away with them deleted (VITA_PHASE2.md, "The map's GPU crash:
-// stale shaders"). How an old binary differs from a new compile is not known: a binary's key names
-// both its sources, and the card's binaries were byte-identical to fresh compiles on Nov 2. So a
-// new build starts without them, as the user's fix did: they are never indexed (nothing reads
-// one), and the card thread deletes them first, before it writes any new one. The material records
-// stay, and the warm-up compiles their programs again from the start, one batch.
+// What vita_programs/build says of the card's program binaries. The user found the map's GPU crash
+// came from the shaders an earlier build had left in vita_programs after a new build was installed,
+// and went away with them deleted (VITA_PHASE2.md, "The map's GPU crash: stale shaders"); how an old
+// binary differs from a new compile was never found (a binary's key names both its sources, and the
+// card's binaries were byte-identical to fresh compiles on Nov 2). So from tallon25 to 0.42.0 test 19
+// the file named the build that wrote them, and a new build deleted them all: every build began with
+// a warm-up of some 900 programs, ~23 minutes (test 18). The user's choice since test 20: keep them.
+// The file names their format ("binaries 3", kProgramBinaryVersion), and only binaries of another
+// format, or of a card no file vouches for (from before tallon25), are deleted. A build whose
+// generated sources differ asks for other keys and leaves the old binaries unread.
 std::string program_binaries_build() noexcept {
   std::string build;
   if (std::FILE* file = std::fopen((g_programCacheDir + "/build").c_str(), "rb"); file != nullptr) {
@@ -1157,6 +1159,16 @@ std::string program_binaries_build() noexcept {
 }
 
 std::string this_build() noexcept { return kMpBuildRevision != nullptr ? std::string{kMpBuildRevision} : std::string{}; }
+
+// What vita_programs/build holds for binaries of this format.
+std::string binaries_marker() noexcept { return fmt::format("binaries {}", kProgramBinaryVersion); }
+
+void write_binaries_marker(const std::string& marker) noexcept {
+  if (std::FILE* file = std::fopen((g_programCacheDir + "/build").c_str(), "wb"); file != nullptr) {
+    std::fwrite(marker.data(), marker.size(), 1, file);
+    std::fclose(file);
+  }
+}
 
 // Card thread: the program binaries another build left deleted, then this build named as theirs.
 void delete_program_binaries(const std::string& previous, const std::string& current) noexcept {
@@ -1178,13 +1190,11 @@ void delete_program_binaries(const std::string& previous, const std::string& cur
     std::error_code gone;
     removed += std::filesystem::remove(path, gone) ? 1 : 0;
   }
-  if (std::FILE* file = std::fopen((g_programCacheDir + "/build").c_str(), "wb"); file != nullptr) {
-    std::fwrite(current.data(), current.size(), 1, file);
-    std::fclose(file);
-  }
-  Log.info("program binaries on the card from {}: {} of {} deleted in {:.0f} ms; build {} writes its own",
-           previous.empty() ? "a build that named none" : fmt::format("build {}", previous), removed, files.size(),
-           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), current);
+  write_binaries_marker(current);
+  Log.info("program binaries on the card ({}): {} of {} deleted in {:.0f} ms; this build ({}) writes its own, as \"{}\"",
+           previous.empty() ? "no file says what they are" : fmt::format("\"{}\"", previous), removed, files.size(),
+           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), this_build(),
+           current);
 }
 
 // vitaGL's own cache of the shaders behind its fixed-function calls: the overlay's, and those of
@@ -3127,16 +3137,23 @@ bool initialize() noexcept {
   std::filesystem::create_directories(cachePath, ec);
   vglSetShaderCachePath(cachePath.c_str());
   check_fixed_function_cache();
-  // The generated programs' own cache (Program, read_cached), and what it holds: nothing another
-  // build wrote (program_binaries_build).
+  // The generated programs' own cache (Program, read_cached), and what it holds: the binaries of
+  // this format, whichever build wrote them (program_binaries_build).
   g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
   std::filesystem::create_directories(g_programCacheDir, ec);
-  const std::string build = this_build();
-  const std::string binariesBuild = program_binaries_build();
-  if (build.empty() || binariesBuild == build) {
+  const std::string marker = binaries_marker();
+  const std::string found = program_binaries_build();
+  if (found == marker) {
     index_card();
-  } else if (!card_thread().submit([binariesBuild, build] { delete_program_binaries(binariesBuild, build); })) {
-    Log.warn("no card thread: the program binaries another build left stay on the card, unread");
+  } else if (!found.empty() && !found.starts_with("binaries ")) {
+    // A build's revision, as tallon25 to test 19 wrote: binaries of this format (the key's seed has
+    // been 3 since before tallon25), kept.
+    index_card();
+    write_binaries_marker(marker);
+    Log.info("program binaries on the card from build {}: {} kept (\"{}\"), as every build keeps them now", found,
+             g_cardKeys.size(), marker);
+  } else if (!card_thread().submit([found, marker] { delete_program_binaries(found, marker); })) {
+    Log.warn("no card thread: the program binaries of another format stay on the card, unread");
   }
   // The warm-up's material records (gx/vita_tev.cpp), read here before the FIFO thread asks, and the
   // programs compiled on the PC (tools/vita_precompile).
