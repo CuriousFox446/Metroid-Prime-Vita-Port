@@ -1589,17 +1589,6 @@ void CStateManager::Update(float dt) {
   PORT_ZONE_TIMED("SM::Update");
 
 #ifdef TARGET_PC
-  // 0.42.0 test 19: the actors' particle updates the entities' Think left on the side worker
-  // (CParticleDatabase::Update) are finished by the end of the tick, whichever way it ends.
-  struct PortParticleDrain {
-    ~PortParticleDrain() {
-      PORT_ZONE_TIMED("SM: particle updates finished (side worker drain)");
-      CParticleDatabase::PortFinishAll();
-    }
-  } portParticleDrain;
-#endif
-
-#ifdef TARGET_PC
   // The debug free camera can hold the simulation still. The console keeps running.
   if (PortFreeCam::Frozen()) {
     PortConsoleTick(*this);

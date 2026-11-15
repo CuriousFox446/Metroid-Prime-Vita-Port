@@ -11,6 +11,10 @@
 
 #include <dolphin/thp/THPFile.h>
 
+#ifdef TARGET_PC
+#include <vector>
+#endif
+
 class CMoviePlayer {
 public:
   enum EPlayMode {
@@ -95,6 +99,25 @@ private:
   void InitializeTextures();
   void ReadCompleted();
   void PostDVDReadRequestIfNeeded();
+#ifdef TARGET_PC
+  // 0.42.0 test 21: a texture slot's video decode runs on the side worker (the PS Vita's fourth
+  // core): its job, its frame's bytes (copied: the read buffer is freed or reused before the job
+  // runs) and where it goes. A slot is shown once its decode has run (PortSlotDecoded).
+  struct SPortDecode {
+    std::vector< uchar > bytes;
+    uint size = 0;
+    void* y = nullptr;
+    void* u = nullptr;
+    void* v = nullptr;
+    uint width = 0;
+    uint height = 0;
+    uint job = 0;
+  };
+  SPortDecode xPortDecodes[3];
+  bool PortSlotDecoded(int slot);
+  void PortWaitDecodes();
+  static void PortDecodeJob(void* decode);
+#endif
   CDvdFile x0_dvdFile;
   THPHeader x28_header;
   THPFrameCompInfo x58_thpComponents;

@@ -2595,3 +2595,41 @@ What to look for in test 20: that line at the start, and no warm-up (the "Compil
 for a moment at most); the map and every room drawn as before (the stale-shader GPU crash came back
 would be a crash on the map with this build's binaries kept); and everything test 19 asks.
 
+**Tests 19 and 20** (ee966e7, then 5f60013; the user's log of Nov 16, test 20, 4.75 minutes: the
+title and file select, Magmoor, the map). Test 20 kept test 19's 935 binaries; its first frame came
+5.5 s after the main loop began (100 s in test 18) and nothing compiled. The user: "the map doesn't
+crash". The side worker ran up to 787 jobs a second, busy up to 21% of core 3, none hung. In
+Magmoor's heaviest windows (12 to 14 FPS) 52 to 83 actors' updates a frame stepped there
+(`CParticleDatabase: systems stepped`, 15.8 ms a frame on core 3 for 815 system updates);
+`CAnimData::AdvanceParticles` on the game thread fell to 3.2 ms a frame (8.5 in test 18), but the
+drain at each tick's end waited 4.8 of them (1 ms a tick): the side worker had only the rest of the
+tick after the last Think to finish. The user: "the main menu save select screen lags, the map too
+the bigger it gets. Our goal is still trying to [get] the game to run at 30+FPS".
+
+- The title and file select: the THP video's decode on the game thread, 8 to 52 ms a frame.
+- The map: the FIFO processor's, busy 98 to 141 ms a frame for some 4,300 draws (1,300 surfaces,
+  each its fills and its outlines with a colour of its own, sorted back to front; the outlines drawn
+  twice when thick, both passes a pixel wide on the Vita), the render worker ~50 ms for the 2,700
+  left after joins, the GPU 12 to 15. The game thread waited for them (begin_frame 34 ms). No speed-up
+  of a draw reaches 30 FPS there: it takes far fewer of them (a later step).
+
+## 0.42.0 test 21: the movies on the fourth core; the particle drain once a frame
+
+**THP video.** `CMoviePlayer::DecodeFromRead` copies a frame's video component (with the 32 spare
+bytes its bit reader reads past the scan) and decodes it on the side worker into the texture slot
+(`PortDecodeJob`; the decoder keeps its state on its own stack). The audio component decodes on the
+game thread as before. `Update` moves the picture to a slot only once its decode has run
+(`PortSlotDecoded`), else the frame shown stays and its time stays owed, as when a decode fell
+behind before; a slot's next decode waits for its last, and `Rewind` and the destructor wait for
+them all before the planes go. Without the side worker every decode runs here, as before.
+
+**The particle drain.** The actors' particle steps a frame's ticks left on the side worker are
+finished once, as `CMFGame::Draw` begins ("frame: particle updates finished (side worker drain)"),
+no longer at the end of every tick: a database the next tick (or the draw) reads first finishes its
+own first, as every method does. The side worker gets the whole frame's ticks for its steps.
+
+What to look for in test 21: the title and file select screens' frame rate (the video itself plays
+no faster than core 3 decodes it, ~25 to 30 frames a second); `movie: THP video decode (side
+worker, core 3)` in `[zones] other`; Magmoor's frame rate and the `[particles]` waits against test
+20's (4.8 ms a frame); the movies' pictures in step with their sound.
+

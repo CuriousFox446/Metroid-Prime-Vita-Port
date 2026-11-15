@@ -20,6 +20,7 @@
 #include "port_debug.h"
 #include "port_disc.h"
 #include "port_profile.h"
+#include <dolphin/gx/GXExtra.h>
 #endif
 
 #include "dolphin/gx/GXGeometry.h"
@@ -321,6 +322,9 @@ bool CMoviePlayer::PumpIndexLoad() {
 }
 
 CMoviePlayer::~CMoviePlayer() {
+#ifdef TARGET_PC
+  PortWaitDecodes(); // they write into the slots' planes, freed with this
+#endif
   --sNumReferences;
   VerifyCallbackStatus();
   if (sAudioPlayer == this) {
@@ -414,8 +418,28 @@ void CMoviePlayer::DecodeFromRead(const void* ptr) {
       // Bounded by the component's size and the planes' picture: the decoder
       // reads ahead of its last bit, and a corrupt frame could claim any size.
       PORT_ZONE_TIMED("movie: THP video decode");
-      THPVideoDecodeBounded(data, CBasics::SwapBytes(sizes[0]), texture.Y(), texture.U(), texture.V(),
-                            x6c_videoInfo.mXSize, x6c_videoInfo.mYSize);
+      const uint videoBytes = CBasics::SwapBytes(sizes[0]);
+      // 0.42.0 test 21: on the side worker where there is one (25 to 50 ms a frame of the game
+      // thread's in test 20's title and file select screens). The slot's last decode runs out first;
+      // the bytes are copied with 32 spare for the bit reader, as the read buffer has them.
+      SPortDecode& decode = xPortDecodes[xcc_decodedTexSlot];
+      if (decode.job != 0) {
+        GXPortSideJobWait(decode.job);
+        decode.job = 0;
+      }
+      decode.bytes.assign(data, data + videoBytes);
+      decode.bytes.resize(videoBytes + 32, 0);
+      decode.size = videoBytes;
+      decode.y = texture.Y();
+      decode.u = texture.U();
+      decode.v = texture.V();
+      decode.width = x6c_videoInfo.mXSize;
+      decode.height = x6c_videoInfo.mYSize;
+      decode.job = GXPortSideJobSubmit(&CMoviePlayer::PortDecodeJob, &decode);
+      if (decode.job == 0) {
+        THPVideoDecodeBounded(data, videoBytes, texture.Y(), texture.U(), texture.V(),
+                              x6c_videoInfo.mXSize, x6c_videoInfo.mYSize);
+      }
 #else
       THPVideoDecode(const_cast< uchar* >(data), texture.Y(), texture.U(), texture.V(),
                      alignedWork);
@@ -488,6 +512,15 @@ void CMoviePlayer::Update(float dt) {
     float remainder = xdc_frameRem - dt;
     const float frameDt = 1.f / x28_header.mFrameRate;
     if (remainder <= 0.f) {
+#ifdef TARGET_PC
+      // The next slot's decode is the side worker's: until it has run, the frame shown stays (as
+      // when a decode here fell behind), and its time is owed (the remainder stays spent).
+      const int portNext = xd0_drawTexSlot + 1 >= static_cast< int >(x80_textures.size()) ? 0 : xd0_drawTexSlot + 1;
+      if (!xf4_27_fieldFlip && !PortSlotDecoded(portNext)) {
+        xdc_frameRem = remainder;
+        return;
+      }
+#endif
       if (!xf4_27_fieldFlip) {
         if (++xd0_drawTexSlot >= x80_textures.size()) {
           xd0_drawTexSlot = 0;
@@ -577,8 +610,37 @@ void CMoviePlayer::Rewind() {
   xd8_decodedTexCount = 0;
   xdc_frameRem = 0.f;
   xe8_curSeconds = 0.f;
+#ifdef TARGET_PC
+  PortWaitDecodes(); // before the planes they write are freed
+#endif
   x80_textures.clear();
 }
+
+#ifdef TARGET_PC
+bool CMoviePlayer::PortSlotDecoded(int slot) {
+  SPortDecode& decode = xPortDecodes[slot];
+  if (decode.job != 0 && GXPortSideJobDone(decode.job)) {
+    decode.job = 0;
+  }
+  return decode.job == 0;
+}
+
+void CMoviePlayer::PortWaitDecodes() {
+  for (SPortDecode& decode : xPortDecodes) {
+    if (decode.job != 0) {
+      GXPortSideJobWait(decode.job);
+      decode.job = 0;
+    }
+  }
+}
+
+void CMoviePlayer::PortDecodeJob(void* data) {
+  PORT_ZONE_TIMED("movie: THP video decode (side worker, core 3)");
+  const SPortDecode& decode = *static_cast< const SPortDecode* >(data);
+  THPVideoDecodeBounded(decode.bytes.data(), decode.size, decode.y, decode.u, decode.v, decode.width,
+                        decode.height);
+}
+#endif
 
 extern "C" uintptr_t AIPortGetDMAStartAddr(void);
 

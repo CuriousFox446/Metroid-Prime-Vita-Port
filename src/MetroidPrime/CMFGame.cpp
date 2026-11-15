@@ -1,4 +1,5 @@
 #include "MetroidPrime/CMFGame.hpp"
+#include "MetroidPrime/CParticleDatabase.hpp"
 #include "port_profile.h"
 #include "Kyoto/CResFactory.hpp"
 #include "Kyoto/CSimplePool.hpp"
@@ -287,6 +288,14 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 void CMFGame::Draw() const {
   PORT_ZONE("CMFGame::Draw");
 #ifdef TARGET_PC
+  {
+    // 0.42.0 test 21: the actors' particle steps the frame's ticks left on the side worker are
+    // finished here, once a frame, not at the end of each tick (test 20: 4.8 ms a frame of waits
+    // in Magmoor, the side worker given only the rest of each tick). A database the next tick or
+    // this draw reads first finishes its own first anyway.
+    PORT_ZONE_TIMED("frame: particle updates finished (side worker drain)");
+    CParticleDatabase::PortFinishAll();
+  }
   // Do not let a request survive a non-game draw (or an early return) into another frame.
   CStateManager::sPortSceneHdrRequest = false;
   CCubeMaterial::sPortSceneHdr = false;
