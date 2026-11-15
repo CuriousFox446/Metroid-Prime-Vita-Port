@@ -2420,3 +2420,41 @@ What to look for in test 16: Magmoor's speed (the `[split]` lines' ticks a frame
 frame rate: 60 ticks a second is full speed; F1 > Video > Frame rate shows "Simulation N ticks/s")
 and whether the lower frame rate there is worth it; "Catch-up" back at 2 gives test 15's behaviour.
 
+**Test 16** (48bdb8b, the user's log of Nov 10: Phendrana, then Magmoor): at 4, Magmoor ran 5
+ticks a frame (2.5 before) at 13.6 ms each, frames of 109 ms in 162 of its 264 windows (about 9
+FPS), the game near 77% of its speed. Test 15's idle systems were 23 of 718 system steps a frame:
+the Puffers' gas generators are not idle (their particles, or emission), so it gained little
+there. `CPuffer`'s Think: 615 us a call (601 in test 14). The particle zones (the particles'
+update, creation, bounds, the port's mover) held 9 of `CElementGen::Update`'s 32.6 ms a frame;
+some 35 us an update was outside them. The user: "you don't need to add catch-up in the settings,
+let's still optimize the game though".
+
+## 0.42.0 test 17: the clock without locks, the particles without stopwatches
+
+**The setting goes**; the Vita's catch-up stays at 4 (`PortDebug::kCatchUpFrames`), 2 elsewhere
+and under Original experience; a saved `catch_up` is read and dropped.
+
+**OSGetTime.** Every `CStopwatch` reads `OSGetTime`, which read Aurora's game clock
+(`aurora::time::game_clock::now`) under a `std::shared_mutex` read lock: libstdc++'s
+`pthread_rwlock`, and vitasdk's pthreads are kernel mutexes and semaphores (`sceKernelLockMutex`),
+for every call, a frame's thousands. And `OSGetTime` passed through `std::call_once` each time
+(its thread-local callable, `pthread_once`). The clock's readers now take no lock: its writers (a
+scale or pause change, a reset) still hold a mutex and step a sequence number around their change,
+and a reader reads the fields between two looks at the sequence, again if a writer came between,
+or waits on the writers' mutex while one is under way. `OSGetTime` checks an atomic flag before
+`std::call_once`.
+
+**The particles' stopwatches.** `CElementGen::InternalUpdate` and `Render` each timed themselves
+into `x2cc` and `x2d0`, which nothing reads: two `OSGetTime` calls an update and a render (some
+1,400 a frame in Magmoor). Left out on the port (kept for the retail build). The particle scopes'
+depth and fog state (`PortFx::UpdateScope`, `RenderScope`) were `thread_local`, which is emulated
+TLS on the Vita (`__emutls_get_address`, a lookup an access, two an update); they are plain statics
+now, as CElementGen's own update depth is (particles update and render on the game thread alone).
+
+The log's start has a line of what these cost on the Vita ("clock costs (us a call...)": OSGetTime,
+steady_clock, sceKernelGetProcessTimeWide, a shared_mutex read lock, a mutex lock, a thread_local
+access), so the old cost is on record beside the new.
+
+What to look for in test 17: that line; Magmoor's `CElementGen::Update` and `CPuffer` Think against
+test 16's (32.6 ms a frame, 615 us); its frame rate and ticks a frame.
+

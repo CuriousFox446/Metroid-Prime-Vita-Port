@@ -43,7 +43,6 @@ extern bool sSkipCutscenes;
 extern float sCutsceneSpeed;
 extern unsigned sSimRate;
 extern bool sSimAdaptive;
-extern unsigned sCatchUpFrames; // PortDebug::CatchUpFrames
 extern bool sFrameLimitEnabled;
 extern int sFpsCap; // with the 60 FPS cap off; 0 = unlimited
 inline constexpr int kFpsCapMin = 30;

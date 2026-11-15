@@ -68,6 +68,9 @@ bool Alive(uint32_t id);
 
 // Update/render scopes in the generators. The outermost update applies the time scale; every
 // outermost call is timed when gTiming is on. Nested calls (children) do neither.
+// Their state is plain statics: generators update and render on the game thread alone (as
+// CElementGen's own update depth and CParticleGlobals already have it), and thread_local is
+// emulated TLS on the PS Vita, a lookup on every access, twice an update (0.42.0 test 17).
 struct UpdateScope {
   explicit UpdateScope(double dtIn) : dt(dtIn) {
     top = depth()++ == 0;
@@ -99,7 +102,7 @@ struct UpdateScope {
 
 private:
   static int& depth() {
-    static thread_local int d = 0;
+    static int d = 0;
     return d;
   }
   bool top = false;
@@ -137,11 +140,11 @@ struct RenderScope {
 
 private:
   static int& depth() {
-    static thread_local int d = 0;
+    static int d = 0;
     return d;
   }
   static GXBool& fog() {
-    static thread_local GXBool f = GX_FALSE;
+    static GXBool f = GX_FALSE;
     return f;
   }
   bool top = false;

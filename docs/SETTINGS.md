@@ -1723,12 +1723,12 @@ The simulation uses a fixed-step accumulator (60 Hz by default) independently of
 the presentation cap. Ordinary slow frames catch up; pauses/debugger stalls are
 capped to 250 ms of simulation work per iteration. Audio runs on
 wall-clock/device consumption.
-A frame's catch-up is bounded by "Catch-up" (`catch_up`, F1 > Video > Frame rate, 2 to 8 60 Hz
-frames' worth; 2 by default, upstream's, and 4 on the PS Vita): once the ticks have taken that
-much of the frame, the frame drops the ticks it has left and the game runs slow (slow motion)
-rather than spiral into ever longer frames. More keeps the game nearer its full speed in a heavy
-room at a lower frame rate. On the Vita at 2, Magmoor Caverns' Puffers (ticks of some 15 ms) left
-room for 2.5 ticks a frame and the game ran at 62% speed. Original experience keeps 2.
+A frame's catch-up is bounded: once its ticks have taken two 60 Hz frames' worth of it (four on
+the PS Vita), the frame drops the ticks it has left and the game runs slow (slow motion) rather
+than spiral into ever longer frames (`PortDebug::CatchUpFrames`). On the Vita at two, Magmoor
+Caverns' Puffers (ticks of some 15 ms) left room for 2.5 ticks a frame and the game ran at 62%
+speed; at four, about 77% at a lower frame rate. Original experience keeps two. (0.42.0 test 16
+had it as a setting, `catch_up`; the key is now ignored.)
 Fractional simulation time is retained through frame jitter. The capped scheduler
 can borrow at most 0.25 ms near a tick boundary and carries that debt forward, so
 it does not alternate zero/two ticks merely due to microsecond sleep jitter.

@@ -150,7 +150,7 @@ void SetSimAdaptive(bool enabled) { StoreSetting(sSimAdaptive, enabled); }
 
 unsigned CatchUpFrames() {
   EnsureInitialized();
-  return sOriginalExperience ? kCatchUpMin : sCatchUpFrames;
+  return sOriginalExperience ? 2u : kCatchUpFrames;
 }
 
 float TickPeriod() { return Loaded(sTickPeriod); }

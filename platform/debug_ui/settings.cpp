@@ -581,15 +581,8 @@ const SettingKey kSettingKeys[] = {
      },
      [](std::ostream& out) { out << sSimRate; }, false, "30", "120"},
     BoolKey< &sSimAdaptive >("sim_adaptive"),
-    {"catch_up",
-     [](const std::string& value) {
-       const long frames = std::strtol(value.c_str(), nullptr, 10);
-       if (frames >= static_cast< long >(PortDebug::kCatchUpMin) &&
-           frames <= static_cast< long >(PortDebug::kCatchUpMax)) {
-         sCatchUpFrames = static_cast< unsigned >(frames);
-       }
-     },
-     [](std::ostream& out) { out << sCatchUpFrames; }, false, "2", "6"},
+    // 0.42.0 test 16's setting, gone (the Vita's catch-up is fixed at 4): its line is dropped.
+    {"catch_up", [](const std::string&) {}, nullptr, false, nullptr, nullptr},
     {"smooth_frames",
      [](const std::string& value) {
        sSmoothFrames = ParseBool(value);

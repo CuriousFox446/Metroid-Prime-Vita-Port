@@ -7,6 +7,7 @@
 
 #include <vitaGL.h>
 #include <vitashark.h>
+#include <dolphin/os.h>
 #include <SDL3/SDL_stdinc.h>
 #include <psp2/common_dialog.h>
 #include <psp2/gxm.h>
@@ -55,6 +56,7 @@ extern void* active_write_fb;
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -3063,6 +3065,45 @@ void draw_world_to_display() noexcept {
   apply_state(RenderState{.depthTest = false}, current, true);
 }
 
+// A thread_local the clock costs' probe touches: emulated TLS here (__emutls_get_address).
+thread_local int t_costProbe = 0;
+__attribute__((noinline)) void touch_thread_local() noexcept { ++t_costProbe; }
+
+// What the clocks and locks the game leans on cost here, once at the start, for the log: a frame
+// reads OSGetTime thousands of times (every CStopwatch), and the game clock behind it took a
+// std::shared_mutex read lock each time until 0.42.0 test 17 (vitasdk's pthread rwlock: kernel
+// mutex calls). The shared_mutex and mutex rows are those locks alone, uncontended; the
+// thread_local row one access to one (the particles' scopes took two an update until test 17).
+void log_clock_costs() noexcept {
+  constexpr int kCalls = 2000;
+  const auto per_call = [](auto&& call) {
+    const uint64_t start = sceKernelGetProcessTimeWide();
+    for (int i = 0; i < kCalls; ++i) {
+      call();
+    }
+    return static_cast<double>(sceKernelGetProcessTimeWide() - start) / kCalls;
+  };
+  volatile int64_t sink = 0;
+  const double osTime = per_call([&sink] { sink = sink + OSGetTime(); });
+  const double steady = per_call([&sink] { sink = sink + std::chrono::steady_clock::now().time_since_epoch().count(); });
+  const double process = per_call([&sink] { sink = sink + static_cast<int64_t>(sceKernelGetProcessTimeWide()); });
+  std::shared_mutex shared;
+  const double sharedLock = per_call([&shared] {
+    shared.lock_shared();
+    shared.unlock_shared();
+  });
+  std::mutex mutex;
+  const double mutexLock = per_call([&mutex] {
+    mutex.lock();
+    mutex.unlock();
+  });
+  const double threadLocal = per_call([] { touch_thread_local(); });
+  Log.info("clock costs (us a call, over {}): OSGetTime {:.2f}, steady_clock::now {:.2f}, sceKernelGetProcessTimeWide "
+           "{:.2f}; a std::shared_mutex read lock and unlock {:.2f}, a std::mutex lock and unlock {:.2f}, a "
+           "thread_local access {:.2f}",
+           kCalls, osTime, steady, process, sharedLock, mutexLock, threadLocal);
+}
+
 } // namespace
 
 bool initialize() noexcept {
@@ -3127,6 +3168,7 @@ bool initialize() noexcept {
     Log.info("vitaGL started at {}x{}", kWidth, kHeight);
   }
   log_memory("started");
+  log_clock_costs();
   return true;
 }
 

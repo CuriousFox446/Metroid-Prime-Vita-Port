@@ -1027,7 +1027,11 @@ float CElementGen::PortSleepDistanceSq() const {
 #endif
 
 bool CElementGen::InternalUpdate(double dt) {
+#ifndef TARGET_PC
+  // The update's time, into x2cc (which nothing reads). On the port two OSGetTime calls an update
+  // were the PS Vita's kernel locks (0.42.0 test 17): left out.
   CStopwatch sw;
+#endif
   CGlobalRandom gr(x27c_randState);
 
   int frameUpdateCount = 0;
@@ -1177,7 +1181,9 @@ bool CElementGen::InternalUpdate(double dt) {
     BuildParticleSystemBounds();
   }
 
+#ifndef TARGET_PC
   x2cc = sw.GetElapsedTime();
+#endif
   return false;
 }
 
@@ -3131,7 +3137,10 @@ bool CElementGen::IsSystemDeletable() const {
 
 void CElementGen::Render() {
   PORT_ZONE("CElementGen::Render (particles)");
+#ifndef TARGET_PC
+  // The render's time, into x2d0 (which nothing reads): left out on the port, as the update's.
   CStopwatch timer;
+#endif
 #ifdef TARGET_PC
   // Asleep (SLDS): GetSystemEnabled is enabled && awake, and the scene proxy goes inactive.
   if (xPortAsleep) {
@@ -3217,7 +3226,9 @@ void CElementGen::Render() {
   }
 #endif
 
+#ifndef TARGET_PC
   x2d0 = timer.GetElapsedTime();
+#endif
 }
 
 #ifdef TARGET_PC

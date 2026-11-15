@@ -41,7 +41,6 @@ bool sSkipCutscenes = false;
 float sCutsceneSpeed = 8.f;
 unsigned sSimRate = 60;
 bool sSimAdaptive = false;
-unsigned sCatchUpFrames = PortDebug::kCatchUpDefault;
 bool sFrameLimitEnabled = true;
 int sFpsCap = 0; // with the 60 FPS cap off; 0 = unlimited
 bool sTurbo = false;

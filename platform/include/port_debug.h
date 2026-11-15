@@ -84,17 +84,15 @@ float SimPeriod();
 // tick-for-tick. Experimental.
 bool SimAdaptive();
 void SetSimAdaptive(bool enabled);
-// Catch-up (port_settings.ini catch_up): how much of a frame the game's ticks may take when they
-// have fallen behind, in 60 Hz frames' worth; past it the frame drops the ticks it has left and
-// the game runs slow rather than drop further (CGameArchitectureSupport::UpdateTicks). More keeps
-// the game nearer its full speed in a heavy room, at a lower frame rate. Upstream's is 2; the PS
-// Vita's 4, whose heavy rooms (Magmoor's Puffers) ran at 62% speed at 2. Original experience: 2.
-constexpr unsigned kCatchUpMin = 2;
-constexpr unsigned kCatchUpMax = 8;
+// The catch-up: how much of a frame the game's ticks may take when they have fallen behind, in
+// 60 Hz frames' worth; past it the frame drops the ticks it has left and the game runs slow rather
+// than drop further (CGameArchitectureSupport::UpdateTicks). Upstream's is 2; the PS Vita's 4,
+// whose heavy rooms (Magmoor's Puffers) ran at 62% speed at 2 (0.42.0 tests 14 and 16; not a
+// setting: the user's call). Original experience: 2.
 #ifdef __vita__
-constexpr unsigned kCatchUpDefault = 4;
+constexpr unsigned kCatchUpFrames = 4;
 #else
-constexpr unsigned kCatchUpDefault = 2;
+constexpr unsigned kCatchUpFrames = 2;
 #endif
 unsigned CatchUpFrames();
 // Smooth uncapped frames (port_settings.ini smooth_frames, on by default): sets

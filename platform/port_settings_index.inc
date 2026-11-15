@@ -205,7 +205,6 @@
 {"Video", "Frame rate", "Frame rate", "60 FPS cap (target)", "fps limit cap framerate 60"},
 {"Video", "Frame rate", "Frame rate", "FPS cap", "fps limit cap framerate number"},
 {"Video", "Frame rate", "Frame rate", "Smooth uncapped frames", "smooth uncapped frame pacing interpolate"},
-{"Video", "Frame rate", "Frame rate", "Catch-up", "catch up slow motion speed behind ticks drop heavy room"},
 {"Video", "Frame rate", "Simulation rate (very experimental)", "Adaptive (follow frame rate)", "simulation tick adaptive experimental"},
 {"Video", "Frame rate", "Simulation rate (very experimental)", "Sim Hz", "simulation tick rate hz experimental"},
 #if defined(_WIN32)
