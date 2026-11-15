@@ -2759,3 +2759,70 @@ What to look for in test 23:
 - The sound clean everywhere, the movies' screens above all (the title, the file select).
 - The fights' frame rate against test 22's.
 
+**Test 23** (1cf1033; the user's log of Nov 16, 4.5 minutes, 8,429 frames, a clean exit: the menus,
+Magmoor, a flying-pirate fight).
+
+- The fourth core's order held:
+  - the game thread's `[particles]` waits were 0.30 ms a frame (0.39 in test 21, 6.27 in test 22);
+  - the drain took 0.30 ms a frame;
+  - the FIFO processor waited for side jobs a few ms a second;
+  - the background lane decoded the movies at 24 to 29 frames a second.
+- The mixer ran 23% to 43% of core 3, little less than in test 22 with as many voices (12.7). Its
+  ramps are not where its time goes: the decode and the resample are (per sample, `int64` steps
+  through memory the compiler cannot keep in registers).
+- Median FPS by kind of room (tests 21, 22, 23):
+  - Magmoor with Puffers: 17.4, 17.2, 20.2;
+  - Magmoor with Triclops: 22.0, 29.1, 27.9;
+  - Metaree rooms: 22.3, 28.4, 25.7;
+  - the flying-pirate fight: 9.7 (the game at 75% of its speed), 14.3, 16.7 (full speed; 7 windows).
+- The game thread ran 88% to 96% of the time in play. In 12 to 30 FPS windows, per frame:
+  - its ticks took 24.8 ms (2.85 ticks: Think 8.5, physics moves 2.3, touches 1.9, PreThink 1.8,
+    the HUD's update 3.0);
+  - its draw took 13.2 ms (the world 7.5, particles 2.2, the HUD 1.9);
+  - the particle updates it still does itself took 2.6 ms;
+  - `begin_frame` waited 7.2 ms for the FIFO processor to end the last frame.
+- The FIFO processor was busy ~33 ms a frame (39 timed) for ~710 draws. Its sections: state 5.2,
+  record 5.1, immediate 4.4, material 4.0, rows 3.8, skinned 3.3, aurora 2.7, dispatch 2.2, other
+  draws 1.9, skinned copy 1.4, lookup 1.3, mesh 0.9.
+- Of the ~560 immediate primitives a frame, ~460 were sent outside every zoned stage of
+  `CMFGame::Draw` (~5 vertices each): the minimap's surfaces.
+
+The user chose the graphics thread before the effects for the next step ("Graphics thread first").
+
+## 0.42.0 test 24: the map's surfaces in fewer draws; the immediate vertices decoded faster
+
+**The map's surfaces** (`CMapArea::CMapAreaSurface::Draw`) sent each fill primitive (strip, fan,
+triangles) and each outline strip as a GX primitive of its own, the outlines twice when thick. That
+made some 460 draws a frame of the minimap, in every room, and the map screen's ~4,300.
+
+- A surface's fills now go as one `GX_TRIANGLES` primitive and its outlines as one `GX_LINES` (each
+  pass, when thick).
+- The triangles are the ones Aurora makes of each primitive, in its order (`triangle_order`: a
+  strip's odd ones turned, a fan's about its first vertex, a quad's two), and the lines are a
+  strip's segments, which it draws a strip as.
+- What is drawn is the same. Checked on the PC by running both through Aurora's triangulation:
+  100,000 surfaces, 1.2 million triangles and 780,000 segments, no difference.
+- A surface with fills of another kind is sent as it was.
+
+**The immediate vertices** (`decode_vertices`).
+
+- A primitive whose attributes all sit in the list (the particles, the snow, the HUD) is decoded by
+  operations worked out once for it (`plan_direct`, `decode_direct`): each vertex starts from one
+  made once, and the common layouts are read with straight code (positions f32 or s16 x3, colour
+  RGBA8, coordinates f32, s16, u8 or s8 x2). The others go through `read_components` and
+  `read_color`, as before.
+- The bounds come to one check, the last vertex ending by the list's end.
+- Checked on the PC against `decode_vertex`, value for value: 200,000 random layouts, 4.1 million
+  vertices, under the address and undefined-behaviour sanitizers too.
+
+A zone `HUD: the map (CAutoMapper::Draw)` times the minimap and the map screen, and counts their GX
+primitives in `[gxsrc]`.
+
+What to look for in test 24:
+
+- `[gxsrc]`: the map's primitives against the ~460 `CMFGame::Draw` had (counted under the new zone).
+- The FIFO processor's `immediate` and per-draw sections, and `draws a frame`.
+- Magmoor's and Phendrana's frame rates against test 23's.
+- The map screen's frame rate (~10 FPS before).
+- The minimap and the map drawn as before: the rooms' fills, their outlines, the thick ones.
+

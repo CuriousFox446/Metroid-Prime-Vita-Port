@@ -26,6 +26,7 @@
 #ifdef TARGET_PC
 #include "port_apclient.h"
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 #endif
@@ -188,6 +189,87 @@ void CMapArea::CMapAreaSurface::PortForEachTriangle(void (*fn)(void* ctx, int a,
     }
   }
 }
+
+namespace {
+// 0.42.0 test 24: a surface's fills sent as one GX_TRIANGLES primitive and its outlines as one
+// GX_LINES, not a primitive each (the minimap's surfaces were ~460 of a frame's ~710 draws on
+// Aurora's FIFO thread in test 23, ~5 vertices each, every room; the map screen's ~4,300). The
+// triangles are the ones Aurora makes of each primitive and in its order (gx/vita_draw.cpp,
+// triangle_order: a strip's odd ones turned, a fan's about its first vertex, a quad's two), and
+// the lines a strip's segments, which it draws a strip as: what is drawn is the same. A surface
+// with a fill of another kind (lines, points) is sent as it was.
+std::vector< uchar > sPortFills;
+std::vector< uchar > sPortOutlines;
+
+bool PortFillTriangles(const int* surfOffset, std::vector< uchar >& out) {
+  out.clear();
+  const int numSurfaces = CBasics::SwapBytes(*surfOffset);
+  const int* surface = &surfOffset[1];
+  for (int i = 0; i < numSurfaces; ++i) {
+    const uint primType = CBasics::SwapBytes(static_cast< uint >(*surface++));
+    const int numVertices = CBasics::SwapBytes(*surface++);
+    const uchar* d = reinterpret_cast< const uchar* >(surface);
+    surface += ((numVertices + 3) & ~3) / 4;
+    switch (primType) {
+    case GX_TRIANGLES:
+      for (int v = 0; v + 2 < numVertices; v += 3) {
+        out.insert(out.end(), {d[v], d[v + 1], d[v + 2]});
+      }
+      break;
+    case GX_TRIANGLESTRIP:
+      for (int v = 0; v + 2 < numVertices; ++v) {
+        if ((v & 1) == 0) {
+          out.insert(out.end(), {d[v], d[v + 1], d[v + 2]});
+        } else {
+          out.insert(out.end(), {d[v + 1], d[v], d[v + 2]});
+        }
+      }
+      break;
+    case GX_TRIANGLEFAN:
+      for (int v = 1; v + 1 < numVertices; ++v) {
+        out.insert(out.end(), {d[0], d[v], d[v + 1]});
+      }
+      break;
+    case GX_QUADS:
+      for (int v = 0; v + 3 < numVertices; v += 4) {
+        out.insert(out.end(), {d[v], d[v + 1], d[v + 2], d[v], d[v + 2], d[v + 3]});
+      }
+      break;
+    default:
+      return false;
+    }
+  }
+  return true;
+}
+
+void PortOutlineSegments(const int* outlineOffset, std::vector< uchar >& out) {
+  out.clear();
+  const int numOutlines = CBasics::SwapBytes(*outlineOffset);
+  const int* outline = &outlineOffset[1];
+  for (int i = 0; i < numOutlines; ++i) {
+    const int numVertices = CBasics::SwapBytes(*outline++);
+    const uchar* d = reinterpret_cast< const uchar* >(outline);
+    outline += ((numVertices + 3) & ~3) / 4;
+    for (int v = 0; v + 1 < numVertices; ++v) {
+      out.insert(out.end(), {d[v], d[v + 1]});
+    }
+  }
+}
+
+// The indices as primitives of `per` vertices, in GX's draws of at most 65,535 vertices.
+void PortDrawIndexed(GXPrimitive primitive, const std::vector< uchar >& indices, size_t per) {
+  const size_t most = 65535 / per * per;
+  for (size_t at = 0; at < indices.size();) {
+    const size_t count = std::min(indices.size() - at, most);
+    CGX::Begin(primitive, GX_VTXFMT0, static_cast< ushort >(count));
+    for (size_t k = 0; k < count; ++k) {
+      GXPosition1x8(indices[at + k]);
+    }
+    CGX::End();
+    at += count;
+  }
+}
+} // namespace
 #endif
 
 void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, const CColor& surfColor,
@@ -202,6 +284,12 @@ void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, c
   }
   if (hasSurfAlpha) {
     CGX::SetTevKColor(GX_KCOLOR0, surfColor.GetGXColor());
+#ifdef TARGET_PC
+    if (PortFillTriangles(x18_surfOffset, sPortFills)) {
+      PortDrawIndexed(GX_TRIANGLES, sPortFills, 3);
+      numSurfaces = 0; // sent
+    }
+#endif
     const int* surface = &x18_surfOffset[1];
     for (int i = 0; i < numSurfaces; ++i) {
       uint primitive = *surface++;
@@ -221,6 +309,9 @@ void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, c
   }
   if (hasLineAlpha) {
     bool thickLine = lineWidth > 1.f;
+#ifdef TARGET_PC
+    PortOutlineSegments(x1c_outlineOffset, sPortOutlines);
+#endif
     for (int j = 0; j < (thickLine ? 1 : 0) + 1; ++j) {
       const int* outline = &x1c_outlineOffset[1];
 
@@ -230,6 +321,10 @@ void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, c
       CGX::SetTevKColor(GX_KCOLOR0,
                         lineColor.WithAlphaModulatedBy(thickLine ? 0.5f : 1.0f).GetGXColor());
 
+#ifdef TARGET_PC
+      PortDrawIndexed(GX_LINES, sPortOutlines, 2);
+      continue;
+#endif
       for (int i = 0; i < numOutlines; ++i) {
         int numVertices = CBasics::SwapBytes(*outline++);
         const uchar* data = reinterpret_cast< const uchar* >(outline);

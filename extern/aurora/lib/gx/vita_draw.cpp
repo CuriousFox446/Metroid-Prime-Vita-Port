@@ -586,6 +586,158 @@ void append_triangle(std::vector<vita_gl::Vertex>& out, const vita_gl::Vertex& a
 // Without a colour of their own, textured faces take their textures' as they are.
 u8 grey_for(const TexAttrs& texAttrs) noexcept { return texAttrs[0] != kNoTexAttr ? 255 : 200; }
 
+// A primitive whose attributes all sit in the list (an immediate draw's, as the particles, the snow
+// and the HUD send them): each attribute's reading worked out once into an operation of its own,
+// the vertex started from one made once, run in a tight loop (0.42.0 test 24: the decode was 4 ms a
+// frame of the FIFO thread's in Magmoor and 32 to 39 in Phendrana's snow, ~27,000 vertices). The
+// common layouts read with straight code, the others through read_components and read_color as
+// decode_vertex does: the vertices are decode_vertex's, value for value.
+enum class DirectOp : u8 {
+  Skip,      // not wanted: its bytes passed over
+  PosF32x3,  // three f32
+  PosS16x3,  // three s16 times the scale
+  PosAny,    // read_components into the position
+  Normal,    // read_components then pack_normal
+  ClrRgba8,  // four bytes as they are
+  ClrAny,    // read_color
+  TexF32x2,  // two f32 into the sets
+  TexS16x2,  // two s16 times the scale
+  TexU8x2,   // two u8 times the scale
+  TexS8x2,   // two s8 times the scale
+  TexAny,    // read_components into the sets
+};
+
+struct DirectStep {
+  DirectOp op = DirectOp::Skip;
+  u8 advance = 0;
+  u8 count = 0;
+  u8 sets = 0;
+  GXCompType type{};
+  float scale = 1.f;
+};
+
+// The plan's steps as operations, and the bytes a vertex takes; false when one is an index (the
+// general path then).
+bool plan_direct(const AttrDecode* plan, u32 steps, DirectStep* out, u32& stride) noexcept {
+  stride = 0;
+  for (u32 s = 0; s < steps; ++s) {
+    const AttrDecode& d = plan[s];
+    if (!d.direct) {
+      return false;
+    }
+    DirectStep& o = out[s];
+    o = {};
+    o.advance = d.advance;
+    stride += d.advance;
+    if (!d.wanted) {
+      continue;
+    }
+    o.count = d.count;
+    o.sets = d.sets;
+    o.type = d.type;
+    o.scale = d.scale;
+    switch (d.attr) {
+    case GX_VA_POS:
+      o.op = d.type == GX_F32 && d.count == 3   ? DirectOp::PosF32x3
+             : d.type == GX_S16 && d.count == 3 ? DirectOp::PosS16x3
+                                                : DirectOp::PosAny;
+      break;
+    case GX_VA_NRM:
+      o.op = DirectOp::Normal;
+      break;
+    case GX_VA_CLR0:
+      o.op = d.type == GX_RGBA8 ? DirectOp::ClrRgba8 : DirectOp::ClrAny;
+      break;
+    default:
+      o.op = d.count != 2         ? DirectOp::TexAny
+             : d.type == GX_F32 ? DirectOp::TexF32x2
+             : d.type == GX_S16 ? DirectOp::TexS16x2
+             : d.type == GX_U8  ? DirectOp::TexU8x2
+             : d.type == GX_S8  ? DirectOp::TexS8x2
+                                : DirectOp::TexAny;
+      break;
+    }
+  }
+  return stride != 0;
+}
+
+inline void put_sets(vita_gl::Vertex& v, u8 sets, float s, float t) noexcept {
+  for (int set = 0; set < kTexCoords; ++set) {
+    if ((sets & (1u << set)) != 0) {
+      v.uv[set][0] = s;
+      v.uv[set][1] = t;
+    }
+  }
+}
+
+// `count` vertices of `stride` bytes each from `vtx` (room for them checked by the caller).
+void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 stride, u32 count, u8 grey,
+                   vita_gl::Vertex* out) noexcept {
+  vita_gl::Vertex base{};
+  base.color[0] = base.color[1] = base.color[2] = grey;
+  base.color[3] = 255;
+  base.raw[0] = base.raw[1] = base.raw[2] = base.raw[3] = 255;
+  for (u32 i = 0; i < count; ++i, vtx += stride) {
+    vita_gl::Vertex& v = out[i];
+    v = base;
+    const u8* p = vtx;
+    for (u32 s = 0; s < nsteps; ++s) {
+      const DirectStep& d = steps[s];
+      switch (d.op) {
+      case DirectOp::Skip:
+        break;
+      case DirectOp::PosF32x3:
+        v.pos[0] = std::bit_cast<float>(read32(p, false));
+        v.pos[1] = std::bit_cast<float>(read32(p + 4, false));
+        v.pos[2] = std::bit_cast<float>(read32(p + 8, false));
+        break;
+      case DirectOp::PosS16x3:
+        v.pos[0] = static_cast<s16>(read16(p, false)) * d.scale;
+        v.pos[1] = static_cast<s16>(read16(p + 2, false)) * d.scale;
+        v.pos[2] = static_cast<s16>(read16(p + 4, false)) * d.scale;
+        break;
+      case DirectOp::PosAny:
+        read_components(p, d.type, d.scale, false, d.count, v.pos);
+        break;
+      case DirectOp::Normal: {
+        float n[3];
+        read_components(p, d.type, d.scale, false, 3, n);
+        pack_normal(n, v.normal);
+        break;
+      }
+      case DirectOp::ClrRgba8:
+        std::memcpy(v.color, p, 4);
+        std::memcpy(v.raw, p, 4);
+        break;
+      case DirectOp::ClrAny:
+        read_color(p, d.type, v.color);
+        std::memcpy(v.raw, v.color, sizeof(v.raw));
+        break;
+      case DirectOp::TexF32x2:
+        put_sets(v, d.sets, std::bit_cast<float>(read32(p, false)), std::bit_cast<float>(read32(p + 4, false)));
+        break;
+      case DirectOp::TexS16x2:
+        put_sets(v, d.sets, static_cast<s16>(read16(p, false)) * d.scale,
+                 static_cast<s16>(read16(p + 2, false)) * d.scale);
+        break;
+      case DirectOp::TexU8x2:
+        put_sets(v, d.sets, p[0] * d.scale, p[1] * d.scale);
+        break;
+      case DirectOp::TexS8x2:
+        put_sets(v, d.sets, static_cast<s8>(p[0]) * d.scale, static_cast<s8>(p[1]) * d.scale);
+        break;
+      case DirectOp::TexAny: {
+        float st[2] = {};
+        read_components(p, d.type, d.scale, false, d.count, st);
+        put_sets(v, d.sets, st[0], st[1]);
+        break;
+      }
+      }
+      p += d.advance;
+    }
+  }
+}
+
 // Decodes `count` vertices from `vtx` (which advances past them) into `out`, room for them, false
 // when one cannot be. indices, when given, gets each one's position and normal indices
 // (decode_vertex).
@@ -599,6 +751,18 @@ bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, con
   u32 steps = 0;
   if (!plan_vertices(g_gxState.vtxFmts[fmt], texAttrs, plan, steps)) {
     return false;
+  }
+  // All in the list: every vertex takes `stride` bytes, so the general loop's checks (each vertex
+  // starting before `end`, the last ending by it) come to the last one ending by `end`.
+  DirectStep direct[GX_VA_TEX7 + 1];
+  u32 stride = 0;
+  if (indices == nullptr && steps != 0 && plan_direct(plan.data(), steps, direct, stride)) {
+    if (vtx > end || static_cast<u64>(count) * stride > static_cast<u64>(end - vtx)) {
+      return false;
+    }
+    decode_direct(vtx, direct, steps, stride, count, grey, out);
+    vtx += static_cast<size_t>(count) * stride;
+    return true;
   }
   for (u32 i = 0; i < count; ++i) {
     if (vtx >= end || !decode_vertex(vtx, plan.data(), steps, grey, out[i], indices != nullptr ? &indices[i] : nullptr)) {

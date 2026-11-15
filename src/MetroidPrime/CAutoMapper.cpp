@@ -1,6 +1,8 @@
 #include "MetroidPrime/CAutoMapper.hpp"
 #include "rstl/math.hpp"
 
+#include "port_profile.h"
+
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "Kyoto/Basics/CBasics.hpp"
 #include "Kyoto/CResFactory.hpp"
@@ -1159,6 +1161,8 @@ void CAutoMapper::ProcessMapPanInput(const CFinalInput& input, const CStateManag
 }
 
 void CAutoMapper::Draw(const CStateManager& mgr, const CTransform4f& xf, float alpha) const {
+  // The minimap and the map screen, timed and their GX draws counted apart (0.42.0 test 24).
+  PORT_ZONE("HUD: the map (CAutoMapper::Draw)");
 #ifdef TARGET_PC
   // The opacity of the visor in use (issue #144).
   float drawAlpha = alpha * gpGameState->GameOptions().GetActiveHudAlpha(mgr);
