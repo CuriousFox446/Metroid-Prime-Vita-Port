@@ -44,6 +44,16 @@ public:
   virtual TUniqueId GetLightId() const = 0;
   virtual void DeleteLight(CStateManager& stateMgr) = 0;
   virtual void SetModulationColor(const CColor& color) = 0;
+#ifdef TARGET_PC
+  // 0.42.0 test 19: Update in its two halves, for CParticleDatabase's update on the PS Vita's side
+  // worker. The system's own step touches nothing but the system (and its children), so the side
+  // worker may run it; the rest (the lights it feeds) is the game thread's, after it.
+  virtual void PortUpdateSystem(float dt) = 0;
+  virtual void PortUpdateRest(float dt, CStateManager& stateMgr) = 0;
+  // Set by CParticleDatabase for the systems the update it is running steps: the ones its first
+  // half did not pass over.
+  bool xPortStepPending = false;
+#endif
 
   EParticleGenType GetType() const { return x80_type; }
   bool GetIsActive() const { return x24_active; }

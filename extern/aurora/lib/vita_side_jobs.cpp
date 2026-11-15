@@ -13,6 +13,13 @@
 #include <condition_variable>
 #include <mutex>
 
+// The side worker's stack, for the game's per-thread statics (platform/include/port_thread_slot.h):
+// a stack pointer in [low, low + span) is the side worker's. Written by it before its first job.
+extern "C" {
+uintptr_t gPortSideStackLow = 0;
+uintptr_t gPortSideStackSpan = 0;
+}
+
 namespace aurora::side_jobs {
 namespace {
 constexpr Module Log{"aurora::side_jobs"};
@@ -88,6 +95,12 @@ bool wait_until(Worker& w, const Ready& ready) noexcept {
 
 void* run(void* arg) {
   Worker& w = *static_cast<Worker*>(arg);
+  // Every frame the jobs make lies below this one, in the stack's kStack bytes from about here down:
+  // the range leaves out its last 16 KiB, which more than covers what started the thread above us.
+  uintptr_t sp;
+  __asm__ volatile("mov %0, sp" : "=r"(sp));
+  gPortSideStackLow = sp - (kStack - 16 * 1024);
+  gPortSideStackSpan = kStack - 16 * 1024;
   thread::set_current({.name = "side worker",
                        .priority = thread::Priority::High,
                        .vitaCore = thread::kVitaSystemCore,
@@ -134,8 +147,8 @@ Worker* worker() noexcept {
     }
     pthread_detach(handle);
     sWorker.store(w, std::memory_order_release);
-    Log.info("side worker: started on core 3 (CPU skinning; the FIFO processor waits for a model's job where "
-             "its draws begin)");
+    Log.info("side worker: started on core 3 (CPU skinning, which the FIFO processor waits for where a model's "
+             "draws begin; the actors' particle steps, which the game thread finishes by the end of the tick)");
     return w;
   }();
   return started;

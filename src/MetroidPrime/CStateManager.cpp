@@ -1,5 +1,6 @@
 #define CSTATEMANAGER_OUT_OF_LINE_GETPLAYER
 #include "MetroidPrime/CStateManager.hpp"
+#include "MetroidPrime/CParticleDatabase.hpp"
 #include "port_profile.h"
 #include "port_actor_shadow.h"
 #include "port_apclient.h"
@@ -1588,6 +1589,17 @@ void CStateManager::Update(float dt) {
   PORT_ZONE_TIMED("SM::Update");
 
 #ifdef TARGET_PC
+  // 0.42.0 test 19: the actors' particle updates the entities' Think left on the side worker
+  // (CParticleDatabase::Update) are finished by the end of the tick, whichever way it ends.
+  struct PortParticleDrain {
+    ~PortParticleDrain() {
+      PORT_ZONE_TIMED("SM: particle updates finished (side worker drain)");
+      CParticleDatabase::PortFinishAll();
+    }
+  } portParticleDrain;
+#endif
+
+#ifdef TARGET_PC
   // The debug free camera can hold the simulation still. The console keeps running.
   if (PortFreeCam::Frozen()) {
     PortConsoleTick(*this);
@@ -1817,7 +1829,14 @@ void CStateManager::Update(float dt) {
   if (x904_gameState == kGS_Running || x904_gameState == kGS_SoftPaused) {
     {
       PORT_ZONE_TIMED("SM: Think (all entities)");
+#ifdef TARGET_PC
+      // The actors' particle systems step on the side worker meanwhile (CParticleDatabase::Update).
+      CParticleDatabase::PortSetAsyncWindow(true);
+#endif
       Think(dt);
+#ifdef TARGET_PC
+      CParticleDatabase::PortSetAsyncWindow(false);
+#endif
     }
     PORT_ZONE_TIMED("SM: PortRoomGeo::Think");
     PortRoomGeo::Think(*this, dt);

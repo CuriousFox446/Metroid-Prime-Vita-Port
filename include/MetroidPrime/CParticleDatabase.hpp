@@ -57,9 +57,58 @@ public:
                                   CStateManager& mgr, TAreaId areaId, int lightIdx);
   void SetUpdatesEnabled(bool enabled) { xb4_24_updatesEnabled = enabled; }
 
+#ifdef TARGET_PC
+  bool AreAnySystemsDrawnWithModel() const {
+    PortFinishConst();
+    return xb4_25_anySystemsDrawnWithModel;
+  }
+
+  // 0.42.0 test 19 (PS Vita): within the open window (CStateManager::Update around its entities'
+  // Think), Update runs in three parts. On the game thread, the first: the systems' transforms from
+  // the pose and their lifetimes, as before. On the side worker (the fourth core), the systems'
+  // own steps, which touch nothing else. On the game thread again, the rest (the lights the systems
+  // feed, the finished ones removed, the times kept), before anything else reads this database
+  // (every method finishes it first) or else by the drain at the end of the tick. The parts run
+  // in the order the whole did, system by system; only the second half of each system's step now
+  // waits until all of the database's systems have stepped.
+  static void PortSetAsyncWindow(bool open);
+  // Finishes every update the window left pending, in the order they began.
+  static void PortFinishAll();
+  // For the log: updates since the last call that went to the side worker, those finished early
+  // (something read the database before the drain) and waited there, and that wait in all.
+  static void PortTakeAsyncStats(uint& async, uint& waited, uint& waitUs);
+#else
   bool AreAnySystemsDrawnWithModel() const { return xb4_25_anySystemsDrawnWithModel; }
+#endif
 
 private:
+#ifdef TARGET_PC
+  // The three parts of UpdateParticleGenDB, per system (see Update). Prepare is false for a system
+  // the update passes over (its locator is not in the pose); Finish is true when the system is done
+  // and comes out of the map.
+  static bool PortPrepareParticleGen(CParticleGenInfo& info, const CPoseAsTransforms& pose,
+                                     const CCharLayoutInfo& layout, const CTransform4f& xf,
+                                     const CVector3f& scale, CStateManager& mgr);
+  static bool PortFinishParticleGen(CParticleGenInfo& info, float dt, CStateManager& mgr, bool deleteIfDone);
+  static bool PortPrepareParticleGenDB(const CPoseAsTransforms& pose, const CCharLayoutInfo& layout,
+                                       const CTransform4f& xf, const CVector3f& scale, CStateManager& mgr,
+                                       DrawMap& map);
+  static void PortStepParticleGenDB(float dt, DrawMap& map);
+  static void PortFinishParticleGenDB(float dt, CStateManager& mgr, DrawMap& map, bool deleteIfDone);
+  static void PortStepJob(void* database);
+  void PortStepAll();
+  void PortFinish();
+  void PortFinishConst() const { const_cast< CParticleDatabase* >(this)->PortFinish(); }
+  void PortLinkPending();
+  void PortUnlinkPending();
+
+  // The pending update: its side job (0 when it has run or never went there), its dt and manager.
+  uint xPortJob = 0;
+  float xPortDt = 0.f;
+  CStateManager* xPortMgr = nullptr;
+  bool xPortPending = false; // the third part is still to run
+  CParticleDatabase* xPortNextPending = nullptr;
+#endif
   static void SetModulationColorAllActiveEffectsForParticleDB(const CColor& color, DrawMap& map);
   static void SuspendAllActiveEffectsForParticleDB(CStateManager& mgr, DrawMap& map);
   static void DeleteAllLightsForParticleDB(CStateManager& mgr, DrawMap& map);

@@ -5,8 +5,8 @@
 #include "Kyoto/Particles/CPortParticleVars.hpp"
 #include "Kyoto/Streams/CInputStream.hpp"
 
-const CPortVarMemory* CPortVarGlobals::sCurrent = nullptr;
-SPortKeep* CPortKeepGlobals::sCurrent = nullptr;
+PortThreadValue< const CPortVarMemory* > CPortVarGlobals::sCurrent(nullptr);
+PortThreadValue< SPortKeep* > CPortKeepGlobals::sCurrent(nullptr);
 std::vector< const CREPortKeep* >* CPortKeepGlobals::sCollect = nullptr;
 
 CPortVarTable* PortReadVarTable(CInputStream& in) {
@@ -32,6 +32,10 @@ CPortVarTable* PortReadVarTable(CInputStream& in) {
 }
 #endif
 
+#ifdef TARGET_PC
+// The game thread's and the side worker's (CParticleGlobals::PortSlot).
+CParticleGlobals::SPortSlot CParticleGlobals::sPortSlots[2];
+#else
 int CParticleGlobals::mParticleLifetime = 0.f;
 float CParticleGlobals::mParticleLifetimeReal = 0.f;
 int CParticleGlobals::mEmitterTime = 0;
@@ -42,14 +46,8 @@ float CParticleGlobals::mParticleLifetimePercentageRemainder = 0.f;
 CElementGen::CParticle* CParticleGlobals::mCurrentParticle = nullptr;
 float* CParticleGlobals::mParticleAccessParameters = nullptr;
 CParticleGlobals::SParticleSystem* CParticleGlobals::mCurrentParticleSystem = nullptr;
+#endif
 #ifdef TARGET_PC
-CElementGen::CParticle* CParticleGlobals::xPortUVParticle = nullptr;
-const CElementGen::CParticle* CParticleGlobals::xPortIrndParticle = nullptr;
-bool CParticleGlobals::xPortIrnd28 = false;
-const CParticleGlobals::SPortSwooshEval* CParticleGlobals::xPortSwooshEval = nullptr;
-float CParticleGlobals::xPortSystemTween = 0.f;
-int CParticleGlobals::xPortSlot2Percentage = 0;
-float CParticleGlobals::xPortSlot2Remainder = 0.f;
 
 namespace {
 CTransform4f sPortCameraTransform(1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f);

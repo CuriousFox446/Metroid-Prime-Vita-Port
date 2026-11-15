@@ -30,10 +30,12 @@
 #include "port_vfx_particles.h"
 #endif
 
-uint CParticleSwoosh::mSwooshAliveCount = 0;
 #ifdef TARGET_PC
-uint CParticleSwoosh::sPortChildSeed = 0;
-bool CParticleSwoosh::sPortChildSeedSet = false;
+std::atomic< uint > CParticleSwoosh::mSwooshAliveCount{0};
+PortThreadValue< uint > CParticleSwoosh::sPortChildSeed(0);
+PortThreadValue< bool > CParticleSwoosh::sPortChildSeedSet(false);
+#else
+uint CParticleSwoosh::mSwooshAliveCount = 0;
 #endif
 static float kFrameTime = 1.f / 60.f;
 

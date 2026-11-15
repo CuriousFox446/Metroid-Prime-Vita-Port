@@ -2527,3 +2527,54 @@ FIFO waits (few and short: the vertices were ready before their draws); the game
 takes; and skinned models drawn whole (a torn or exploded one would be a draw that read its
 vertices before its job ran).
 
+**Test 18** (bdb5ef1, the user's log of Nov 15: Magmoor, an elevator ride). A clean 30-minute run.
+Core 3 was open; the program compiler, the texture worker and the side worker kept to it (mask
+0x80000, no moves). The side worker ran 20 to 124 jobs a second, none hung; the FIFO processor
+waited for 5 to 20% of them, under 2% of its time, except in the elevator (a big model's jobs of
+~3 ms: 17%). The game thread's skinning went from 2.7 to 0.2 ms a frame; Magmoor's windows under 18
+FPS from 58% to 48% of the time. The warm-up did not shorten (some 890 programs at ~1.3 s each,
+~23 minutes): the compiler had had an idle core during it before too; every new build deletes the
+last one's binaries (tallon25), and that is the time. The user: "4th core is around 30% and when I
+was at the elevator, it went up to 40%". Every helper thread woke some 1,400 times a second, the
+side worker too with 25 jobs a second, as in test 17: not looked into yet.
+
+## 0.42.0 test 19: the actors' particles on the fourth core
+
+With the catch-up, a millisecond off a tick is about five off a Magmoor frame (4.8 ticks a frame).
+A tick there was ~11 ms, ~2 of it the actors' particle systems (`CAnimData::AdvanceParticles`:
+`CParticleDatabase::Update`, 8.5 ms a frame; the Puffers' fourteen gas jets each).
+
+**The update in three parts.** Within the window CStateManager::Update opens around its entities'
+Think, `CParticleDatabase::Update` runs its systems' transforms and lifetimes on the game thread as
+before, hands the systems' own steps (`CParticleGenInfo::PortUpdateSystem`: the system and its
+children, nothing else) to the side worker, and leaves the rest (`PortUpdateRest`: the lights the
+systems feed; then the finished systems taken out and the times kept) for the game thread: before
+any other method of that database runs (each finishes it first), or by the drain at the end of the
+tick (`PortFinishAll`, in the order the updates began). The parts keep the whole's order system by
+system; what moves is only that a system's lights and removal now wait for all of its database's
+steps. The destructor waits for a running step. Without the side worker every update runs whole.
+
+**What the steps share, made safe for two threads.** The particle code keeps its state between
+calls in statics, which the game thread's own particle code (effects, projectiles, the draw) uses
+meanwhile. Each now holds a value per thread (`platform/include/port_thread_slot.h`: a thread's stack
+pointer tells the side worker apart, a compare; the two values in cache lines of their own), read
+and written as the statics were, so the decompiled code is unchanged: `CParticleGlobals` (the
+particle, system and lifetime tweens being evaluated), `CRandom16`/`CGlobalRandom` (the current
+generator), `CPortVarGlobals`/`CPortKeepGlobals`, the seeds new generators, swooshes and electrics
+take, the update and scope depths. The live counts (the 0xa00 particle cap among them), the
+per-particle seed counter and the stats are atomic, and so are the token counts (`CObjectReference`):
+a step that spawns a child copies and locks its description's tokens (never the last reference: the
+parent's description keeps every child's loaded, so nothing loads or unloads off the game thread).
+The allocator has its lock and `PortFx`'s generator list its mutex. Left shared: a few elements'
+own caches (sample-and-hold, a cone's basis), whose race could only misplace a particle.
+
+The log's `[particles]` line adds the actors' updates stepped on the side worker a frame and those
+the game thread waited for (and how long); `[zones] other` has "CParticleDatabase: systems stepped
+(side worker, core 3)", the main list "SM: particle updates finished (side worker drain)".
+
+What to look for in test 19: Magmoor's frame rate and `CAnimData::AdvanceParticles` (8.5 ms a frame
+in test 18's heavy windows) against the side worker's zone; the `[side jobs]` busy share; the
+waits in `[particles]` (few and short: the steps were done before anything read them); particle
+effects that look as before (the Puffers' gas, lava, sparks; a misplaced or missing one would be a
+step that read something the game thread changed); and no crash.
+

@@ -8,8 +8,15 @@
 #include "Kyoto/SObjectTag.hpp"
 #include "Kyoto/Particles/CElementGen.hpp"
 
+#ifdef TARGET_PC
+#include "port_thread_slot.h"
+#endif
+
 class CParticleGlobals {
 public:
+#ifdef TARGET_PC
+  struct SPortSwooshEval;
+#endif
   struct SParticleSystem {
     FourCC x0_type;
     CElementGen* x4_system;
@@ -76,6 +83,62 @@ public:
   static void SetCurrentParticleSystem(SParticleSystem* system) { mCurrentParticleSystem = system; }
 
 public:
+#ifdef TARGET_PC
+  // 0.42.0 test 19: every one of these is per thread (port_thread_slot.h), the side worker stepping
+  // actors' systems while the game thread evaluates its own. A thread's values are together in a
+  // slot of their own cache lines; the fields below read and write them as the statics did.
+  struct alignas(64) SPortSlot {
+    int mParticleLifetime = 0;
+    float mParticleLifetimeReal = 0.f;
+    int mEmitterTime = 0;
+    float mEmitterTimeReal = 0.f;
+    int mParticleLifetimePercentage = 0;
+    float mParticleLifetimePercentageReal = 0.f;
+    float mParticleLifetimePercentageRemainder = 0.f;
+    CElementGen::CParticle* mCurrentParticle = nullptr;
+    float* mParticleAccessParameters = nullptr;
+    SParticleSystem* mCurrentParticleSystem = nullptr;
+    CElementGen::CParticle* xPortUVParticle = nullptr;
+    const CElementGen::CParticle* xPortIrndParticle = nullptr;
+    bool xPortIrnd28 = false;
+    const SPortSwooshEval* xPortSwooshEval = nullptr;
+    float xPortSystemTween = 0.f;
+    int xPortSlot2Percentage = 0;
+    float xPortSlot2Remainder = 0.f;
+  };
+  static SPortSlot sPortSlots[2];
+  static SPortSlot& PortSlot() { return sPortSlots[PortThreadSlot()]; }
+  template < typename T, T SPortSlot::*Member >
+  struct PortField {
+    operator T&() const { return PortSlot().*Member; }
+    const PortField& operator=(const T& value) const {
+      PortSlot().*Member = value;
+      return *this;
+    }
+    T operator->() const { return PortSlot().*Member; }
+  };
+  static constexpr PortField< int, &SPortSlot::mParticleLifetime > mParticleLifetime{};
+  static constexpr PortField< float, &SPortSlot::mParticleLifetimeReal > mParticleLifetimeReal{};
+  static constexpr PortField< int, &SPortSlot::mEmitterTime > mEmitterTime{};
+  static constexpr PortField< float, &SPortSlot::mEmitterTimeReal > mEmitterTimeReal{};
+  static constexpr PortField< int, &SPortSlot::mParticleLifetimePercentage > mParticleLifetimePercentage{};
+  static constexpr PortField< float, &SPortSlot::mParticleLifetimePercentageReal >
+      mParticleLifetimePercentageReal{};
+  static constexpr PortField< float, &SPortSlot::mParticleLifetimePercentageRemainder >
+      mParticleLifetimePercentageRemainder{};
+  static constexpr PortField< CElementGen::CParticle*, &SPortSlot::mCurrentParticle > mCurrentParticle{};
+  static constexpr PortField< float*, &SPortSlot::mParticleAccessParameters > mParticleAccessParameters{};
+  static constexpr PortField< SParticleSystem*, &SPortSlot::mCurrentParticleSystem > mCurrentParticleSystem{};
+  // port-only: the particle a per-particle GetValueUV call is for (null = none)
+  static constexpr PortField< CElementGen::CParticle*, &SPortSlot::xPortUVParticle > xPortUVParticle{};
+  // port-only: the particle the elements are being evaluated for, set only while a generator with
+  // PIRN is evaluating per-particle elements (null otherwise). IRND elements then give a value
+  // fixed per (particle, element) instead of relying on being read at frame 0.
+  static constexpr PortField< const CElementGen::CParticle*, &SPortSlot::xPortIrndParticle > xPortIrndParticle{};
+  // port-only: set while a Remastered decal evaluates its elements. IRND keeps retail's
+  // frame-0-only write but draws Remastered's PortFloat28 (IRND 0x2959d8) from the global random.
+  static constexpr PortField< bool, &SPortSlot::xPortIrnd28 > xPortIrnd28{};
+#else
   static int mParticleLifetime;
   static float mParticleLifetimeReal;
   static int mEmitterTime;
@@ -86,16 +149,8 @@ public:
   static CElementGen::CParticle* mCurrentParticle;
   static float* mParticleAccessParameters;
   static SParticleSystem* mCurrentParticleSystem;
+#endif
 #ifdef TARGET_PC
-  // port-only: the particle a per-particle GetValueUV call is for (null = none)
-  static CElementGen::CParticle* xPortUVParticle;
-  // port-only: the particle the elements are being evaluated for, set only while a generator with
-  // PIRN is evaluating per-particle elements (null otherwise). IRND elements then give a value
-  // fixed per (particle, element) instead of relying on being read at frame 0.
-  static const CElementGen::CParticle* xPortIrndParticle;
-  // port-only: set while a Remastered decal evaluates its elements. IRND keeps retail's
-  // frame-0-only write but draws Remastered's PortFloat28 (IRND 0x2959d8) from the global random.
-  static bool xPortIrnd28;
   // port-only: what Remastered's DFCS/DFCP (0x299134 / 0x299064) read from a swoosh's context: the
   // swoosh's local->world transform (T(global) * R(global orientation) * S(global scale), the
   // BuildTransform4f of its registers), the swoosh's local translation (DFCS) and the position of
@@ -109,19 +164,19 @@ public:
     int nodePercentage = 0;
     float nodeRemainder = 0.f;
   };
-  static const SPortSwooshEval* xPortSwooshEval;
+  static constexpr PortField< const SPortSwooshEval*, &SPortSlot::xPortSwooshEval > xPortSwooshEval{};
   // port-only: the system tween Remastered keeps at ctx+0x60 (UpdateLifetimeTweenValues 0x24ef38 on
   // time slot 0, written by every system tick): clamp(system frame / system lifetime, 0, 1). A
   // lifetime of 0 reads as 1, and the infinite one (the port's PSLT default 0x7FFFFF, retail's
   // 0x1000000) gives 0. The reciprocal is a plain 1 / lifetime; the original's estimate is within
   // an ulp of it.
-  static float xPortSystemTween;
+  static constexpr PortField< float, &SPortSlot::xPortSystemTween > xPortSystemTween{};
   static void PortSetSystemTime(int frame, int lifetime);
   // port-only: Remastered's time slot 2 (ctx+0x80), which only CParticleElectric2::UpdateBolt
   // 0xb77638 writes (node i over node count - 1, the same tween as above); the context ctor
   // 0x24f06c zeroes it, so it reads 0 everywhere else. KESP keyframes read it.
-  static int xPortSlot2Percentage;
-  static float xPortSlot2Remainder;
+  static constexpr PortField< int, &SPortSlot::xPortSlot2Percentage > xPortSlot2Percentage{};
+  static constexpr PortField< float, &SPortSlot::xPortSlot2Remainder > xPortSlot2Remainder{};
   static void PortSetSlot2Time(int frame, int lifetime);
   static void PortClearSlot2Time() {
     xPortSlot2Percentage = 0;

@@ -24,6 +24,8 @@ class CModVectorElement;
 #include "Kyoto/Particles/CGenDescription.hpp" // PortKssmChild points at a CGenDescription::PortKssm
 #include "Kyoto/Particles/CPortVfxConstants.hpp"
 #include "Kyoto/Particles/PortParticleMath.hpp"
+#include "port_thread_slot.h"
+#include <atomic>
 #include <utility>
 #include <vector>
 struct CPortVfxMeshBatch;
@@ -518,9 +520,10 @@ private:
   // A converted Remastered system keeps its seed as 32 bits (x94 is 16): the SEED value, else the
   // seed it was built with (sPortChildSeed for a Remastered child, else sSeed).
   uint xPortSeed;
-  // The seed a Remastered parent gives the child it constructs next; consumed by that ctor.
-  static uint sPortChildSeed;
-  static bool sPortChildSeedSet;
+  // The seed a Remastered parent gives the child it constructs next; consumed by that ctor. Per
+  // thread (port_thread_slot.h): parent and child are built on the same one.
+  static PortThreadValue< uint > sPortChildSeed;
+  static PortThreadValue< bool > sPortChildSeedSet;
   uint PortChildSeed(u32 childGuidWord) const {
     return PortChildSeed(childGuidWord, x290_activePartChildren.size());
   }
@@ -672,9 +675,18 @@ private:
 #endif
 
   static double kTickTime;
+#ifdef TARGET_PC
+  // 0.42.0 test 19: the side worker builds generators (children, in its updates) while the game
+  // thread builds others. The seed a new generator takes is per thread (port_thread_slot.h); the
+  // live counts, which cap the particles of all of them together, are atomic.
+  static PortThreadValue< ushort > sSeed;
+  static std::atomic< int > mParticleAliveCount;
+  static std::atomic< int > mParticleSystemAliveCount;
+#else
   static ushort sSeed;
   static int mParticleAliveCount;
   static int mParticleSystemAliveCount;
+#endif
   static bool sSubtractBlend;
   static bool sMoveRedToAlphaBuffer;
 };

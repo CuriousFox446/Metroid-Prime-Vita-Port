@@ -13,7 +13,9 @@
 
 #ifdef TARGET_PC
 #include "Kyoto/Particles/CPortParticleVars.hpp"
+#include "port_thread_slot.h"
 #include "port_tick_pair.h"
+#include <atomic>
 #include <vector>
 #endif
 
@@ -198,9 +200,9 @@ private:
 #ifdef TARGET_PC
 public:
   // The seed a Remastered parent gives the converted swoosh it constructs next; consumed by
-  // that ctor (CElementGen::PortSeedSwooshChild).
-  static uint sPortChildSeed;
-  static bool sPortChildSeedSet;
+  // that ctor (CElementGen::PortSeedSwooshChild). Per thread, as CElementGen's.
+  static PortThreadValue< uint > sPortChildSeed;
+  static PortThreadValue< bool > sPortChildSeedSet;
 
 private:
   CPortVarMemory xPortVars; // PVRT variables, initialised from the description's defaults
@@ -271,7 +273,12 @@ private:
   int PortSplineSteps(int curIdx, int prevIdx) const;
 #endif
 
+#ifdef TARGET_PC
+  // Swooshes are built on the side worker too (an actor system's children, 0.42.0 test 19).
+  static std::atomic< uint > mSwooshAliveCount;
+#else
   static uint mSwooshAliveCount;
+#endif
 };
 
 CHECK_SIZEOF(CParticleSwoosh, 0x210)

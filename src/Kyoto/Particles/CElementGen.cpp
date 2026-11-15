@@ -64,10 +64,11 @@ static void PortGetValueUV(const CUVElement* elem, int frame, CElementGen::CPart
   CParticleGlobals::xPortUVParticle = nullptr;
 }
 
-// A well-mixed per-particle seed (counter x golden ratio, then a murmur3 finaliser).
+// A well-mixed per-particle seed (counter x golden ratio, then a murmur3 finaliser). The counter is
+// shared by the game thread and the side worker (0.42.0 test 19), each draw a number of its own.
 static uint PortNextParticleSeed() {
-  static uint counter = 0;
-  uint h = ++counter * 0x9E3779B9u;
+  static std::atomic< uint > counter{0};
+  uint h = (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B9u;
   h ^= h >> 16;
   h *= 0x85EBCA6Bu;
   h ^= h >> 13;
@@ -129,17 +130,24 @@ extern "C" float frsqrte(float);
 bool CElementGen::sMoveRedToAlphaBuffer;
 bool CElementGen::sSubtractBlend;
 
-int CElementGen::mParticleAliveCount;
-int CElementGen::mParticleSystemAliveCount;
+#ifdef TARGET_PC
+std::atomic< int > CElementGen::mParticleAliveCount{0};
+std::atomic< int > CElementGen::mParticleSystemAliveCount{0};
 // Live systems of converted Remastered effects (PIRN): with any, the scene runs Remastered's
 // particle engine, which has no 0xa00 global cap (CreateNewParticles).
-static int sPortIrndSystems;
+static std::atomic< int > sPortIrndSystems{0};
+#else
+int CElementGen::mParticleAliveCount;
+int CElementGen::mParticleSystemAliveCount;
+#endif
 
 double CElementGen::kTickTime = 1 / 60.0;
-ushort CElementGen::sSeed = 99;
 #ifdef TARGET_PC
-uint CElementGen::sPortChildSeed = 0;
-bool CElementGen::sPortChildSeedSet = false;
+PortThreadValue< ushort > CElementGen::sSeed(99);
+PortThreadValue< uint > CElementGen::sPortChildSeed(0);
+PortThreadValue< bool > CElementGen::sPortChildSeedSet(false);
+#else
+ushort CElementGen::sSeed = 99;
 #endif
 static bool sStaticListInitialized;
 
@@ -920,11 +928,11 @@ void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
 }
 
 #ifdef TARGET_PC
-// PortTakeUpdateStats: counted on the game thread, where particles update.
-static uint sPortStatSteps = 0;
-static uint sPortStatIdleSteps = 0;
-static uint sPortStatParticles = 0;
-static uint sPortStatCreated = 0;
+// PortTakeUpdateStats: counted on the game thread and the side worker alike (0.42.0 test 19).
+static std::atomic< uint > sPortStatSteps{0};
+static std::atomic< uint > sPortStatIdleSteps{0};
+static std::atomic< uint > sPortStatParticles{0};
+static std::atomic< uint > sPortStatCreated{0};
 #endif
 
 const bool CElementGen::Update(double dt) {
@@ -933,8 +941,9 @@ const bool CElementGen::Update(double dt) {
   if (xPortFrozen) {
     return false;
   }
-  // The profile times only the outermost update: a child generator's is inside its parent's.
-  static int sPortUpdateDepth = 0;
+  // The profile times only the outermost update: a child generator's is inside its parent's. Per
+  // thread: the side worker updates actors' systems while the game thread updates others.
+  static PortThreadValue< int > sPortUpdateDepth(0);
   if (sPortUpdateDepth == 0) {
     PORT_ZONE_TIMED("CElementGen::Update (particles)");
     ++sPortUpdateDepth;
@@ -1268,11 +1277,10 @@ bool CElementGen::PortIdleUpdate(double dt) {
 }
 
 void CElementGen::PortTakeUpdateStats(uint& steps, uint& idle, uint& particles, uint& created) {
-  steps = sPortStatSteps;
-  idle = sPortStatIdleSteps;
-  particles = sPortStatParticles;
-  created = sPortStatCreated;
-  sPortStatSteps = sPortStatIdleSteps = sPortStatParticles = sPortStatCreated = 0;
+  steps = sPortStatSteps.exchange(0, std::memory_order_relaxed);
+  idle = sPortStatIdleSteps.exchange(0, std::memory_order_relaxed);
+  particles = sPortStatParticles.exchange(0, std::memory_order_relaxed);
+  created = sPortStatCreated.exchange(0, std::memory_order_relaxed);
 }
 #endif
 

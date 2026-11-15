@@ -75,6 +75,7 @@ extern bool PortSmokeFrame(unsigned frame);
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "Kyoto/Particles/CElementGen.hpp"
+#include "MetroidPrime/CParticleDatabase.hpp"
 #include "Kyoto/Streams/CMemoryInStream.hpp"
 #include "Kyoto/Streams/CMemoryStreamOut.hpp"
 #include "Kyoto/Streams/CZipInputStream.hpp"
@@ -1389,9 +1390,15 @@ int CMain::RsMain(int argc, const char* const* argv) {
             {
               uint steps, idle, particles, created;
               CElementGen::PortTakeUpdateStats(steps, idle, particles, created);
+              // 0.42.0 test 19: the actors' updates whose systems stepped on the side worker, and the
+              // ones the game thread then had to wait for (a reader before the drain, or the drain).
+              uint async, waited, waitUs;
+              CParticleDatabase::PortTakeAsyncStats(async, waited, waitUs);
               PortLog::Write("[particles] per frame: %.1f system steps (%.1f of systems with nothing to step), %.1f "
-                             "particles updated, %.1f created\n",
-                             steps / frames, idle / frames, particles / frames, created / frames);
+                             "particles updated, %.1f created; %.1f actors' updates stepped on the side worker, "
+                             "%.1f waited for (%.2f ms)\n",
+                             steps / frames, idle / frames, particles / frames, created / frames, async / frames,
+                             waited / frames, waitUs / 1000.0 / frames);
             }
             // The zone profiler's breakdown of the same frames (Vita, MP_PROFILE).
             PORT_PROFILE_REPORT(sFrames, [](const char* line) { PortLog::Write("%s", line); });

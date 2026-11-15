@@ -35,6 +35,10 @@ public:
   virtual TUniqueId GetLightId() const override;
   virtual void DeleteLight(CStateManager& stateMgr) override;
   virtual void SetModulationColor(const CColor& color) override;
+#ifdef TARGET_PC
+  virtual void PortUpdateSystem(float dt) override;
+  virtual void PortUpdateRest(float dt, CStateManager& stateMgr) override;
+#endif
 
   rstl::ncrc_ptr< CParticleGen > GetParticleSystem() const { return x84_system; }
 

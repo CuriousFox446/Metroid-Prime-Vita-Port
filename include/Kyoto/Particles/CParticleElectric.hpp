@@ -204,7 +204,13 @@ private:
   CVector3f PortSpreadSpawn(const CVector3f& pos) const;
 #endif
 
+#ifdef TARGET_PC
+  // Per thread (port_thread_slot.h): the side worker builds electrics too, an actor system's
+  // children (0.42.0 test 19).
+  static PortThreadValue< ushort > sSeed;
+#else
   static ushort sSeed;
+#endif
 };
 #ifndef TARGET_PC
 CHECK_SIZEOF(CParticleElectric, 0x458)
