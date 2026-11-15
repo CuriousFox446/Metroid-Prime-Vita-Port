@@ -152,6 +152,10 @@ public:
 #ifdef TARGET_PC
   void DrawPortPickups(const CMapWorldDrawParms& parms,
                        const rstl::vector< CMapAreaBFSInfo >& bfsInfos) const;
+  // DrawAreas' surfaces, sorted ahead of the rest, as one GXPortDrawBatch; how many it drew (0:
+  // none, DrawAreas draws them).
+  int PortDrawSurfaceBatch(const CMapWorldDrawParms& parms,
+                           const rstl::vector< CMapObjectSortInfo >& sortInfos) const;
 #endif
   void RecalculateWorldSphere(const CMapWorldInfo& mwInfo, const IWorld& wld) const;
   CVector3f ConstrainToWorldVolume(const CVector3f& point, const CVector3f& lookVec) const;

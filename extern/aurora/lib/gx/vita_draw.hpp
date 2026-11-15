@@ -19,6 +19,9 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
 // this path cannot draw it.
 bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices) noexcept;
 bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std::span<const u8> indices) noexcept;
+// A batch (GX_AURORA_PORT_DRAW_BATCH, GXPortDrawBatch): its sources' records as the host lays them
+// out and its primitives' records. False when it could not be drawn (nothing else draws it).
+bool draw_batch(std::span<const u8> sources, u32 sourceCount, std::span<const u8> prims) noexcept;
 // The list was released (GX_AURORA_RESIDENT_RELEASE): its decoded triangles go.
 void release(const void* key) noexcept;
 // A list was retained (GX_AURORA_RESIDENT_RETAIN): which arrays are resident may have changed.
@@ -38,6 +41,7 @@ void warm_up_step() noexcept;
 inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
 inline bool draw_indexed(GXVtxFmt, u16, std::span<const u8>, std::span<const u8>) noexcept { return false; }
+inline bool draw_batch(std::span<const u8>, u32, std::span<const u8>) noexcept { return false; }
 inline void release(const void*) noexcept {}
 inline void retained() noexcept {}
 inline void record_copy() noexcept {}

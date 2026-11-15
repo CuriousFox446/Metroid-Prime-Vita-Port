@@ -1,6 +1,7 @@
 #include "gx.hpp"
 #include "__gx.h"
 #include "dolphin/gx/GXAurora.h"
+#include "dolphin/gx/GXPortBatch.h"
 #include "../../gfx/bloom.hpp"
 #include "../../gfx/pipeline_cache.hpp"
 #include "../../gfx/probe.hpp"
@@ -687,6 +688,37 @@ void GXPortBackgroundJobWait(u32 job) {
 #else
   (void)job;
 #endif
+}
+
+GXBool GXPortDrawBatchAvailable() {
+#if defined(AURORA_VITA_GL)
+  return aurora::vita_gl::active() && !aurora::gx::fifo::in_display_list() ? GX_TRUE : GX_FALSE;
+#else
+  return GX_FALSE;
+#endif
+}
+
+GXBool GXPortDrawBatch(const GXPortBatchSource* sources, u32 sourceCount, const void* prims, u32 primBytes) {
+  if (GXPortDrawBatchAvailable() == GX_FALSE || sources == nullptr || prims == nullptr || sourceCount == 0 ||
+      sourceCount > 256 || primBytes == 0) {
+    return GX_FALSE;
+  }
+  // As GXBegin: the state written so far goes first, and the [gxsrc] counts take the batch as one
+  // primitive (its bytes as its vertices).
+  if (__gx->dirtyState != 0) {
+    __GXSetDirtyState();
+  }
+  if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
+    __GXSendFlushPrim();
+  }
+  aurora::gx::source::count_begin(static_cast<u16>(primBytes < 0xFFFFu ? primBytes : 0xFFFFu));
+  aurora::gx::draw_tag::flush();
+  GX_WRITE_AURORA(GX_AURORA_PORT_DRAW_BATCH);
+  GX_WRITE_U32(sourceCount);
+  GX_WRITE_U32(primBytes);
+  aurora::gx::fifo::write_data(sources, sourceCount * static_cast<u32>(sizeof(GXPortBatchSource)));
+  aurora::gx::fifo::write_data(prims, primBytes);
+  return GX_TRUE;
 }
 
 int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority) {

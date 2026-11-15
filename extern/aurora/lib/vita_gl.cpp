@@ -3221,6 +3221,21 @@ void set_render_scale(float scale) noexcept {
   g_renderSize.store(static_cast<uint32_t>(width) << 16 | static_cast<uint32_t>(height), std::memory_order_relaxed);
 }
 
+ScreenRect frame_rect(const ScreenRect& r) noexcept {
+  const uint32_t size = g_renderSize.load(std::memory_order_relaxed);
+  const int width = static_cast<int>(size >> 16);
+  const int height = static_cast<int>(size & 0xFFFF);
+  if (width == kScreenWidth && height == kScreenHeight) {
+    return r;
+  }
+  // As the render worker's target scales it (WorldTarget::rect).
+  WorldTarget target;
+  target.scaled = true;
+  target.sx = static_cast<float>(width) / static_cast<float>(kScreenWidth);
+  target.sy = static_cast<float>(height) / static_cast<float>(kScreenHeight);
+  return target.rect(r);
+}
+
 void set_present_sharpness(float sharpness) noexcept {
   g_sharpness.store(std::clamp(sharpness, 0.f, 1.f), std::memory_order_relaxed);
 }

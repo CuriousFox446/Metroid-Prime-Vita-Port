@@ -14,6 +14,7 @@
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
 #include "dolphin/gx/GXAurora.h"
+#include "dolphin/gx/GXPortBatch.h"
 #include "gx.hpp"
 #include "pipeline.hpp"
 #include "regs.hpp"
@@ -1799,6 +1800,16 @@ void handle_aurora(ByteReader& reader) noexcept {
 #else
     (void)job;
 #endif
+  } else if (subCmd == GX_AURORA_PORT_DRAW_BATCH) {
+    // GXPortDrawBatch: drawn by the Vita path alone (nothing writes one elsewhere).
+    const u32 sourceCount = reader.read<u32>();
+    const u32 primBytes = reader.read<u32>();
+    const auto sources = reader.take(static_cast<size_t>(sourceCount) * sizeof(GXPortBatchSource));
+    const auto prims = reader.take(primBytes);
+    if (vita_gl::active()) {
+      vita::draw_batch(sources, sourceCount, prims);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
+    }
   } else if (subCmd == GX_AURORA_PORT_VFX_CAPTURE_SCENE) {
     gfx::vfx::capture_scene_now(reader.read<u8>() != 0);
   } else if (subCmd == GX_AURORA_PORT_COPY_SCENE) {

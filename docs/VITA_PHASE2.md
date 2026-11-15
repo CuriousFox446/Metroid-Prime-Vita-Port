@@ -2826,3 +2826,89 @@ What to look for in test 24:
 - The map screen's frame rate (~10 FPS before).
 - The minimap and the map drawn as before: the rooms' fills, their outlines, the thick ones.
 
+**Test 24** (34f3537; the user's log of Nov 16, 12 minutes, 20,223 frames, a clean exit:
+Magmoor, a flying-pirate fight, a snowy area, the map screen).
+
+- Median FPS by kind of room (tests 23, 24):
+  - Magmoor with Puffers: 20.2, 21.4;
+  - Magmoor with Triclops: 27.9, 29.2;
+  - Metaree rooms: 25.7, 28.9;
+  - the flying-pirate fight: 16.7, 16.9 (the FIFO processor busy 52 ms a frame, 62 in test 23).
+- The minimap's primitives (now `HUD: the map`) fell only 9% to 26% in the same kinds of rooms
+  (Triclops 393 to 319 a frame, Metarees 377 to 277), and its vertices grew by a third to three
+  fifths (a strip's corners as a list's). Most surfaces had one fill and one outline already: the
+  minimap is still a fill and an outline a surface, 230 to 320 draws a frame, each surface its own
+  colour.
+- The map screen: 2,600 to 5,400 primitives a frame (22,000 to 66,000 vertices), 10 to 22 FPS.
+- The immediate decode, per vertex with its draws' share: 0.63 µs in play (0.99 in test 23). In the
+  snowy windows it was 0.54 µs, against 0.78 in test 21's Phendrana; those windows ran 20 FPS, the
+  FIFO processor busy 50 ms a frame, but not in test 21's rooms.
+- From 18 to 31 FPS the game thread and the FIFO processor were each busy about the frame's length
+  (18 to 22 FPS: 47 and 51 ms).
+
+Fewer draws for the map need its surfaces merged across surfaces, each vertex carrying its surface's
+colour. To keep fills and outlines in one draw, the outlines must either become thin triangles in
+the original order, or be drawn after the fills: a look question for the user.
+
+## 0.42.0 test 25: the map in one draw
+
+The user chose the exact look: every fill and outline kept in its original order, the outlines
+drawn as thin triangles.
+
+**The batch** (`GXPortDrawBatch`, `dolphin/gx/GXPortBatch.h`; the Vita path only).
+
+- `CMapWorld::DrawAreas` sorts all the surfaces ahead of the doors and objects. That whole run now
+  goes as one batch (`CMapWorld::PortDrawSurfaceBatch`): each surface's fill primitives, then its
+  outline strips once for each pass, in the colours the loop gives them (`PortSurfaceColor`, one
+  function for both, and `CMapAreaSurface::PortBatch`).
+- The positions are the areas' own arrays, kept as `GXSetArray` keeps them. Each area's transform
+  rides with its array; the plane's projection is the draw's model matrix.
+- The FIFO processor (`vita_draw.cpp`, `draw_batch`; geometry in `vita_batch.hpp`) makes one draw of
+  it, more only past 65,535 vertices. The map screen's ~64,000 come to one or two.
+- The triangles are `triangle_order`'s. A run of one area's primitives in one colour shares its
+  vertices.
+- The colour is the vertices'. The batch's own material is one TEV stage passing the unlit vertex
+  colour and alpha on (the map's own passed a TEV constant on, set before each draw). Blending, depth,
+  culling, alpha test and fog stay the game's. The batch puts GX's TEV and channels back for the
+  draws after.
+
+**The outlines** are quads one pixel of the frame wide, half a pixel to each side across the line's
+major axis. That is the parallelogram GL draws a one-pixel line as, and the Vita's lines are all a
+pixel since tallon21.
+
+- Each corner is the end's position plus a step in model space that moves the clip position by half
+  a pixel, its w kept. The depth stays the line's, under a perspective or an orthographic view.
+- Where a strip keeps its axis, the corners are shared and the quads meet edge to edge, as GL's strip
+  pixels do. Where it turns, they overlap or leave a gap of a pixel at most, and a line's last pixel
+  follows the quad's edge rule, not GL's.
+- Each quad goes in both windings under GX's front or back culling (the culling keeps one), in one
+  with none. Under `GX_CULL_ALL` the lines go alone, unculled, since GX culls no line.
+- The width follows the frame's pixels at the resolution scale asked for (`vita_gl::frame_rect`). A
+  scale changed while a frame is recorded could leave that one frame's lines a hair off.
+
+**Checked on the PC** (`~/scratch/batchtest`; the header's own code, under the address and
+undefined-behaviour sanitizers too).
+
+- The fills against `triangle_order`, value for value: 6,944 primitives, 89,348 triangles.
+- Chunks past 65,535 vertices, order kept: 257,758 vertices in 4 draws.
+- The outline quads carried through random views as the GPU would, against the reference
+  parallelogram made in window space. The views were perspective and orthographic, and the
+  minimap's kind of model matrix (a camera's inverse squashed 0.001 along its depth).
+- Over 430,000 segments and 128 million pixels, the quads missed 1 to 5 pixels in 100,000 and added
+  as many, each a pixel centre within a thousandth of a pixel of an edge. No pixel was drawn twice
+  by one quad.
+- The corners sit within about a thousandth of a pixel of where they should (1.06e-3 at most), w
+  within 3e-6 of the end's.
+
+`MP_MAP_BATCH=0` sends the surfaces as test 24 did (the PC's environment; the Vita sets its own).
+The universe view's worlds (`CMapUniverse`) are still a draw a surface.
+
+What to look for in test 25:
+
+- `[gxsrc]`: `HUD: the map` should fall from ~300 primitives a frame (test 24's minimap) to the doors'
+  and icons', and the map screen's from 2,600 to 5,400 likewise.
+- A new `batches:` line: primitives, triangles, lines, vertices and draws.
+- The map screen's frame rate (10 to 22 FPS in test 24), and the rooms' against test 24's.
+- The map and minimap drawn as before: the rooms' fills, their outlines, the thick ones on the map
+  screen, the colours, the selected and flashing rooms. A line's end or corner may differ by a pixel.
+
