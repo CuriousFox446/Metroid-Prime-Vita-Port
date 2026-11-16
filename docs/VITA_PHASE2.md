@@ -3175,3 +3175,46 @@ The `core 0 helper:` line adds the tokens the helper published and the waits at 
 What to look for in test 5: no flicker on the doors or elsewhere, and no white shapes. Frame rates as
 in test 4 (Magmoor's Puffers 27.4 FPS). Tokens on the `core 0 helper:` line, and no new waits.
 
+### Test 5 result
+
+`~/logs/t046_5.log` (d1d0e2d, 186 windows). The user: "the white box still appears briefly and
+disappears"; the doors' flicker was not mentioned again.
+- The helper posed 35,489 skinned calls and published 9,881 draw sync tokens. It waited at no draw
+  done, and no job hung.
+- Magmoor's Puffers: 25.7 FPS (27.4 in test 4, 19.8 in test 3). Metarees: 30.3 FPS.
+- The warm-up took 27.9 s to make its 1,534 materials again (2.5 s in tests 2 to 4).
+
+**The white box was not the helper's.** The test 4 photo shows a rectangle, axis-aligned and evenly
+white, behind the arm cannon and the reticle and over the walls, with no depth test. That is a fog
+volume's last pass (`CCubeRenderer::ReallyRenderFogVolume`): a quad over the volume's rectangle on
+screen, without the depth test, blended adding. Magmoor's lava has fog volumes (the logs: about 600
+depth copies a window, two a frame).
+- With its program the pass adds nothing on the Vita: its alpha is the ramp read through the two
+  depth copies, and those are the black stand-ins.
+- A program is built on the render worker at its first draw, one a frame (from the card: 60 to 90 ms
+  each; tests 3 to 5 loaded 46 to 119 during play). Meanwhile its draws are fixed-function: about
+  3,300 to 3,800 draws in each of tests 2 to 5.
+- Fixed-function, the pass has no unit: `choose_units` takes the stages whose colour reads their
+  texture, and this one's colour is a konst. Its vertices have no colour, so the decoder gives them
+  white (`grey_for`: 255 for a textured format) at full alpha. Added over the rectangle: white,
+  until the program is ready, which takes a few frames to a second or two when an area brings many
+  new programs.
+- The same happened in tests 2 and 3; it was noticed in test 4.
+
+## 0.46.0 test 6: no flat shapes while a program loads
+
+The render worker leaves out a draw whose program is still pending (`!settled()`), when its
+fixed-function form would have none of its textures (`left_out_while_pending`):
+- no unit (no stage's colour reads its texture),
+- a program that samples a texture,
+- and no depth write, so what draws after is unchanged.
+
+The fog volume's last pass is one. So is any draw whose texture gives only its alpha, a glow over a
+vertex colour for instance, which fixed-function was a solid quad. A draw whose program failed is
+drawn fixed-function as before.
+
+The `presents:` line adds "N left out waiting for theirs" after the fixed-function ones.
+
+What to look for in test 6: no white box over the lava (or anywhere) on entering Magmoor's rooms;
+the "left out" count above 0 where programs load; the rest as in test 5.
+

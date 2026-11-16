@@ -1983,6 +1983,9 @@ struct PresentStats {
   // Draws with their generated program, and draws whose program was not ready (fixed-function).
   uint64_t programDraws = 0;
   uint64_t programPending = 0;
+  // Draws whose program was not ready, left out rather than drawn fixed-function without any of
+  // their textures (left_out_while_pending).
+  uint64_t pendingLeftOut = 0;
   // EFB copies made on the GPU, the pixels they wrote, the render worker's time on them (the GPU's
   // is in the frame's), and copies left unmade while the copy program was being built.
   uint32_t copies = 0;
@@ -1991,6 +1994,25 @@ struct PresentStats {
   uint32_t copiesWaiting = 0;
 };
 PresentStats g_presentStats;
+
+// 0.46.0 test 6. A draw whose program is still on its way (loaded from the card or compiled, one a
+// frame) is drawn fixed-function meanwhile: its units' textures modulated by its vertex colour.
+// One with no unit (no stage's colour reads its texture) whose program samples textures has none
+// of them so: a flat shape in its vertex colour, at full alpha, where the program would draw what
+// they give. A fog volume's last pass (CCubeRenderer::ReallyRenderFogVolume) is one: its colour a
+// konst, its alpha the ramp read through two depth copies, its vertices without a colour (white
+// for a textured format), blended adding, over the volume's rectangle on screen without the depth
+// test. While its program loaded, it was a white rectangle over the lava's fog (0.46.0 tests 4 and
+// 5, "the white box"; with the program it adds nothing, the depth copies being black). Such a draw
+// that writes no depth is left out until its program is ready; one whose program failed is drawn
+// fixed-function as before.
+bool left_out_while_pending(const Draw& draw) noexcept {
+  if (draw.units[0].texture != nullptr || draw.state.depthWrite) {
+    return false;
+  }
+  return std::any_of(std::begin(draw.program.textures), std::end(draw.program.textures),
+                     [](const Texture* texture) { return texture != nullptr; });
+}
 
 
 void set_enabled(GLenum cap, bool on) {
@@ -2925,6 +2947,7 @@ void draw_world(const Frame& frame) {
       width = draw.width;
     }
     Program* program = draw.program.program;
+    bool leaveOut = false;
     if (program != nullptr) {
       const int budgetBefore = buildBudget;
       const bool ready = program->ready(buildBudget);
@@ -2933,9 +2956,14 @@ void draw_world(const Frame& frame) {
         glUseProgram(usedProgram);
       }
       if (!ready) {
+        leaveOut = !program->settled() && left_out_while_pending(draw);
         program = nullptr;
       }
       g_clock.mark(kBuild);
+    }
+    if (leaveOut) {
+      ++g_presentStats.pendingLeftOut;
+      continue;
     }
     if (program != nullptr) {
       ++g_presentStats.programDraws;
@@ -3484,7 +3512,8 @@ void present(ImDrawData* overlay) noexcept {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame ({:.1f} more joined to the draw before them), {} "
              "destroyed here with the reaper two behind; "
              "generated programs: {} draws with theirs, {} "
-             "fixed-function waiting for theirs; {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
+             "fixed-function waiting for theirs, {} left out waiting for theirs (none of their textures without "
+             "them); {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
              "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} from the precompiled "
              "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
              "failed, {} built or being built by their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
@@ -3495,7 +3524,8 @@ void present(ImDrawData* overlay) noexcept {
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.merged) / g_presentStats.framesWithDraws : 0.0,
              g_reaper.take_destroyed_here(),
-             g_presentStats.programDraws, g_presentStats.programPending, g_programStats.compiled,
+             g_presentStats.programDraws, g_presentStats.programPending, g_presentStats.pendingLeftOut,
+             g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
              g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),
              g_programStats.precompiled, g_programStats.loaded, g_programStats.reloaded, g_programStats.loadMs,
