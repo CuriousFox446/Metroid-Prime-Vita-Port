@@ -76,6 +76,7 @@ extern bool PortSmokeFrame(unsigned frame);
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "Kyoto/Particles/CElementGen.hpp"
 #include "MetroidPrime/CParticleDatabase.hpp"
+#include "Weapons/CProjectileWeapon.hpp"
 #include <musyx/port_voices.h>
 #include "Kyoto/Streams/CMemoryInStream.hpp"
 #include "Kyoto/Streams/CMemoryStreamOut.hpp"
@@ -1395,11 +1396,17 @@ int CMain::RsMain(int argc, const char* const* argv) {
               // ones the game thread then had to wait for (a reader before the drain, or the drain).
               uint async, waited, waitUs;
               CParticleDatabase::PortTakeAsyncStats(async, waited, waitUs);
+              // 0.46.0 test 3: the projectiles' particle steps sent there, and those the game thread
+              // waited for (at the Think pass's end, or a reader before it).
+              uint shots, shotWaits, shotWaitUs;
+              CProjectileWeapon::PortTakeStepStats(shots, shotWaits, shotWaitUs);
               PortLog::Write("[particles] per frame: %.1f system steps (%.1f of systems with nothing to step), %.1f "
                              "particles updated, %.1f created; %.1f actors' updates stepped on the side worker, "
-                             "%.1f waited for (%.2f ms)\n",
+                             "%.1f waited for (%.2f ms); %.1f projectiles' effects stepped there, %.1f waited for "
+                             "(%.2f ms)\n",
                              steps / frames, idle / frames, particles / frames, created / frames, async / frames,
-                             waited / frames, waitUs / 1000.0 / frames);
+                             waited / frames, waitUs / 1000.0 / frames, shots / frames, shotWaits / frames,
+                             shotWaitUs / 1000.0 / frames);
             }
             {
               // 0.42.0 test 22: MusyX's lock, which the mixer held through its whole mix and every

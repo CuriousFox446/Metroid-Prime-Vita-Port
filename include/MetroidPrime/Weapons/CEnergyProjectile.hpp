@@ -46,7 +46,16 @@ public:
                              const EWeaponCollisionResponseTypes type, CStateManager& mgr,
                              const CDamageVulnerability& dVuln, const TUniqueId hitActor);
 
+#ifdef TARGET_PC
+  // Set by others during the Think pass (CScriptSpecialFunction): its Think's rest runs first, as
+  // it did before it was put off (0.46.0 test 3).
+  void Set3d0_26(bool v) {
+    PortFinishThink();
+    x3d0_26_ = v;
+  }
+#else
   void Set3d0_26(bool v) { x3d0_26_ = v; }
+#endif
 
   CProjectileWeapon& ProjectileWeapon() { return x170_projectile; }
 
@@ -59,9 +68,22 @@ public:
 #ifdef TARGET_PC
   // CEnergyProjectileMP1::SetRemainingRicochetCount (0x1013554); read only by Remastered Explode.
   void PortSetRemainingRicochetCount(int count) { xPortRicochets = count; }
+  // 0.46.0 test 3: the window CStateManager::Update opens around its entities' Think. Within it a
+  // projectile's particle step goes to the PS Vita's side worker (CProjectileWeapon::
+  // PortStepOnSideWorker), and what Think does after it (the explosion check, the light, the sound,
+  // the time kept, the deletion checks: PortThinkTail) waits for the pass's end (PortFinishAll, in
+  // the order the steps began), or for a message to the projectile, whichever comes first.
+  static void PortSetAsyncWindow(bool open);
+  static void PortFinishAll();
 #endif
 
 private:
+#ifdef TARGET_PC
+  void PortThinkTail(float dt, CStateManager& mgr);
+  void PortFinishThink();
+  void PortLinkPending();
+  void PortUnlinkPending();
+#endif
   CSfxHandle x2e8_sfx;
   CVector3f x2ec_dir;
   float x2f8_mag;
@@ -74,6 +96,11 @@ private:
 #ifdef TARGET_PC
   CPortNestedLights xPortNestedLights; // lights of the nested PHDR children of the APSM effect
   int xPortRicochets = 8; // CEnergyProjectileMP1 +0x528, ctor 0x1011bdc
+  // The rest of a Think whose particle step is on the side worker, and the pending list's link.
+  CEnergyProjectile* xPortNextPending = nullptr;
+  CStateManager* xPortTailMgr = nullptr;
+  float xPortTailDt = 0.f;
+  bool xPortTailPending = false;
 #endif
 
   static const CMaterialList kCheckMaterial;

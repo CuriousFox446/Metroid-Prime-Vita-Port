@@ -1,6 +1,7 @@
 #define CSTATEMANAGER_OUT_OF_LINE_GETPLAYER
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/CParticleDatabase.hpp"
+#include "MetroidPrime/Weapons/CEnergyProjectile.hpp"
 #include "port_profile.h"
 #include "port_actor_shadow.h"
 #include "port_apclient.h"
@@ -1824,11 +1825,19 @@ void CStateManager::Update(float dt) {
     {
       PORT_ZONE_TIMED("SM: Think (all entities)");
 #ifdef TARGET_PC
-      // The actors' particle systems step on the side worker meanwhile (CParticleDatabase::Update).
+      // The actors' particle systems step on the side worker meanwhile (CParticleDatabase::Update),
+      // and the projectiles' (CEnergyProjectile::Think, 0.46.0 test 3).
       CParticleDatabase::PortSetAsyncWindow(true);
+      CEnergyProjectile::PortSetAsyncWindow(true);
 #endif
       Think(dt);
 #ifdef TARGET_PC
+      {
+        // The rest of each such projectile's Think, in the order the steps began: within the tick.
+        PORT_ZONE_TIMED("SM: projectiles' Think finished (side worker steps)");
+        CEnergyProjectile::PortFinishAll();
+      }
+      CEnergyProjectile::PortSetAsyncWindow(false);
       CParticleDatabase::PortSetAsyncWindow(false);
 #endif
     }

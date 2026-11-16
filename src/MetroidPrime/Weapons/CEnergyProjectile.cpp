@@ -25,6 +25,16 @@
 
 #ifdef TARGET_PC
 #define PORT_REMASTERED_PROJECTILE(p) ((p).PortIsRemastered())
+
+namespace {
+// The window CStateManager::Update opens around its entities' Think (PortSetAsyncWindow).
+bool sPortAsyncWindow = false;
+// Set when the side worker refused a step (no fourth core): every Think runs whole, as before.
+bool sPortNoWorker = false;
+// The projectiles whose Think has its rest still to run, in the order their steps began.
+CEnergyProjectile* sPortPendingHead = nullptr;
+CEnergyProjectile* sPortPendingTail = nullptr;
+} // namespace
 #else
 #define PORT_REMASTERED_PROJECTILE(p) false
 #endif
@@ -266,7 +276,11 @@ const bool CEnergyProjectile::Explode(const CVector3f& pos, const CVector3f& nor
   return done;
 }
 
+#ifdef TARGET_PC
+void CEnergyProjectile::Touch(CActor&, CStateManager&) { PortFinishThink(); }
+#else
 void CEnergyProjectile::Touch(CActor&, CStateManager&) {}
+#endif
 
 void CEnergyProjectile::AddToRenderer(const CFrustumPlanes& frustum,
                                       const CStateManager& mgr) const {
@@ -336,6 +350,9 @@ void CEnergyProjectile::Render(const CStateManager& mgr) const {
 }
 
 void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  PortFinishThink(); // a pass's end finishes every one: none is pending here
+#endif
   CWeapon::Think(dt, mgr);
   if (GetCurrentAreaId() != mgr.GetWorld()->GetCurrentAreaId() && HasAttrib(kPA_ArmCannon)) {
     mgr.SetActorAreaId(*this, mgr.GetWorld()->GetCurrentAreaId());
@@ -356,10 +373,76 @@ void CEnergyProjectile::Think(float dt, CStateManager& mgr) {
     }
   }
   CProjectileWeapon& projectile = Projectile();
+#ifdef TARGET_PC
+  // 0.46.0 test 3: the particle step on the side worker (0.46.0 test 2's flying-pirate fight: 2.9
+  // ms a frame of the game thread, a third of its entities' Think), while the pass goes on; the
+  // rest of this Think waits for it, at the pass's end (PortFinishAll) or a message here first.
+  // What that rest does with other entities stays where it was: a projectile that explodes, is
+  // dead or reaches its 45 s this tick (known before the step, which changes none of them) runs
+  // whole, as Remastered's (its rest reads its own state). What moves is only the light, the
+  // sound, and the deletion of a projectile whose effects have just run out.
+  if (sPortAsyncWindow && !sPortNoWorker && !(x2e4_24_active && x3d0_26_) && !x3d0_24_dead &&
+      !(x3d4_curTime + dt > 45.f) && !PORT_REMASTERED_PROJECTILE(projectile)) {
+    if (projectile.PortStepOnSideWorker()) {
+      xPortTailDt = dt;
+      xPortTailMgr = &mgr;
+      xPortTailPending = true;
+      PortLinkPending();
+      return;
+    }
+    sPortNoWorker = true;
+  }
+#endif
   {
     PORT_ZONE_TIMED("projectile: particle effects (UpdateParticleFX)");
     projectile.UpdateParticleFX();
   }
+#ifdef TARGET_PC
+  PortThinkTail(dt, mgr);
+}
+
+void CEnergyProjectile::PortFinishThink() {
+  if (!xPortTailPending) {
+    return;
+  }
+  xPortTailPending = false;
+  PortUnlinkPending();
+  Projectile().PortFinishStep();
+  PortThinkTail(xPortTailDt, *xPortTailMgr);
+}
+
+void CEnergyProjectile::PortLinkPending() {
+  xPortNextPending = nullptr;
+  (sPortPendingTail != nullptr ? sPortPendingTail->xPortNextPending : sPortPendingHead) = this;
+  sPortPendingTail = this;
+}
+
+void CEnergyProjectile::PortUnlinkPending() {
+  CEnergyProjectile* prev = nullptr;
+  for (CEnergyProjectile* p = sPortPendingHead; p != nullptr; prev = p, p = p->xPortNextPending) {
+    if (p == this) {
+      (prev != nullptr ? prev->xPortNextPending : sPortPendingHead) = xPortNextPending;
+      if (sPortPendingTail == this) {
+        sPortPendingTail = prev;
+      }
+      xPortNextPending = nullptr;
+      return;
+    }
+  }
+}
+
+void CEnergyProjectile::PortSetAsyncWindow(bool open) { sPortAsyncWindow = open; }
+
+void CEnergyProjectile::PortFinishAll() {
+  while (sPortPendingHead != nullptr) {
+    sPortPendingHead->PortFinishThink();
+  }
+}
+
+// What Think does after the particle step: as it was, from here.
+void CEnergyProjectile::PortThinkTail(float dt, CStateManager& mgr) {
+  CProjectileWeapon& projectile = Projectile();
+#endif
   if (x2e4_24_active && x3d0_26_) {
     Explode(GetTranslation(), CVector3f::Up(), kWCR_Default, mgr,
             CDamageVulnerability::NormalVulnerability(), kInvalidUniqueId);
@@ -454,6 +537,8 @@ ENTITY_ACCEPT_IMPL(CEnergyProjectile)
 void CEnergyProjectile::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid,
                                         CStateManager& mgr) {
 #ifdef TARGET_PC
+  // A message finds its Think whole, as it did before (0.46.0 test 3).
+  PortFinishThink();
   xPortNestedLights.Forward(msg, uid, GetUniqueId(), mgr);
 #endif
   switch (msg) {

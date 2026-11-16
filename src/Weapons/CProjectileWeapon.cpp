@@ -21,6 +21,28 @@
 
 #ifdef TARGET_PC
 #include "port_beam_colours.h"
+#include "port_profile.h"
+#include "port_thread_slot.h"
+
+#include <dolphin/gx/GXExtra.h>
+
+#include <chrono>
+
+// A step still on the side worker is finished before anything reads or changes the systems or what
+// the step reads (PortStepOnSideWorker); on the side worker itself (the step's own calls) it is not.
+#define PORT_PW_FINISH() PortFinishStep()
+// A system the step finds finished: deleted on the game thread, and on the side worker kept for the
+// game thread to delete (PortRetire), the pointer cleared at once as before either way.
+#define PORT_PW_DELETE(system) PortRetire(system)
+
+namespace {
+uint sPortStatStepped = 0;
+uint sPortStatWaited = 0;
+uint sPortStatWaitUs = 0;
+} // namespace
+#else
+#define PORT_PW_FINISH() (void)0
+#define PORT_PW_DELETE(system) (delete (system), (system) = nullptr)
 #endif
 
 uint CProjectileWeapon::skGlobalSeed = 99;
@@ -138,6 +160,7 @@ CProjectileWeapon::CProjectileWeapon(const TToken< CWeaponDescription >& descrip
 }
 
 CProjectileWeapon::~CProjectileWeapon() {
+  PORT_PW_FINISH();
   delete xfc_APSMGen;
   delete x100_APS2Gen;
   delete x104_;
@@ -147,6 +170,7 @@ CProjectileWeapon::~CProjectileWeapon() {
 }
 
 bool CProjectileWeapon::Update(float dt) {
+  PORT_PW_FINISH();
   CGlobalRandom __(x10_random);
 
   double actualTime = xf4_curFrame * (1.0 / 60.0);
@@ -193,6 +217,70 @@ bool CProjectileWeapon::Update(float dt) {
 }
 
 void CProjectileWeapon::UpdateParticleFX() {
+#ifdef TARGET_PC
+  PORT_PW_FINISH();
+  PortUpdateParticleFX();
+}
+
+bool CProjectileWeapon::PortStepOnSideWorker() {
+  PORT_PW_FINISH();
+  const uint job = GXPortSideJobSubmit(&CProjectileWeapon::PortStepJob, this);
+  if (job == 0) {
+    return false;
+  }
+  xPortStepJob = job;
+  ++sPortStatStepped;
+  return true;
+}
+
+void CProjectileWeapon::PortStepJob(void* weapon) {
+  PORT_ZONE_TIMED("projectile: particle effects (side worker, core 3)");
+  static_cast< CProjectileWeapon* >(weapon)->PortUpdateParticleFX();
+}
+
+void CProjectileWeapon::PortFinishStep() const {
+  if (xPortStepJob == 0 || PortThreadSlot() != 0) {
+    return;
+  }
+  if (!GXPortSideJobDone(xPortStepJob)) {
+    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    // Past the side jobs' limit (logged there) it waits again: the worker may still be stepping
+    // the systems, which nothing may read meanwhile.
+    while (!GXPortSideJobDone(xPortStepJob)) {
+      GXPortSideJobWait(xPortStepJob);
+    }
+    ++sPortStatWaited;
+    sPortStatWaitUs += static_cast< uint >(
+        std::chrono::duration_cast< std::chrono::microseconds >(std::chrono::steady_clock::now() - start)
+            .count());
+  }
+  xPortStepJob = 0;
+  for (int i = 0; i < xPortRetiredCount; ++i) {
+    delete xPortRetired[i];
+    xPortRetired[i] = nullptr;
+  }
+  xPortRetiredCount = 0;
+}
+
+template < typename T >
+void CProjectileWeapon::PortRetire(T*& system) {
+  if (PortThreadSlot() != 0 && xPortRetiredCount < 6) {
+    xPortRetired[xPortRetiredCount++] = system;
+  } else {
+    delete system;
+  }
+  system = nullptr;
+}
+
+void CProjectileWeapon::PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs) {
+  stepped = sPortStatStepped;
+  waited = sPortStatWaited;
+  waitUs = sPortStatWaitUs;
+  sPortStatStepped = sPortStatWaited = sPortStatWaitUs = 0;
+}
+
+void CProjectileWeapon::PortUpdateParticleFX() {
+#endif
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   if (xfc_APSMGen && x4_weaponDesc->x28_30_SPS1) {
     xfc_APSMGen->Update(1.f / 60.f);
@@ -222,13 +310,18 @@ const CVector3f CProjectileWeapon::GetTranslation() const {
 #endif
 }
 
-void CProjectileWeapon::SetRelativeOrientation(const CTransform4f& orient) { x44_localXf = orient; }
+void CProjectileWeapon::SetRelativeOrientation(const CTransform4f& orient) {
+  PORT_PW_FINISH();
+  x44_localXf = orient;
+}
 
 void CProjectileWeapon::SetWorldSpaceOrientation(const CTransform4f& orient) {
+  PORT_PW_FINISH();
   x44_localXf = x14_localToWorldXf.GetInverse() * orient;
 }
 
 void CProjectileWeapon::UpdatePSTranslationAndOrientation() {
+  PORT_PW_FINISH();
   if (xe8_lifetime >= xf4_curFrame && x124_24_active) {
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
     x80_previousLocalOffset = x80_localOffset;
@@ -280,6 +373,7 @@ void CProjectileWeapon::UpdatePSTranslationAndOrientation() {
 }
 
 void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
+  PORT_PW_FINISH();
   double useDt = (close_enough(dt, 1.f / 60.f, 1.6666666851961054e-5f)) ? 1.0 / 60.0 : dt;
 
   if (xfc_APSMGen) {
@@ -304,8 +398,7 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
 #endif
       xfc_APSMGen->Update(useDt);
     if (xfc_APSMGen->IsSystemDeletable() == TRUE) {
-      delete xfc_APSMGen;
-      xfc_APSMGen = nullptr;
+      PORT_PW_DELETE(xfc_APSMGen);
     }
   }
 
@@ -332,8 +425,7 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
 #endif
       x100_APS2Gen->Update(useDt);
     if (x100_APS2Gen->IsSystemDeletable() == TRUE) {
-      delete x100_APS2Gen;
-      x100_APS2Gen = nullptr;
+      PORT_PW_DELETE(x100_APS2Gen);
     }
   }
 
@@ -353,8 +445,7 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
     x118_swoosh1->SetWarmUp();
     x118_swoosh1->Update(0.0);
     if (x118_swoosh1->IsSystemDeletable() == TRUE) {
-      delete x118_swoosh1;
-      x118_swoosh1 = nullptr;
+      PORT_PW_DELETE(x118_swoosh1);
     }
   }
 
@@ -374,8 +465,7 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
     x11c_swoosh2->SetWarmUp();
     x11c_swoosh2->Update(0.0);
     if (x11c_swoosh2->IsSystemDeletable() == TRUE) {
-      delete x11c_swoosh2;
-      x11c_swoosh2 = nullptr;
+      PORT_PW_DELETE(x11c_swoosh2);
     }
   }
 
@@ -401,16 +491,14 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
     x120_swoosh3->SetWarmUp();
     x120_swoosh3->Update(0.0);
     if (x120_swoosh3->IsSystemDeletable() == TRUE) {
-      delete x120_swoosh3;
-      x120_swoosh3 = nullptr;
+      PORT_PW_DELETE(x120_swoosh3);
     }
   }
 
   if (x104_) {
     x104_->Update(useDt);
     if (x104_->IsSystemDeletable() == TRUE) {
-      delete x104_;
-      x104_ = nullptr;
+      PORT_PW_DELETE(x104_);
     }
   }
 
@@ -418,6 +506,7 @@ void CProjectileWeapon::UpdateChildParticleSystems(float dt) {
 }
 
 const bool CProjectileWeapon::IsSystemDeletable() const {
+  PORT_PW_FINISH();
   bool ret = true;
   if (xfc_APSMGen && !xfc_APSMGen->IsSystemDeletable()) {
     ret = false;
@@ -438,6 +527,7 @@ const bool CProjectileWeapon::IsSystemDeletable() const {
 }
 
 void CProjectileWeapon::Render() const {
+  PORT_PW_FINISH();
   if (xf4_curFrame <= xe8_lifetime && x124_24_active && x108_model) {
     CTransform4f localXf = CTransform4f::Translate(
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
@@ -460,6 +550,7 @@ void CProjectileWeapon::Render() const {
 
 #ifdef TARGET_PC
 void CProjectileWeapon::PortSetBeamTint(int beam) {
+  PORT_PW_FINISH();
   mPortBeamTint = beam;
   CParticleGen* gens[] = {xfc_APSMGen, x100_APS2Gen, x104_, x118_swoosh1, x11c_swoosh2,
                           x120_swoosh3};
@@ -472,6 +563,7 @@ void CProjectileWeapon::PortSetBeamTint(int beam) {
 
 #endif
 void CProjectileWeapon::AddToRenderer() const {
+  PORT_PW_FINISH();
   if (xfc_APSMGen)
     IWeaponRenderer::GetRenderer()->AddParticleGen(*xfc_APSMGen);
   if (x100_APS2Gen)
@@ -487,6 +579,7 @@ void CProjectileWeapon::AddToRenderer() const {
 }
 
 void CProjectileWeapon::RenderParticles() const {
+  PORT_PW_FINISH();
   if (xfc_APSMGen) {
     xfc_APSMGen->Render();
   }
@@ -510,6 +603,7 @@ void CProjectileWeapon::RenderParticles() const {
 rstl::optional_object< TLockedToken< CGenDescription > > CProjectileWeapon::CollisionOccured(
     const EWeaponCollisionResponseTypes colType, const bool deflected, const bool useTarget,
     const CVector3f& pos, const CVector3f& normal, const CVector3f& target) {
+  PORT_PW_FINISH();
   x80_localOffset = x14_localToWorldXf.TransposeRotate(pos - x74_worldOffset) - x8c_projOffset;
 #if VERSION >= VERSION_GM8P_00 && VERSION != VERSION_GM8E_02
   x98_interpolationOffset = CVector3f::Zero();
@@ -602,6 +696,7 @@ void CProjectileWeapon::SetGlobalSeed(const uint seed) { skGlobalSeed = seed; }
 
 #ifdef TARGET_PC
 bool CProjectileWeapon::PortIsRemastered() const {
+  PORT_PW_FINISH();
   return (xfc_APSMGen && xfc_APSMGen->PortIsRemastered()) ||
          (x100_APS2Gen && x100_APS2Gen->PortIsRemastered()) ||
          (x104_ && x104_->PortIsRemastered()) ||
@@ -612,6 +707,7 @@ bool CProjectileWeapon::PortIsRemastered() const {
 #endif
 
 rstl::optional_object< CAABox > CProjectileWeapon::GetBounds() const {
+  PORT_PW_FINISH();
   CAABox ret = CAABox::MakeMaxInvertedBox();
   bool hasBox = false;
 

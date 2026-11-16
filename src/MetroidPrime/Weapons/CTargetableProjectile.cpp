@@ -77,6 +77,18 @@ void CTargetableProjectile::ResolveCollisionWithActor(const CRayCastResult& res,
   CEnergyProjectile::ResolveCollisionWithActor(res, act, mgr);
 }
 
+#ifdef TARGET_PC
+CEnergyProjectile::~CEnergyProjectile() {
+  // Deleted with its particle step on the side worker (0.46.0 test 3): the step is waited for, and
+  // the rest of its Think goes with the projectile.
+  if (xPortTailPending) {
+    xPortTailPending = false;
+    PortUnlinkPending();
+    Projectile().PortFinishStep();
+  }
+}
+#else
 CEnergyProjectile::~CEnergyProjectile() {}
+#endif
 
 CTargetableProjectile::~CTargetableProjectile() {}

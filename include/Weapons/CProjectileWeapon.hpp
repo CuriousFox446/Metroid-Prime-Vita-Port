@@ -62,8 +62,19 @@ public:
   static void SetGlobalSeed(const uint seed);
   bool IsProjectileActive() const { return x124_24_active; }
   TLockedToken< CWeaponDescription > GetWeaponDescription() const { return x4_weaponDesc; }
+#ifdef TARGET_PC
+  CElementGen* GetAttachedPS1() {
+    PortFinishStep();
+    return xfc_APSMGen;
+  }
+  const CElementGen* GetAttachedPS1() const {
+    PortFinishStep();
+    return xfc_APSMGen;
+  }
+#else
   CElementGen* GetAttachedPS1() { return xfc_APSMGen; }
   const CElementGen* GetAttachedPS1() const { return xfc_APSMGen; }
+#endif
   double GameTime() const { return xd0_curTime; }
 #ifdef TARGET_PC
   // True when any of the projectile's particle systems came from the Remastered mod.
@@ -71,6 +82,18 @@ public:
   // The beam whose picked colour (port_beam_colours.h) tints the shot, model and particles.
   void PortSetBeamTint(int beam);
   int PortBeamTint() const { return mPortBeamTint; }
+  // 0.46.0 test 3: UpdateParticleFX on the PS Vita's side worker (the fourth core), within the
+  // Think pass (CEnergyProjectile::Think). False when there is no side worker: nothing was sent,
+  // and the caller steps them itself. The systems the step finds finished are deleted on the game
+  // thread, once it is done (PortFinishStep). Every method that reads or changes the systems, or
+  // what the step reads (the transforms' setters, the movement), finishes a pending step first:
+  // on the game thread only (the step's own calls are the side worker's).
+  bool PortStepOnSideWorker();
+  void PortFinishStep() const;
+  bool PortStepPending() const { return xPortStepJob != 0; }
+  // For the log: the steps sent to the side worker, and those the game thread waited for (and how
+  // long), since the last call.
+  static void PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs);
 #endif
 
   rstl::optional_object< CAABox > GetBounds() const;
@@ -120,6 +143,15 @@ private:
   bool x124_31_VMD2 : 1;
 #ifdef TARGET_PC
   int mPortBeamTint = -1;
+  // The side worker's step (PortStepOnSideWorker): its job, and the systems it found finished,
+  // which the game thread deletes (PortFinishStep).
+  static void PortStepJob(void* weapon);
+  void PortUpdateParticleFX();
+  template < typename T >
+  void PortRetire(T*& system);
+  mutable uint xPortStepJob = 0;
+  mutable CParticleGen* xPortRetired[6] = {};
+  mutable int xPortRetiredCount = 0;
 #endif
 };
 CHECK_SIZEOF(CProjectileWeapon,

@@ -3016,3 +3016,52 @@ misses the other), and the sleep is timed at 4 ms, so a wake-up lost anyhow cost
 What to look for in test 2: no `has not run after 500 ms` errors, `hung` 0 in the `[side jobs]`
 lines, `pwait` back to a millisecond or so, and the frame rates against test 24's.
 
+**Test 2** (80ea3a6; the user's log of Nov 15, 8.7 minutes, a clean exit; a fight with two flying
+pirates, to test combat).
+- The side worker: no job hung, no timeout; 200 or so jobs a second at 6% busy, waits of a few ms,
+  as in 0.42.0. Seven `MP stall` lines: the start, loads, and three draws of 260 to 330 ms.
+- Median FPS by kind of room (test 24 on 0.42.0, then this):
+  - the flying-pirate fight: 16.9, 19.1 (195 windows);
+  - Magmoor with Puffers: 21.4, 21.7;
+  - Magmoor with Triclops: 29.2, 26.9 (means 29.2 and 28.7);
+  - Metaree rooms: 28.9, 28.4.
+- In the fight the FIFO processor is the limit: busy 53.2 ms a frame (the whole frame at 19 FPS;
+  52.3 in test 24), for ~970 draws a frame, of which the minimap's are 321. Skinned models take
+  11 ms of it (7.7 and 3.3 to copy), the per-draw sections (state, record, material, rows,
+  dispatch) about 27.
+- The game thread is about 44.5 ms a frame (3.1 ticks at 9.0 ms, draw 16.5), its largest Think the
+  energy projectiles (4.1 ms), then the flying pirates (2.1, and 0.8 moving) and the script effects
+  (1.9).
+
+## 0.46.0 test 3: the projectiles' particle effects on the fourth core
+
+The user chose the projectiles first. In test 2's fight the energy projectiles' Think was 4.1 ms a
+frame of the game thread, 2.9 of it their particle effects (`UpdateParticleFX`: each shot's
+systems stepped a sixtieth of a second, about 34 a frame), the rest movement, collision and sound.
+(The FIFO processor limits that fight, so the frame rate there gains only once it is lighter too.)
+
+**The step on the side worker.** Within the window CStateManager::Update opens around its
+entities' Think (as for the actors' particles, test 19), `CEnergyProjectile::Think` hands its
+`UpdateParticleFX` to the side worker (`CProjectileWeapon::PortStepOnSideWorker`), and the rest of
+its Think waits:
+- At the pass's end, all of them in the order their steps began (`CEnergyProjectile::PortFinishAll`,
+  zone "SM: projectiles' Think finished"), or before, when a message reaches the projectile, or a
+  `Set3d0_26` (CScriptSpecialFunction's).
+- A projectile that explodes, is dead or reaches its 45 s this tick runs whole, as before: those
+  are known before the step, which changes none of them. What moves is only the light, the sound,
+  and the deletion of a projectile whose effects have just run out, all within the tick.
+- Every `CProjectileWeapon` method that reads or changes its systems, or what the step reads (the
+  transforms' setters, the movement), waits for a pending step first, on the game thread (the
+  step's own calls are the side worker's). The systems the step finds finished are deleted on the
+  game thread once it is done, their pointers cleared at once as before.
+- The particle code's shared state was made per-thread in test 19 (its generators, random numbers,
+  seeds, depths): each system steps with its own random generator, so the game's own stays as it
+  was. Without the side worker every Think runs whole.
+
+The `[particles]` line adds the projectiles' effects stepped on the side worker a frame and those
+waited for; `[zones] other` has "projectile: particle effects (side worker, core 3)".
+
+What to look for in test 3: the fight's `SM: Think (all entities)` and projectile zones against test
+2's; few and short waits in `[particles]`; the shots' trails and impacts as before (a misplaced or
+missing one would be a step that read what the game thread changed); no crash.
+
