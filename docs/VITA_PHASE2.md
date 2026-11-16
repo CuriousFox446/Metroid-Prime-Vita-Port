@@ -3377,3 +3377,52 @@ The indices stay as they were: a heavy frame's are ~150 KiB.
 What to look for in test 9: no out-of-memory crash in Phendrana. The `[heap]` lines' in-use and taken
 figures, against test 8's 165 MiB mean and 190 peak. Frame rates as in test 8.
 
+### Test 9 result
+
+`~/logs/t046_9.log` (e89a8ad, 1,830 windows: a long run in several areas). It ended cleanly: no out
+of memory, no error, no hung job. The heap was at 169.6 MiB in use on average, 186.5 at most.
+- Phendrana: 20.5 FPS in the open (19.9 in test 8), 18.3 with the Sheegoths (17.3).
+- The user: "I've noticed the third person option hurts the performance because it uses Samus'
+  higher poly model for third person."
+
+**Third person.** The log has each change of the setting (`port: setting third_person: 0 -> 1`),
+three times. `~/tools/span.py` sums the windows between two lines.
+
+| windows | third person | FPS | the game thread's draw | `CStateManager::PreRender` |
+|---|---|---|---|---|
+| before the first | off | 26.6 | 11.6 ms | 0.9 ms |
+| the first | on | 10.1 | 54.8 ms | 37.2 ms |
+| the second | on | 15.3 | 34.6 ms | 28.2 ms |
+
+The model is not what costs:
+- Its skinning on the fourth core goes from 2.2 to 4.6 ms a frame.
+- The FIFO processor's and the render worker's loads stay about where they were.
+
+What costs is the body's pose (`PortThirdPersonBody::PreRender`, under `CPlayer::PreRender`):
+- `PoseBody` samples some ten clips a frame: the idle or the turn, the walks, the ready pose's
+  upper body, the jumps, and the aim grid's clips at their fixed phase.
+- Each `Sample` called `CAnimData::SetAnimation`, which builds a new tree for the clip. A new tree's
+  compressed readers then decode the clip from its start to the phase
+  (`CFBStreamedPairOfTotals::SetTime`).
+- The pose itself is cheap: `CAnimData::PreRender`, through which every sample goes, was 0.4 ms a
+  frame.
+
+## 0.46.0 test 10: the third-person body's clips keep their trees
+
+Each clip's tree is built at its first `Sample` and kept (`PortThirdPersonBody::Tree`).
+`CAnimData::PortSetAnimationTree` installs a kept tree: it is `SetAnimation(..., true)` line for line,
+the kept tree in place of a new one.
+- A kept tree seeks from where it is. The aim clips at their fixed phase decode nothing; the walks
+  only the frames since the last one.
+- A reader that goes back (a loop wrapping) decodes from its start as before.
+- The decoded values come from the same increments in the same order, so the poses are the same.
+- The trees are dropped with the body (`Drop`), and the body's own when it is built again.
+- Zones: `third person: the body's pose`, `third person: a clip sampled`,
+  `third person: a clip's tree built`.
+
+CAnimData.hpp changed, so most of the game is built again.
+
+What to look for in test 10: third person's frame rate against first person in the same place (10.1
+against 26.6 FPS in test 9), the body moving and aiming exactly as before, and the new zones (the
+pose ~30 ms a frame in test 9).
+

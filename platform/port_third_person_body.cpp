@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "port_dread_samus_mod.h"
+#include "port_profile.h"
 #include "port_shell.h"
 #include "port_third_person.h"
 
@@ -293,6 +294,13 @@ struct State {
   // The muzzle as Render last posed it, for the charge effect (TakeMuzzle).
   CTransform4f muzzle = CTransform4f::Identity();
   bool muzzleDrawn = false;
+  // Each clip's animation tree, built at its first Sample and kept (Tree; 0.46.0 test 10).
+  struct KeptTree {
+    CAnimData* data;
+    int index;
+    rstl::ncrc_ptr<CAnimTreeNode> tree;
+  };
+  std::vector<KeptTree> trees;
 };
 State s;
 // The procedural backpedal: the walk-back clip covers 0.88 u/s, so at Samus's ~1.9 u/s backward
@@ -325,6 +333,7 @@ int CharIdx(const CStateManager& mgr) {
 }
 
 void Drop() {
+  s.trees.clear(); // before the bodies whose clips they play
   s.suitModel.reset();
   s.suitSkin.reset();
   s.pinned = Clip();
@@ -621,9 +630,27 @@ CQuaternion Blend(const CQuaternion& a, const CQuaternion& b, float t) {
 // builder (offsets first back to the skeleton's, as a clip without an offset track leaves them).
 // A clip of another set is sampled by that set's tree, its offsets moved onto the body's bones (a
 // suit's bones may be longer or shorter than the set's: each keeps the clip's change to it).
+// The clip's animation tree, built at its first Sample and kept (0.46.0 test 10). Sample took
+// SetAnimation's, a new tree each call: a frame samples some ten clips (the walks, the ready pose,
+// the aim grid's at its fixed phase), and each new tree's compressed readers decoded the clip from
+// its start to the phase, ~30 ms of the game thread's frame in test 9 (CStateManager::PreRender 28 to
+// 37 ms a frame with the body, ~1 without). A kept tree seeks from where it is (the aim clips' fixed
+// phase: nothing to decode) and poses as a new one would (CAnimData::PortSetAnimationTree).
+rstl::ncrc_ptr<CAnimTreeNode> Tree(const Clip& clip) {
+  for (const State::KeptTree& kept : s.trees) {
+    if (kept.data == clip.data && kept.index == clip.index) {
+      return kept.tree;
+    }
+  }
+  PORT_ZONE_TIMED("third person: a clip's tree built");
+  s.trees.push_back({clip.data, clip.index, clip.data->PortBuildAnimationTree(clip.index)});
+  return s.trees.back().tree;
+}
+
 void Sample(const Clip& clip, float phase, Pose& out) {
+  PORT_ZONE_TIMED("third person: a clip sampled");
   CAnimData& data = *clip.data;
-  data.SetAnimation(CAnimPlaybackParms(clip.index, -1, 1.f, true), true);
+  data.PortSetAnimationTree(clip.index, Tree(clip));
   data.SetPhase(phase);
   CHierarchyPoseBuilder& pb = data.PoseBuilder();
   const CCharLayoutInfo& poseLayout = **pb.CharLayoutInfo();
@@ -1393,6 +1420,10 @@ void StandStill() {
 
 void Build(CStateManager& mgr) {
   const CAnimRes res(s.ancs, s.loadedChar, CVector3f(kBodyScale, kBodyScale, kBodyScale), 0, true);
+  // The kept trees are the old body's (and a new body may take the old one's address).
+  s.trees.erase(std::remove_if(s.trees.begin(), s.trees.end(),
+                               [](const State::KeptTree& kept) { return s.body && kept.data == s.body->AnimationData(); }),
+                s.trees.end());
   s.body.reset(new CModelData(res));
   CAnimData* data = s.body->AnimationData();
   s.idle = Find(*data, kIdle);
@@ -1787,6 +1818,7 @@ void NoteShot(const CStateManager& mgr) {
 }
 
 void PreRender(const CStateManager& mgr) {
+  PORT_ZONE_TIMED("third person: the body's pose");
   if (Ready()) {
     CAnimData& data = *s.body->AnimationData();
     if (s.pinned.Valid()) {

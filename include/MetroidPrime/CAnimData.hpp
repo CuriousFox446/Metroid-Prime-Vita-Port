@@ -218,6 +218,11 @@ public:
   // SetAnimation through the ANCS transition, but a transition the ANCS leaves as a snap
   // cross-fades over `blendSeconds` instead (the third-person body's clip changes).
   void PortSetAnimationBlended(const CAnimPlaybackParms& parms, float blendSeconds);
+  // An animation's tree as SetAnimation builds one (one animation, no second), for a caller that
+  // keeps it; and SetAnimation(CAnimPlaybackParms(animId, -1, 1.f, true), true) with such a tree in
+  // place of a new one (the third-person body's clips, sampled many times a frame: 0.46.0 test 10).
+  rstl::ncrc_ptr< CAnimTreeNode > PortBuildAnimationTree(int animId);
+  void PortSetAnimationTree(int animId, const rstl::ncrc_ptr< CAnimTreeNode >& tree);
   // Makes the next PreRender sample the tree again (after a SetPhase with no advance).
   void PortInvalidatePose() {
     x220_31_poseCached = false;

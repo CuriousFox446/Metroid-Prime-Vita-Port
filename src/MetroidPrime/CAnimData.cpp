@@ -631,6 +631,43 @@ void CAnimData::SetAnimation(const CAnimPlaybackParms& parms, bool noTrans) {
 }
 
 #ifdef TARGET_PC
+rstl::ncrc_ptr< CAnimTreeNode > CAnimData::PortBuildAnimationTree(int animId) {
+  const uint animRes = xc_charInfo.GetAnimationIndexList()[animId];
+  return GetAnimationManager()->GetAnimationTree(animRes, CMetaAnimTreeBuildOrders::NoSpecialOrders());
+}
+
+// SetAnimation(parms, true) for parms (animId, -1, 1.f, true), line for line, with `tree` (built by
+// PortBuildAnimationTree for animId) where it builds a new one. A tree sampled again at a phase
+// poses as a new one would: its readers seek by time, a compressed one decoding from its start
+// when it goes back, from where it is when it goes on (CFBStreamedPairOfTotals::SetTime).
+void CAnimData::PortSetAnimationTree(int animId, const rstl::ncrc_ptr< CAnimTreeNode >& tree) {
+  const CAnimPlaybackParms parms(animId, -1, 1.f, true);
+  if (parms.GetAnimationId() == x40c_playbackParms.GetAnimationId() ||
+      (parms.GetSecondAnimationId() == x40c_playbackParms.GetSecondAnimationId() &&
+       parms.GetSecondAnimationId() != -1) ||
+      (parms.GetBlendFactor() == x40c_playbackParms.GetBlendFactor() && parms.GetBlendFactor() != 1.f)) {
+    if (x220_29_animationJustStarted)
+      return;
+  }
+
+  x40c_playbackParms.SetAnimationId(parms.GetAnimationId());
+  x40c_playbackParms.SetSecondAnimationId(parms.GetSecondAnimationId());
+  x40c_playbackParms.SetBlendFactor(parms.GetBlendFactor());
+
+  const int animA = parms.GetAnimationId();
+  const bool animating = parms.GetIsPlayAnimation();
+  x200_speedScale = 1.f;
+  x208_currentAnim = animA;
+  ResetPOILists();
+
+  x1f8_animRoot = tree;
+
+  x220_24_animating = animating;
+  CalcPlaybackAlignmentParms(parms, tree);
+  ResetPOILists();
+  x220_29_animationJustStarted = true;
+}
+
 void CAnimData::PortSetAnimationBlended(const CAnimPlaybackParms& parms, float blendSeconds) {
   const rstl::ncrc_ptr< CAnimTreeNode > oldRoot = x1f8_animRoot;
   SetAnimation(parms, true);
