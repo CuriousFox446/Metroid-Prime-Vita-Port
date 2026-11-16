@@ -38,6 +38,10 @@ constexpr int kPriority = 128;
 // The background lane's (0.42.0 test 23): long jobs nobody waits for soon (a movie frame's decode,
 // 15 to 40 ms), below the mixer, which must not miss the audio device's buffer for one of them.
 constexpr int kBackgroundPriority = 130;
+// The core 0 helper's (0.46.0 test 4): above the render worker there (160, a third of the core in
+// the fights), whose present the FIFO processor's frame feeds; below the DVD worker (112).
+constexpr int kHelperPriority = 158;
+constexpr int kHelperCore = 0;
 // The longest anyone waits for a job. The worker's take a millisecond or less, so past this it has
 // hung: that is logged, and the waiter goes on without it.
 constexpr uint64_t kWaitLimitUs = 500 * 1000;
@@ -53,6 +57,7 @@ struct Job {
 struct Worker {
   const char* name = "side worker";
   int priority = kPriority;
+  int core = thread::kVitaSystemCore;
   bool sideStack = false; // exports its stack for the per-thread statics (the side worker only)
   std::array<Job, kSlots> ring{};
   std::mutex submitMutex; // submitters one at a time
@@ -85,6 +90,7 @@ struct Worker {
 
 std::atomic<Worker*> sWorker{nullptr};
 std::atomic<Worker*> sBackground{nullptr};
+std::atomic<Worker*> sHelper{nullptr};
 
 uint64_t now_us() noexcept { return sceKernelGetProcessTimeWide(); }
 
@@ -125,7 +131,7 @@ void* run(void* arg) {
   }
   thread::set_current({.name = w.name,
                        .priority = thread::Priority::High,
-                       .vitaCore = thread::kVitaSystemCore,
+                       .vitaCore = w.core,
                        .vitaPriority = w.priority});
   uint32_t next = 1;
   for (;;) {
@@ -155,15 +161,16 @@ void* run(void* arg) {
   return nullptr;
 }
 
-// A worker thread on the fourth core; none without it.
-Worker* start_worker(const char* name, int priority, bool sideStack, std::atomic<Worker*>& slot,
+// A worker thread on `core`; none on the fourth core without it open.
+Worker* start_worker(const char* name, int priority, int core, bool sideStack, std::atomic<Worker*>& slot,
                      const char* what) noexcept {
-  if (!thread::vita_core3_available()) {
+  if (core == thread::kVitaSystemCore && !thread::vita_core3_available()) {
     return nullptr;
   }
   auto* w = new Worker();
   w->name = name;
   w->priority = priority;
+  w->core = core;
   w->sideStack = sideStack;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -178,22 +185,29 @@ Worker* start_worker(const char* name, int priority, bool sideStack, std::atomic
   }
   pthread_detach(handle);
   slot.store(w, std::memory_order_release);
-  Log.info("{}: started on core 3 at priority {} ({})", name, priority, what);
+  Log.info("{}: started on core {} at priority {} ({})", name, core, priority, what);
   return w;
 }
 
 // Each started at its first submit.
 Worker* side_worker() noexcept {
   static Worker* const started =
-      start_worker("side worker", kPriority, true, sWorker,
+      start_worker("side worker", kPriority, thread::kVitaSystemCore, true, sWorker,
                    "CPU skinning, which the FIFO processor waits for where a model's draws begin; the actors' "
-                   "particle steps, which the game thread finishes as the frame's draw begins");
+                   "and the projectiles' particle steps, which the game thread finishes later in the tick");
   return started;
 }
 
 Worker* background_worker() noexcept {
-  static Worker* const started = start_worker("side worker (background lane)", kBackgroundPriority, false,
-                                              sBackground, "the movies' video decode");
+  static Worker* const started = start_worker("side worker (background lane)", kBackgroundPriority,
+                                              thread::kVitaSystemCore, false, sBackground, "the movies' video decode");
+  return started;
+}
+
+Worker* helper_worker() noexcept {
+  static Worker* const started =
+      start_worker("core 0 helper", kHelperPriority, kHelperCore, false, sHelper,
+                   "the FIFO processor's skinned calls' vertices, which its frame's end waits for");
   return started;
 }
 
@@ -268,10 +282,10 @@ void log_worker(Worker* w, const char* lane) noexcept {
     return;
   }
   const double seconds = static_cast<double>(span) / 1e6;
-  Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core 3, busy {:.1f} ms a second ({:.0f}%); "
+  Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core {}, busy {:.1f} ms a second ({:.0f}%); "
            "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms), the other threads for {} "
            "({:.1f} ms); {} hung",
-           lane, seconds, jobs, jobs / seconds, static_cast<double>(busyUs) / 1000.0 / seconds,
+           lane, seconds, jobs, jobs / seconds, w->core, static_cast<double>(busyUs) / 1000.0 / seconds,
            100.0 * static_cast<double>(busyUs) / static_cast<double>(span), fifoWaits,
            static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, otherWaits,
            static_cast<double>(otherWaitUs) / 1000.0, hangs);
@@ -290,8 +304,21 @@ bool done_background(uint32_t job) noexcept { return done_in(sBackground.load(st
 
 void wait_background(uint32_t job) noexcept { wait_in(sBackground.load(std::memory_order_acquire), job, false); }
 
+uint32_t submit_helper(Fn fn, void* data) noexcept { return submit_to(helper_worker(), fn, data); }
+
+bool done_helper(uint32_t job) noexcept { return done_in(sHelper.load(std::memory_order_acquire), job); }
+
+void wait_helper(uint32_t job) noexcept {
+  Worker* const w = sHelper.load(std::memory_order_acquire);
+  // Past the limit (logged) it waits again: the job writes into the frame being recorded.
+  while (!done_in(w, job)) {
+    wait_in(w, job, true);
+  }
+}
+
 void log_stats() noexcept {
   log_worker(sWorker.load(std::memory_order_acquire), "");
   log_worker(sBackground.load(std::memory_order_acquire), " background lane");
+  log_worker(sHelper.load(std::memory_order_acquire), " core 0 helper");
 }
 } // namespace aurora::side_jobs

@@ -232,6 +232,8 @@ public:
   const T* at(uint32_t index) const { return m_data.get() + index; }
   T* at(uint32_t index) { return m_data.get() + index; }
   uint32_t size() const { return m_size; }
+  // How many more grow takes without moving what it holds.
+  uint32_t room() const { return m_capacity - m_size; }
 
 private:
   std::unique_ptr<T[]> m_data;
@@ -1862,6 +1864,8 @@ uint32_t recording_serial() noexcept { return g_recording.serial; }
 uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.size()); }
 
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept { return g_recording.vertices.grow(count, at); }
+
+uint32_t frame_vertex_room() noexcept { return g_recording.vertices.room(); }
 
 void trim_frame_vertices(uint32_t at) noexcept { g_recording.vertices.trim(at); }
 

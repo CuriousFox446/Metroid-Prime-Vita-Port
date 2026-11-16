@@ -3065,3 +3065,52 @@ What to look for in test 3: the fight's `SM: Think (all entities)` and projectil
 2's; few and short waits in `[particles]`; the shots' trails and impacts as before (a misplaced or
 missing one would be a step that read what the game thread changed); no crash.
 
+**Test 3** (0f2d821; the user's log of Nov 15, 8.3 minutes, a clean exit, the flying-pirate fight
+again).
+- The fight's projectiles: 33 particle steps a frame on the side worker (3.9 ms there), the waits
+  for them 0.1 ms at most; the game thread's `SM: Think (all entities)` 10.5 ms a frame against
+  12.7 in test 2, the rest of the projectiles' Think 1.0 at the pass's end. No side job hung.
+- Median FPS (test 2, then test 3): the fight 19.1, 20.1 (203 windows; its ticks 8.4 ms against
+  9.0); Magmoor with Triclops 26.9, 30.5; Metarees 28.4, 28.1; Magmoor with Puffers 21.7, 19.8 (its
+  ticks and draws a little heavier, another spot: no projectiles there).
+- The cores, from the `[threads]` reports in the fight: core 0 at 42 to 44% (the render worker 35 to
+  37%, the DVD worker 4, the reaper 3), core 1 at 90 to 92% (the game thread), core 2 at 85 to 89%
+  (the FIFO processor), core 3 at 62 to 65% (the mixer 36 to 39%, the side worker 24 to 25). The
+  user noticed core 0 resting at about half. Tool: `~/tools/cores.py <log> [reports]`.
+- Which thread limits: the fight the FIFO processor (busy 53 ms a frame); Magmoor's and the Metaree
+  rooms the game thread (the FIFO processor idle 13 to 16 ms a frame there). Most particle steps run
+  on the side worker already (the Puffers' gas 9 ms a frame there).
+- What core 0 could take: the FIFO processor's work that each draw does on its own, the skinned
+  models' vertices (10.6 ms a frame in the fight: `skinned` and `skinned copy`) and the immediate
+  draws' decode (5.8).
+
+## 0.46.0 test 4: the core 0 helper
+
+The user chose a helper on core 0 for the FIFO processor, which limits the fight.
+
+**The helper.** A third worker of the side jobs' kind (`vita_side_jobs.cpp`, `submit_helper`), on core
+0 at priority 158: above the render worker there (160, a third of the core in the fight), below the
+DVD worker (112). Its waits do not give up (a job writes into the frame being recorded).
+
+**What it takes: a skinned call's vertices.** `skinned_from_template` still checks and builds the
+template, reserves the frame's vertices and copies the indices; the posing (each distinct
+position and normal read from the arrays the CPU skinned) and the writing (the template's vertices
+copied, each given its pose) go to the helper (`pose_skinned`, `write_skinned`), and the draw is
+recorded at once. The fixed-function path, rare, poses as before.
+
+**What waits for it.**
+- The frame's end (`finish_helper_jobs`, before `end_frame_draws`), so the render worker gets the
+  frame whole. The game thread draws its next frame only after that end (the deferred frame end's
+  begin-wait), so the arrays the helper reads stay as they were, as they did for the FIFO processor.
+- A reservation that would move the frame's vertices (they grow by doubling; each frame starts at
+  the last one's size, so seldom): the helper's writes land first (`frame_vertices_safe`, for every
+  reservation of the frame's vertices).
+- A template rebuilt or released while the helper may read it (`wait_for_template`).
+
+The log adds a `core 0 helper:` line (calls posed there, the waits at frame ends and for room) and a
+`[side jobs] core 0 helper` line (its jobs and busy share); `[threads]` has it as "core 0 helper".
+
+What to look for in test 4: the fight's FIFO processor (`skinned` and `skinned copy`, 10.6 ms a frame in
+test 3) and frame rate; core 0's load in `[threads]`; few and short waits on the `core 0 helper:` line;
+the skinned models (Samus's arm and suits, the pirates, the other enemies) drawn as before.
+

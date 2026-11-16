@@ -484,7 +484,9 @@ static bool deferred_frame_end() noexcept {
 // The rest of end_frame once the FIFO has processed the frame: on the game thread after a drain,
 // or on the FIFO thread under a deferred frame end.
 static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
-  // The Vita path's draws of this frame go to the present this frame end queues (vita_gl.hpp).
+  // What the core 0 helper still writes into this frame (its skinned vertices) first; then the Vita
+  // path's draws of this frame go to the present this frame end queues (vita_gl.hpp).
+  gx::vita::finish_helper_jobs();
   vita_gl::end_frame_draws();
   if (vita_gl::active()) {
     static uint32_t sFrames = 0;

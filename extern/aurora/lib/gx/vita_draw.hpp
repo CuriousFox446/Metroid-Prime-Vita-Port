@@ -34,6 +34,10 @@ void log_stats() noexcept;
 void drop_lone_textures() noexcept;
 // The generated programs' warm-up, a step (vita_tev.hpp: FIFO thread, at a frame end).
 void warm_up_step() noexcept;
+// What the core 0 helper still writes into the frame being recorded (a skinned call's vertices,
+// 0.46.0 test 4), waited for: at the frame's end, before its draws go to the render worker (FIFO
+// thread).
+void finish_helper_jobs() noexcept;
 #else
 inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
@@ -45,5 +49,6 @@ inline void record_copy_clear() noexcept {}
 inline void log_stats() noexcept {}
 inline void drop_lone_textures() noexcept {}
 inline void warm_up_step() noexcept {}
+inline void finish_helper_jobs() noexcept {}
 #endif
 } // namespace aurora::gx::vita

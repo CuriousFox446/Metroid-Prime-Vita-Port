@@ -302,6 +302,10 @@ uint32_t recorded_draw_count() noexcept;
 // frame's vertices cut back to `at`'s first (a draw that could not be decoded after all).
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept;
 void trim_frame_vertices(uint32_t at) noexcept;
+// FIFO thread: how many more vertices frame_vertices hands out before the frame's vertices move
+// (they grow by doubling): a vertex written later by another thread (the core 0 helper) must be
+// written before they do.
+uint32_t frame_vertex_room() noexcept;
 // FIFO thread: a FrameMesh's indices copied to the frame's own; returns where they start.
 uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept;
 // The warm-up's side here (gx/vita_tev.cpp has the rest): the material records on the card, read at
@@ -357,6 +361,7 @@ inline uint32_t recording_serial() noexcept { return 0; }
 inline uint32_t recorded_draw_count() noexcept { return 0; }
 inline Vertex* frame_vertices(uint32_t, uint32_t&) noexcept { return nullptr; }
 inline void trim_frame_vertices(uint32_t) noexcept {}
+inline uint32_t frame_vertex_room() noexcept { return 0; }
 inline uint32_t frame_indices(const uint16_t*, uint32_t) noexcept { return 0; }
 inline const std::vector<uint8_t>& saved_materials() noexcept {
   static const std::vector<uint8_t> none;

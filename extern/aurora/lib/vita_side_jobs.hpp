@@ -27,6 +27,13 @@ void wait(uint32_t job, bool fifo) noexcept;
 uint32_t submit_background(Fn fn, void* data) noexcept;
 bool done_background(uint32_t job) noexcept;
 void wait_background(uint32_t job) noexcept;
+// The core 0 helper (0.46.0 test 4): a thread on the first core, beside the render worker (core 0
+// had half its time free), for the FIFO processor's own work that each draw does apart (a skinned
+// call's vertices), which the FIFO processor waits for by its frame's end. Its own numbers too.
+// Its wait does not give up: a job writes into the frame being recorded.
+uint32_t submit_helper(Fn fn, void* data) noexcept;
+bool done_helper(uint32_t job) noexcept;
+void wait_helper(uint32_t job) noexcept;
 // The log's [side jobs] lines: what each worker ran and who waited for it, since the last lines.
 void log_stats() noexcept;
 } // namespace aurora::side_jobs

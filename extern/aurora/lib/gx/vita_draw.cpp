@@ -4,6 +4,7 @@
 #include "../gfx/texture_convert.hpp"
 #include "../internal.hpp"
 #include "../vita_gl.hpp"
+#include "../vita_side_jobs.hpp"
 #include "gx.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -207,6 +209,8 @@ struct SkinnedTemplate {
   std::vector<vita_gl::Vertex> unique;
   std::vector<u32> uniqueSlots;
   std::shared_ptr<const std::vector<u16>> order;
+  // The core 0 helper's last job reading it (0.46.0 test 4): waited for before it changes or goes.
+  u32 helperJob = 0;
 };
 std::unordered_map<const void*, SkinnedTemplate> sSkinned;
 
@@ -308,6 +312,12 @@ struct Stats {
   // The material key's parts worked out again (material_hash).
   u32 keyPipelines = 0;
   u32 keyTextures = 0;
+  // Skinned calls posed on the core 0 helper (0.46.0 test 4), and the FIFO processor's waits for it:
+  // at its frames' ends (how long in all), and for the frame's vertices to grow.
+  u32 skinnedOnHelper = 0;
+  u32 helperFrameWaits = 0;
+  u64 helperWaitUs = 0;
+  u32 helperRoomWaits = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -2125,6 +2135,134 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
   ++sStats.drawsByUnits[material.unitCount];
 }
 
+// A skinned call's vertices to pose and write (skinned_from_template): its template, the position
+// and normal arrays as they were at the call, and where the vertices go. The FIFO processor fills
+// one itself, or the core 0 helper does (0.46.0 test 4).
+struct SkinnedFill {
+  const SkinnedTemplate* t = nullptr;
+  bool byIndex = false; // the template's unique vertices (a program's draw), else every corner
+  vita_gl::Vertex* out = nullptr;
+  bool copySource = false; // the template's vertices copied to `out` first (the frame's own)
+  u32 count = 0;
+  const u8* base = nullptr;
+  u32 baseIndex = 0;
+  u32 stride = 0;
+  bool le = false;
+  GXCompType posType{};
+  float posScale = 1.f;
+  u32 cnt = 3;
+  bool normals = false;
+  bool allNormalsInside = false;
+  const u8* nrmBase = nullptr;
+  u32 nrmBaseIndex = 0;
+  u32 nrmStride = 0;
+  u32 nrmSize = 0;
+  bool nrmLe = false;
+  GXCompType nrmType{};
+  float nrmScale = 1.f;
+  u32 nrmStep = 0;
+};
+
+// Each distinct pair posed once (into `posed`, grown only: each pair is written here).
+void pose_skinned(const SkinnedFill& f, std::vector<PosedVertex>& posed) noexcept {
+  const SkinnedTemplate& t = *f.t;
+  if (posed.size() < t.distinct.size()) {
+    posed.resize(t.distinct.size());
+  }
+  for (size_t d = 0; d < t.distinct.size(); ++d) {
+    const VertexIndices& v = t.distinct[d];
+    PosedVertex& p = posed[d];
+    read_components(f.base + (u64{v.pos} + f.baseIndex) * f.stride, f.posType, f.posScale, f.le, f.cnt, p.pos);
+    p.hasNormal = false;
+    if (f.normals && v.nrm != UINT32_MAX) {
+      const u64 nrmOffset = (u64{v.nrm} + f.nrmBaseIndex) * f.nrmStride;
+      if (f.allNormalsInside || nrmOffset + 3 * f.nrmStep <= f.nrmSize) {
+        float n[3];
+        read_components(f.nrmBase + nrmOffset, f.nrmType, f.nrmScale, f.nrmLe, 3, n);
+        pack_normal(n, p.normal);
+        p.hasNormal = true;
+      }
+    }
+  }
+}
+
+// Then copied to the vertices that read them.
+void write_skinned(const SkinnedFill& f, const std::vector<PosedVertex>& posed) noexcept {
+  const SkinnedTemplate& t = *f.t;
+  const std::vector<vita_gl::Vertex>& source = f.byIndex ? t.unique : t.vertices;
+  const std::vector<u32>& slots = f.byIndex ? t.uniqueSlots : t.slots;
+  if (f.copySource) {
+    std::memcpy(f.out, source.data(), sizeof(vita_gl::Vertex) * f.count);
+  }
+  for (u32 i = 0; i < f.count; ++i) {
+    const PosedVertex& p = posed[slots[i]];
+    for (u32 c = 0; c < f.cnt; ++c) {
+      f.out[i].pos[c] = p.pos[c];
+    }
+    if (p.hasNormal) {
+      std::memcpy(f.out[i].normal, p.normal, sizeof(p.normal));
+    }
+  }
+}
+
+// The fills the core 0 helper has (a ring: a frame sends a few dozen), each kept till its job has
+// run; the frame's last job (the helper runs them in order: when it has run, all have); whether the
+// helper refused one (no helper: the FIFO processor fills them itself from then on). FIFO thread.
+constexpr size_t kHelperFills = 256;
+std::array<SkinnedFill, kHelperFills> sHelperFills;
+std::array<u32, kHelperFills> sHelperFillJobs{};
+size_t sNextHelperFill = 0;
+u32 sLastHelperJob = 0;
+bool sNoHelper = false;
+// The helper's own posed pairs (sPosed is the FIFO processor's).
+std::vector<PosedVertex> sHelperPosed;
+
+void run_helper_fill(void* data) {
+  const SkinnedFill& f = *static_cast<const SkinnedFill*>(data);
+  pose_skinned(f, sHelperPosed);
+  write_skinned(f, sHelperPosed);
+}
+
+// The fill sent to the helper (false: none, the caller fills it).
+bool fill_on_helper(const SkinnedFill& fill, SkinnedTemplate& t) noexcept {
+  if (sNoHelper) {
+    return false;
+  }
+  const size_t slot = sNextHelperFill;
+  if (sHelperFillJobs[slot] != 0) {
+    side_jobs::wait_helper(sHelperFillJobs[slot]);
+  }
+  sHelperFills[slot] = fill;
+  const u32 job = side_jobs::submit_helper(&run_helper_fill, &sHelperFills[slot]);
+  if (job == 0) {
+    sNoHelper = true;
+    return false;
+  }
+  sHelperFillJobs[slot] = job;
+  sNextHelperFill = (slot + 1) % kHelperFills;
+  t.helperJob = job;
+  sLastHelperJob = job;
+  ++sStats.skinnedOnHelper;
+  return true;
+}
+
+// A template the helper may still be reading, before it changes or goes.
+void wait_for_template(SkinnedTemplate& t) noexcept {
+  if (t.helperJob != 0) {
+    side_jobs::wait_helper(t.helperJob);
+    t.helperJob = 0;
+  }
+}
+
+// The frame's vertices, the helper's writes into them finished first when these would move them.
+vita_gl::Vertex* frame_vertices_safe(u32 count, u32& at) noexcept {
+  if (sLastHelperJob != 0 && count > vita_gl::frame_vertex_room()) {
+    ++sStats.helperRoomWaits;
+    finish_helper_jobs();
+  }
+  return vita_gl::frame_vertices(count, at);
+}
+
 // A skinned template's unique vertices for a program's draw and its corners' order of them
 // (SkinnedTemplate::unique): corners alike in their distinct pair, coordinates and vertex colour
 // share one, the order padded for vitaGL's pool (vita_gl::pad_triangle_indices). No order when
@@ -2187,6 +2325,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   SkinnedTemplate& t = sSkinned[key];
   const bool built = !t.vertices.empty() || t.state.fmtMask != 0;
   if (!built || !t.state.matches_current(texAttrs, true)) {
+    wait_for_template(t); // the core 0 helper may still read it
     ++sStats.skinnedTemplates;
     DecodeState& state = t.state;
     state.fmtMask = 0;
@@ -2263,58 +2402,57 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   const float nrmScale = component_scale(nrmFmt.frac);
   const bool allNormalsInside =
       normals && (u64{t.maxNrm} + nrmArray.baseIndex) * nrmArray.stride + 3 * nrmStep <= nrmArray.size;
-  // Each distinct pair posed once, then copied to the vertices that read it. Grown only (each pair
-  // is written below): resized down and up again, a vector clears what it adds back.
-  if (sPosed.size() < t.distinct.size()) {
-    sPosed.resize(t.distinct.size());
-  }
-  for (size_t d = 0; d < t.distinct.size(); ++d) {
-    const VertexIndices& v = t.distinct[d];
-    PosedVertex& posed = sPosed[d];
-    read_components(base + (u64{v.pos} + array.baseIndex) * array.stride, posFmt.type, posScale, array.le, cnt,
-                    posed.pos);
-    posed.hasNormal = false;
-    if (normals && v.nrm != UINT32_MAX) {
-      const u64 nrmOffset = (u64{v.nrm} + nrmArray.baseIndex) * nrmArray.stride;
-      if (allNormalsInside || nrmOffset + 3 * nrmStep <= nrmArray.size) {
-        float n[3];
-        read_components(nrmBase + nrmOffset, nrmFmt.type, nrmScale, nrmArray.le, 3, n);
-        pack_normal(n, posed.normal);
-        posed.hasNormal = true;
-      }
-    }
-  }
-  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
+  // The arrays as they are now, and where the vertices go (pose_skinned, write_skinned).
+  SkinnedFill fill;
+  fill.t = &t;
+  fill.base = base;
+  fill.baseIndex = array.baseIndex;
+  fill.stride = array.stride;
+  fill.le = array.le;
+  fill.posType = posFmt.type;
+  fill.posScale = posScale;
+  fill.cnt = cnt;
+  fill.normals = normals;
+  fill.allNormalsInside = allNormalsInside;
+  fill.nrmBase = nrmBase;
+  fill.nrmBaseIndex = nrmArray.baseIndex;
+  fill.nrmStride = nrmArray.stride;
+  fill.nrmSize = nrmArray.size;
+  fill.nrmLe = nrmArray.le;
+  fill.nrmType = nrmFmt.type;
+  fill.nrmScale = nrmScale;
+  fill.nrmStep = nrmStep;
   // A program's draw takes the unique vertices, every corner otherwise (the face's shading).
   const bool byIndex = program && t.order != nullptr;
+  fill.byIndex = byIndex;
   const std::vector<vita_gl::Vertex>& source = byIndex ? t.unique : t.vertices;
-  const std::vector<u32>& slots = byIndex ? t.uniqueSlots : t.slots;
   const auto count = static_cast<u32>(source.size());
-  vita_gl::Vertex* posedOut;
+  fill.count = count;
+  sStats.skinnedIndexed += byIndex ? 1 : 0;
+  sStats.skinnedCorners += t.vertices.size();
+  sStats.skinnedVertices += count;
   if (program) {
-    posedOut = vita_gl::frame_vertices(count, frameMesh.vertexAt);
-    std::memcpy(posedOut, source.data(), sizeof(vita_gl::Vertex) * count);
+    fill.out = frame_vertices_safe(count, frameMesh.vertexAt);
+    fill.copySource = true;
     frameMesh.vertexCount = count;
     if (byIndex) {
       frameMesh.indexCount = static_cast<u32>(t.order->size());
       frameMesh.indexAt = vita_gl::frame_indices(t.order->data(), frameMesh.indexCount);
     }
+    // 0.46.0 test 4: posed and written on the core 0 helper while this thread goes on. The frame's
+    // end waits for it (finish_helper_jobs), as does anything that would move the frame's vertices
+    // first (frame_vertices_safe) or change the template (wait_for_template).
+    if (fill_on_helper(fill, t)) {
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinnedCopy);
+      return true;
+    }
   } else {
     out = source;
-    posedOut = out.data();
+    fill.out = out.data();
   }
-  for (u32 i = 0; i < count; ++i) {
-    const PosedVertex& posed = sPosed[slots[i]];
-    for (u32 c = 0; c < cnt; ++c) {
-      posedOut[i].pos[c] = posed.pos[c];
-    }
-    if (posed.hasNormal) {
-      std::memcpy(posedOut[i].normal, posed.normal, sizeof(posed.normal));
-    }
-  }
-  sStats.skinnedIndexed += byIndex ? 1 : 0;
-  sStats.skinnedCorners += t.vertices.size();
-  sStats.skinnedVertices += count;
+  pose_skinned(fill, sPosed);
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
+  write_skinned(fill, sPosed);
   vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinnedCopy);
   return true;
 }
@@ -2391,7 +2529,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     vita_gl::FrameMesh mesh{.kind = vita_gl::MeshKind::Immediate,
                             .primitive = lines ? vita_gl::MeshPrimitive::Lines : vita_gl::MeshPrimitive::Triangles};
     if (count != 0) {
-      vita_gl::Vertex* out = vita_gl::frame_vertices(count, mesh.vertexAt);
+      vita_gl::Vertex* out = frame_vertices_safe(count, mesh.vertexAt);
       const u8* vtx = vertices.data();
       sLastFail = Fail::None;
       if (decode_vertices(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out)) {
@@ -2448,7 +2586,7 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     std::vector<vita_gl::Vertex> lines;
     vita_gl::Vertex* out;
     if (count != 0 && material.program != nullptr) {
-      out = vita_gl::frame_vertices(count, mesh.vertexAt);
+      out = frame_vertices_safe(count, mesh.vertexAt);
       mesh.vertexCount = count;
     } else {
       lines.resize(count);
@@ -2645,7 +2783,7 @@ void record_copy() noexcept {
 void record_masked_clear(const vita_gl::ScreenRect& rect) noexcept {
   constexpr float kCorners[6][2] = {{-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f}, {-1.f, -1.f}, {1.f, 1.f}, {-1.f, 1.f}};
   vita_gl::FrameMesh mesh{.vertexCount = 6, .kind = vita_gl::MeshKind::Other};
-  vita_gl::Vertex* out = vita_gl::frame_vertices(mesh.vertexCount, mesh.vertexAt);
+  vita_gl::Vertex* out = frame_vertices_safe(mesh.vertexCount, mesh.vertexAt);
   // Clip space as it is (identity matrices below): GL's depth -1 to 1 for the clear's 0 to 1.
   const float z = 2.f * static_cast<float>(g_gxState.clearDepth) / 16777215.f - 1.f;
   u8 rgba[4];
@@ -2702,7 +2840,24 @@ void record_copy_clear() noexcept {
 void release(const void* key) noexcept {
   sPosAnswerKnown = false;
   sCache.erase(key);
-  sSkinned.erase(key);
+  if (const auto it = sSkinned.find(key); it != sSkinned.end()) {
+    wait_for_template(it->second); // the core 0 helper may still read it
+    sSkinned.erase(it);
+  }
+}
+
+void finish_helper_jobs() noexcept {
+  if (sLastHelperJob == 0) {
+    return;
+  }
+  if (!side_jobs::done_helper(sLastHelperJob)) {
+    const auto start = std::chrono::steady_clock::now();
+    side_jobs::wait_helper(sLastHelperJob);
+    ++sStats.helperFrameWaits;
+    sStats.helperWaitUs += static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+  }
+  sLastHelperJob = 0;
 }
 
 // A material keeps its textures alive, and one unused lasts till its window ends (log_stats) or its
@@ -2813,6 +2968,10 @@ void log_stats() noexcept {
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
+  // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
+  Log.info("core 0 helper: {} skinned calls posed there; waited for at {} frame ends ({:.1f} ms in all), {} times "
+           "for the frame's vertices to grow",
+           s.skinnedOnHelper, s.helperFrameWaits, static_cast<double>(s.helperWaitUs) / 1000.0, s.helperRoomWaits);
   Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
            "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}; "
            "{} materials worked out in all with a layout a program cannot draw",
