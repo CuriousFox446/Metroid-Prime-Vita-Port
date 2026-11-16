@@ -21,6 +21,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -318,6 +319,10 @@ struct Stats {
   u32 helperFrameWaits = 0;
   u64 helperWaitUs = 0;
   u32 helperRoomWaits = 0;
+  // GXSetDrawSync's tokens the helper published after the calls before them (defer_draw_sync,
+  // 0.46.0 test 5), and the draw-done waits for it.
+  u32 helperTokens = 0;
+  u32 helperDrawDones = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -2263,6 +2268,11 @@ vita_gl::Vertex* frame_vertices_safe(u32 count, u32& at) noexcept {
   return vita_gl::frame_vertices(count, at);
 }
 
+// A GXSetDrawSync token the helper publishes, after the calls handed to it before (defer_draw_sync).
+void publish_draw_sync(void* data) {
+  gx::set_draw_sync_token(static_cast<u16>(reinterpret_cast<uintptr_t>(data)));
+}
+
 // A skinned template's unique vertices for a program's draw and its corners' order of them
 // (SkinnedTemplate::unique): corners alike in their distinct pair, coordinates and vertex colour
 // share one, the order padded for vitaGL's pool (vita_gl::pad_triangle_indices). No order when
@@ -2860,6 +2870,42 @@ void finish_helper_jobs() noexcept {
   sLastHelperJob = 0;
 }
 
+// 0.46.0 test 5. A skinned model's vertices come from the game's ring (CSkinnedModel::
+// AllocateStorage), let go once GXReadDrawSync shows the token set after its draw
+// (TickAllocations); a ring with nothing left in it starts again at its first byte, so the next
+// model is skinned into the same memory at once. The FIFO processor read the positions before it
+// came to the token; since test 4 the helper reads them later, and read the next model's: the
+// doors flickered, and a white shape came and went. The token is now published by the helper,
+// after the calls handed to it before it (it runs its jobs in order), while there are any; the FIFO
+// processor goes on.
+bool defer_draw_sync(u16 token) noexcept {
+  if (sLastHelperJob == 0) {
+    return false;
+  }
+  if (side_jobs::done_helper(sLastHelperJob)) {
+    sLastHelperJob = 0;
+    return false;
+  }
+  const u32 job =
+      side_jobs::submit_helper(&publish_draw_sync, reinterpret_cast<void*>(static_cast<uintptr_t>(token)));
+  if (job == 0) {
+    finish_helper_jobs();
+    return false;
+  }
+  sLastHelperJob = job;
+  ++sStats.helperTokens;
+  return true;
+}
+
+// GXDrawDone's callers free what the draws before it read (CFrameDelayedKiller): the helper's reads
+// are finished first.
+void finish_helper_jobs_for_draw_done() noexcept {
+  if (sLastHelperJob != 0) {
+    ++sStats.helperDrawDones;
+    finish_helper_jobs();
+  }
+}
+
 // A material keeps its textures alive, and one unused lasts till its window ends (log_stats) or its
 // set replaces it: on a screen making a new palette texture each frame (the death screen) the
 // materials kept some 20 s of them, past the GPU's memory and then the heap's. A material holding a
@@ -2970,8 +3016,9 @@ void log_stats() noexcept {
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there; waited for at {} frame ends ({:.1f} ms in all), {} times "
-           "for the frame's vertices to grow",
-           s.skinnedOnHelper, s.helperFrameWaits, static_cast<double>(s.helperWaitUs) / 1000.0, s.helperRoomWaits);
+           "for the frame's vertices to grow, {} at a draw done; {} draw sync tokens published by it",
+           s.skinnedOnHelper, s.helperFrameWaits, static_cast<double>(s.helperWaitUs) / 1000.0, s.helperRoomWaits,
+           s.helperDrawDones, s.helperTokens);
   Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
            "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}; "
            "{} materials worked out in all with a layout a program cannot draw",

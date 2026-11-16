@@ -318,6 +318,8 @@ ProcessResult process(const u8* data, u32 size) noexcept {
         handle_bp(value);
       }
       if (reg_get(value, 8, 24) == GX_BP_REG_DRAWDONE) {
+        // GXDrawDone's callers free what the draws before it read: the core 0 helper's reads too.
+        vita::finish_helper_jobs_for_draw_done();
         return {static_cast<u32>(reader.offset()), true};
       }
       break;
@@ -1487,7 +1489,12 @@ void handle_aurora(ByteReader& reader) noexcept {
     auto label = reader.read_string();
     gfx::insert_debug_marker(std::move(label));
   } else if (subCmd == GX_AURORA_SET_DRAW_SYNC) {
-    aurora::gx::set_draw_sync_token(reader.read<u16>());
+    // The skinned models' ring lets go of what the token covers: the core 0 helper may still read
+    // it, and then publishes the token itself (vita_draw.cpp, defer_draw_sync).
+    const u16 token = reader.read<u16>();
+    if (!vita::defer_draw_sync(token)) {
+      aurora::gx::set_draw_sync_token(token);
+    }
   } else if (subCmd == GX_AURORA_LOAD_ARRAY_BASE_INDEX) {
     const u32 attrIdx = (reader.read<u8>() & 0x0f) + GX_VA_POS;
     const u32 base = reader.read<u32>();

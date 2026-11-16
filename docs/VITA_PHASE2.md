@@ -3114,3 +3114,64 @@ What to look for in test 4: the fight's FIFO processor (`skinned` and `skinned c
 test 3) and frame rate; core 0's load in `[threads]`; few and short waits on the `core 0 helper:` line;
 the skinned models (Samus's arm and suits, the pirates, the other enemies) drawn as before.
 
+### Test 4 result
+
+`~/logs/t046_4.log` (e0e9353, 245 windows). The user: "there's a flickering problem, first thing I
+noticed were the doors. There's also this white shape that appears briefly and disappears" (a photo
+in Magmoor: a large white rectangle across the middle of the screen).
+
+The speed was there:
+
+| | test 3 | test 4 |
+|---|---|---|
+| Magmoor, Puffers | 19.8 FPS, FIFO busy 36.2 ms a frame | 27.4 FPS, FIFO busy 24.9 ms |
+| Metarees | 28.1 FPS | 29.0 FPS |
+| Magmoor, Triclops | 30.5 FPS (81 windows) | 26.8 FPS (16 windows) |
+| the pirate fight | 20.1 FPS, FIFO busy 53.3 ms, idle 5.3 | 17.4 FPS (11 windows), FIFO busy 41.1 ms, idle 21.5 |
+
+- In the fight the FIFO processor's skinned work (`skinned` 7.4 and `skinned copy` 3.2 ms a frame in
+  test 3) was down to 0.3 ms.
+- What limited the fight's 11 windows was the game thread: 9.46 ms a tick against 8.39, a different
+  stretch of the fight.
+- Cores: core 0 at 54% (helper 19%, render worker 29%), core 2 (FIFO) at 59% (85% in test 3).
+- 69,062 skinned calls posed on the helper; the waits at the frames' ends came to some 3 ms a second.
+
+**The flicker: the game's ring of skinned vertices.**
+- An owned skinned model (`CSkinnedModel`, `x38_owned`: the doors, the enemies, Samus's arm) takes the
+  vertices it is skinned into from a ring, `sSkinningBuffer` (`AllocateStorage`).
+- After its draw, `PostDrawFunc` sets a GX draw sync token. Once `GXReadDrawSync` shows that token
+  processed, the next allocation lets that space go (`TickAllocations`).
+- `CCircularBuffer` starts again at its first byte when everything in it has been let go
+  (`CCircularBuffer::Free`). The FIFO processor keeps up with the tokens (`GXSetDrawSync` publishes
+  the FIFO), so the next model is skinned into the same memory at once, on the side worker or the
+  game thread.
+- Until test 4 the FIFO processor read the positions before it came to the token. In test 4 it only
+  handed them to the helper and went on to the token, so the helper could read the next model's
+  positions through the first one's template: a door for a frame in another model's shape, or a
+  stretched one in a white or glowing material.
+
+## 0.46.0 test 5: the draw sync tokens after the helper
+
+**The tokens.** The command processor's `GX_AURORA_SET_DRAW_SYNC` asks `vita::defer_draw_sync`
+first.
+- While the helper has calls not yet done, the token goes to it as a job of its own
+  (`publish_draw_sync`).
+- The helper runs its jobs in order, so the game sees the token only once the helper has read every
+  array handed to it before. The FIFO processor does not wait; the game's ring just lets go a little
+  later (its 32 MiB has room).
+- With nothing pending, the token is published at once, as before.
+
+**The draw done.** `GXDrawDone`'s callers free what the draws before it read
+(`CFrameDelayedKiller::StallAndFlushAllAllocations`, the debug teleport). The BP draw-done register
+now waits for the helper (`finish_helper_jobs_for_draw_done`) before the drain returns. It is rare
+(loads, teleports, the credits).
+
+**Unchanged.** The other guards (the frame's end, the frame's vertices growing, a template rebuilt
+or released) stay. The non-owned workspaces and the swarms' shared ones are skinned again only in
+the next frame's draw, after its begin-wait, which waits for this frame's end.
+
+The `core 0 helper:` line adds the tokens the helper published and the waits at a draw done.
+
+What to look for in test 5: no flicker on the doors or elsewhere, and no white shapes. Frame rates as
+in test 4 (Magmoor's Puffers 27.4 FPS). Tokens on the `core 0 helper:` line, and no new waits.
+

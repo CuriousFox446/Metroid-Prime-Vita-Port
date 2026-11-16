@@ -38,6 +38,11 @@ void warm_up_step() noexcept;
 // 0.46.0 test 4), waited for: at the frame's end, before its draws go to the render worker (FIFO
 // thread).
 void finish_helper_jobs() noexcept;
+// A GXSetDrawSync token, published by the core 0 helper once the calls handed to it before are
+// done, when there are any (true: the caller does not publish it). 0.46.0 test 5. FIFO thread.
+bool defer_draw_sync(u16 token) noexcept;
+// A draw done: what the helper still reads, finished first (FIFO thread).
+void finish_helper_jobs_for_draw_done() noexcept;
 #else
 inline bool draw_resident(const void*, const resident::Entry&, u32) noexcept { return false; }
 inline bool draw_immediate(GXPrimitive, GXVtxFmt, u16, std::span<const u8>) noexcept { return false; }
@@ -50,5 +55,7 @@ inline void log_stats() noexcept {}
 inline void drop_lone_textures() noexcept {}
 inline void warm_up_step() noexcept {}
 inline void finish_helper_jobs() noexcept {}
+inline bool defer_draw_sync(u16) noexcept { return false; }
+inline void finish_helper_jobs_for_draw_done() noexcept {}
 #endif
 } // namespace aurora::gx::vita
