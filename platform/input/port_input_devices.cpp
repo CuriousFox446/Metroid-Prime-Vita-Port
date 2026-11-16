@@ -10,6 +10,7 @@
 #include "port_paths.h"
 #include "port_photo.h"
 #include "port_pointer.h"
+#include "port_profile.h"
 #include "port_radial.h"
 #include "MetroidPrime/CStateManager.hpp"
 #include "MetroidPrime/Player/CPlayer.hpp"
@@ -56,6 +57,10 @@ uint64_t sUserVersion = 0;
 bool sUserLoaded = false;
 std::filesystem::file_time_type sUserTime{};
 std::chrono::steady_clock::time_point sUserChecked{};
+
+// BeginFrame's count, which Poll builds its profile once per value of (0: no frames
+// counted, so every poll builds it).
+uint64_t sFrame = 0;
 
 // Touch overlay controls held now (codes 0..kTouchControlCount-1, and the added
 // buttons' from kTouchCustomBase), set from Android's UI thread.
@@ -270,6 +275,20 @@ void BindController(Profile& p) {
     axisCount = PAD_AXIS_COUNT;
   }
   BindMapping(p, buttons, buttonCount, axes, axisCount, dz == nullptr || dz->emulateTriggers);
+#if defined(__vita__)
+  // The Vita's Remastered and Modern layouts fire on R (the Vita has no triggers) and leave
+  // GameCube R unmapped: its free look is the right stick's under twin-stick, but in morph ball it
+  // is the spider ball. There L, the lock-on with nothing to lock on to, holds it.
+  bool rMapped = false;
+  for (u32 i = 0; i < buttonCount; ++i) {
+    rMapped = rMapped || (buttons[i].padButton == PAD_TRIGGER_R && buttons[i].nativeButton != PAD_NATIVE_BUTTON_INVALID);
+  }
+  if (!rMapped) {
+    const Input l = NativeInput(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    BindIn(p, Action::PadR, l, PortInput::kCtxMorphBall);
+    BindIn(p, Action::RAnalog, l, PortInput::kCtxMorphBall);
+  }
+#endif
 }
 
 void BindKeyboard(Profile& p) {
@@ -400,17 +419,20 @@ void BindPortControls(Profile& p) {
 
   // The port's own keys and the pad's overlay chord. Back + Start is ordered both
   // ways, so either can be held first; the chord also keeps Start from pausing.
-  Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
-  const Input back = NativeInput(SDL_GAMEPAD_BUTTON_BACK);
-  const Input start = NativeInput(SDL_GAMEPAD_BUTTON_START);
-  if (back.Valid() && start.Valid()) {
-    for (int order = 0; order < 2; ++order) {
-      Binding b;
-      b.action = Action::PortMenu;
-      b.inputs[0] = order == 0 ? back : start;
-      b.inputs[1] = order == 0 ? start : back;
-      b.count = 2;
-      p.bindings.push_back(b);
+  // Metroid Prime Demo has no port menu: there Select + Start is Start.
+  if (!PortDebug::Demo()) {
+    Bind(p, Action::PortMenu, Make(Device::Key, SDL_SCANCODE_F1));
+    const Input back = NativeInput(SDL_GAMEPAD_BUTTON_BACK);
+    const Input start = NativeInput(SDL_GAMEPAD_BUTTON_START);
+    if (back.Valid() && start.Valid()) {
+      for (int order = 0; order < 2; ++order) {
+        Binding b;
+        b.action = Action::PortMenu;
+        b.inputs[0] = order == 0 ? back : start;
+        b.inputs[1] = order == 0 ? start : back;
+        b.count = 2;
+        p.bindings.push_back(b);
+      }
     }
   }
   Bind(p, Action::SaveState, Make(Device::Key, SDL_SCANCODE_F5));
@@ -991,6 +1013,8 @@ void BuildBaseProfile(Profile& out) {
 // (and no pad one while a pad is connected), F1 opens it again, so a hand-edited
 // controls.toml or an unplugged pad can't lock anyone out of the settings.
 void KeepPortMenuReachable(Profile& p) {
+  // Metroid Prime Demo has none to reach (BindPortControls).
+  if (PortDebug::Demo()) return;
   bool pad = false;
   for (const Binding& b : p.bindings) {
     if (b.action != Action::PortMenu || b.count == 0) continue;
@@ -1281,26 +1305,70 @@ static void ApplyTwinStickFreeAim(Profile& p, uint16_t contexts) {
   }
 }
 
+void BeginFrame() { ++sFrame; }
+
 SPoll Poll(unsigned mouseHeld, bool focused) {
+  PORT_ZONE_TIMED("input: PortInputDevices::Poll");
   static Profile sProfile;
   static PortInput::Runtime sRuntime;
   static bool sInit = false;
   static double sClockMs = 0.0;
+  static uint64_t sProfileFrame = 0;
 
-  PortControls::ApplySavedPadPreset();
-  Profile next;
-  BuildProfile(next);
-  ApplyMenuButtons(next);
-  PortInput::ApplyBallButtons(next);
-  PortInput::ApplyMapRows(next);
-  PortInput::ApplyTargetRows(next);
+  // The game polls once a tick, several times a frame when ticks catch up; nothing the
+  // profile is built from changes between them, and building it (the default mappings,
+  // the user's bindings, the menu rows) and comparing it cost a Vita about 2.7 ms a
+  // poll. So it is built once a frame (BeginFrame), or every poll without frames.
+  bool build = !sInit || sFrame == 0 || sProfileFrame != sFrame;
+  // The game's contexts: the profile reads the Morph Ball's (ApplyTwinStickFreeAim), the bindings
+  // engine all of them.
   const uint16_t contexts = GameContexts();
-  ApplyTwinStickFreeAim(next, contexts);
-  if (!sInit || next != sProfile) {
-    UpdatePromptBindings(next);
-    sProfile = std::move(next);
-    sRuntime.SetProfile(&sProfile);
-    sInit = true;
+#if defined(__vita__)
+  // Once a frame still cost the Vita 1.2 ms of each (tallon17), and there the profile changes
+  // only when what it is built from does: the user's bindings (their version), port 0's pad and
+  // its type, whether there is a pad at all (KeepPortMenuReachable), whether the player is in the
+  // Morph Ball (twin stick frees R outside it), and the settings, which change in the Port menu
+  // (no touch overlay on the Vita). So a frame builds it when one of those moved, while the menu
+  // is up and for a second after, and once a second besides, for anything else it reads.
+  struct Sources {
+    uint64_t userVersion = 0;
+    s32 padIndex = -1;
+    PADControllerType padType{};
+    bool hasPad = false;
+    bool morphBall = false;
+    bool operator==(const Sources&) const = default;
+  };
+  static Sources sSources;
+  static uint64_t sBuiltFrame = 0;
+  static uint64_t sMenuFrame = 0; // the last frame the Port menu was up
+  constexpr uint64_t kSecond = 30; // frames
+  if (build && sInit && sFrame != 0) {
+    const Sources sources{UserBindingsVersion(), PADGetIndexForPort(kPort), PADGetControllerType(kPort),
+                          SDL_HasGamepad(), (contexts & PortInput::kCtxMorphBall) != 0};
+    if (PortDebug::Visible()) sMenuFrame = sFrame;
+    sProfileFrame = sFrame;
+    build = !(sources == sSources) || sFrame - sMenuFrame <= kSecond || sFrame - sBuiltFrame >= kSecond;
+    sSources = sources;
+  }
+  if (build) sBuiltFrame = sFrame;
+#endif
+  if (build) {
+    PORT_ZONE_TIMED("input: build the controls profile");
+    sProfileFrame = sFrame;
+    PortControls::ApplySavedPadPreset();
+    Profile next;
+    BuildProfile(next);
+    ApplyMenuButtons(next);
+    PortInput::ApplyBallButtons(next);
+    PortInput::ApplyMapRows(next);
+    PortInput::ApplyTargetRows(next);
+    ApplyTwinStickFreeAim(next, contexts);
+    if (!sInit || next != sProfile) {
+      UpdatePromptBindings(next);
+      sProfile = std::move(next);
+      sRuntime.SetProfile(&sProfile);
+      sInit = true;
+    }
   }
 
   // A Toggle-trigger L lets go when its lock ends, as Toggle Lock-On does: a
@@ -1318,8 +1386,12 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
   }
 
   PortInput::RawState raw;
-  FillRawState(raw, mouseHeld, focused);
+  {
+    PORT_ZONE_TIMED("input: read the devices");
+    FillRawState(raw, mouseHeld, focused);
+  }
   sClockMs += static_cast< double >(PortDebug::TickPeriod()) * 1000.0;
+  PORT_ZONE_TIMED("input: bindings engine");
   const PortInput::Output& out =
       sRuntime.Poll(raw, contexts, sClockMs, QuietContexts(sRuntime.ActiveContexts(), contexts));
   SPoll r;
@@ -1337,10 +1409,14 @@ SPoll Poll(unsigned mouseHeld, bool focused) {
     PortRadial::TakePick(PortRadial::kBeam);
     PortRadial::TakePick(PortRadial::kVisor);
   } else {
+    PORT_ZONE_TIMED("input: direct actions");
     RouteDirectActions(out);
   }
 
-  r.status = Synthesize(out);
+  {
+    PORT_ZONE_TIMED("input: the pad status");
+    r.status = Synthesize(out);
+  }
   if (r.status.substickX != 0 || r.status.substickY != 0) {
     r.cStickX = std::clamp(out.Value(Action::CRight) - out.Value(Action::CLeft), -1.f, 1.f);
     r.cStickY = std::clamp(out.Value(Action::CUp) - out.Value(Action::CDown), -1.f, 1.f);
@@ -1373,29 +1449,63 @@ void PollPortActions() {
   static bool sWatch = false;
   if (!sWatch) sWatch = SDL_AddEventWatch(KeyDownWatch, nullptr);
 
-  Profile next;
-  BuildProfile(next);
-  if (!sInit || next != sFull) {
-    sFull = std::move(next);
-    sProfile = sFull;
-    std::erase_if(sProfile.bindings, [](const Binding& b) {
-      return !IsPortAction(b.action) && !PortInput::IsCustom(b.action);
-    });
-    sRuntime.SetProfile(&sProfile);
-    sInit = true;
+  bool build = true;
+#if defined(__vita__)
+  // As Poll's (tallon18): the Vita builds this profile only when what it is built from moved (the
+  // user's bindings, port 0's pad and its type, whether there is a pad), while the Port menu is up
+  // and for a second after, and once a second besides. Built every frame, as it was, it cost what
+  // Poll's did before (1.2 to 2.7 ms on the Vita), on the main thread before the ticks, which the
+  // log's [split] counted as "input" with no zone to name it (0.42.0 test 4: 4.1 ms a frame).
+  struct Sources {
+    uint64_t userVersion = 0;
+    s32 padIndex = -1;
+    PADControllerType padType{};
+    bool hasPad = false;
+    bool operator==(const Sources&) const = default;
+  };
+  static Sources sSources;
+  static uint64_t sBuiltFrame = 0;
+  static uint64_t sMenuFrame = 0; // the last frame the Port menu was up
+  constexpr uint64_t kSecond = 30; // frames
+  if (sInit && sFrame != 0) {
+    const Sources sources{UserBindingsVersion(), PADGetIndexForPort(kPort), PADGetControllerType(kPort),
+                          SDL_HasGamepad()};
+    if (PortDebug::Visible()) sMenuFrame = sFrame;
+    build = !(sources == sSources) || sFrame - sMenuFrame <= kSecond || sFrame - sBuiltFrame >= kSecond;
+    sSources = sources;
+  }
+  if (build) sBuiltFrame = sFrame;
+#endif
+  if (build) {
+    PORT_ZONE_TIMED("input: build the Port actions' profile");
+    Profile next;
+    BuildProfile(next);
+    if (!sInit || next != sFull) {
+      sFull = std::move(next);
+      sProfile = sFull;
+      std::erase_if(sProfile.bindings, [](const Binding& b) {
+        return !IsPortAction(b.action) && !PortInput::IsCustom(b.action);
+      });
+      sRuntime.SetProfile(&sProfile);
+      sInit = true;
+    }
   }
 
   PortInput::RawState raw;
-  ReadRaw(raw);
-  for (size_t w = 0; w < std::size(sKeyDowns); ++w) {
-    uint64_t bits = sKeyDowns[w].exchange(0, std::memory_order_relaxed);
-    while (bits != 0) {
-      const int bit = std::countr_zero(bits);
-      bits &= bits - 1;
-      raw.keys.set(w * 64 + static_cast< size_t >(bit));
+  {
+    PORT_ZONE_TIMED("input: the Port actions' devices");
+    ReadRaw(raw);
+    for (size_t w = 0; w < std::size(sKeyDowns); ++w) {
+      uint64_t bits = sKeyDowns[w].exchange(0, std::memory_order_relaxed);
+      while (bits != 0) {
+        const int bit = std::countr_zero(bits);
+        bits &= bits - 1;
+        raw.keys.set(w * 64 + static_cast< size_t >(bit));
+      }
     }
   }
   const uint16_t contexts = GameContexts();
+  PORT_ZONE_TIMED("input: the Port actions' engine");
   const PortInput::Output& out = sRuntime.Poll(raw, contexts, static_cast< double >(SDL_GetTicksNS()) / 1e6,
                                                QuietContexts(sRuntime.ActiveContexts(), contexts));
   // The F1 Remap page is recording an input: a bound PortMenu would close it.

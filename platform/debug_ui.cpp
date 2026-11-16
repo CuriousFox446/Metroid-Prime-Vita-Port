@@ -430,6 +430,7 @@ void TakePadPortForLastUsed() {
 
 bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
   PortDebug::PhotoTouchEvent(*event);
+  PortDebug::MinimapTapEvent(*event);
   // The port menu, save state and screenshot keys are bindings
   // (PortInputDevices::PollPortActions).
   if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&

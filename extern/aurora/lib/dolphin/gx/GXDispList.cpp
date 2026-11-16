@@ -5,6 +5,8 @@
 #include "dolphin/gx/GXAurora.h"
 #include "dolphin/gx/GXExtra.h"
 
+#include <aurora/gfx.h>
+
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -19,7 +21,25 @@ struct Retained {
   u32 count;
 };
 std::unordered_map<const void*, Retained> sRetained;
+
+// aurora_take_gx_source_counts: by the source the game names, on the game thread.
+struct SourceCounts {
+  u32 begins = 0;
+  u32 beginVertices = 0;
+  u32 lists = 0;
+  u64 listBytes = 0;
+  u32 residentLists = 0;
+};
+SourceCounts sSourceCounts[AURORA_GX_SOURCES];
+u32 sSource = 0;
 } // namespace
+
+namespace aurora::gx::source {
+void count_begin(u16 vertices) noexcept {
+  ++sSourceCounts[sSource].begins;
+  sSourceCounts[sSource].beginVertices += vertices;
+}
+} // namespace aurora::gx::source
 
 extern "C" {
 void GXBeginDisplayList(void* list, u32 size) {
@@ -70,6 +90,7 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
     __GXSendFlushPrim();
   }
+  aurora::gx::draw_tag::flush();
 
   if (!sRetained.empty() && !aurora::gx::fifo::in_display_list()) {
     const auto found = sRetained.find(data);
@@ -79,6 +100,7 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
       GX_WRITE_U64(reinterpret_cast<u64>(data));
       GX_WRITE_U32(nbytes);
       aurora::gx::fifo::publish();
+      ++sSourceCounts[sSource].residentLists;
       return;
     }
   }
@@ -86,6 +108,35 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
   // Write display list contents to the FIFO
   aurora::gx::fifo::write_data(data, nbytes);
   aurora::gx::fifo::publish();
+#ifdef AURORA_VITA_GL
+  // Its bytes may set arrays (a list recorded with GXSetArray or GDSetArray): the processor's
+  // arrays are no longer known to be what was sent last. (A retained list's are draws alone.)
+  aurora::gx::sent_arrays::forget();
+#endif
+  if (!aurora::gx::fifo::in_display_list()) {
+    ++sSourceCounts[sSource].lists;
+    sSourceCounts[sSource].listBytes += nbytes;
+  }
+}
+
+u32 aurora_gx_set_source(u32 source) {
+  const u32 previous = sSource;
+  sSource = source < AURORA_GX_SOURCES ? source : 0;
+  return previous;
+}
+
+void aurora_take_gx_source_counts(AuroraGxSourceCounts out[AURORA_GX_SOURCES]) {
+  for (u32 i = 0; i < AURORA_GX_SOURCES; ++i) {
+    const SourceCounts& counts = sSourceCounts[i];
+    out[i] = AuroraGxSourceCounts{
+        .begins = counts.begins,
+        .beginVertices = counts.beginVertices,
+        .lists = counts.lists,
+        .listKiB = static_cast<u32>(counts.listBytes / 1024),
+        .residentLists = counts.residentLists,
+    };
+    sSourceCounts[i] = {};
+  }
 }
 
 void GXPortRetainResident(const void* data, u32 size) {

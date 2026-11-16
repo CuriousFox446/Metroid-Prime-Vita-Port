@@ -42,10 +42,16 @@ else ()
     set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
   endif()
   set(ABSL_PROPAGATE_CXX_STD ON)
+  set(_absl_patch)
+  if (VITA)
+    set(_absl_patch PATCH_COMMAND ${CMAKE_COMMAND} -DABSL_SOURCE_DIR=<SOURCE_DIR>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/patches/apply-abseil-vita.cmake")
+  endif ()
   FetchContent_Declare(abseil-cpp
     URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
     URL_HASH SHA256=f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3
     DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    ${_absl_patch}
     EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(abseil-cpp)
@@ -258,6 +264,10 @@ if (AURORA_ENABLE_GX)
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
     target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_TEST_ENGINE)
+    if (VITA)
+      # ImGui's default "open in shell" forks and execs, which the Vita cannot.
+      target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+    endif ()
 
     add_library(imgui_backends STATIC
       ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
@@ -266,6 +276,17 @@ if (AURORA_ENABLE_GX)
     )
     target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
     target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
+    if (VITA)
+      # The overlay through vitaGL (lib/vita_gl.hpp): ImGui's OpenGL 2 backend, whose GL/gl.h
+      # is vitaGL's.
+      target_sources(imgui_backends PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+      target_include_directories(imgui_backends PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/vitagl_shim)
+      # After this archive on the link line, or the GL calls only it makes stay unresolved; and
+      # vitaGL's own dependencies after vitaGL (as in cmake/aurora_core.cmake).
+      target_link_libraries(imgui_backends PRIVATE
+        vitaGL vitashark SceShaccCgExt mathneon taihen_stub SceShaccCg_stub SceKernelDmacMgr_stub
+        SceGxm_stub SceDisplay_stub SceAppMgr_stub SceCommonDialog_stub SceIme_stub SceSysmodule_stub)
+    endif ()
     target_link_libraries(imgui PUBLIC imgui_backends)
 
     if (TARGET Freetype::Freetype)
@@ -313,6 +334,14 @@ if (AURORA_ENABLE_GX)
 
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+    if (VITA)
+      # newlib on the Vita: no mmap, no <sys/ioctl.h> (the unix VFS includes it but
+      # only uses it on Linux), no shared-memory WAL. fchown and readlink, which
+      # sqlite always references, are stubbed in the port (platform/vita).
+      target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL SQLITE_MAX_MMAP_SIZE=0
+        SQLITE_OMIT_LOAD_EXTENSION HAVE_USLEEP=1)
+      target_include_directories(sqlite3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/sqlite_shim")
+    endif ()
   endif ()
 
   if (AURORA_CACHE_USE_ZSTD)
@@ -369,8 +398,28 @@ if (AURORA_ENABLE_GX)
   endif ()
 endif ()
 
-if (NOT TARGET Tracy::TracyClient)
+if (NOT TARGET Tracy::TracyClient AND NOT VITA)
   aurora_find_package_global(Tracy CONFIG)
+endif ()
+if (NOT TARGET Tracy::TracyClient AND VITA)
+  # Tracy's client has no Vita port, and with TRACY_ENABLE off its macros expand to
+  # nothing: only the headers are needed (SOURCE_SUBDIR names no CMake project).
+  message(STATUS "aurora: Fetching Tracy headers")
+  FetchContent_Declare(
+          tracy
+          URL https://github.com/wolfpld/tracy/archive/refs/tags/v0.14.1.zip
+          URL_HASH SHA256=908f3a2917fa86a247abfcf85dcf04bad1db6986a4d40f94b70512f3e9e98d5b
+          DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+          SOURCE_SUBDIR headers-only
+          EXCLUDE_FROM_ALL
+  )
+  FetchContent_MakeAvailable(tracy)
+  add_library(TracyClient INTERFACE)
+  # The zone profiler's tracy/Tracy.hpp shim first: it #include_next's Tracy's own and
+  # sends ZoneScoped to platforms/vita/profile.
+  target_include_directories(TracyClient INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../platforms/vita/profile" "${tracy_SOURCE_DIR}/public")
+  add_library(Tracy::TracyClient ALIAS TracyClient)
 endif ()
 if (NOT TARGET Tracy::TracyClient)
   message(STATUS "aurora: Fetching Tracy")

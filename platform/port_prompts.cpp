@@ -8,6 +8,7 @@
 #include "port_embedded.h"
 #include "port_input_devices.h"
 #include "port_pointer.h"
+#include "port_profile.h"
 #include "port_textures.h"
 
 #include <dolphin/gx.h>
@@ -50,30 +51,41 @@ enum : uint32_t {
   PROMPT_CSTICK_LEFT,
   PROMPT_CSTICK_RIGHT,
   PROMPT_DPAD,
+  // The sticks' diagonal frames: the map's Rotate and Move turn through all eight ways.
+  PROMPT_STICK_UP_LEFT,
+  PROMPT_STICK_UP_RIGHT,
+  PROMPT_STICK_DOWN_LEFT,
+  PROMPT_STICK_DOWN_RIGHT,
+  PROMPT_CSTICK_UP_LEFT,
+  PROMPT_CSTICK_UP_RIGHT,
+  PROMPT_CSTICK_DOWN_LEFT,
+  PROMPT_CSTICK_DOWN_RIGHT,
 };
 
 // The game's prompt art by asset id, sorted by id. CTexture binds these by
 // pointer (BindTexture), which holds whatever the content: matching on a texel
 // hash missed on any disc whose art differs by a pixel. Covers GC USA and
 // Trilogy's Metroid1.pak (whose stick dash frames are not on the GC disc).
+// The GC disc's GGuiSys.pak names the sticks' frames: LStickN (at rest), LstickU, LStickD,
+// LStickL, LStickR and the diagonals LStickUL, LStickUR, LStickDL, LStickDR, and CStick the same.
 struct PromptAsset {
   uint32_t id;
   uint32_t prompt;
 };
 constexpr PromptAsset kAssets[] = {
     {0x04361847, PAD_BUTTON_B},       {0x05AF9CAA, PAD_BUTTON_A},       {0x08A2E4B9, PAD_TRIGGER_R},
-    {0x12A12131, PROMPT_CSTICK_DOWN}, {0x13A7E65D, PROMPT_STICK},       {0x1A29C0E6, PROMPT_CSTICK},
-    {0x2176CFF9, PAD_BUTTON_X},       {0x217C015A, PROMPT_STICK},       {0x2A13C23E, PROMPT_CSTICK},
+    {0x12A12131, PROMPT_CSTICK_DOWN}, {0x13A7E65D, PROMPT_STICK_DOWN_RIGHT},       {0x1A29C0E6, PROMPT_CSTICK},
+    {0x2176CFF9, PAD_BUTTON_X},       {0x217C015A, PROMPT_STICK_UP_RIGHT},       {0x2A13C23E, PROMPT_CSTICK},
     {0x2B97F6A0, PROMPT_STICK},       {0x34E79314, PAD_TRIGGER_L},      {0x3A446C61, PROMPT_STICK},
     {0x3DBB2482, PAD_BUTTON_A},       {0x4050F102, PROMPT_STICK_LEFT},  {0x409AA72E, PROMPT_CSTICK_RIGHT},
-    {0x46434ED3, PAD_TRIGGER_L},      {0x4A414F04, PROMPT_STICK},       {0x5400AEEF, PROMPT_CSTICK},
+    {0x46434ED3, PAD_TRIGGER_L},      {0x4A414F04, PROMPT_STICK_DOWN_LEFT},       {0x5400AEEF, PROMPT_CSTICK_UP_LEFT},
     {0x56705CA9, PROMPT_STICK},       {0x5D9F9796, PROMPT_CSTICK_UP},   {0x5F556002, PAD_BUTTON_DOWN},
-    {0x63E1497C, PROMPT_CSTICK},      {0x6CBE6EF2, PAD_TRIGGER_Z},      {0x6D22966B, PAD_BUTTON_START},
+    {0x63E1497C, PROMPT_CSTICK_UP_RIGHT},      {0x6CBE6EF2, PAD_TRIGGER_Z},      {0x6D22966B, PAD_BUTTON_START},
     {0x778CCD6A, PROMPT_STICK_RIGHT}, {0x7946C4C5, PROMPT_CSTICK_LEFT}, {0x833BEE04, PAD_BUTTON_B},
     {0x8ADA8184, PAD_BUTTON_RIGHT},   {0x8B0C22A7, PROMPT_STICK_LEFT},  {0x951546A8, PROMPT_CSTICK_DOWN},
-    {0x9530337E, PAD_TRIGGER_R},      {0x95EB0B4C, PROMPT_STICK_UP},    {0x99F6C3B4, PROMPT_STICK},
-    {0x9C8A7FD1, PROMPT_CSTICK},      {0x9E9624C9, PROMPT_STICK},       {0xA91A7703, PROMPT_CSTICK_UP},
-    {0xA9798329, PROMPT_CSTICK_LEFT}, {0xAB6B9842, PROMPT_CSTICK},      {0xB306E26F, PAD_BUTTON_LEFT},
+    {0x9530337E, PAD_TRIGGER_R},      {0x95EB0B4C, PROMPT_STICK_UP},    {0x99F6C3B4, PROMPT_STICK_UP_LEFT},
+    {0x9C8A7FD1, PROMPT_CSTICK_DOWN_LEFT},      {0x9E9624C9, PROMPT_STICK},       {0xA91A7703, PROMPT_CSTICK_UP},
+    {0xA9798329, PROMPT_CSTICK_LEFT}, {0xAB6B9842, PROMPT_CSTICK_DOWN_RIGHT},      {0xB306E26F, PAD_BUTTON_LEFT},
     {0xBBED079B, PROMPT_STICK},       {0xBCD01ECF, PROMPT_STICK_RIGHT}, {0xC042EC91, PAD_BUTTON_UP},
     {0xC6C483AC, PROMPT_STICK},       {0xCD7B1ACA, PROMPT_CSTICK_RIGHT}, {0xD717196D, PROMPT_STICK},
     {0xD979433D, PAD_TRIGGER_R},      {0xDFEF9E78, PROMPT_STICK},       {0xEA2A1C5C, PAD_BUTTON_Y},
@@ -115,11 +127,19 @@ constexpr PromptAction kActions[] = {
     {PROMPT_STICK_DOWN, "stick down"},
     {PROMPT_STICK_LEFT, "stick left"},
     {PROMPT_STICK_RIGHT, "stick right"},
+    {PROMPT_STICK_UP_LEFT, "stick up-left"},
+    {PROMPT_STICK_UP_RIGHT, "stick up-right"},
+    {PROMPT_STICK_DOWN_LEFT, "stick down-left"},
+    {PROMPT_STICK_DOWN_RIGHT, "stick down-right"},
     {PROMPT_CSTICK, "C-stick"},
     {PROMPT_CSTICK_UP, "C-stick up"},
     {PROMPT_CSTICK_DOWN, "C-stick down"},
     {PROMPT_CSTICK_LEFT, "C-stick left"},
     {PROMPT_CSTICK_RIGHT, "C-stick right"},
+    {PROMPT_CSTICK_UP_LEFT, "C-stick up-left"},
+    {PROMPT_CSTICK_UP_RIGHT, "C-stick up-right"},
+    {PROMPT_CSTICK_DOWN_LEFT, "C-stick down-left"},
+    {PROMPT_CSTICK_DOWN_RIGHT, "C-stick down-right"},
     {PROMPT_DPAD, "D-pad"},
     {PAD_BUTTON_UP, "D-pad up"},
     {PAD_BUTTON_DOWN, "D-pad down"},
@@ -620,6 +640,42 @@ std::string IconStemForStick(const PADAxis (&axes)[4], int dir, const char* devi
   return PadStemForAxis(axes[dir >= 0 ? dir : 0], device, dir < 0);
 }
 
+// Whether the bindings folder has `stem`'s icon: looked for once per stem (a file system query
+// each, on the Vita's game thread).
+bool HasIcon(const std::string& stem) {
+  static std::unordered_map<std::string, bool> sHas;
+  if (const auto found = sHas.find(stem); found != sHas.end()) {
+    return found->second;
+  }
+  const bool has = !FindIconFile(stem + ".dds").empty();
+  sHas.emplace(stem, has);
+  return has;
+}
+
+// A stick's diagonal frame (vertical, horizontal: kStickAxes' indices): the icon for both ways at
+// once ("<device>_stick_l_up_left") where they go to the one stick and the set has it; else the
+// whole stick, which is what the sets without diagonal art (Kenney's) show for them.
+std::string IconStemForStickDiagonal(const PADAxis (&axes)[4], int vertical, int horizontal, const char* device) {
+  const std::string whole = IconStemForStick(axes, -1, device);
+  if (std::strcmp(device, "gamecube") == 0 || std::strcmp(device, "keyboard") == 0) {
+    return whole;
+  }
+  const std::string v = PadStemForAxis(axes[vertical], device, false);
+  const std::string h = PadStemForAxis(axes[horizontal], device, false);
+  const size_t vAt = v.rfind('_');
+  const size_t hAt = h.rfind('_');
+  if (vAt == std::string::npos || hAt == std::string::npos || v.compare(0, vAt, h, 0, hAt) != 0) {
+    return whole;
+  }
+  const std::string vWay = v.substr(vAt + 1);
+  const std::string hWay = h.substr(hAt + 1);
+  if ((vWay != "up" && vWay != "down") || (hWay != "left" && hWay != "right")) {
+    return whole;
+  }
+  const std::string stem = v.substr(0, vAt) + "_" + vWay + "_" + hWay;
+  return HasIcon(stem) ? stem : whole;
+}
+
 std::string IconStemForDpad(const char* device) {
   if (std::strcmp(device, "gamecube") == 0) {
     return {};
@@ -654,6 +710,15 @@ std::string TouchTwinStemForPrompt(uint32_t prompt) {
   case PROMPT_CSTICK_LEFT: return "xbox_dpad_left";
   case PROMPT_CSTICK_RIGHT: return "xbox_dpad_right";
   case PROMPT_DPAD: return "xbox_dpad";
+  // The diagonals as the whole stick or D-pad, as they were before they had prompts of their own.
+  case PROMPT_STICK_UP_LEFT:
+  case PROMPT_STICK_UP_RIGHT:
+  case PROMPT_STICK_DOWN_LEFT:
+  case PROMPT_STICK_DOWN_RIGHT: return "xbox_stick_l";
+  case PROMPT_CSTICK_UP_LEFT:
+  case PROMPT_CSTICK_UP_RIGHT:
+  case PROMPT_CSTICK_DOWN_LEFT:
+  case PROMPT_CSTICK_DOWN_RIGHT: return "xbox_dpad";
   case PAD_BUTTON_UP: return "xbox_dpad_up";
   case PAD_BUTTON_DOWN: return "xbox_dpad_down";
   case PAD_BUTTON_LEFT: return "xbox_dpad_left";
@@ -687,6 +752,14 @@ std::string IconStemForPrompt(uint32_t prompt, const char* device) {
   case PROMPT_CSTICK_LEFT: return IconStemForStick(kCStickAxes, 2, device);
   case PROMPT_CSTICK_RIGHT: return IconStemForStick(kCStickAxes, 3, device);
   case PROMPT_DPAD: return IconStemForDpad(device);
+  case PROMPT_STICK_UP_LEFT: return IconStemForStickDiagonal(kStickAxes, 0, 2, device);
+  case PROMPT_STICK_UP_RIGHT: return IconStemForStickDiagonal(kStickAxes, 0, 3, device);
+  case PROMPT_STICK_DOWN_LEFT: return IconStemForStickDiagonal(kStickAxes, 1, 2, device);
+  case PROMPT_STICK_DOWN_RIGHT: return IconStemForStickDiagonal(kStickAxes, 1, 3, device);
+  case PROMPT_CSTICK_UP_LEFT: return IconStemForStickDiagonal(kCStickAxes, 0, 2, device);
+  case PROMPT_CSTICK_UP_RIGHT: return IconStemForStickDiagonal(kCStickAxes, 0, 3, device);
+  case PROMPT_CSTICK_DOWN_LEFT: return IconStemForStickDiagonal(kCStickAxes, 1, 2, device);
+  case PROMPT_CSTICK_DOWN_RIGHT: return IconStemForStickDiagonal(kCStickAxes, 1, 3, device);
   default: return IconStemForButton(static_cast<PADButton>(prompt), device);
   }
 }
@@ -813,6 +886,35 @@ void ApplyBound(const void* owner, BoundPrompt& bound, const std::string& stem) 
   bound.registered = bound.handle.id != 0;
 }
 
+// For the log, once per prompt texture and icon: the icon it took, or why it kept the game's art.
+void LogBindOutcome(uint32_t id, uint32_t prompt, uint32_t width, uint32_t height, const std::string& stem,
+                    bool registered) {
+  static std::set<std::string> sLogged;
+  char key[96];
+  std::snprintf(key, sizeof(key), "%08X %s", id, stem.c_str());
+  if (!sLogged.insert(key).second) {
+    return;
+  }
+  const char* label = "?";
+  for (const PromptAction& action : kActions) {
+    if (action.prompt == prompt) {
+      label = action.label;
+    }
+  }
+  std::string outcome;
+  if (stem.empty()) {
+    outcome = "the game's art (no icon for what it is bound to)";
+  } else if (const std::string path = FindIconForSize(stem, width, height); path.empty()) {
+    outcome = "the game's art (no " + stem + " icon)";
+  } else if (!registered) {
+    outcome = "the game's art (" + std::filesystem::path(path).filename().string() + " does not fit it)";
+  } else {
+    outcome = std::filesystem::path(path).filename().string();
+  }
+  PortLog::Write("metroid_prime_port: prompt texture %08X (%s, %ux%u): %s\n", id, label, width, height,
+                 outcome.c_str());
+}
+
 } // namespace
 
 namespace PortPrompts {
@@ -894,12 +996,17 @@ void Poll() {
   sLastDevice = device;
   sLastMap = map;
   sLastResolveNs = nowNs != 0 ? nowNs : 1;
+  // On the Vita's game thread four times a second: the profile shows what it costs there.
+  PORT_ZONE_TIMED("prompts: resolve the bindings");
+  static bool sTableLogged = false;
+  bool tableChanged = !sTableLogged;
   for (size_t a = 0; a < std::size(kActions); ++a) {
     const PromptAction& action = kActions[a];
     const std::string stem = IconStemForPrompt(action.prompt, device);
     if (stem == sActionStems[a]) {
       continue;
     }
+    tableChanged = true;
     sActionStems[a] = stem;
     size_t applied = 0;
     for (auto& [owner, bound] : sBound) {
@@ -912,6 +1019,19 @@ void Poll() {
       PortLog::Write("metroid_prime_port: prompt %s %s\n", action.label,
                      stem.empty() ? "(the game's own art)" : stem.c_str());
     }
+  }
+  if (tableChanged) {
+    // Each prompt's icon, at the start and whenever one changes ("-": the game's own art).
+    sTableLogged = true;
+    std::string table;
+    for (size_t a = 0; a < std::size(kActions); ++a) {
+      table += a != 0 ? ", " : "";
+      table += kActions[a].label;
+      table += ' ';
+      table += sActionStems[a].empty() ? "-" : sActionStems[a];
+    }
+    PortLog::Write("metroid_prime_port: prompt icons for %s%s: %s\n", device, map ? " on the map" : "",
+                   table.c_str());
   }
 }
 bool KeyboardActive() { return sActiveInput.load(std::memory_order_relaxed) == ActiveInput::Keyboard; }
@@ -929,7 +1049,9 @@ bool BindTexture(const void* owner, uint32_t id, uint32_t width, uint32_t height
     return false;
   }
   BoundPrompt& bound = sBound[owner] = BoundPrompt{.prompt = asset->prompt, .width = width, .height = height};
-  ApplyBound(owner, bound, ActionStem(asset->prompt));
+  const std::string& stem = ActionStem(asset->prompt);
+  ApplyBound(owner, bound, stem);
+  LogBindOutcome(id, asset->prompt, width, height, stem, bound.registered);
   return true;
 }
 

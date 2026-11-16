@@ -47,6 +47,7 @@ void DrawGameSection() {
     RequestReset();
   }
   ImGui::SameLine();
+#ifndef __vita__ // the Vita's screenshots are its own (PS button + Start)
   const std::string shotKeys = PortInputRemap::BindingsText(PortInput::Action::Screenshot, " / ");
   const std::string shotLabel =
       (shotKeys.empty() ? std::string("Screenshot") : port::Translate("Screenshot") + (" (" + shotKeys + ")")) +
@@ -55,6 +56,7 @@ void DrawGameSection() {
     PortPhoto::RequestScreenshot();
   }
   ImGui::SameLine();
+#endif
   const std::string photoKeys = PortInputRemap::BindingsText(PortInput::Action::PhotoMode, " / ");
   const std::string photoLabel =
       (photoKeys.empty() ? std::string("Photo mode") : port::Translate("Photo mode") + (" (" + photoKeys + ")")) +
@@ -195,7 +197,9 @@ void DrawGameAudio() {
   }
   ImGui::EndDisabled();
   ImGui::SetItemTooltip("These audio options are saved globally and persist across restarts.");
+#ifndef __vita__ // its import picks a disc image with a file browser, which the Vita does not have
   DrawFlaahgraTheme();
+#endif
 }
 
 void DrawOriginalSection() {
@@ -228,10 +232,12 @@ void DrawControlsTab() {
     DrawControlsOptions();
     ImGui::EndTabItem();
   }
+#ifndef __vita__ // no mouse there; its crosshair options are Controller settings' (DrawAimCrosshair)
   if (SubTab("Controls", "Mouse settings")) {
     DrawControlsKeyboardMouse();
     ImGui::EndTabItem();
   }
+#endif
   if (SubTab("Controls", "Controller settings")) {
     DrawControlsController();
     ImGui::EndTabItem();
@@ -263,10 +269,12 @@ void DrawVideoTab() {
     DrawPerformanceTab();
     ImGui::EndTabItem();
   }
+#ifndef __vita__ // GPU drivers, renderers and their self-test: the PC's and Android's
   if (SubTab("Video", "Compatibility")) {
     DrawVideoCompatibility();
     ImGui::EndTabItem();
   }
+#endif
   ImGui::EndTabBar();
 }
 
@@ -278,14 +286,23 @@ void DrawModsTab() {
 void DrawSystemTab() {
   DrawOverlaySection();
   DrawSettingsSection();
+  // Not on the Vita: the memory card's imports and exports and a new disc image are picked with a
+  // file browser it does not have, the update check opens a web page, and the disc check was asked
+  // to go with them.
+#ifndef __vita__
   DrawMemoryCard();
+#endif
 #if defined(__ANDROID__)
   PortDataFolder::DrawPanel();
 #endif
   DrawLogSection();
+#ifndef __vita__
   DrawDiscCheckSection();
+#endif
   DrawDiscordSection();
+#ifndef __vita__
   DrawUpdateSection();
+#endif
   ImGui::SeparatorText("About");
   ImGui::TextDisabled("Version %s, build %s", MP_BUILD_VERSION, MP_BUILD_REVISION);
 }

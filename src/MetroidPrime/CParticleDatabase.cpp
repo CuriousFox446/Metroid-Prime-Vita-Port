@@ -8,10 +8,45 @@
 #include "Kyoto/Particles/CParticleSwoosh.hpp"
 #include "MetroidPrime/CParticleGenInfoGeneric.hpp"
 
+#ifdef TARGET_PC
+#include "port_profile.h"
+#include <dolphin/gx/GXExtra.h>
+#include <chrono>
+
+// Every method but the description caches finishes a pending update first (see Update).
+#define PORT_DB_FINISH() PortFinishConst()
+
+namespace {
+// The window CStateManager::Update opens around its entities' Think (PortSetAsyncWindow).
+bool sPortAsyncWindow = false;
+// Set when the side worker refused a job (no fourth core): every update runs whole, as before.
+bool sPortNoWorker = false;
+// The updates with their third part still to run, in the order they began.
+CParticleDatabase* sPortPendingHead = nullptr;
+CParticleDatabase* sPortPendingTail = nullptr;
+uint sPortStatAsync = 0;
+uint sPortStatWaited = 0;
+uint sPortStatWaitUs = 0;
+} // namespace
+#else
+#define PORT_DB_FINISH() (void)0
+#endif
+
 CParticleDatabase::CParticleDatabase()
 : xb4_24_updatesEnabled(true), xb4_25_anySystemsDrawnWithModel(false) {}
 
-CParticleDatabase::~CParticleDatabase() {}
+CParticleDatabase::~CParticleDatabase() {
+#ifdef TARGET_PC
+  // A step still running reads these systems: wait for it. What its update had left to do (lights
+  // fed, finished systems taken out) goes with the systems.
+  if (xPortJob != 0) {
+    GXPortSideJobWait(xPortJob);
+  }
+  if (xPortPending) {
+    PortUnlinkPending();
+  }
+#endif
+}
 
 void CParticleDatabase::CacheParticleDesc(const CCharacterInfo::CParticleResData& data) {
   for (rstl::vector< CAssetId >::const_iterator it = data.x0_part.begin(), end = data.x0_part.end();
@@ -135,6 +170,7 @@ void CParticleDatabase::AddParticleEffect(const rstl::string& name, int flags,
                                           const CParticleData& data, const CVector3f& scale,
                                           CStateManager& mgr, TAreaId areaId, bool oneShot,
                                           int particleLightIdx) {
+  PORT_DB_FINISH();
   const SObjectTag tag = data.GetParticleAssetInfo();
   const int duration = data.GetDuration();
   const rstl::string& locator = data.GetLocatorName();
@@ -199,6 +235,7 @@ void CParticleDatabase::AddAuxiliaryParticleEffect(const rstl::string& name, int
                                                    const CAuxiliaryParticleData& data,
                                                    const CVector3f& scale, CStateManager& mgr,
                                                    TAreaId areaId, int particleLightIdx) {
+  PORT_DB_FINISH();
   const SObjectTag tag = data.GetParticleAssetInfo();
   const int duration = data.GetDuration();
   const float scaleFactor = data.GetScale();
@@ -240,6 +277,7 @@ void CParticleDatabase::AddAuxiliaryParticleEffect(const rstl::string& name, int
 }
 
 CParticleGenInfo* CParticleDatabase::GetParticleEffect(const rstl::string& name) {
+  PORT_DB_FINISH();
   {
     AUTO(it, x3c_rendererDrawLoop.find(name));
     if (it != x3c_rendererDrawLoop.end()) {
@@ -281,6 +319,7 @@ CParticleGenInfo* CParticleDatabase::GetParticleEffect(const rstl::string& name)
 
 void CParticleDatabase::SetParticleEffectState(const rstl::string& name, bool active,
                                                CStateManager& mgr) {
+  PORT_DB_FINISH();
   CParticleGenInfo* effect = GetParticleEffect(name);
   if (effect != nullptr) {
     effect->SetParticleEmission(active, mgr);
@@ -293,6 +332,7 @@ void CParticleDatabase::SetParticleEffectState(const rstl::string& name, bool ac
 }
 
 void CParticleDatabase::SetExternalVarValue(const rstl::string& name, int index, float value) {
+  PORT_DB_FINISH();
   CParticleGenInfo* effect = GetParticleEffect(name);
   if (effect != nullptr) {
     CElementGen* system = static_cast< CElementGen* >(
@@ -307,6 +347,37 @@ void CParticleDatabase::Update(float dt, const CPoseAsTransforms& pose,
   if (!xb4_24_updatesEnabled) {
     return;
   }
+#ifdef TARGET_PC
+  // A previous update's third part first (one update a tick is the rule, but not every actor's).
+  PortFinish();
+  if (sPortAsyncWindow && !sPortNoWorker) {
+    // The first part, on this thread, in the maps' order (UpdateParticleGenDB's).
+    bool any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, x3c_rendererDrawLoop);
+    any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, x50_firstDrawLoop) || any;
+    any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, x64_lastDrawLoop) || any;
+    any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, x78_rendererDraw) || any;
+    any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, x8c_firstDraw) || any;
+    any = PortPrepareParticleGenDB(pose, layout, xf, scale, mgr, xa0_lastDraw) || any;
+    xPortDt = dt;
+    xPortMgr = &mgr;
+    xPortPending = true;
+    PortLinkPending();
+    if (any) {
+      // The second, on the side worker; without one, here (and every update whole from now on).
+      xPortJob = GXPortSideJobSubmit(&CParticleDatabase::PortStepJob, this);
+      if (xPortJob != 0) {
+        ++sPortStatAsync;
+      } else {
+        sPortNoWorker = true;
+        PortStepAll();
+      }
+    }
+    if (xPortJob == 0) {
+      PortFinish();
+    }
+    return;
+  }
+#endif
   UpdateParticleGenDB(dt, pose, layout, xf, scale, mgr, x3c_rendererDrawLoop, true);
   UpdateParticleGenDB(dt, pose, layout, xf, scale, mgr, x50_firstDrawLoop, true);
   UpdateParticleGenDB(dt, pose, layout, xf, scale, mgr, x64_lastDrawLoop, true);
@@ -317,6 +388,262 @@ void CParticleDatabase::Update(float dt, const CPoseAsTransforms& pose,
                                     x8c_firstDraw.size() || xa0_lastDraw.size();
 }
 
+#ifdef TARGET_PC
+// UpdateParticleGenDB's loop body before the system's Update: its transforms from the pose and its
+// lifetime. False when the update passes the system over (an active one whose locator the pose has
+// no data for), which then neither steps nor ages.
+bool CParticleDatabase::PortPrepareParticleGen(CParticleGenInfo& info, const CPoseAsTransforms& pose,
+                                               const CCharLayoutInfo& layout, const CTransform4f& xf,
+                                               const CVector3f& scale, CStateManager& mgr) {
+  if (info.GetIsActive()) {
+    switch (info.GetType()) {
+    case kPGT_Normal: {
+      const CParticleData::EParentedMode mode = info.GetParentedMode();
+      const CSegId seg = layout.GetSegIdFromString(info.GetLocatorName());
+      if (seg == CSegId::Invalid()) {
+        return false;
+      }
+      if (!pose.ContainsDataFor(seg)) {
+        return false;
+      }
+      const CVector3f offset = pose.GetOffset(seg);
+      switch (mode) {
+      case CParticleData::kPM_Initial:
+        if (info.GetIsGrabInitialData()) {
+          const uint initialFlags = info.GetFlags();
+          CTransform4f segXf((initialFlags & 0x10) ? CMatrix3f::Identity()
+                                                   : pose.GetTransformMinusOffset(seg),
+                             CVector3f(offset.GetX() * scale.GetX(), offset.GetY() * scale.GetY(),
+                                       offset.GetZ() * scale.GetZ()));
+          CTransform4f composed(xf * segXf);
+          info.SetCurTransform(composed.GetRotation());
+          info.SetCurOffset(composed.GetTranslation());
+          info.ResetTime();
+          info.SetIsGrabInitialData(false);
+        }
+        info.SetOrientation(info.GetCurTransform(), mgr);
+        info.SetTranslation(info.GetCurOffset(), mgr);
+        if (info.GetFlags() & 0x2000) {
+          const CVector3f& particleScale = info.GetScale();
+          info.SetGlobalScale(CVector3f(particleScale.GetX() * scale.GetX(),
+                                        particleScale.GetY() * scale.GetY(),
+                                        particleScale.GetZ() * scale.GetZ()));
+        } else {
+          info.SetGlobalScale(info.GetScale());
+        }
+        break;
+      case CParticleData::kPM_ContinuousEmitter:
+      case CParticleData::kPM_ContinuousSystem: {
+        if (info.GetIsGrabInitialData()) {
+          info.ResetTime();
+          info.SetIsGrabInitialData(false);
+        }
+        CTransform4f segXf(pose.GetTransformMinusOffset(seg),
+                           CVector3f(offset.GetX() * scale.GetX(), offset.GetY() * scale.GetY(),
+                                     offset.GetZ() * scale.GetZ()));
+        CTransform4f composed(xf * segXf);
+        if (mode == CParticleData::kPM_ContinuousEmitter) {
+          info.SetTranslation(composed.GetTranslation(), mgr);
+          if (info.GetFlags() & 0x10) {
+            info.SetOrientation(xf.GetRotation(), mgr);
+          } else {
+            info.SetOrientation(composed.GetRotation(), mgr);
+          }
+        } else {
+          info.SetGlobalTranslation(composed.GetTranslation(), mgr);
+          if (info.GetFlags() & 0x10) {
+            info.SetGlobalOrientation(xf.GetRotation(), mgr);
+          } else {
+            info.SetGlobalOrientation(composed.GetRotation(), mgr);
+          }
+        }
+        if (info.GetFlags() & 0x2000) {
+          const CVector3f& particleScale = info.GetScale();
+          info.SetGlobalScale(CVector3f(particleScale.GetX() * scale.GetX(),
+                                        particleScale.GetY() * scale.GetY(),
+                                        particleScale.GetZ() * scale.GetZ()));
+        } else {
+          info.SetGlobalScale(info.GetScale());
+        }
+        break;
+      }
+      }
+      break;
+    }
+    case kPGT_Auxiliary:
+      break;
+    }
+    const float duration =
+        info.GetInactiveStartTime() == 0.f ? 10000000.f : info.GetInactiveStartTime();
+    if (info.GetCurrentTime() > duration) {
+      info.SetIsActive(false);
+      info.SetParticleEmission(false, mgr);
+      info.MarkFinishTime();
+      if (info.GetFlags() & 1) {
+        info.DestroyParticles();
+      }
+    }
+  }
+  return true;
+}
+
+// UpdateParticleGenDB's loop body after the system's Update: true when the system is done (it
+// comes out of the map), else its time moves on.
+bool CParticleDatabase::PortFinishParticleGen(CParticleGenInfo& info, float dt, CStateManager& mgr,
+                                              bool deleteIfDone) {
+  if (!info.GetIsActive()) {
+    if (!info.HasActiveParticles() && info.GetCurrentTime() - info.GetFinishTime() > 5.f &&
+        deleteIfDone) {
+      info.DeleteLight(mgr);
+      return true;
+    }
+  } else if (info.IsSystemDeletable()) {
+    info.DeleteLight(mgr);
+    return true;
+  }
+  info.OffsetTime(dt);
+  return false;
+}
+
+void CParticleDatabase::UpdateParticleGenDB(float dt, const CPoseAsTransforms& pose,
+                                            const CCharLayoutInfo& layout, const CTransform4f& xf,
+                                            const CVector3f& scale, CStateManager& mgr,
+                                            DrawMap& map, bool deleteIfDone) {
+  AUTO(it, map.begin());
+  while (it != map.end()) {
+    CParticleGenInfo& info = *it->second;
+    if (!PortPrepareParticleGen(info, pose, layout, xf, scale, mgr)) {
+      ++it;
+      continue;
+    }
+    info.Update(dt, mgr);
+    if (PortFinishParticleGen(info, dt, mgr, deleteIfDone)) {
+      it = map.erase(it);
+      continue;
+    }
+    ++it;
+  }
+}
+
+bool CParticleDatabase::PortPrepareParticleGenDB(const CPoseAsTransforms& pose,
+                                                 const CCharLayoutInfo& layout, const CTransform4f& xf,
+                                                 const CVector3f& scale, CStateManager& mgr, DrawMap& map) {
+  bool any = false;
+  for (AUTO(it, map.begin()); it != map.end(); ++it) {
+    CParticleGenInfo& info = *it->second;
+    info.xPortStepPending = PortPrepareParticleGen(info, pose, layout, xf, scale, mgr);
+    any = any || info.xPortStepPending;
+  }
+  return any;
+}
+
+// The side worker's part: nothing but the systems' own steps (CParticleGenInfo::PortUpdateSystem).
+void CParticleDatabase::PortStepParticleGenDB(float dt, DrawMap& map) {
+  for (AUTO(it, map.begin()); it != map.end(); ++it) {
+    CParticleGenInfo& info = *it->second;
+    if (info.xPortStepPending) {
+      info.PortUpdateSystem(dt);
+    }
+  }
+}
+
+void CParticleDatabase::PortFinishParticleGenDB(float dt, CStateManager& mgr, DrawMap& map,
+                                                bool deleteIfDone) {
+  AUTO(it, map.begin());
+  while (it != map.end()) {
+    CParticleGenInfo& info = *it->second;
+    if (!info.xPortStepPending) {
+      ++it;
+      continue;
+    }
+    info.xPortStepPending = false;
+    info.PortUpdateRest(dt, mgr);
+    if (PortFinishParticleGen(info, dt, mgr, deleteIfDone)) {
+      it = map.erase(it);
+      continue;
+    }
+    ++it;
+  }
+}
+
+void CParticleDatabase::PortStepJob(void* database) {
+  PORT_ZONE_TIMED("CParticleDatabase: systems stepped (side worker, core 3)");
+  static_cast< CParticleDatabase* >(database)->PortStepAll();
+}
+
+void CParticleDatabase::PortStepAll() {
+  PortStepParticleGenDB(xPortDt, x3c_rendererDrawLoop);
+  PortStepParticleGenDB(xPortDt, x50_firstDrawLoop);
+  PortStepParticleGenDB(xPortDt, x64_lastDrawLoop);
+  PortStepParticleGenDB(xPortDt, x78_rendererDraw);
+  PortStepParticleGenDB(xPortDt, x8c_firstDraw);
+  PortStepParticleGenDB(xPortDt, xa0_lastDraw);
+}
+
+void CParticleDatabase::PortFinish() {
+  if (!xPortPending) {
+    return;
+  }
+  xPortPending = false;
+  PortUnlinkPending();
+  if (xPortJob != 0) {
+    if (!GXPortSideJobDone(xPortJob)) {
+      const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+      GXPortSideJobWait(xPortJob);
+      ++sPortStatWaited;
+      sPortStatWaitUs += static_cast< uint >(std::chrono::duration_cast< std::chrono::microseconds >(
+                                                 std::chrono::steady_clock::now() - start)
+                                                 .count());
+    }
+    xPortJob = 0;
+  }
+  CStateManager& mgr = *xPortMgr;
+  const float dt = xPortDt;
+  PortFinishParticleGenDB(dt, mgr, x3c_rendererDrawLoop, true);
+  PortFinishParticleGenDB(dt, mgr, x50_firstDrawLoop, true);
+  PortFinishParticleGenDB(dt, mgr, x64_lastDrawLoop, true);
+  PortFinishParticleGenDB(dt, mgr, x78_rendererDraw, false);
+  PortFinishParticleGenDB(dt, mgr, x8c_firstDraw, false);
+  PortFinishParticleGenDB(dt, mgr, xa0_lastDraw, false);
+  xb4_25_anySystemsDrawnWithModel = x50_firstDrawLoop.size() || x64_lastDrawLoop.size() ||
+                                    x8c_firstDraw.size() || xa0_lastDraw.size();
+}
+
+void CParticleDatabase::PortLinkPending() {
+  xPortNextPending = nullptr;
+  (sPortPendingTail != nullptr ? sPortPendingTail->xPortNextPending : sPortPendingHead) = this;
+  sPortPendingTail = this;
+}
+
+void CParticleDatabase::PortUnlinkPending() {
+  CParticleDatabase* prev = nullptr;
+  for (CParticleDatabase* db = sPortPendingHead; db != nullptr; prev = db, db = db->xPortNextPending) {
+    if (db == this) {
+      (prev != nullptr ? prev->xPortNextPending : sPortPendingHead) = xPortNextPending;
+      if (sPortPendingTail == this) {
+        sPortPendingTail = prev;
+      }
+      xPortNextPending = nullptr;
+      return;
+    }
+  }
+}
+
+void CParticleDatabase::PortSetAsyncWindow(bool open) { sPortAsyncWindow = open; }
+
+void CParticleDatabase::PortFinishAll() {
+  while (sPortPendingHead != nullptr) {
+    sPortPendingHead->PortFinish();
+  }
+}
+
+void CParticleDatabase::PortTakeAsyncStats(uint& async, uint& waited, uint& waitUs) {
+  async = sPortStatAsync;
+  waited = sPortStatWaited;
+  waitUs = sPortStatWaitUs;
+  sPortStatAsync = sPortStatWaited = sPortStatWaitUs = 0;
+}
+#else
 void CParticleDatabase::UpdateParticleGenDB(float dt, const CPoseAsTransforms& pose,
                                             const CCharLayoutInfo& layout, const CTransform4f& xf,
                                             const CVector3f& scale, CStateManager& mgr,
@@ -432,14 +759,17 @@ void CParticleDatabase::UpdateParticleGenDB(float dt, const CPoseAsTransforms& p
     ++it;
   }
 }
+#endif
 
 void CParticleDatabase::AddToRendererClipped(const CFrustumPlanes& frustum) const {
+  PORT_DB_FINISH();
   AddToRendererClippedParticleGenMap(x78_rendererDraw, frustum);
   AddToRendererClippedParticleGenMap(x3c_rendererDrawLoop, frustum);
 }
 
 void CParticleDatabase::AddToRendererClippedMasked(const CFrustumPlanes& frustum, int mask,
                                                    int target) const {
+  PORT_DB_FINISH();
   AddToRendererClippedParticleGenMapMasked(x78_rendererDraw, frustum, mask, target);
   AddToRendererClippedParticleGenMapMasked(x3c_rendererDrawLoop, frustum, mask, target);
 }
@@ -467,21 +797,25 @@ void CParticleDatabase::AddToRendererClippedParticleGenMapMasked(const DrawMap& 
 }
 
 void CParticleDatabase::RenderSystemsToBeDrawnFirst() const {
+  PORT_DB_FINISH();
   RenderParticleGenMap(x8c_firstDraw);
   RenderParticleGenMap(x50_firstDrawLoop);
 }
 
 void CParticleDatabase::RenderSystemsToBeDrawnFirstMasked(int mask, int target) const {
+  PORT_DB_FINISH();
   RenderParticleGenMapMasked(x8c_firstDraw, mask, target);
   RenderParticleGenMapMasked(x50_firstDrawLoop, mask, target);
 }
 
 void CParticleDatabase::RenderSystemsToBeDrawnLast() const {
+  PORT_DB_FINISH();
   RenderParticleGenMap(xa0_lastDraw);
   RenderParticleGenMap(x64_lastDrawLoop);
 }
 
 void CParticleDatabase::RenderSystemsToBeDrawnLastMasked(int mask, int target) const {
+  PORT_DB_FINISH();
   RenderParticleGenMapMasked(xa0_lastDraw, mask, target);
   RenderParticleGenMapMasked(x64_lastDrawLoop, mask, target);
 }
@@ -501,6 +835,7 @@ void CParticleDatabase::RenderParticleGenMapMasked(const DrawMap& map, int mask,
 }
 
 void CParticleDatabase::DeleteAllLights(CStateManager& mgr) {
+  PORT_DB_FINISH();
   DeleteAllLightsForParticleDB(mgr, x3c_rendererDrawLoop);
   DeleteAllLightsForParticleDB(mgr, x50_firstDrawLoop);
   DeleteAllLightsForParticleDB(mgr, x64_lastDrawLoop);
@@ -516,6 +851,7 @@ void CParticleDatabase::DeleteAllLightsForParticleDB(CStateManager& mgr, DrawMap
 }
 
 void CParticleDatabase::SuspendAllActiveEffects(CStateManager& mgr) {
+  PORT_DB_FINISH();
   SuspendAllActiveEffectsForParticleDB(mgr, x3c_rendererDrawLoop);
   SuspendAllActiveEffectsForParticleDB(mgr, x50_firstDrawLoop);
   SuspendAllActiveEffectsForParticleDB(mgr, x64_lastDrawLoop);
@@ -528,6 +864,7 @@ void CParticleDatabase::SuspendAllActiveEffectsForParticleDB(CStateManager& mgr,
 }
 
 void CParticleDatabase::SetModulationColorAllActiveEffects(const CColor& color) {
+  PORT_DB_FINISH();
   SetModulationColorAllActiveEffectsForParticleDB(color, x3c_rendererDrawLoop);
   SetModulationColorAllActiveEffectsForParticleDB(color, x50_firstDrawLoop);
   SetModulationColorAllActiveEffectsForParticleDB(color, x64_lastDrawLoop);

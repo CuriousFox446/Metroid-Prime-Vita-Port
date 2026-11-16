@@ -27,7 +27,11 @@
 #include "port_fx_debug.h"
 #endif
 
+#ifdef TARGET_PC
+PortThreadValue< ushort > CParticleElectric::sSeed(99);
+#else
 ushort CParticleElectric::sSeed = 99;
+#endif
 
 #ifdef TARGET_PC
 void CParticleElectric::PortElc2Step(bool emitting) {

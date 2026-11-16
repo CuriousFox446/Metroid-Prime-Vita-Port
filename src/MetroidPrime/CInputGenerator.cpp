@@ -5,6 +5,8 @@
 
 #include "Kyoto/Basics/COsContext.hpp"
 
+#include "port_profile.h"
+
 CInputGenerator::CInputGenerator(COsContext* ctx, float leftDiv, float rightDiv)
 : x0_context(ctx)
 , x4_controller(IController::Create(*ctx))
@@ -17,14 +19,22 @@ CInputGenerator::CInputGenerator(COsContext* ctx, float leftDiv, float rightDiv)
 
 bool CInputGenerator::Update(float dt, CArchitectureQueue& queue) {
   int availSlot = 0;
-  if (!x0_context->Update()) {
+  bool contextUpdated;
+  {
+    PORT_ZONE_TIMED("input: COsContext::Update");
+    contextUpdated = x0_context->Update();
+  }
+  if (!contextUpdated) {
     return false;
   }
 
   bool firstController = false;
   if (!x4_controller.null()) {
     const int count = x4_controller->GetDeviceCount();
-    x4_controller->Poll();
+    {
+      PORT_ZONE_TIMED("input: controller Poll");
+      x4_controller->Poll();
+    }
     for (int i = 0; i < count; ++i) {
       const CControllerGamepadData& cont = x4_controller->GetGamepadData(i);
       if (cont.DeviceIsPresent()) {

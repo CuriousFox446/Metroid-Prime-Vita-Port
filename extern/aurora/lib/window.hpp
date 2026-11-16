@@ -40,6 +40,9 @@ bool get_frame_buffer_size_for_scale(float scale, uint32_t* width, uint32_t* hei
 const AuroraEvent* poll_events();
 // How long the last poll_events spent in SDL_UpdateJoysticks.
 uint64_t joystick_update_ns() noexcept;
+// Counts poll_events calls (0 before the first). SDL refreshes its keyboard, mouse and pad
+// state only when events are pumped, so reads of that state repeat between two values.
+uint64_t pump_generation() noexcept;
 SDL_Window* get_sdl_window();
 SDL_Renderer* get_sdl_renderer();
 const void* get_native_window_handle() noexcept;

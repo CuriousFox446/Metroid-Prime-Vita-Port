@@ -310,9 +310,10 @@ private:
 };
 
 // The memory of the system being updated/rendered (null outside one), so a child generator reads
-// its own variables. Set with CPortVarScope, which restores the previous one.
+// its own variables. Set with CPortVarScope, which restores the previous one. Per thread: the side
+// worker updates systems while the game thread updates others (port_thread_slot.h).
 struct CPortVarGlobals {
-  static const CPortVarMemory* sCurrent;
+  static PortThreadValue< const CPortVarMemory* > sCurrent;
 };
 
 class CPortVarScope {
@@ -469,8 +470,9 @@ struct SPortKeep {
 class CREPortKeep;
 
 struct CPortKeepGlobals {
-  // The particle or swoosh point being evaluated, or null (a KPIN then reads its child).
-  static SPortKeep* sCurrent;
+  // The particle or swoosh point being evaluated, or null (a KPIN then reads its child). Per thread,
+  // as CPortVarGlobals.
+  static PortThreadValue< SPortKeep* > sCurrent;
   // While a description is read: where its PKPR elements are listed.
   static std::vector< const CREPortKeep* >* sCollect;
 };

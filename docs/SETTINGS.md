@@ -132,9 +132,18 @@
   stretched image in the present resample (not AMD's CAS proper, which scales and
   sharpens in one filter), and only to a frame smaller than the window. The file also
   takes a manual `render_scale` under 1.
+  On the PS Vita the scales are multiples of its screen instead: 1x (and Auto) is its 960x544,
+  the slider goes to 2x (1920x1088, the most its GPU and video memory take), and a scale other
+  than 1x draws the frame into a framebuffer of that size, drawn to the screen at the frame's end
+  (sharpened as above when drawn up). Its GPU time is the time the GPU has a scene to finish, from
+  the fence each scene ends with (no timestamp queries there), and the GPU counts as the limit only
+  while it is busy for most of each frame's own time too: the Vita's CPU sets the pace below
+  60 fps however busy the GPU is for a 60 fps frame's worth. A "Frame rate target" of 30 suits it:
+  at 30 fps it raises the scale (up to the maximum) where the GPU has time to spare. The Vita
+  takes no supersampled photos (photo mode keeps the scale).
 - `MP_ASPECT=4:3|16:9|window` (default `window`, persisted as `aspect`); the legacy `MP_WIDESCREEN` selects 16:9.
 - Quick setup (Controls > Options): "Use mouse & keyboard" turns on mouse aim (with twin stick) and applies
-  the Mouse & keyboard layout; "Use twin-stick controller" turns on twin stick and applies the
+  the Mouse & keyboard layout (not on the PS Vita, which has neither); "Use twin-stick controller" turns on twin stick and applies the
   Remastered layout to all controllers (greyed out with a GameCube adapter). Both replace your own
   bindings for that device (Remap > Presets...) and are saved. "Save current as..." in Remap > My presets...
   keeps your bindings as a preset of your own (see Control presets).
@@ -1513,6 +1522,10 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   room (MREA 3E6B2BB7) in first person about 5 s after launch, and
   `39F2DE28:B2701146` gives the Landing Site. It needs no smoke build, and the
   console's `status` answers as soon as the room is up.
+- `MP_DEMO=1`: Metroid Prime Demo, which the Vita's second app sets (with
+  `MP_FAST_BOOT`, docs/VITA.md). A world teleporter's way out to another world
+  quits instead, as Quit Game does, so the front end starts a new game on the
+  frigate again; the port menu does not open, and Back + Start is Start.
 - `MP_TURBO[=<ticks>]`: lockstep for automated runs. Every frame runs exactly
   `<ticks>` fixed ticks (default 1, at most 16) with no frame limiter and no
   vsync, so a run goes as fast as the machine renders it; game time per tick
@@ -1764,6 +1777,12 @@ The simulation uses a fixed-step accumulator (60 Hz by default) independently of
 the presentation cap. Ordinary slow frames catch up; pauses/debugger stalls are
 capped to 250 ms of simulation work per iteration. Audio runs on
 wall-clock/device consumption.
+A frame's catch-up is bounded: once its ticks have taken two 60 Hz frames' worth of it (four on
+the PS Vita), the frame drops the ticks it has left and the game runs slow (slow motion) rather
+than spiral into ever longer frames (`PortDebug::CatchUpFrames`). On the Vita at two, Magmoor
+Caverns' Puffers (ticks of some 15 ms) left room for 2.5 ticks a frame and the game ran at 62%
+speed; at four, about 77% at a lower frame rate. Original experience keeps two. (0.42.0 test 16
+had it as a setting, `catch_up`; the key is now ignored.)
 Fractional simulation time is retained through frame jitter. The capped scheduler
 can borrow at most 0.25 ms near a tick boundary and carries that debt forward, so
 it does not alternate zero/two ticks merely due to microsecond sleep jitter.

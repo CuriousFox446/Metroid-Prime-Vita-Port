@@ -11,7 +11,17 @@
 #include "../../gfx/xray.hpp"
 #include "../../webgpu/gpu.hpp"
 #include "../../webgpu/gpu_prof.hpp"
+#if defined(AURORA_VITA_GL)
+#include "../../vita_gl.hpp"
+#endif
+#if defined(__vita__)
+#include "../../thread.hpp"
+#include "../../vita_side_jobs.hpp"
 
+#include <psp2/kernel/threadmgr.h>
+#endif
+
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstring>
@@ -544,11 +554,43 @@ void GXPortSetPerformance(u32 flags) { sPerformance.store(flags & GX_PORT_PERF_A
 
 u32 GXPortGetPerformance(void) { return sPerformance.load(std::memory_order_relaxed); }
 
-void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+// The draw tag only names draws in Aurora's warnings, so it is sent with the next draw
+// (flush_draw_tag) and only when it changed: the game tags every surface and clears the tag
+// after it, two commands a surface otherwise.
+static std::array<u32, 3> sWantedDrawTag{0, UINT32_MAX, 0};
+static std::array<u32, 3> sSentDrawTag{0, UINT32_MAX, 0};
+
+static void write_draw_tag(const std::array<u32, 3>& tag) {
   GX_WRITE_AURORA(GX_AURORA_SET_DRAW_TAG);
-  GX_WRITE_U32(asset);
-  GX_WRITE_U32(model);
-  GX_WRITE_U32(material);
+  GX_WRITE_U32(tag[0]);
+  GX_WRITE_U32(tag[1]);
+  GX_WRITE_U32(tag[2]);
+}
+
+void GXSetDrawTag(u32 asset, u32 model, u32 material) {
+  if (aurora::gx::fifo::in_display_list()) {
+    // Into the list as it is: the list's draws carry it wherever it is called.
+    write_draw_tag({asset, model, material});
+    return;
+  }
+  sWantedDrawTag = {asset, model, material};
+}
+
+extern "C++" {
+namespace aurora::gx::draw_tag {
+void flush() noexcept {
+#ifdef AURORA_VITA_GL
+  // The Vita path reads no tag, and Aurora's warnings that would name a draw with it come from
+  // its WebGPU draws: some 1500 tags a heavy frame, each written here and read on the FIFO thread.
+  return;
+#endif
+  if (sWantedDrawTag == sSentDrawTag || fifo::in_display_list()) {
+    return;
+  }
+  sSentDrawTag = sWantedDrawTag;
+  write_draw_tag(sSentDrawTag);
+}
+} // namespace aurora::gx::draw_tag
 }
 
 void GXPortSetDrawSerial(u32 serial) {
@@ -573,6 +615,103 @@ void GXPortDrawLog(GXBool on) { aurora::gx::set_draw_shader_log(on != GX_FALSE);
 u64 GXPortDrawShader(u32 serial) { return aurora::gx::draw_shader_hash(serial); }
 
 GXBool GXPortShaderOverridden(u64 hash) { return aurora::gx::shader_overridden(hash) ? GX_TRUE : GX_FALSE; }
+
+void GXPortVfxCaptureScene(GXBool again) {
+  GX_WRITE_AURORA(GX_AURORA_PORT_VFX_CAPTURE_SCENE);
+  GX_WRITE_U8(again ? 1 : 0);
+  aurora::gx::fifo::publish();
+}
+
+u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data) {
+#if defined(__vita__)
+  return aurora::side_jobs::submit(fn, data);
+#else
+  (void)fn;
+  (void)data;
+  return 0;
+#endif
+}
+
+GXBool GXPortSideJobDone(u32 job) {
+#if defined(__vita__)
+  return aurora::side_jobs::done(job) ? GX_TRUE : GX_FALSE;
+#else
+  (void)job;
+  return GX_TRUE;
+#endif
+}
+
+void GXPortSideJobWait(u32 job) {
+#if defined(__vita__)
+  aurora::side_jobs::wait(job, false);
+#else
+  (void)job;
+#endif
+}
+
+GXBool GXPortSideJobFence(u32 job) {
+  if (job == 0) {
+    return GX_TRUE;
+  }
+  // A display list keeps what is written for every later call: the job's wait belongs to this one.
+  if (aurora::gx::fifo::in_display_list()) {
+    return GX_FALSE;
+  }
+  GX_WRITE_AURORA(GX_AURORA_PORT_SIDE_JOB_FENCE);
+  GX_WRITE_U32(job);
+  return GX_TRUE;
+}
+
+u32 GXPortBackgroundJobSubmit(GXPortSideJobFn fn, void* data) {
+#if defined(__vita__)
+  return aurora::side_jobs::submit_background(fn, data);
+#else
+  (void)fn;
+  (void)data;
+  return 0;
+#endif
+}
+
+GXBool GXPortBackgroundJobDone(u32 job) {
+#if defined(__vita__)
+  return aurora::side_jobs::done_background(job) ? GX_TRUE : GX_FALSE;
+#else
+  (void)job;
+  return GX_TRUE;
+#endif
+}
+
+void GXPortBackgroundJobWait(u32 job) {
+#if defined(__vita__)
+  aurora::side_jobs::wait_background(job);
+#else
+  (void)job;
+#endif
+}
+
+int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority) {
+#if defined(__vita__)
+  const std::string threadName = name != nullptr ? name : "unnamed";
+  aurora::thread::register_current(threadName);
+  if (!aurora::thread::vita_core3_available()) {
+    return -1;
+  }
+  const SceUID self = sceKernelGetThreadId();
+  const int result =
+      sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << aurora::thread::kVitaSystemCore);
+  if (result < 0) {
+    return -1;
+  }
+  if (vitaPriority != 0) {
+    sceKernelChangeThreadPriority(self, vitaPriority);
+  }
+  return aurora::thread::kVitaSystemCore;
+#else
+  (void)name;
+  (void)vitaPriority;
+  return -1;
+#endif
+}
 
 void GXCopyProbeFace(u32 face) {
   GX_WRITE_AURORA(GX_AURORA_COPY_PROBE_FACE);
@@ -1029,6 +1168,25 @@ void GXSetPBRLightScale(f32 diffuse, f32 f0, f32 alpha, GXBool alphaReplaces) {
 }
 }
 
+#if defined(AURORA_VITA_GL)
+// The Vita's GPU has no timestamp queries; its renderer times how long the GPU has a scene to finish
+// (vita_gl.cpp's GpuClock), always on: the busy time a frame, as both the span and the total, and no
+// passes of its own.
+void GXPortSetGpuTimes(GXBool) {}
+
+GXBool GXPortGpuTimesSupported(void) { return GX_TRUE; }
+
+u32 GXPortGetGpuTimes(GXPortGpuTime*, u32, float* totalMs, float* spanMs) {
+  const float busy = aurora::vita_gl::gpu_busy_ms();
+  if (totalMs != nullptr) {
+    *totalMs = busy;
+  }
+  if (spanMs != nullptr) {
+    *spanMs = busy;
+  }
+  return 0;
+}
+#else
 void GXPortSetGpuTimes(GXBool on) { aurora::webgpu::gpu_prof::set_enabled(on != GX_FALSE); }
 
 GXBool GXPortGpuTimesSupported(void) { return aurora::webgpu::gpu_prof::supported() ? GX_TRUE : GX_FALSE; }
@@ -1050,3 +1208,4 @@ u32 GXPortGetGpuTimes(GXPortGpuTime* out, u32 max, float* totalMs, float* spanMs
   }
   return out == nullptr ? u32(result.entries.size()) : count;
 }
+#endif

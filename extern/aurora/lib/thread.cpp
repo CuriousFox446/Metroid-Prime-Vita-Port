@@ -23,10 +23,38 @@
 #include <Windows.h>
 #elif defined(__APPLE__)
 #include <pthread.h>
+#elif defined(__vita__)
+#include "internal.hpp"
+
+#include <fmt/format.h>
+#include <psp2/kernel/cpu.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #endif
 
 namespace aurora::thread {
 namespace {
+#if defined(__vita__)
+constexpr Module Log{"aurora::thread"};
+
+// The threads named so far (register_current), for log_cpu: each one's time run, moves between
+// cores, preemptions (by interrupts, by other threads) and waits ended at the last log (seen: it
+// has been logged once).
+struct Named {
+  std::string name;
+  SceUID id = 0;
+  bool seen = false;
+  uint64_t run = 0;
+  int32_t moves = 0;
+  uint32_t interrupts = 0;
+  uint32_t preempted = 0;
+  uint32_t waits = 0;
+};
+std::mutex sNamedMutex;
+std::vector<Named> sNamed;
+uint64_t sLastLog = 0;
+#endif
+
 struct Processor {
   uint16_t group = 0;
   uint32_t number = 0;
@@ -287,12 +315,125 @@ void set_current(const Options& options) noexcept {
 #ifdef TRACY_ENABLE
     tracy::SetThreadName(options.name.c_str());
 #endif
+    register_current(options.name);
   }
 
   SDL_SetCurrentThreadPriority(to_sdl_priority(options.priority));
   if (options.affinity == Affinity::SharedCache) {
     pin_shared_cache();
   }
+#if defined(__vita__)
+  // The Vita's scheduler moves a thread between cores as it likes, and runs one till it waits or
+  // one of a higher priority is ready, whatever else of its priority waits. In 0.42.0 test 7's heavy
+  // room the FIFO processor was busy 97% of each frame by its own clock but ran 86%: the frame reaper
+  // (its priority, 6%), the DVD worker (above it, 4%) and a texture worker had last run on its core.
+  // So the three busy threads each keep a core and the helpers that can take one from them share
+  // the render worker's, which is busy about a third of the time. Test 8 had the FIFO processor on
+  // core 0 alone, and it still ran no more than 81% of the time in the room it held back (its clock:
+  // 93% busy): core 0 seems to give some of its time elsewhere (the system's interrupts, its own
+  // threads; log_cpu counts the preemptions). So the render worker, with time to spare, takes core
+  // 0 and the helpers, the FIFO processor core 2, the game core 1.
+  // 0.42.0 test 18: the fourth core (CapUnlocker) takes work off the others, where it can have it.
+  const SceUID self = sceKernelGetThreadId();
+  int core = options.vitaCore;
+  if (core == kVitaSystemCore && !vita_core3_available()) {
+    core = options.vitaCoreFallback;
+  }
+  if (core >= 0 && core <= kVitaSystemCore) {
+    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << core);
+    if (result < 0) {
+      Log.warn("{}: could not keep to core {} ({:#x})", options.name, core, static_cast<uint32_t>(result));
+    }
+  }
+  if (options.vitaPriority != 0) {
+    const int result = sceKernelChangeThreadPriority(self, options.vitaPriority);
+    if (result < 0) {
+      Log.warn("{}: could not take priority {} ({:#x})", options.name, options.vitaPriority,
+               static_cast<uint32_t>(result));
+    }
+  }
+#endif
+}
+
+bool vita_core3_available() noexcept {
+#if defined(__vita__)
+  // The kernel refuses a game thread the system's core (its affinity check), unless CapUnlocker has
+  // patched that check out. Asked by trying: the calling thread moves there and straight back.
+  static const bool available = [] {
+    const SceUID self = sceKernelGetThreadId();
+    const int before = sceKernelGetThreadCpuAffinityMask(self);
+    const int result = sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_0 << kVitaSystemCore);
+    if (result >= 0) {
+      sceKernelChangeThreadCpuAffinityMask(self, before >= 0 ? before : 0);
+      Log.info("core 3 (the system's) is open to the game (CapUnlocker): the helpers that can use it keep to it");
+    } else {
+      Log.info("core 3 (the system's) is closed to the game ({:#x}; no CapUnlocker): its helpers stay on cores 0 to 2",
+               static_cast<uint32_t>(result));
+    }
+    return result >= 0;
+  }();
+  return available;
+#else
+  return false;
+#endif
+}
+
+void register_current(const std::string& name) noexcept {
+#if defined(__vita__)
+  const SceUID id = sceKernelGetThreadId();
+  std::lock_guard lock{sNamedMutex};
+  for (Named& named : sNamed) {
+    if (named.id == id) {
+      named.name = name;
+      return;
+    }
+  }
+  sNamed.push_back({.name = name, .id = id});
+#else
+  (void)name;
+#endif
+}
+
+void log_cpu() noexcept {
+#if defined(__vita__)
+  std::lock_guard lock{sNamedMutex};
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  const uint64_t span = sLastLog != 0 ? now - sLastLog : 0;
+  sLastLog = now;
+  std::string threads;
+  for (auto it = sNamed.begin(); it != sNamed.end();) {
+    SceKernelThreadInfo info{};
+    info.size = sizeof(info);
+    if (sceKernelGetThreadInfo(it->id, &info) < 0) {
+      it = sNamed.erase(it); // it has ended (a job thread with no work left)
+      continue;
+    }
+    // Its run time and the span are both microseconds.
+    const uint64_t run = info.runClocks;
+    const std::string busy = it->seen && span != 0
+                                 ? fmt::format("{:.0f}%", 100.0 * static_cast<double>(run - it->run) / static_cast<double>(span))
+                                 : std::string("new");
+    // Its ID too: a crash dump names threads by theirs. Then, since the last log, how often an
+    // interrupt or another thread took its core while it ran, and how many of its waits ended.
+    const auto since = [&](uint32_t now, uint32_t last) { return it->seen ? now - last : now; };
+    threads += fmt::format("{}{} ({:#x}): core {} (last {}, mask {:#x}), priority {}, {} busy, {} moves, preempted by "
+                           "interrupts {} and threads {}, {} waits",
+                           threads.empty() ? "" : " | ", it->name, static_cast<uint32_t>(it->id), info.currentCpuId,
+                           info.lastExecutedCpuId,
+                           static_cast<uint32_t>(info.currentCpuAffinityMask), info.currentPriority, busy,
+                           it->seen ? info.changeCpuCount - it->moves : info.changeCpuCount,
+                           since(info.intrPreemptCount, it->interrupts), since(info.threadPreemptCount, it->preempted),
+                           since(info.threadReleaseCount, it->waits));
+    it->seen = true;
+    it->run = run;
+    it->moves = info.changeCpuCount;
+    it->interrupts = info.intrPreemptCount;
+    it->preempted = info.threadPreemptCount;
+    it->waits = info.threadReleaseCount;
+    ++it;
+  }
+  Log.info("[threads] over {:.1f} s: {}", static_cast<double>(span) / 1e6, threads);
+#endif
 }
 
 } // namespace aurora::thread

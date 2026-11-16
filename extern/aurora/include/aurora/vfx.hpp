@@ -371,8 +371,10 @@ void draw_indexed_triangles(const DrawDesc& desc, const Vertex* verts, uint32_t 
 // another target (an offscreen pass) bind 1x1 dummies, do no DepthSoften and draw no SceneWarp.
 // again: copy anew over this frame's copy of the same kind (the pause screen's copy before its
 // silhouettes, RenderPauseScreenElements, flags 1); draws recorded after it read the new one, its
-// top level alone.
+// top level alone. It goes into the GX FIFO, so the game does not wait for what was drawn before it.
 void capture_scene(bool again = false);
+// The copy itself, on the FIFO thread (GX_AURORA_PORT_VFX_CAPTURE_SCENE).
+void capture_scene_now(bool again);
 // Remastered's RenderVisorEffects, after the post and the camera filters: copies the display output
 // (half size, no mips, decoded to linear) and makes the draws recorded until end_visor_effects visor
 // effects, which read that copy and write linear light encoded, with no exposure, tone or fog. False

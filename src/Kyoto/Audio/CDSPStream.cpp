@@ -82,6 +82,11 @@ static struct {
 #define g_Streams g_StreamData.streams
 #define sHandleCounter g_StreamData.handleCounter
 
+// Port diagnostic: a refill came due while the stream's last read was still under way (UpdateStream),
+// said once a refill. The mixer then plays that read's half again: the music repeats, and the other
+// channel's stream runs on ahead of this one's.
+static bool sRefillLateReported[4];
+
 void CDSPStream::OpenFiles(const char* fileName, CDSPStream& stream) {
   DVDOpen(const_cast< char* >(fileName), &stream.x50_fileInfo1);
   DVDOpen(const_cast< char* >(fileName), &stream.x8c_fileInfo2);
@@ -439,6 +444,7 @@ void CDSPStream::BufferStream() {
       // stopped, and the mixer looped the buffer it already had. The guest
       // guarded this with OSDisableInterrupts, which is a no-op on PC.
       xec_readsPending = secondReadLen != 0 ? 2 : 1;
+      sRefillLateReported[this - g_Streams] = false;
       DVDReadAsyncPrio(&x50_fileInfo1, buf, static_cast< s32 >(readLen),
                        static_cast< s32 >(x18_headerSize + xcc_fileCur), ReadCompleted, 1);
       if (secondReadLen != 0) {
@@ -498,6 +504,11 @@ u32 CDSPStream::UpdateStream(void*, u32 destOffset, void*, u32 len, u32 user) {
     return stream->x0_state == 4 ? stream->xdc_streamSamples >> 1 : 0;
   }
 
+  if (!sRefillLateReported[stream - g_Streams]) {
+    sRefillLateReported[stream - g_Streams] = true;
+    MP_STREAM_LOG("refill late file=%s pending=%u fileCur=%u: its last read is still under way",
+                  stream->x10_fileName.data(), stream->xec_readsPending, stream->xcc_fileCur);
+  }
   return 0;
 }
 

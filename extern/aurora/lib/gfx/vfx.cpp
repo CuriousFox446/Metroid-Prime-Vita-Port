@@ -14,6 +14,7 @@
 #include "texture.hpp"
 
 #include <aurora/gfx.hpp>
+#include <dolphin/gx/GXExtra.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -2179,7 +2180,13 @@ void draw_indexed_triangles(const DrawDesc& desc, const Vertex* verts, uint32_t 
 }
 
 void capture_scene(bool again) {
-  gx::fifo::drain();
+  // The copy reads the recorder, which the FIFO thread owns mid-frame: it is made there, after
+  // what the FIFO holds now, instead of the game draining the FIFO to make it here. The draws
+  // that read it (draw_prims) drain first, so they see it.
+  GXPortVfxCaptureScene(again ? GX_TRUE : GX_FALSE);
+}
+
+void capture_scene_now(bool again) {
   if (is_offscreen()) {
     return;
   }

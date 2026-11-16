@@ -1,5 +1,6 @@
 #include "MetroidPrime/Player/CPlayer.hpp"
 
+#include "port_profile.h"
 #include "port_console.h"
 #include "port_debug.h"
 #include "port_disc.h"
@@ -2459,6 +2460,7 @@ void CPlayer::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
 
   float dt = input.Time();
   if (x2f8_morphBallState != kMS_Morphed) {
+    PORT_ZONE_TIMED("player input: scanning");
     UpdateScanningState(input, mgr, dt);
   }
 
@@ -2525,8 +2527,12 @@ void CPlayer::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
     }
   }
 
-  UpdateGrappleState(input, mgr);
+  {
+    PORT_ZONE_TIMED("player input: grapple");
+    UpdateGrappleState(input, mgr);
+  }
   if (x2f8_morphBallState == kMS_Morphed) {
+    PORT_ZONE_TIMED("player input: ball movement");
     float leftDiv = gpTweakBall->GetLeftStickDivisor();
     const float rightDiv = gpTweakBall->GetRightStickDivisor();
     if (x26c_attachedActor != kInvalidUniqueId || IsUnderBetaMetroidAttack(mgr)) {
@@ -2537,6 +2543,7 @@ void CPlayer::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
     x768_morphball->UpdateBallDynamics(mgr, dt);
     x4a0_playerStuckTracker->ResetStats();
   } else {
+    PORT_ZONE_TIMED("player input: movement");
     if (x304_orbitState == CPlayer::kOS_Grapple) {
       ApplyGrappleForces(input, mgr, dt);
     } else {
@@ -2572,15 +2579,25 @@ void CPlayer::ProcessInput(const CFinalInput& input, CStateManager& mgr) {
 #endif
   }
 
-  ComputeFreeLook(input);
-  UpdateFreeLookState(input, dt, mgr);
-  UpdateOrbitInput(input, mgr);
-  UpdateOrbitZone(mgr);
-  UpdateGunState(input, mgr);
-  UpdateVisorState(input, dt, mgr);
+  {
+    PORT_ZONE_TIMED("player input: free look");
+    ComputeFreeLook(input);
+    UpdateFreeLookState(input, dt, mgr);
+  }
+  {
+    PORT_ZONE_TIMED("player input: orbit (targets)");
+    UpdateOrbitInput(input, mgr);
+    UpdateOrbitZone(mgr);
+  }
+  {
+    PORT_ZONE_TIMED("player input: gun and visor state");
+    UpdateGunState(input, mgr);
+    UpdateVisorState(input, dt, mgr);
+  }
 
   if (x2f8_morphBallState == kMS_Morphed ||
       (x2f8_morphBallState == kMS_Unmorphed && x498_gunHolsterState == kGH_Drawn)) {
+    PORT_ZONE_TIMED("player input: the gun's input");
     x490_gun->ProcessInput(input, mgr);
     if (x2f8_morphBallState == kMS_Morphed && x26c_attachedActor != kInvalidUniqueId) {
       bool turnLeft = ControlMapper::GetPressInput(ControlMapper::kC_TurnLeft, input);

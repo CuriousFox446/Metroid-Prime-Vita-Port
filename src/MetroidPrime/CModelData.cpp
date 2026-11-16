@@ -1,4 +1,5 @@
 #include "MetroidPrime/CModelData.hpp"
+#include "port_profile.h"
 
 #include "Kyoto/Animation/CSkinnedModel.hpp"
 #include "Kyoto/Animation/CVertexMorphEffect.hpp"
@@ -664,6 +665,7 @@ bool CModelData::HasModel(EWhichModel which) const {
 
 void CModelData::Render(const CStateManager& mgr, const CTransform4f& xf,
                         const CActorLights* lights, const CModelFlags& flags) const {
+  PORT_ZONE("CModelData::Render (actor models)");
   Render(GetRenderingModel(mgr), xf, lights, flags);
 }
 

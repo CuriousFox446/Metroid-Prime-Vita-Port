@@ -74,6 +74,10 @@ void DrawPalLanguages() {
              "less played than USA: please report differences.");
     return;
   }
+#ifdef __vita__
+  // The import picks a PAL disc image with a file browser, which the Vita does not have.
+  return;
+#endif
   std::string picked;
   {
     std::lock_guard lock(sRemasteredPickMutex);
@@ -278,8 +282,9 @@ void DrawBuiltinModToggle(const char* modName, const char* label, bool stale) {
 }
 
 // Which parts of the installed import the mods load (remastered_hide): the disc's own stands in
-// for each part left out, without importing again. Applies at the next reload.
-void DrawRemasteredParts() {
+// for each part left out, without importing again. Applies at the next reload. Not drawn on the
+// Vita, whose built-in mods are Echoes' alone.
+[[maybe_unused]] void DrawRemasteredParts() {
   const PortMods::Status& status = PortMods::CurrentStatus();
   const auto mod = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
     return m.name == PortRemastered::kImportModName;
@@ -337,6 +342,9 @@ void DrawRemasteredParts() {
 void DrawBuiltinMods() {
   ImGui::SeparatorText("Built-in mods");
   const PortMods::Status& status = PortMods::CurrentStatus();
+#ifndef __vita__
+  // Not on the Vita: Prime Remastered's and Dread's imports read Switch dumps and draw models far
+  // heavier than it can. Echoes' suits, from a GameCube disc, are its one built-in mod.
   // One prod.keys serves both imports, so the page has one row for it, above both sections and
   // inside neither: it stays visible whichever of them is open, and neither section owns it.
   DrawImportKeys();
@@ -384,6 +392,7 @@ void DrawBuiltinMods() {
     DrawDreadSamusImport();
     ImGui::Unindent();
   }
+#endif
   if (StartSection("Mods", "Metroid Prime 2: Echoes")) {
     ImGui::SetNextItemOpen(true);
   }

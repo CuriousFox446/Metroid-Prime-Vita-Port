@@ -87,6 +87,9 @@ u32 GXPortCopySerial(void);
 // for it (AuroraConfig::residentGeometryMiB), it is sent every frame as before.
 void GXPortRetainResident(const void* data, u32 size);
 void GXPortReleaseResident(const void* data);
+// Aurora extension: queues the VFX opaque scene copy (aurora::gfx::vfx::capture_scene, `again` as
+// there) at this point of the FIFO (GX_AURORA_PORT_VFX_CAPTURE_SCENE).
+void GXPortVfxCaptureScene(GXBool again);
 // Aurora extension: the PBR environment probe (see GX_AURORA_COPY_PROBE_FACE and
 // GX_AURORA_SET_PBR_PROBE).
 void GXCopyProbeFace(u32 face);
@@ -431,6 +434,35 @@ void GXPortShell(u32 mode, const f32* params);
 void GXPortSetRoomLights(const f32* records, u32 count);
 // Game-thread snapshot, at most 64 records, for scoped UI lighting overrides.
 u32 GXPortGetRoomLights(f32 records[64 * 16]);
+
+// Port extension: the side worker, a thread on the PS Vita's fourth core (the system's, which the
+// CapUnlocker plugin opens to games), for work the game thread hands off whose results only the
+// FIFO processor reads. Its jobs run one at a time, in the order they were submitted. Elsewhere, and
+// on a Vita without CapUnlocker, there is none: GXPortSideJobSubmit returns 0 and the caller does
+// the work itself.
+typedef void (*GXPortSideJobFn)(void* data);
+// Queues fn(data); its number (above 0), or 0 when there is no worker. `data` must live until the
+// job has run.
+u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data);
+// Whether the job has run (true for 0, no job).
+GXBool GXPortSideJobDone(u32 job);
+// The calling thread waits until the job has run.
+void GXPortSideJobWait(u32 job);
+// The FIFO processor waits for the job before it takes what is written after this
+// (GX_AURORA_PORT_SIDE_JOB_FENCE). False when nothing can be written there (a display list is being
+// recorded): wait with GXPortSideJobWait instead.
+GXBool GXPortSideJobFence(u32 job);
+// The side worker's background lane (0.42.0 test 23): a second thread on the fourth core, below
+// MusyX's mixer and the side worker, for long jobs nobody waits for soon (a movie frame's decode). Its
+// job numbers are its own (0: no lane; the caller does the work).
+u32 GXPortBackgroundJobSubmit(GXPortSideJobFn fn, void* data);
+GXBool GXPortBackgroundJobDone(u32 job);
+void GXPortBackgroundJobWait(u32 job);
+// Port extension: the calling thread, one aurora did not make (an SDL thread), keeps to the PS
+// Vita's fourth core at the Vita priority given (lower is sooner; 0 leaves it), and is named for
+// the [threads] log. Returns the core it keeps to (3), or -1 when the core is closed (no CapUnlocker)
+// and the thread stays where it was, only named. Elsewhere -1.
+int GXPortKeepThreadToFourthCore(const char* name, int vitaPriority);
 
 void GXColor4f32(float r, float g, float b, float a);
 

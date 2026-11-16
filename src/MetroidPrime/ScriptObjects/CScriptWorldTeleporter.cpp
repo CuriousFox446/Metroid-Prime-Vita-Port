@@ -11,6 +11,10 @@
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "Kyoto/CResFactory.hpp"
 
+#include "port_debug.h"
+
+#include <stdio.h>
+
 #ifdef MP_ENABLE_SMOKE_DRIVER
 #include "port_smoke.h"
 #endif
@@ -111,6 +115,21 @@ void CScriptWorldTeleporter::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId
       gpGameState->SetCurrentWorldId(x34_worldId);
 
       if (gpResourceFactory->GetResLoader().GetResourceTypeById(x34_worldId) == 'MLVL') {
+        // Port: Metroid Prime Demo ends with the frigate. Its way out quits instead, as the
+        // pause screen's Quit Game does, and the front end, which the demo passes straight
+        // through (fast boot), starts a new game on the frigate. Only here is the target known
+        // to be a world: SetCurrentWorldId has just readied its PAK, which until then was
+        // stashed like every world's but the current one's. The frigate is made current again.
+        if (PortDebug::Demo() && x34_worldId != currentWorld) {
+          fprintf(stderr, "[demo] the way out to world %08X: a new game on the frigate\n",
+                  static_cast< unsigned >(x34_worldId));
+          gpGameState->SetCurrentWorldId(currentWorld);
+          x40_25_inTransition = false;
+          transMgr->DisableTransition();
+          transMgr->SfxStop();
+          mgr.QuitGame();
+          break;
+        }
         StartTransition(mgr);
         gpGameState->SetCurrentWorldId(x34_worldId);
         gpGameState->CurrentWorldState().SetDesiredAreaAssetId(x38_areaId);

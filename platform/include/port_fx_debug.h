@@ -2,6 +2,8 @@
 #define METROID_PRIME_PORT_PORT_FX_DEBUG_H
 #include <dolphin/gx/GXExtra.h>
 
+#include "port_thread_slot.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -68,6 +70,9 @@ bool Alive(uint32_t id);
 
 // Update/render scopes in the generators. The outermost update applies the time scale; every
 // outermost call is timed when gTiming is on. Nested calls (children) do neither.
+// Their state is per thread without thread_local, which is emulated TLS on the PS Vita, a lookup
+// on every access, twice an update (0.42.0 test 17): since test 19 the side worker updates actors'
+// systems while the game thread updates others, and port_thread_slot.h tells the two apart.
 struct UpdateScope {
   explicit UpdateScope(double dtIn) : dt(dtIn) {
     top = depth()++ == 0;
@@ -99,8 +104,8 @@ struct UpdateScope {
 
 private:
   static int& depth() {
-    static thread_local int d = 0;
-    return d;
+    static PortThreadValue< int > d(0);
+    return d.Get();
   }
   bool top = false;
   std::chrono::steady_clock::time_point t0;
@@ -137,12 +142,12 @@ struct RenderScope {
 
 private:
   static int& depth() {
-    static thread_local int d = 0;
-    return d;
+    static PortThreadValue< int > d(0);
+    return d.Get();
   }
   static GXBool& fog() {
-    static thread_local GXBool f = GX_FALSE;
-    return f;
+    static PortThreadValue< GXBool > f(GX_FALSE);
+    return f.Get();
   }
   bool top = false;
   GXBool prevFog = GX_FALSE;

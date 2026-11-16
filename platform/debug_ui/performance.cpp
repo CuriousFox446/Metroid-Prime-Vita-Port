@@ -52,6 +52,7 @@ void DrawPerformanceTab() {
   ItemHelp("With the FPS cap off, smooths mouse, gyro and twin-stick look and moving objects "
            "between the game's 60 Hz ticks. Aim and shots are unchanged.");
 
+
   ImGui::SeparatorText("Simulation rate (very experimental)");
   ImGui::TextColored(ThemeWarnColor(), "For testing only. The game was written for 60 Hz: other rates can\n"
                                        "break physics, enemy behaviour, cutscenes and scripted events.");

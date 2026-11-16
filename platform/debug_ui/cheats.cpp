@@ -325,7 +325,7 @@ void DrawCheats() {
   const float goWidth = ImGui::CalcTextSize("Reload").x + ImGui::GetStyle().FramePadding.x * 2.f;
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - goWidth - ImGui::GetStyle().ItemSpacing.x);
   if (ImGui::BeginCombo("##room", roomLabel(current).c_str(), ImGuiComboFlags_HeightLarge)) {
-#if !defined(__ANDROID__) // it would raise the on-screen keyboard every time
+#if !defined(__ANDROID__) && !defined(__vita__) // it would raise the on-screen (system) keyboard every time
     if (ImGui::IsWindowAppearing()) {
       ImGui::SetKeyboardFocusHere();
     }

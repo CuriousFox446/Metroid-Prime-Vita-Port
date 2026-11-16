@@ -34,8 +34,13 @@ void CParticleGenInfoGeneric::Render() { x84_system->Render(); }
 
 void CParticleGenInfoGeneric::Update(float dt, CStateManager& stateMgr) {
   x84_system->Update(dt);
-
 #ifdef TARGET_PC
+  PortUpdateRest(dt, stateMgr);
+}
+
+void CParticleGenInfoGeneric::PortUpdateSystem(float dt) { x84_system->Update(dt); }
+
+void CParticleGenInfoGeneric::PortUpdateRest(float, CStateManager& stateMgr) {
   xPortNestedLights.Update(stateMgr, x84_system.GetPtr(), GetIsActive(), kInvalidUniqueId,
                            xPortAreaId, rstl::string_l("ParticlePHDR"), xPortLightSource, 0);
 #endif

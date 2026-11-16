@@ -1,4 +1,6 @@
 #include "MetroidPrime/CMFGame.hpp"
+#include "MetroidPrime/CParticleDatabase.hpp"
+#include "port_profile.h"
 #include "Kyoto/CResFactory.hpp"
 #include "Kyoto/CSimplePool.hpp"
 #include "Kyoto/Graphics/CModel.hpp"
@@ -36,6 +38,7 @@
 #include "MetroidPrime/CWorld.hpp"
 
 #include <cstdio>
+#include "port_skip_cutscenes.h"
 #include "MetroidPrime/CScriptLayerManager.hpp"
 #include "port_room_env.h"
 #include "port_savestate.h"
@@ -110,6 +113,7 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
     break;
   }
   case kAM_TimerTick: {
+    PORT_ZONE_TIMED("CMFGame tick");
     bool wasInitialized = mInitialized;
     mInitialized = true;
     float dt = MakeMsg::GetParmTimerTick(message).GetReal();
@@ -147,7 +151,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
     // Fall through.
     case kGFS_InGame:
 #ifdef TARGET_PC
-      PortPhoto::Tick(*mStateManager, mFlowState == kGFS_InGame);
+      {
+        PORT_ZONE_TIMED("CMFGame tick: PortPhoto::Tick");
+        PortPhoto::Tick(*mStateManager, mFlowState == kGFS_InGame);
+      }
 #endif
       mStateManager->SetRandomAvailable(true);
       switch (mStateManager->GetDeferredStateTransition()) {
@@ -208,7 +215,10 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
       CSfxManager::mCurrentChannel = channel;
     }
     PortDebug::SetMouseGameplayActive(mouseActive);
-    mGuiManager->Update(mgr, dt, queue, IsCameraActiveFlow());
+    {
+      PORT_ZONE_TIMED("CMFGame tick: CInGameGuiManager::Update (HUD)");
+      mGuiManager->Update(mgr, dt, queue, IsCameraActiveFlow());
+    }
     if (!wasInitialized)
       gpGameState->WorldTransitionManager()->EndTransition();
     return kMR_Exit;
@@ -226,8 +236,15 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 #ifdef TARGET_PC
         // Photo mode takes Start (leave) and Z (rise) for itself.
         const bool photoMode = PortPhoto::Active();
-        // A skips a skippable cinematic too (it does nothing else while one plays).
-        const bool skipPress = !photoMode && (input.PStart() || (cineCam && input.PA()));
+        // A cinematic is skipped only with Skippable cutscenes on (or forced on in a randomized
+        // game), with Start or A (it does nothing else while one plays). Off, none is: the game's
+        // own rule let Start skip any cinematic the memory card had seen played before, and A
+        // with it, so the fire button skipped cutscenes with the setting off. Original experience
+        // keeps the game's rule, Start alone.
+        const bool skipPress =
+            !photoMode && (cineCam != nullptr ? (PortSkipCutscenes::Active() && (input.PStart() || input.PA())) ||
+                                                    (PortDebug::OriginalExperience() && input.PStart())
+                                              : input.PStart());
 #else
         const bool photoMode = false;
         const bool skipPress = input.PStart();
@@ -269,7 +286,16 @@ CIOWin::EMessageReturn CMFGame::OnMessage(const CArchitectureMessage& message,
 }
 
 void CMFGame::Draw() const {
+  PORT_ZONE("CMFGame::Draw");
 #ifdef TARGET_PC
+  {
+    // 0.42.0 test 21: the actors' particle steps the frame's ticks left on the side worker are
+    // finished here, once a frame, not at the end of each tick (test 20: 4.8 ms a frame of waits
+    // in Magmoor, the side worker given only the rest of each tick). A database the next tick or
+    // this draw reads first finishes its own first anyway.
+    PORT_ZONE_TIMED("frame: particle updates finished (side worker drain)");
+    CParticleDatabase::PortFinishAll();
+  }
   // Do not let a request survive a non-game draw (or an early return) into another frame.
   CStateManager::sPortSceneHdrRequest = false;
   CCubeMaterial::sPortSceneHdr = false;

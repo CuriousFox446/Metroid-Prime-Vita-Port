@@ -10,6 +10,19 @@ include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 #   - "shared" (default): prefer nod::nod_shared
 #   - "static": prefer nod::nod_static
 
+# PS Vita: nod is Rust and has no Vita build; a plain GCM reader implements the
+# part of its C API Aurora uses (platforms/vita/nod).
+if (VITA)
+  if (NOT TARGET nod_gcm)
+    set(_nod_dir "${CMAKE_CURRENT_LIST_DIR}/../platforms/vita/nod")
+    add_library(nod_gcm STATIC "${_nod_dir}/nod_gcm.cpp")
+    target_include_directories(nod_gcm PUBLIC "${_nod_dir}/include")
+    target_compile_features(nod_gcm PRIVATE cxx_std_20)
+    add_library(nod::nod ALIAS nod_gcm)
+  endif ()
+  return()
+endif ()
+
 # ── Auto: resolve provider based on platform availability ──
 set(_aurora_nod_provider "${AURORA_NOD_PROVIDER}")
 if (_aurora_nod_provider STREQUAL "auto")

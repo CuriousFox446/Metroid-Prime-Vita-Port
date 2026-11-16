@@ -1,5 +1,6 @@
 #include "MetroidPrime/CInGameGuiManager.hpp"
 #include "port_env.h"
+#include "port_profile.h"
 #ifdef TARGET_PC
 #include "port_mods.h"
 #include "port_pause_lighting.h"
@@ -755,19 +756,21 @@ void CInGameGuiManager::Update(const CStateManager& mgr, float dt, CArchitecture
     x1f4_visorStaticAlpha = visorStaticAlpha;
   }
   if (cameraActive) {
+    PORT_ZONE_TIMED("HUD: faceplate and Samus's reflection");
     x20_faceplateDecor.Update(dt, mgr);
-  }
-  if (cameraActive) {
     x40_samusReflection->Update(dt, mgr, x1c_rand);
   }
   if (x1f0_enablePlayerVisor != 0 && cameraActive) {
+    PORT_ZONE_TIMED("HUD: the player visor");
     x30_playerVisor->Update(dt, mgr);
   }
   if (cameraActive && x1f8_25_playerAlive) {
+    PORT_ZONE_TIMED("HUD: CSamusHud::Update");
     x34_samusHud->Update(dt, mgr, x1e0_helmetVisMode, x1ec_hudVisMode != CTweakGui::kHud_Zero,
                          x1e4_enableTargetingManager != 0);
   }
   if (x1e8_enableAutoMapper != 0) {
+    PORT_ZONE_TIMED("HUD: the auto mapper");
     UpdateAutoMapper(mgr, dt);
   }
   x3c_pauseScreenBlur->Update(dt, mgr, x12c_dumpedTextures.empty());

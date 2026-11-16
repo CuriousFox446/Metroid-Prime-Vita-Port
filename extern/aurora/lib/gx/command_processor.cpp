@@ -20,16 +20,26 @@
 #include "resident.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
+#include "vita_draw.hpp"
+#include "../vita_gl.hpp"
+#if defined(__vita__)
+#include "../vita_side_jobs.hpp"
+#endif
 
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
+#include <aurora/gfx.h>
+#include <aurora/vfx.hpp>
+
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <span>
 #include <memory>
 #include <vector>
@@ -300,7 +310,13 @@ ProcessResult process(const u8* data, u32 size) noexcept {
 
     case CP_CMD_LOAD_BP_REG: {
       const u32 value = reader.read<u32>();
-      handle_bp(value);
+      if (reg_get(value, 8, 24) == 0x52) { // an EFB copy or clear
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
+        handle_bp(value);
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kCopies);
+      } else {
+        handle_bp(value);
+      }
       if (reg_get(value, 8, 24) == GX_BP_REG_DRAWDONE) {
         return {static_cast<u32>(reader.offset()), true};
       }
@@ -365,7 +381,10 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     }
 
     case GX_AURORA: {
+      // Its draws mark their own sections (handle_aurora).
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
       handle_aurora(reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kAurora);
       break;
     }
 
@@ -377,14 +396,18 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     case GX_DRAW_LINES:
     case GX_DRAW_LINE_STRIP:
     case GX_DRAW_POINTS: {
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
       handle_draw(cmd, reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
       break;
     }
 
     default:
       // Check if it's a draw command (0x80-0xBF range)
       if (cmd >= 0x80) {
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kState);
         handle_draw(cmd, reader);
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
       } else {
         // Hex dump surrounding bytes for debugging
         {
@@ -701,6 +724,7 @@ static bool check_indexed_arrays(const u8* vtxData, GXVtxFmt fmt, GXPrimitive pr
 
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) noexcept {
+  ZoneScoped;
   auto& state = g_gxState;
   auto& cache = sDrawCache;
   if (drop_overflowed_draw(vertRange, "vertex") || drop_overflowed_draw(idxRange, "index")) {
@@ -975,6 +999,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
     return;
   }
 
+  const auto vertexData = reader.take(totalVtxBytes);
+  if (vita_gl::active() && vita::draw_immediate(prim, fmt, vtxCount, vertexData)) {
+    // Drawn by the Vita path; the WebGPU draw would only feed the null device.
+    return;
+  }
+
   // A cast-only draw pushes no command of its own, so it must not extend the last world draw; nor
   // must one that pass 1 of a depth pre-pass leaves out.
   const bool cleanState = g_gxState.dirty == 0 && !g_gxState.shadowCasterOnly && !sDrawCache.prepassSkip && g_gxState.actorLayer < 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
@@ -983,7 +1013,6 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
 
   // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
-  const auto vertexData = reader.take(totalVtxBytes);
   gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), canMerge ? 0 : 4);
   if (drop_overflowed_draw(vertRange, "vertex")) {
     return;
@@ -1052,11 +1081,22 @@ static u32 current_vtx_size(GXVtxFmt fmt) noexcept {
   return g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calc_vtx_size(fmt);
 }
 
+// For aurora_take_resident_dl_stats: written on the processor thread, read and reset by
+// the game's thread.
+static struct {
+  std::atomic<uint32_t> calls{0}, drawnResident{0}, sent{0}, builds{0}, failCommand{0}, failIndices{0},
+      failVertexSize{0}, failRoom{0}, rebuilds{0};
+  std::atomic<uint8_t> lastCommand{0};
+} sResidentStats;
+
+static void count(std::atomic<uint32_t>& counter) noexcept { counter.fetch_add(1, std::memory_order_relaxed); }
+
 // Makes a retained display list into triangle lists in the resident buffers, as the
 // processor would draw it now (merged draws, with their index buffers). False when it holds
 // anything but triangle draws, or there is no room for it.
 static bool build_resident_dl(resident::Entry& entry) noexcept {
   ZoneScoped;
+  count(sResidentStats.builds);
   const std::vector<u8>& bytes = *entry.bytes;
   std::array<u32, GX_MAX_VTXFMT> sizes{};
   std::vector<resident::Chunk> chunks;
@@ -1070,6 +1110,8 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
       continue;
     }
     if (cmd < 0x80 || bytes.size() - pos < 2) {
+      count(sResidentStats.failCommand);
+      sResidentStats.lastCommand.store(cmd, std::memory_order_relaxed);
       return false;
     }
     const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -1078,6 +1120,8 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     pos += 2;
     const u32 numIndices = triangle_index_count(prim, vtxCount);
     if (numIndices == 0 || numIndices > 0xFFFF) {
+      count(sResidentStats.failIndices);
+      sResidentStats.lastCommand.store(cmd, std::memory_order_relaxed);
       return false;
     }
     if (sizes[fmt] == 0) {
@@ -1085,6 +1129,7 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     }
     const size_t vtxBytes = size_t(vtxCount) * sizes[fmt];
     if (sizes[fmt] == 0 || vtxBytes > bytes.size() - pos) {
+      count(sResidentStats.failVertexSize);
       return false;
     }
     if (chunks.empty() || chunks.back().fmt != fmt || u32(chunks.back().vtxCount) + vtxCount > 0xFFFF) {
@@ -1116,7 +1161,12 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
     chunk.vertSize += static_cast<u32>(vtxBytes);
     chunk.idxCount += made;
   }
-  if (chunks.empty() || !resident::store_dl(entry, verts, indices)) {
+  if (chunks.empty()) {
+    count(sResidentStats.failCommand); // nothing but NOPs
+    return false;
+  }
+  if (!resident::store_dl(entry, verts, indices)) {
+    count(sResidentStats.failRoom);
     return false;
   }
   entry.vtxSizes = sizes;
@@ -1126,9 +1176,15 @@ static bool build_resident_dl(resident::Entry& entry) noexcept {
 
 static void call_resident_dl(const void* key, u32 size) noexcept {
   ZoneScoped;
+  count(sResidentStats.calls);
   resident::Entry* const entry = resident::find(key);
   if (entry == nullptr || size > entry->bytes->size()) {
     Log.error("GX_AURORA_RESIDENT_CALL_DL: {} is not retained with {} bytes", key, size);
+    return;
+  }
+  if (vita_gl::active() && vita::draw_resident(key, *entry, size)) {
+    // Drawn by the Vita path (vita_draw.hpp). The WebGPU draw below would only feed the null
+    // device; lists the Vita path cannot draw yet still go there.
     return;
   }
   if (!entry->chunks.empty()) {
@@ -1137,6 +1193,7 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
       const u32 parsed = entry->vtxSizes[fmt];
       if (parsed != 0 && parsed != current_vtx_size(static_cast<GXVtxFmt>(fmt))) {
         resident::free_dl(*entry);
+        count(sResidentStats.rebuilds);
         break;
       }
     }
@@ -1147,9 +1204,11 @@ static void call_resident_dl(const void* key, u32 size) noexcept {
   }
   if (entry->chunks.empty()) {
     // As GXCallDisplayList would have sent it.
+    count(sResidentStats.sent);
     process(entry->bytes->data(), size);
     return;
   }
+  count(sResidentStats.drawnResident);
   for (const resident::Chunk& chunk : entry->chunks) {
     const gfx::Range vertRange{entry->vert.offset + chunk.vertOffset, chunk.vertSize};
     const gfx::Range idxRange{entry->idx.offset + chunk.idxOffset, chunk.idxCount * u32(sizeof(u16))};
@@ -1170,9 +1229,16 @@ static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
   draw_prim(prim, fmt, reader.read<u16>(), reader);
 }
 
+// aurora_take_aurora_op_counts: extension commands processed, by opcode (GX2 and higher in the
+// last slot). Only the FIFO thread writes them; the reader takes the difference between reads.
+static std::array<std::atomic<u32>, AURORA_GX_OPCODES> sAuroraOpCounts{};
+
 void handle_aurora(ByteReader& reader) noexcept {
-  ZoneScoped;
   const u16 subCmd = reader.read<u16>();
+  {
+    auto& ops = sAuroraOpCounts[std::min<u32>(subCmd, AURORA_GX_OPCODES - 1)];
+    ops.store(ops.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  }
 
   if (subCmd == GX_AURORA_LOAD_VIEWPORT_RENDER) {
     const f32 left = reader.read<f32>();
@@ -1356,14 +1422,17 @@ void handle_aurora(ByteReader& reader) noexcept {
       u32 vtxCount = byteLen / vtxSize;
       AURORA_ASSERT(vtxCount <= 0xFFFF, "GX_AURORA_DRAW_SIZED: too many vertices ({})", vtxCount);
       draw_prim(prim, fmt, static_cast<u16>(vtxCount), reader);
+      vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
     }
   } else if (subCmd == GX_AURORA_RESIDENT_RETAIN) {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     std::unique_ptr<std::vector<u8>> bytes{reinterpret_cast<std::vector<u8>*>(reader.read<u64>())};
     resident::retain(key, std::move(bytes));
+    vita::retained();
   } else if (subCmd == GX_AURORA_RESIDENT_RELEASE) {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     resident::release(key);
+    vita::release(key);
     // An array still set to it reads its resident copy no more.
     for (auto& array : g_gxState.arrays) {
       if (array.data == key) {
@@ -1374,6 +1443,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     const auto* key = reinterpret_cast<const void*>(reader.read<u64>());
     const u32 size = reader.read<u32>();
     call_resident_dl(key, size);
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
   } else if (subCmd == GX_AURORA_DRAW_INDEXED) {
     ZoneScopedN("DRAW_INDEXED");
     const u8 cmd = reader.read<u8>();
@@ -1386,7 +1456,6 @@ void handle_aurora(ByteReader& reader) noexcept {
     const size_t idxBytes = static_cast<size_t>(indexCount) * sizeof(u16);
     // Index data is always host-endian; push it to the GPU buffer as-is
     const auto indexData = reader.take(idxBytes);
-    const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
     u32 vtxSize;
     if (g_gxState.lastVtxFmt == fmt) {
       vtxSize = g_gxState.lastVtxSize;
@@ -1398,11 +1467,17 @@ void handle_aurora(ByteReader& reader) noexcept {
     if (check_indexed_arrays(vertexData.data(), fmt, prim, vtxCount, vtxSize)) UNLIKELY {
       sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
     } else {
+      if (vita_gl::active() && vita::draw_indexed(fmt, vtxCount, vertexData, indexData)) {
+        vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
+        return; // drawn by the Vita path
+      }
+      const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
       const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
       if (indexCount != 0) {
         push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
       }
     }
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kOtherDraws);
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
     gfx::push_debug_group(std::move(label));
@@ -1767,6 +1842,20 @@ void handle_aurora(ByteReader& reader) noexcept {
         Log.warn("GX_AURORA_PORT_SCENE_HDR: switch to {} refused", value);
       }
     }
+  } else if (subCmd == GX_AURORA_PORT_FIFO_TASK) {
+    std::unique_ptr<std::function<void()>> task{
+        reinterpret_cast<std::function<void()>*>(static_cast<uintptr_t>(reader.read<u64>()))};
+    (*task)();
+  } else if (subCmd == GX_AURORA_PORT_SIDE_JOB_FENCE) {
+    // What follows reads what the side worker makes (a skinned model's vertices): wait for it.
+    const u32 job = reader.read<u32>();
+#if defined(__vita__)
+    side_jobs::wait(job, true);
+#else
+    (void)job;
+#endif
+  } else if (subCmd == GX_AURORA_PORT_VFX_CAPTURE_SCENE) {
+    gfx::vfx::capture_scene_now(reader.read<u8>() != 0);
   } else if (subCmd == GX_AURORA_PORT_COPY_SCENE) {
     const u8 value = reader.read<u8>();
     if (value > 1) {
@@ -2096,3 +2185,26 @@ void set_vertex_array_check(bool enabled) noexcept {
   vertexArrayCheck.store(enabled, std::memory_order_relaxed);
 }
 } // namespace aurora::gx::testing
+
+void aurora_take_resident_dl_stats(AuroraResidentDlStats* out) {
+  auto& s = aurora::gx::fifo::sResidentStats;
+  const auto take = [](std::atomic<uint32_t>& counter) { return counter.exchange(0, std::memory_order_relaxed); };
+  *out = AuroraResidentDlStats{
+      .calls = take(s.calls),
+      .drawnResident = take(s.drawnResident),
+      .sent = take(s.sent),
+      .builds = take(s.builds),
+      .failCommand = take(s.failCommand),
+      .lastCommand = s.lastCommand.load(std::memory_order_relaxed),
+      .failIndices = take(s.failIndices),
+      .failVertexSize = take(s.failVertexSize),
+      .failRoom = take(s.failRoom),
+      .rebuilds = take(s.rebuilds),
+  };
+}
+
+void aurora_read_aurora_op_counts(uint32_t out[AURORA_GX_OPCODES]) {
+  for (uint32_t i = 0; i < AURORA_GX_OPCODES; ++i) {
+    out[i] = aurora::gx::fifo::sAuroraOpCounts[i].load(std::memory_order_relaxed);
+  }
+}

@@ -2,6 +2,7 @@
 #ifdef TARGET_PC
 #include "port_pause_lighting.h"
 #endif
+#include "port_profile.h"
 #include "port_env.h"
 #include "Kyoto/Basics/CBasics.hpp"
 #include <cstring>
@@ -1540,6 +1541,7 @@ bool CCubeModel::TryLockTextures() const {
 }
 
 void CCubeModel::DrawSurfaces(const CModelFlags& flags) const {
+  PORT_ZONE_TIMED("CCubeModel::DrawSurfaces");
   if (sDrawingWireframe) {
     for (CCubeSurface surface = GetNormalSurfaces(); surface.IsValid();
          surface = surface.GetNextSurface()) {

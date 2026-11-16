@@ -454,6 +454,9 @@ void FreeRetiredGalleryTextures(bool all);
 void CloseGallery();
 void DrawGalleryWindow();
 
+// input.cpp: the Vita's front-screen tap on the HUD's minimap opens the map (RequestMapTap).
+void MinimapTapEvent(const SDL_Event& event);
+
 // overlays.cpp
 void PhotoTouchEvent(const SDL_Event& event);
 void DrawStaleImportToast();
@@ -504,6 +507,7 @@ void DrawTexturesSection();
 // controls.cpp
 void DrawControlsOptions();
 void DrawControlsKeyboardMouse();
+void DrawAimCrosshair();
 void DrawControlsController();
 void DrawControlsTouchGyro();
 

@@ -15,6 +15,7 @@
 #include "port_input_devices.h"
 #include "port_input_remap_ui.h"
 #include "port_mods.h"
+#include "port_profile.h"
 #include "port_discord.h"
 #include "port_savestate.h"
 
@@ -23,6 +24,7 @@
 #include "Kyoto/Audio/CSfxManager.hpp"
 #include "MetroidPrime/SFX/UI.h"
 
+#include <aurora/aurora.h>
 #include <aurora/imgui.h>
 #include <imgui_internal.h>
 #include <SDL3/SDL_dialog.h>
@@ -37,6 +39,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
+#include <string>
 
 namespace PortDebug {
 
@@ -466,6 +470,158 @@ void RunGpuSelfTestIfRequested() {
   }
 }
 
+#ifdef __vita__
+// A character of the system keyboard's text as the field's flags let typing through (ImGui's
+// InputTextFilterCharacter, its named filters: the field is single-line, and none here filters by
+// callback): false to leave it out.
+static bool FilterTypedCharacter(unsigned int& c, ImGuiInputTextFlags flags) {
+  if (c < 0x20 || c == 127 || (c >= 0xE000 && c <= 0xF8FF)) {
+    return false;
+  }
+  if ((flags & (ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_CharsHexadecimal |
+                ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank |
+                ImGuiInputTextFlags_CharsScientific | ImGuiInputTextFlags_LocalizeDecimalPoint)) == 0) {
+    return true;
+  }
+  const auto point = static_cast< unsigned int >(ImGui::GetPlatformIO().Platform_LocaleDecimalPoint);
+  if ((flags & (ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_CharsScientific |
+                ImGuiInputTextFlags_LocalizeDecimalPoint)) != 0 && (c == '.' || c == ',')) {
+    c = point;
+  }
+  if ((flags & (ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_CharsScientific |
+                ImGuiInputTextFlags_CharsHexadecimal)) != 0 && c >= 0xFF01 && c <= 0xFF5E) {
+    c = c - 0xFF01 + 0x21; // full width to half width
+  }
+  const bool digit = c >= '0' && c <= '9';
+  const bool arithmetic = c == point || c == '-' || c == '+' || c == '*' || c == '/';
+  if ((flags & ImGuiInputTextFlags_CharsDecimal) != 0 && !digit && !arithmetic) {
+    return false;
+  }
+  if ((flags & ImGuiInputTextFlags_CharsScientific) != 0 && !digit && !arithmetic && c != 'e' && c != 'E') {
+    return false;
+  }
+  if ((flags & ImGuiInputTextFlags_CharsHexadecimal) != 0 && !digit && !(c >= 'a' && c <= 'f') &&
+      !(c >= 'A' && c <= 'F')) {
+    return false;
+  }
+  if ((flags & ImGuiInputTextFlags_CharsUppercase) != 0 && c >= 'a' && c <= 'z') {
+    c += static_cast< unsigned int >('A' - 'a');
+  }
+  if ((flags & ImGuiInputTextFlags_CharsNoBlank) != 0 && (c == ' ' || c == '\t' || c == 0x3000)) {
+    return false;
+  }
+  return true;
+}
+
+// The active field's text made `text` (filtered as typing it would be, cut to the field's buffer
+// at a character's end), everything selected: the field copies its edit buffer to its own at its
+// next frame, before Enter releases it (InputTextEx applies the live buffer, then lets go).
+static void SetFieldText(ImGuiInputTextState& state, const char* text) {
+  const int capacity = std::max(state.BufCapacity - 1, 0);
+  std::string filtered;
+  for (const char* s = text; *s != '\0';) {
+    unsigned int c = 0;
+    s += ImTextCharFromUtf8(&c, s, nullptr);
+    if (!FilterTypedCharacter(c, state.Flags)) {
+      continue;
+    }
+    char utf8[5] = {};
+    ImTextCharToUtf8(utf8, c);
+    const size_t length = std::strlen(utf8);
+    if (filtered.size() + length > static_cast< size_t >(capacity)) {
+      break;
+    }
+    filtered += utf8;
+  }
+  const int length = static_cast< int >(filtered.size());
+  if (state.TextA.Size < length + 1) {
+    state.TextA.resize(length + 1);
+  }
+  std::memcpy(state.TextA.Data, filtered.c_str(), static_cast< size_t >(length) + 1);
+  state.TextLen = length;
+  state.SelectAll();
+  state.CursorClamp();
+  state.CursorFollow = true;
+  state.CursorAnimReset();
+}
+
+// The Vita has no keyboard. A text field that becomes active (the settings search, a seed, an
+// address, a room filter, a colour's hex) opens the system's, which Aurora draws over the frame;
+// while it is up, and until the button that closed it is let go, the pad does not reach the
+// overlay. Closed with its text (Enter, or its close button, as SDL's own Vita keyboard takes it),
+// the text is put in the field and Enter closes the field; no text could be had, the field closes
+// as it was. SDL used to open the system keyboard itself without vitaGL ever drawing it, and the
+// field waited for typing that could not come: the search box held on to the pad, and the overlay
+// could not be left (tallon7). Until 0.42.0 test 15 the text went in as key presses (select all,
+// the characters, Enter), and in this ImGui what was typed did not register (the user: "whatever I
+// type just doesn't register"); the field's edit buffer is now set directly. True while the
+// overlay should not see the pad.
+static bool UpdateSystemKeyboard(bool padHeld) {
+  enum class Step { Idle, Up, Applying, Releasing };
+  static Step sStep = Step::Idle;
+  static ImGuiID sField = 0;
+  static int sFrames = 0;
+  ImGuiContext& g = *ImGui::GetCurrentContext();
+  ImGuiIO& io = ImGui::GetIO();
+  switch (sStep) {
+  case Step::Idle: {
+    const ImGuiInputTextState* state = io.WantTextInput ? ImGui::GetInputTextState(g.ActiveId) : nullptr;
+    if (state == nullptr) {
+      return false;
+    }
+    const std::string text(state->TextA.Data, static_cast< size_t >(state->TextLen));
+    if (!aurora_open_system_keyboard(text.c_str(), static_cast< uint32_t >(std::max(state->BufCapacity - 1, 1)))) {
+      ImGui::ClearActiveID(); // no keyboard: the field must not wait for one
+      return false;
+    }
+    sField = g.ActiveId;
+    sStep = Step::Up;
+    return true;
+  }
+  case Step::Up: {
+    static char sText[3 * 2048 + 1];
+    const int result = aurora_system_keyboard_result(sText, sizeof(sText));
+    if (result == 0) {
+      return true;
+    }
+    ImGuiInputTextState* state = ImGui::GetInputTextState(sField);
+    const bool active = g.ActiveId == sField && state != nullptr;
+    if (active && result > 0) {
+      SetFieldText(*state, sText);
+      io.AddKeyEvent(ImGuiKey_Enter, true);
+      io.AddKeyEvent(ImGuiKey_Enter, false);
+    } else if (active) {
+      ImGui::ClearActiveID();
+    }
+    PortLog::Write("port: system keyboard %s (%zu bytes)%s\n", result > 0 ? "closed with its text" : "cancelled",
+                   result > 0 ? std::strlen(sText) : size_t{0},
+                   active ? "" : "; the field it was opened for had closed meanwhile");
+    sStep = Step::Applying;
+    sFrames = 0;
+    return true;
+  }
+  case Step::Applying:
+    // The keys land over a few frames. A field still active after them (one that takes the focus
+    // back after Enter) is closed, so the keyboard does not come straight back.
+    if (g.ActiveId == sField && ++sFrames < 30) {
+      return true;
+    }
+    if (g.ActiveId == sField) {
+      ImGui::ClearActiveID();
+    }
+    sStep = Step::Releasing;
+    [[fallthrough]];
+  case Step::Releasing:
+    if (padHeld) {
+      return true;
+    }
+    sStep = Step::Idle;
+    return false;
+  }
+  return false;
+}
+#endif
+
 void UpdateControllerNav() {
   EnsureInitialized();
   // Registered here rather than in EnsureInitialized so the event system is only
@@ -479,13 +635,23 @@ void UpdateControllerNav() {
     InstallTouchOverlay();
 #endif
   }
-  UpdateUiScale();
-  ApplyThemeIfChanged();
+  {
+    PORT_ZONE_TIMED("frame: UI scale and theme");
+    UpdateUiScale();
+    ApplyThemeIfChanged();
+  }
+#if !defined(__vita__)
+  // The Vita's own pad is its only one, on port 0 already; asking would be an SDL call (some
+  // 20 us there) on each frame a stick moves.
   TakePadPortForLastUsed();
+#endif
   // The Steam Controller's and Deck's own reports (gyro and back buttons) first, so the polls
   // after this read this frame's.
   PortSteamTriton::Update();
-  PortInputDevices::PollPortActions();
+  {
+    PORT_ZONE_TIMED("frame: Port actions (PollPortActions)");
+    PortInputDevices::PollPortActions();
+  }
   if (sToggleRequested.exchange(false, std::memory_order_acq_rel)) {
     Toggle();
   }
@@ -536,15 +702,32 @@ void UpdateControllerNav() {
   // player's, queues two changes a frame where ImGui applies one.
   const s32 padIndex = PADGetIndexForPort(PAD_CHAN0);
   SDL_Gamepad* pad = PADGetSDLGamepadForIndex(padIndex >= 0 ? static_cast< u32 >(padIndex) : 0);
+  // The pad is read as the PAD calls read it (PADGetGamepadButton, PADGetGamepadAxis): the Vita
+  // takes these 40 or so reads a frame from one read of the pad an event pump, where SDL's own
+  // calls cost about 20 us each (1.2 ms a frame here in 0.42.0 test 6).
+#ifdef __vita__
+  const auto anyHeld = [pad] {
+    for (int button = 0; pad != nullptr && button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+      if (PADGetGamepadButton(pad, button)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const bool keyboard = UpdateSystemKeyboard(anyHeld());
+#else
+  constexpr bool keyboard = false;
+#endif
   // While the Controls tab captures a pad input, the pad binds instead of
   // navigating (releasing everything here also ends any nav press in progress).
-  // A pad that went away releases everything the same way.
-  const bool capturing = pad == nullptr || PortInputRemap::Capturing();
+  // A pad that went away releases everything the same way, as does the Vita's
+  // system keyboard while it is up.
+  const bool capturing = pad == nullptr || PortInputRemap::Capturing() || keyboard;
   const auto held = [pad, capturing](SDL_GamepadButton button) {
-    return !capturing && SDL_GetGamepadButton(pad, button);
+    return !capturing && PADGetGamepadButton(pad, button) != FALSE;
   };
   const auto axis = [pad, capturing](SDL_GamepadAxis a) {
-    return capturing ? Sint16{0} : SDL_GetGamepadAxis(pad, a);
+    return capturing ? Sint16{0} : static_cast< Sint16 >(PADGetGamepadAxis(pad, a));
   };
   constexpr Sint16 kStickThreshold = 16000;
   io.AddKeyEvent(ImGuiKey_GamepadDpadUp,
@@ -569,6 +752,10 @@ void UpdateControllerNav() {
 
 void Toggle() {
   EnsureInitialized();
+  // Metroid Prime Demo has no port menu: it does not open, whatever asks.
+  if (!sVisible && Demo()) {
+    return;
+  }
   sVisible = !sVisible;
   SetMouseCaptured(false);
   // A press that never got its release (seen on the Android tablet with a mouse

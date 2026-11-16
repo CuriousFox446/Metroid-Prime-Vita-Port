@@ -66,6 +66,10 @@ bool FastBoot();
 // MP_BOOT_WORLD=<MLVL hex>[:<MREA hex>]: no splash screens or front end; a new game
 // starts straight in that world (its default area without an MREA). Tests only.
 bool BootWorld(uint32_t& worldId, uint32_t& areaAssetId);
+// MP_DEMO=1: Metroid Prime Demo, the Vita's second app (platform/vita/vita_platform.cpp sets it,
+// with MP_FAST_BOOT): the frigate only. Its way out starts a new game instead of leaving for
+// Tallon Overworld (CScriptWorldTeleporter), and the port menu does not open.
+bool Demo();
 // MP_SKIP_CUTSCENES / MP_CUTSCENE_SPEED (tests only; not a saved setting).
 bool SkipCutscenes();
 float CutsceneSpeed();
@@ -80,6 +84,17 @@ float SimPeriod();
 // tick-for-tick. Experimental.
 bool SimAdaptive();
 void SetSimAdaptive(bool enabled);
+// The catch-up: how much of a frame the game's ticks may take when they have fallen behind, in
+// 60 Hz frames' worth; past it the frame drops the ticks it has left and the game runs slow rather
+// than drop further (CGameArchitectureSupport::UpdateTicks). Upstream's is 2; the PS Vita's 4,
+// whose heavy rooms (Magmoor's Puffers) ran at 62% speed at 2 (0.42.0 tests 14 and 16; not a
+// setting: the user's call). Original experience: 2.
+#ifdef __vita__
+constexpr unsigned kCatchUpFrames = 4;
+#else
+constexpr unsigned kCatchUpFrames = 2;
+#endif
+unsigned CatchUpFrames();
 // Smooth uncapped frames (port_settings.ini smooth_frames, on by default): sets
 // the four parts below together. Setting a part on its own (console `interp`)
 // is for testing and isn't saved.

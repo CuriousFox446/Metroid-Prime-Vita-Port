@@ -1,4 +1,5 @@
 #include "Kyoto/Particles/CElementGen.hpp"
+#include "port_profile.h"
 
 #include "Kyoto/Basics/CStopwatch.hpp"
 #include "Kyoto/CRandom16.hpp"
@@ -63,10 +64,11 @@ static void PortGetValueUV(const CUVElement* elem, int frame, CElementGen::CPart
   CParticleGlobals::xPortUVParticle = nullptr;
 }
 
-// A well-mixed per-particle seed (counter x golden ratio, then a murmur3 finaliser).
+// A well-mixed per-particle seed (counter x golden ratio, then a murmur3 finaliser). The counter is
+// shared by the game thread and the side worker (0.42.0 test 19), each draw a number of its own.
 static uint PortNextParticleSeed() {
-  static uint counter = 0;
-  uint h = ++counter * 0x9E3779B9u;
+  static std::atomic< uint > counter{0};
+  uint h = (counter.fetch_add(1, std::memory_order_relaxed) + 1) * 0x9E3779B9u;
   h ^= h >> 16;
   h *= 0x85EBCA6Bu;
   h ^= h >> 13;
@@ -128,17 +130,24 @@ extern "C" float frsqrte(float);
 bool CElementGen::sMoveRedToAlphaBuffer;
 bool CElementGen::sSubtractBlend;
 
-int CElementGen::mParticleAliveCount;
-int CElementGen::mParticleSystemAliveCount;
+#ifdef TARGET_PC
+std::atomic< int > CElementGen::mParticleAliveCount{0};
+std::atomic< int > CElementGen::mParticleSystemAliveCount{0};
 // Live systems of converted Remastered effects (PIRN): with any, the scene runs Remastered's
 // particle engine, which has no 0xa00 global cap (CreateNewParticles).
-static int sPortIrndSystems;
+static std::atomic< int > sPortIrndSystems{0};
+#else
+int CElementGen::mParticleAliveCount;
+int CElementGen::mParticleSystemAliveCount;
+#endif
 
 double CElementGen::kTickTime = 1 / 60.0;
-ushort CElementGen::sSeed = 99;
 #ifdef TARGET_PC
-uint CElementGen::sPortChildSeed = 0;
-bool CElementGen::sPortChildSeedSet = false;
+PortThreadValue< ushort > CElementGen::sSeed(99);
+PortThreadValue< uint > CElementGen::sPortChildSeed(0);
+PortThreadValue< bool > CElementGen::sPortChildSeedSet(false);
+#else
+ushort CElementGen::sSeed = 99;
 #endif
 static bool sStaticListInitialized;
 
@@ -918,11 +927,29 @@ void CElementGen::SetGlobalOrientAndTrans(const CTransform4f& xf) {
   SetGlobalTranslation(xf.GetTranslation());
 }
 
+#ifdef TARGET_PC
+// PortTakeUpdateStats: counted on the game thread and the side worker alike (0.42.0 test 19).
+static std::atomic< uint > sPortStatSteps{0};
+static std::atomic< uint > sPortStatIdleSteps{0};
+static std::atomic< uint > sPortStatParticles{0};
+static std::atomic< uint > sPortStatCreated{0};
+#endif
+
 const bool CElementGen::Update(double dt) {
 #ifdef TARGET_PC
   // +0xa0 bit 1: Update 0x2460e0 returns at once.
   if (xPortFrozen) {
     return false;
+  }
+  // The profile times only the outermost update: a child generator's is inside its parent's. Per
+  // thread: the side worker updates actors' systems while the game thread updates others.
+  static PortThreadValue< int > sPortUpdateDepth(0);
+  if (sPortUpdateDepth == 0) {
+    PORT_ZONE_TIMED("CElementGen::Update (particles)");
+    ++sPortUpdateDepth;
+    const bool result = Update(dt);
+    --sPortUpdateDepth;
+    return result;
   }
   PortFx::UpdateScope fxScope(dt);
   if (fxScope.skip) {
@@ -970,7 +997,7 @@ const bool CElementGen::Update(double dt) {
   }
 
 #ifdef TARGET_PC
-  const bool ret = InternalUpdate(dt);
+  const bool ret = PortIsIdle() ? PortIdleUpdate(dt) : InternalUpdate(dt);
   // KILL (0x24620c), after the tick: true sets +0xa0 bit 0 (deletable) and clears +0x208 bit 3, so
   // the deletable check that follows sets bit 1 too.
   if (x28_loadedGenDesc->xPortKill) {
@@ -1009,7 +1036,11 @@ float CElementGen::PortSleepDistanceSq() const {
 #endif
 
 bool CElementGen::InternalUpdate(double dt) {
+#ifndef TARGET_PC
+  // The update's time, into x2cc (which nothing reads). On the port two OSGetTime calls an update
+  // were the PS Vita's kernel locks (0.42.0 test 17): left out.
   CStopwatch sw;
+#endif
   CGlobalRandom gr(x27c_randState);
 
   int frameUpdateCount = 0;
@@ -1046,10 +1077,18 @@ bool CElementGen::InternalUpdate(double dt) {
     CParticleGlobals::PortSetSystemTime(x74_curFrame, x268_PSLT);
 #endif
 #ifdef TARGET_PC
-    PortStepMover();
-    PortStepPemv();
+    ++sPortStatSteps;
+    sPortStatParticles += static_cast< uint >(x30_particles.size());
+    {
+      PORT_ZONE_TIMED("particles: port mover (PortStepMover, PortStepPemv)");
+      PortStepMover();
+      PortStepPemv();
+    }
 #endif
-    UpdateExistingParticles();
+    {
+      PORT_ZONE_TIMED("particles: UpdateExistingParticles");
+      UpdateExistingParticles();
+    }
     CParticleGlobals::SetParticleLifetime(x268_PSLT);
 
 #ifdef TARGET_PC
@@ -1086,6 +1125,10 @@ bool CElementGen::InternalUpdate(double dt) {
         x28_loadedGenDesc->x1c_MAXP->GetValue(x74_curFrame, x90_MAXP);
       }
 
+#ifdef TARGET_PC
+      sPortStatCreated += static_cast< uint >(rstl::max_val(genCount, 0));
+#endif
+      PORT_ZONE_TIMED("particles: CreateNewParticles");
       CreateNewParticles(genCount);
     }
 
@@ -1121,6 +1164,7 @@ bool CElementGen::InternalUpdate(double dt) {
 
 #ifdef TARGET_PC
   if (frameUpdateCount > 0 && x28_loadedGenDesc->xPortVfx) {
+    PORT_ZONE_TIMED("particles: Remastered VFX update");
     PortVfxUpdateSystem();
   }
   // Only a system that stepped exactly one frame this tick can be drawn
@@ -1141,11 +1185,104 @@ bool CElementGen::InternalUpdate(double dt) {
 #ifdef TARGET_PC
   PortPspsTrim();
 #endif
-  BuildParticleSystemBounds();
+  {
+    PORT_ZONE_TIMED("particles: BuildParticleSystemBounds");
+    BuildParticleSystemBounds();
+  }
 
+#ifndef TARGET_PC
   x2cc = sw.GetElapsedTime();
+#endif
   return false;
 }
+
+#ifdef TARGET_PC
+// A system with nothing to step: no particle and none to come this update (no emission, or past
+// its lifetime, or spawned by code alone), no child or per-particle system, no light, no shutdown
+// countdown, no translation element to evaluate (POFS/SSPO/SEPO animated), no motion blur, no
+// Remastered frame; and a description that spawns no child at a frame (ICTS, IITS, KSSM, IDTS,
+// SSWH, SELC, extra swooshes, Remastered's spawns), varies no system value, scale or time scale,
+// moves no emitter and has no fixed bounds. Its steps change nothing but its time, which
+// PortIdleUpdate keeps as InternalUpdate would; no random number is drawn by them.
+// Puffers have fourteen gas jets each, most off and empty at any moment, and every one was stepped
+// in full every tick (0.42.0 test 14: some 310 system steps a frame in Magmoor, ~45 us each).
+bool CElementGen::PortIsIdle() const {
+  if (!x30_particles.empty() || !x290_activePartChildren.empty() || !xPortPsps.empty() ||
+      !xPortKssmChildren.empty()) {
+    return false;
+  }
+  const CGenDescription& d = *x28_loadedGenDesc;
+  if (x88_particleEmission && x74_curFrame < x268_PSLT && !d.xPortCodeSpawn) {
+    return false;
+  }
+  if (x308_lightType != kLT_None || xPortShutdownCountdown > 0 || x26c_24_translationDirty || x26c_30_MBLR ||
+      xPortIntFrame || !xPortMoverInit) {
+    return false;
+  }
+  if (d.x8_PSTS != nullptr || d.x78_ICTS || d.x90_IDTS || d.xa4_IITS || d.xbc_KSSM.get() != nullptr || d.xc0_SSWH ||
+      d.xd8_SELC || !d.xPortExtraSwooshes.empty() || d.xPortIrnd || d.xPortVfx || d.xPortFixedBounds || d.xPortSys ||
+      d.xPortIntScale != nullptr || d.xPortSpawnScale != nullptr || d.xPortXfmd == kPortXfmdSystem ||
+      d.xPortPemv != 0 || d.xPortKssm || PortHasMover()) {
+    return false;
+  }
+  return true;
+}
+
+// InternalUpdate for an idle system (PortIsIdle): its steps one by one in the same arithmetic,
+// each resetting the bounds gathered and the particle count, noting its frame as the children's
+// update does (x84_prevFrame) and moving to the next frame; then what follows the steps.
+bool CElementGen::PortIdleUpdate(double dt) {
+  int frameUpdateCount = 0;
+  double t = x74_curFrame * kTickTime;
+  const double dt1 = close_enough(dt, kTickTime) ? kTickTime : dt;
+  x78_curSeconds += dt1;
+  while (t < x78_curSeconds && !close_enough(t, x78_curSeconds)) {
+    x84_prevFrame = x74_curFrame;
+    ++frameUpdateCount;
+    t += kTickTime;
+    ++x74_curFrame;
+  }
+  if (frameUpdateCount != 0) {
+    x2d4_aabbMin = CVector3f(FLT_MAX, FLT_MAX, FLT_MAX);
+    x2e0_aabbMax = CVector3f(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    x2ec_maxSize = 0.0f;
+    x25c_activeParticleCount = 0;
+  }
+  if (close_enough(t, x78_curSeconds)) {
+    x78_curSeconds = t;
+    x80_timeDeltaScale = 1.0f;
+  } else {
+    // UpdateChildParticleSystems for the rest of the time: with no child, it notes the frame.
+    if (!close_enough(dt1 - (double)frameUpdateCount * kTickTime, 0.0, 1e-7)) {
+      x84_prevFrame = x74_curFrame;
+    }
+    x80_timeDeltaScale = 1.0f - static_cast< float >((t - x78_curSeconds) / kTickTime);
+  }
+  if (frameUpdateCount == 1 && x80_timeDeltaScale == 1.0f) {
+    xPortStepGeneration = CActor::PortTickGeneration();
+  } else if (frameUpdateCount != 0 || x80_timeDeltaScale != 1.0f) {
+    xPortStepGeneration = 0;
+  }
+  if (frameUpdateCount != 0) {
+    xPortPrevSpawnTranslation = xPortSpawnTranslation;
+    xPortPrevSpawnGeneration = xPortSpawnGeneration;
+    xPortSpawnTranslation = xdc_translation;
+    xPortSpawnGeneration = frameUpdateCount == 1 ? xPortStepGeneration : 0;
+  }
+  BuildParticleSystemBounds();
+  x2cc = 0.f;
+  sPortStatSteps += static_cast< uint >(frameUpdateCount);
+  sPortStatIdleSteps += static_cast< uint >(frameUpdateCount);
+  return false;
+}
+
+void CElementGen::PortTakeUpdateStats(uint& steps, uint& idle, uint& particles, uint& created) {
+  steps = sPortStatSteps.exchange(0, std::memory_order_relaxed);
+  idle = sPortStatIdleSteps.exchange(0, std::memory_order_relaxed);
+  particles = sPortStatParticles.exchange(0, std::memory_order_relaxed);
+  created = sPortStatCreated.exchange(0, std::memory_order_relaxed);
+}
+#endif
 
 void CElementGen::UpdateLightParameters() {
 #ifdef TARGET_PC
@@ -3007,7 +3144,11 @@ bool CElementGen::IsSystemDeletable() const {
 }
 
 void CElementGen::Render() {
+  PORT_ZONE("CElementGen::Render (particles)");
+#ifndef TARGET_PC
+  // The render's time, into x2d0 (which nothing reads): left out on the port, as the update's.
   CStopwatch timer;
+#endif
 #ifdef TARGET_PC
   // Asleep (SLDS): GetSystemEnabled is enabled && awake, and the scene proxy goes inactive.
   if (xPortAsleep) {
@@ -3093,7 +3234,9 @@ void CElementGen::Render() {
   }
 #endif
 
+#ifndef TARGET_PC
   x2d0 = timer.GetElapsedTime();
+#endif
 }
 
 #ifdef TARGET_PC

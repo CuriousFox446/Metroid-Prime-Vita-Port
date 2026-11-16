@@ -1,5 +1,6 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 
+#include "port_profile.h"
 #include "port_debug.h"
 #include "port_presentation_rules.h"
 #include "MetroidPrime/CActor.hpp"
@@ -405,8 +406,14 @@ void CCameraManager::Update(float dt, CStateManager& mgr) {
   const TUniqueId previousId = GetCurrentCameraId();
   const CTransform4f previousTransform =
       GetCurrentCamera(mgr).GetTransform() * CTransform4f::Translate(x30_shakeOffset);
-  UpdateCameraHints(dt, mgr);
-  UpdateCameras(dt, mgr);
+  {
+    PORT_ZONE_TIMED("camera: hints");
+    UpdateCameraHints(dt, mgr);
+  }
+  {
+    PORT_ZONE_TIMED("camera: the cameras");
+    UpdateCameras(dt, mgr);
+  }
   UpdateAudioListener(mgr);
   UpdateScreenShake(dt, mgr);
   UpdateFilters(dt, mgr);

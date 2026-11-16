@@ -2,6 +2,8 @@
 
 #include "../thread.hpp"
 
+#include <aurora/gfx.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -18,6 +20,8 @@ thread::Thread g_thread;
 std::atomic_bool g_running = false;
 std::atomic_size_t g_pendingItems = 0;
 std::thread::id g_workerThreadId;
+// Time spent in work items, for aurora_render_worker_busy_ns.
+std::atomic_uint64_t g_busyNs = 0;
 
 void complete_sync(const std::shared_ptr<SyncState>& sync) {
   if (!sync) {
@@ -46,7 +50,11 @@ void worker_main(std::stop_token token) {
 
     if (item->work) {
       ZoneScopedN("QueueItem work");
+      const auto start = std::chrono::steady_clock::now();
       item->work();
+      g_busyNs.fetch_add(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(),
+          std::memory_order_relaxed);
     }
     complete_sync(item->sync);
     g_pendingItems.fetch_sub(1, std::memory_order_acq_rel);
@@ -199,6 +207,7 @@ void initialize() {
   g_thread = thread::Thread{{
                                 .name = "Aurora render worker",
                                 .affinity = thread::Affinity::SharedCache,
+                                .vitaCore = 0,
                             },
                             worker_main};
 }
@@ -271,3 +280,7 @@ bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::
 bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
 
 } // namespace aurora::gfx::render_worker
+
+uint64_t aurora_render_worker_busy_ns() {
+  return aurora::gfx::render_worker::g_busyNs.load(std::memory_order_relaxed);
+}

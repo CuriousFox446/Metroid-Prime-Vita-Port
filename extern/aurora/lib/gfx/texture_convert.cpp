@@ -8,6 +8,10 @@
 #include <array>
 #include <cstring>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gfx {
@@ -173,6 +177,13 @@ static ByteBuffer DecodeTiled(uint32_t width, uint32_t height, uint32_t mips, Ar
         for (uint32_t y = 0; y < numRows; ++y) {
           auto* target = targetMip + (baseY + y) * w + baseX;
           const auto n = std::min(w - baseX, T::BlockWidth);
+          if constexpr (requires(typename T::Target* t, const typename T::Source* s) { T::decode_row(t, s); }) {
+            if (n == T::BlockWidth) {
+              T::decode_row(target, in);
+              in += T::BlockWidth / T::Frac;
+              continue;
+            }
+          }
           for (uint32_t x = 0; x < n; ++x) {
             T::decode_texel(target, in, x);
           }
@@ -237,6 +248,15 @@ struct TextureDecoderI8 {
     target[x].b = intensity;
     target[x].a = intensity;
   }
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  // A tile's whole row at once (DecodeTiled), each intensity to the four channels: a movie's frame
+  // is three I8 planes, converted as each is drawn (the PS Vita).
+  static void decode_row(Target* target, const Source* in) {
+    const uint8x8_t intensity = vld1_u8(in);
+    vst4_u8(reinterpret_cast<uint8_t*>(target), uint8x8x4_t{{intensity, intensity, intensity, intensity}});
+  }
+#endif
 };
 
 struct TextureDecoderRG8 {
@@ -738,6 +758,37 @@ ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, ui
       .data = std::move(converted),
       .hasArbitraryMips = hasArbitraryMips,
   };
+}
+
+ByteBuffer convert_cmpr_level0_to_bc1(uint32_t width, uint32_t height, ArrayRef<uint8_t> data) {
+  uint32_t levels = 0;
+  return convert_cmpr_to_bc1(width, height, 1, data, levels);
+}
+
+ByteBuffer convert_cmpr_to_bc1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data,
+                               uint32_t& levels) {
+  levels = 0;
+  if (width % 4 != 0 || height % 4 != 0) {
+    return {};
+  }
+  // The leading levels with no transparent texels, each read whole (8x8 tiles, as ForEachCMPRBlock reads).
+  size_t offset = 0;
+  uint32_t w = width;
+  uint32_t h = height;
+  for (uint32_t mip = 0; mip < std::min(mips, 16u); ++mip) {
+    const size_t size = size_t{(w + 7) / 8 * 8} * ((h + 7) / 8 * 8) / 2;
+    if (offset + size > data.size() || CMPRHasTransparentTexels(w, h, 1, data.data() + offset)) {
+      break;
+    }
+    offset += size;
+    ++levels;
+    w = std::max(w / 2, 1u);
+    h = std::max(h / 2, 1u);
+  }
+  if (levels == 0) {
+    return {};
+  }
+  return BuildBC1FromCMPR(width, height, levels, data.data());
 }
 
 ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data) {

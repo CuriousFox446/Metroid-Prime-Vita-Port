@@ -15,8 +15,10 @@
 #include "gx/fifo.hpp"
 #include "gx/gx.hpp"
 #include "gx/texture.hpp"
+#include "gx/vita_draw.hpp"
 #include "imgui.hpp"
 #include "io.hpp"
+#include "vita_gl.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
 #include <webgpu/webgpu_cpp.h>
@@ -309,8 +311,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     std::exit(1);
   }
 
-  // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend
-  if (webgpu::g_backendType == wgpu::BackendType::Null) {
+  // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend. The Vita draws through
+  // vitaGL instead (vita_gl.hpp): SDL's renderer there is GXM too, and two GXM users clash.
+  if (webgpu::g_backendType == wgpu::BackendType::Null && !vita_gl::initialize()) {
     AURORA_ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
   }
 #else
@@ -323,6 +326,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   thread::set_current({
       .name = "Main thread",
       .affinity = thread::Affinity::SharedCache,
+      .vitaCore = 1,
   });
 
 #ifdef AURORA_ENABLE_GX
@@ -356,6 +360,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
 void shutdown() noexcept {
 #ifdef AURORA_ENABLE_GX
+  gx::fifo::finish_frame_end();
   gx::fifo::shutdown();
   gfx::render_worker::synchronize();
 #ifdef AURORA_ENABLE_RMLUI
@@ -419,6 +424,10 @@ void release_lost_surface() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  // A deferred end of the last frame must have run before anything here touches the surface,
+  // the recorder or the frame slots.
+  phase::set(phase::Main, "begin_frame (waiting for the FIFO thread to end the last frame)");
+  gx::fifo::finish_frame_end();
   {
     if (!service_surface("begin_frame")) {
       return false;
@@ -453,28 +462,46 @@ bool begin_frame() noexcept {
   return true;
 }
 
-void end_frame() noexcept {
-  ZoneScoped;
-  // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
-  struct ResizeFrameTimer {
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-    bool timed = webgpu::g_resizeFramesToTime > 0;
-    ~ResizeFrameTimer() {
-      if (timed) {
-        const int index = 3 - webgpu::g_resizeFramesToTime--;
-        const double ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        Log.info("EFB resize: frame {} after it took {:.1f} ms to record, submit and present", index, ms);
-      }
-    }
-  } resizeFrameTimer;
 #ifdef AURORA_ENABLE_GX
-  phase::set(phase::Main, "end_frame (recording and queueing the frame)");
-  gx::fifo::drain();
-  gx::fifo::end_frame();
+// AURORA_DEFERRED_FRAME_END=1: end_frame queues the frame's end on the FIFO thread instead of
+// draining it, so the game's next tick runs while the FIFO thread finishes this frame, and the
+// next begin_frame waits for it (fifo::queue_frame_end). For a game thread that waits on a
+// FIFO thread slower than its own work (the PS Vita). Not with RmlUi, whose frame is recorded
+// from the game thread.
+static bool deferred_frame_end() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("AURORA_DEFERRED_FRAME_END");
+    return value != nullptr && value[0] == '1' && gx::fifo::processing_mode() == gx::fifo::ProcessingMode::Thread;
+  }();
+#if AURORA_ENABLE_RMLUI
+  if (rmlui::is_initialized()) {
+    return false;
+  }
+#endif
+  return enabled;
+}
+
+// The rest of end_frame once the FIFO has processed the frame: on the game thread after a drain,
+// or on the FIFO thread under a deferred frame end.
+static void submit_frame(imgui::DrawData imguiDrawData) noexcept {
+  // The Vita path's draws of this frame go to the present this frame end queues (vita_gl.hpp).
+  vita_gl::end_frame_draws();
+  if (vita_gl::active()) {
+    static uint32_t sFrames = 0;
+    if (++sFrames % 300 == 0) {
+      gx::vita::log_stats();
+      gx::texture::log_cache_holdings();
+    }
+    if (sFrames % 16 == 0) {
+      gx::vita::drop_lone_textures();
+    }
+    gx::vita::warm_up_step();
+  }
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndVita);
   gx::texture::end_frame();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndTextures);
   gfx::finish();
-  auto imguiDrawData = imgui::freeze();
+  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kEndFinish);
 
   const auto& presentSource = webgpu::present_source();
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
@@ -664,7 +691,37 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
   });
+  vita_gl::fifo_clock::frame_end();
+}
+#endif
 
+void end_frame() noexcept {
+  ZoneScoped;
+  // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
+  struct ResizeFrameTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    bool timed = webgpu::g_resizeFramesToTime > 0;
+    ~ResizeFrameTimer() {
+      if (timed) {
+        const int index = 3 - webgpu::g_resizeFramesToTime--;
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        Log.info("EFB resize: frame {} after it took {:.1f} ms to record, submit and present", index, ms);
+      }
+    }
+  } resizeFrameTimer;
+#ifdef AURORA_ENABLE_GX
+  phase::set(phase::Main, "end_frame (recording and queueing the frame)");
+  // ImGui belongs to the game thread: its frame is frozen here either way.
+  auto imguiDrawData = imgui::freeze();
+  if (deferred_frame_end()) {
+    gx::fifo::queue_frame_end(
+        [imguiDrawData = std::move(imguiDrawData)]() mutable { submit_frame(std::move(imguiDrawData)); });
+    return;
+  }
+  gx::fifo::drain();
+  gx::fifo::end_frame();
+  submit_frame(std::move(imguiDrawData));
 #endif
 }
 } // namespace
@@ -756,6 +813,10 @@ void aurora_set_resampler(AuroraSampler sampler) {
 }
 
 void aurora_set_present_sharpness(float sharpness) {
+#if defined(AURORA_VITA_GL)
+  // The Vita's frame drawn up from a lower scale (vita_gl.cpp, draw_world_to_display).
+  aurora::vita_gl::set_present_sharpness(sharpness);
+#endif
 #ifdef AURORA_ENABLE_GX
   aurora::webgpu::set_present_sharpness(sharpness);
 #else
@@ -771,6 +832,28 @@ void aurora_set_per_pixel_lighting(bool enabled) {
 #else
   (void)enabled;
 #endif
+}
+bool aurora_open_system_keyboard(const char* text, uint32_t max_length) {
+  return aurora::vita_gl::active() && aurora::vita_gl::open_keyboard(text != nullptr ? text : "", max_length);
+}
+void aurora_get_program_compiles(uint32_t* sent, uint32_t* finished) {
+  uint32_t s = 0;
+  uint32_t f = 0;
+  aurora::vita_gl::program_compiles(s, f);
+  if (sent != nullptr) {
+    *sent = s;
+  }
+  if (finished != nullptr) {
+    *finished = f;
+  }
+}
+int aurora_system_keyboard_result(char* out, size_t size) {
+  std::string text;
+  const int result = aurora::vita_gl::keyboard_result(text);
+  if (result == 1 && out != nullptr && size > 0) {
+    SDL_strlcpy(out, text.c_str(), size);
+  }
+  return result;
 }
 void aurora_set_timescale(float scale) { aurora::time::set_scale(scale); }
 float aurora_get_timescale() { return aurora::time::scale(); }

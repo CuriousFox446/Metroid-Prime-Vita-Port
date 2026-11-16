@@ -1,4 +1,5 @@
 #include "Kyoto/Animation/CSkinnedModel.hpp"
+#include "port_profile.h"
 #include "port_env.h"
 
 #include "Kyoto/Alloc/CCircularBuffer.hpp"
@@ -13,6 +14,9 @@
 #include <dolphin/gx.h>
 #include <dolphin/os.h>
 #include <dolphin/os/OSCache.h>
+#ifdef TARGET_PC
+#include <dolphin/gx/GXExtra.h>
+#endif
 
 #include <rstl/list.hpp>
 #include <rstl/optional_object.hpp>
@@ -43,6 +47,9 @@ static bool Stats() {
   static const bool stats = Flag("MP_SKIN_STATS");
   return stats;
 }
+// PS Vita: the smallest model the side worker skins (CSkinnedModel::Calculate); a smaller one is
+// done before its job could be queued.
+const int kSideJobMinPoints = 64;
 Clock::time_point Now() { return Stats() ? Clock::now() : Clock::time_point(); }
 
 void Record(int points, Clock::time_point start) {
@@ -189,7 +196,13 @@ CSkinnedModel::CSkinnedModel(const CSkinnedModel& other)
   Construct();
 }
 
-CSkinnedModel::~CSkinnedModel() { Skinning::DelSkinnedRef(); }
+CSkinnedModel::~CSkinnedModel() {
+#ifdef TARGET_PC
+  // The side worker may still be writing the workspace freed here, from the model's arrays.
+  PortWaitSkinJob();
+#endif
+  Skinning::DelSkinnedRef();
+}
 
 #ifdef TARGET_PC
 // Bytes per skinned normal: nine floats (N, B, T) when the model has NBT normals, fifteen with a second frame.
@@ -232,6 +245,9 @@ void CSkinnedModel::Draw(const CModelFlags& flags) const {
   } else if (x28_vertWorkspace.null()) {
     x4_model->Draw(flags);
   } else {
+#ifdef TARGET_PC
+    PortFenceSkinJob();
+#endif
     x4_model->Draw(x28_vertWorkspace.get(), x30_normalWorkspace.get(), flags);
     PostDrawFunc();
   }
@@ -249,6 +265,10 @@ void CSkinnedModel::Draw(const TDrawFunc func, void* data) {
   } else if (x28_vertWorkspace.null()) {
     Draw(func, x4_model->GetPositions(), x4_model->GetNormals(), data);
   } else {
+#ifdef TARGET_PC
+    // The callbacks (thermal, flat, disintegrate, multi-pass draws) hand the arrays to GX too.
+    PortFenceSkinJob();
+#endif
     func(x28_vertWorkspace.get(), x30_normalWorkspace.get(), data);
     uint vertSize = (x10_skinRules->GetNumPoints() * 12 + 31) & ~31u;
     DCFlushRangeNoSync(x28_vertWorkspace.get(), vertSize);
@@ -264,6 +284,9 @@ void CSkinnedModel::Draw(const float* positions, const float* normals,
   CGraphics::sRenderState.SetSkinnedArraySizes(
       x10_skinRules->GetNumPoints() * 12,
       x10_skinRules->GetNumNormals() * NormalStride(**x4_model), NormalStride(**x4_model));
+#ifdef TARGET_PC
+  PortFenceSkinJob(); // in case these are this model's own workspaces
+#endif
   x4_model->Draw(positions, normals, flags);
   PostDrawFunc();
 }
@@ -271,6 +294,7 @@ void CSkinnedModel::Draw(const float* positions, const float* normals,
 void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
                               const rstl::optional_object< CVertexMorphEffect >& morphEffect,
                               const float* averagedNormals, float* workVerts) {
+  PORT_ZONE_TIMED("CSkinnedModel::Calculate (CPU skinning)");
   size_t alignedNormSize = 0;
   size_t alignedVertSize = 0;
   size_t totalSize = 0;
@@ -285,6 +309,13 @@ void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
       x10_skinRules->BuildAccumulatedTransforms(pose, **x1c_layoutInfo);
       return;
     }
+#ifdef TARGET_PC
+    // A side job still making this model's last vertices writes the workspace this call takes
+    // again (an owned model's is a fresh one from the ring after each draw).
+    if (!x38_owned || !x28_vertWorkspace.null()) {
+      PortWaitSkinJob();
+    }
+#endif
     AllocateStorage();
     verts = x28_vertWorkspace.get();
   }
@@ -323,10 +354,23 @@ void CSkinnedModel::Calculate(const CPoseAsTransforms& pose,
     PortBuildLegacy(pipe);
   } else {
     float* normals = reinterpret_cast< float* >(reinterpret_cast< uchar* >(verts) + alignedVertSize);
-    x10_skinRules->PortBuildPointsAndNormals(**x4_model, verts, normals);
-    memset(reinterpret_cast< uchar* >(verts) + vertSize, 0, alignedVertSize - vertSize);
-    if (PortSkin::Verify() && !legacy && NormalStride(**x4_model) == 12) {
-      PortVerify(verts, alignedVertSize + normSize);
+#if defined(__vita__)
+    // 0.42.0 test 18: on the fourth core (CSkinRules::PortSubmitPointsAndNormals), when nothing here
+    // reads the vertices before the draws (a morph, a point generator, the verify run) and they go
+    // to this model's own workspace (the swarms' shared ones are posed once and drawn for many).
+    if (workVerts == nullptr && !morphEffect.valid() && sPointGen == nullptr && !PortSkin::Verify() &&
+        x10_skinRules->GetNumPoints() >= PortSkin::kSideJobMinPoints) {
+      xPortSkinJob = x10_skinRules->PortSubmitPointsAndNormals(
+          **x4_model, verts, normals, reinterpret_cast< uchar* >(verts) + vertSize,
+          static_cast< uint >(alignedVertSize - vertSize));
+    } else
+#endif
+    {
+      x10_skinRules->PortBuildPointsAndNormals(**x4_model, verts, normals);
+      memset(reinterpret_cast< uchar* >(verts) + vertSize, 0, alignedVertSize - vertSize);
+      if (PortSkin::Verify() && !legacy && NormalStride(**x4_model) == 12) {
+        PortVerify(verts, alignedVertSize + normSize);
+      }
     }
   }
   PortSkin::Record(x10_skinRules->GetNumPoints(), skinStart);
@@ -391,7 +435,35 @@ void CSkinnedModel::PortVerify(const float* verts, size_t size) const {
 }
 #endif
 
+#ifdef TARGET_PC
+void CSkinnedModel::PortFenceSkinJob() const {
+#if defined(__vita__)
+  if (xPortSkinJob == 0) {
+    return;
+  }
+  if (GXPortSideJobDone(xPortSkinJob)) {
+    xPortSkinJob = 0;
+  } else if (!GXPortSideJobFence(xPortSkinJob)) {
+    // A display list is being recorded: the FIFO cannot be told, so the vertices must be made now.
+    PortWaitSkinJob();
+  }
+#endif
+}
+
+void CSkinnedModel::PortWaitSkinJob() const {
+#if defined(__vita__)
+  if (xPortSkinJob != 0) {
+    GXPortSideJobWait(xPortSkinJob);
+    xPortSkinJob = 0;
+  }
+#endif
+}
+#endif
+
 void CSkinnedModel::CalculateDefault() {
+#ifdef TARGET_PC
+  PortWaitSkinJob(); // the workspace freed here may be the one a side job is writing
+#endif
   x28_vertWorkspace = rstl::auto_ptr< float[] >();
   x30_normalWorkspace = rstl::auto_ptr< float[] >();
 }

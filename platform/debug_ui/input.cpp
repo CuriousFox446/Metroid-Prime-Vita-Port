@@ -1040,6 +1040,59 @@ void RequestMapTap() {
   sMapTapPending.fetch_add(1);
 }
 
+// The Vita has no touch overlay to see minimap taps (Android's view and the C++ overlay do
+// elsewhere): its front screen does here, from SDL's event watch on the thread pumping events. A
+// finger put down on the drawn minimap and lifted soon after, near where it landed, is a tap.
+void MinimapTapEvent(const SDL_Event& event) {
+#if defined(__vita__)
+  constexpr uint64_t kTapNs = 400'000'000;
+  constexpr float kTapSlop = 0.03f; // of the screen, either way
+  struct Down {
+    bool held = false;
+    SDL_FingerID finger = 0;
+    float x = 0.f;
+    float y = 0.f;
+    uint64_t ns = 0;
+  };
+  static Down sDown;
+  const SDL_TouchFingerEvent& f = event.tfinger;
+  switch (event.type) {
+  case SDL_EVENT_FINGER_DOWN:
+    // The front screen only: the back panel reports indirect touches.
+    if (!sDown.held && SDL_GetTouchDeviceType(f.touchID) == SDL_TOUCH_DEVICE_DIRECT) {
+      sDown = {true, f.fingerID, f.x, f.y, f.timestamp};
+    }
+    return;
+  case SDL_EVENT_FINGER_CANCELED:
+    if (f.fingerID == sDown.finger) {
+      sDown.held = false;
+    }
+    return;
+  case SDL_EVENT_FINGER_UP:
+    break;
+  default:
+    return;
+  }
+  if (!sDown.held || f.fingerID != sDown.finger) {
+    return;
+  }
+  sDown.held = false;
+  if (f.timestamp - sDown.ns > kTapNs || std::abs(f.x - sDown.x) > kTapSlop || std::abs(f.y - sDown.y) > kTapSlop) {
+    return;
+  }
+  float rect[4];
+  bool drawn = false;
+  if (!TouchMapTap() || Visible() || !MinimapRect(rect, &drawn) || !drawn) {
+    return;
+  }
+  if (sDown.x >= rect[0] && sDown.x <= rect[2] && sDown.y >= rect[1] && sDown.y <= rect[3]) {
+    RequestMapTap();
+  }
+#else
+  (void)event;
+#endif
+}
+
 // Game thread, once per frame from CAutoMapper::Update.
 void SetMapScreenOpen(bool open) {
   std::lock_guard lock(sMapPanMutex);

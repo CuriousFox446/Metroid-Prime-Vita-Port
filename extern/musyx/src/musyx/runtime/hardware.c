@@ -52,6 +52,33 @@ static void snd_handle_irq() {
 
   streamCorrectLoops();
   hwIRQEnterCritical();
+#if MUSY_TARGET == MUSY_TARGET_PC
+  /* On PC the game thread takes this same lock between sections, so a key off or
+   * break it wrote between the mix and the clear below was wiped unseen, and a
+   * looping voice (the charge beam hum) kept playing with no synth voice left to
+   * stop it. The control pass, which reads the changed bits, and the clear stay in
+   * one critical section. The voices are then rendered with the lock open (0.42.0
+   * test 22, hw_pc.c): the game's sound calls no longer wait for the mix, and a bit
+   * one of them writes meanwhile is kept for the next frame, as when it waited. */
+  salCtrlDspControl();
+
+  for (v = 0; v < salNumVoices; ++v) {
+    for (i = 0; i < 5; ++i) {
+      dspVoice[v].changed[i] = 0;
+    }
+  }
+
+  if (salPortUnlockedRender()) {
+    hwIRQLeaveCritical();
+    salCtrlDspRender();
+    hwIRQEnterCritical();
+  } else {
+    salCtrlDspRender();
+  }
+  salCtrlDspFinish(salAiGetDest());
+  salFrame ^= 1;
+  salAuxFrame = (salAuxFrame + 1) % 3;
+#else
   // sndProfStartPCM(&prof.dspCtrl);
   salCtrlDsp(salAiGetDest());
   // sndProfStopPMC(&prof.dspCtrl);
@@ -64,10 +91,6 @@ static void snd_handle_irq() {
   hwIRQLeaveCritical();
   hwIRQEnterCritical();
 #endif
-  /* On PC the game thread takes this same lock between sections, so a key off or
-   * break it wrote between the mix and the clear below was wiped unseen, and a
-   * looping voice (the charge beam hum) kept playing with no synth voice left to
-   * stop it. The mix and the clear stay in one critical section. */
   salFrame ^= 1;
   salAuxFrame = (salAuxFrame + 1) % 3;
 
@@ -76,6 +99,7 @@ static void snd_handle_irq() {
       dspVoice[v].changed[i] = 0;
     }
   }
+#endif
 
   // sndProfStartPMC(&prof.sequencer);
   // sndProfPausePMC(&prof.sequencer);

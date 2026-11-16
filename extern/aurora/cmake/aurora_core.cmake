@@ -26,6 +26,20 @@ if (AURORA_ENABLE_GX AND AURORA_CACHE_USE_ZSTD)
     target_link_libraries(aurora_core PRIVATE zstd::libzstd)
 endif ()
 
+if (VITA)
+    # The zone profiler (Tracy's zones go to it on the Vita; the game's PORT_ZONE too).
+    target_sources(aurora_core PRIVATE platforms/vita/profile/zone_profile.cpp)
+    target_include_directories(aurora_core PUBLIC platforms/vita/profile)
+    # The screen through vitaGL (lib/vita_gl.hpp, docs/VITA_PHASE2.md); vitaGL comes with VitaSDK.
+    target_sources(aurora_core PRIVATE lib/vita_gl.cpp)
+    # The side worker on the fourth core (CapUnlocker): lib/vita_side_jobs.hpp.
+    target_sources(aurora_core PRIVATE lib/vita_side_jobs.cpp)
+    target_compile_definitions(aurora_core PUBLIC AURORA_VITA_GL)
+    target_link_libraries(aurora_core PUBLIC
+            vitaGL vitashark SceShaccCgExt mathneon taihen_stub SceShaccCg_stub SceKernelDmacMgr_stub
+            SceGxm_stub SceDisplay_stub SceAppMgr_stub SceCommonDialog_stub SceIme_stub SceSysmodule_stub)
+endif ()
+
 if (CMAKE_SYSTEM_NAME STREQUAL Windows)
     # stuff for fetching system info.
     target_link_libraries(aurora_core PRIVATE wbemuuid.lib comsuppw.lib ntdll.lib DXGI.lib)
@@ -70,9 +84,12 @@ if (AURORA_ENABLE_GX)
             lib/webgpu/gpu_prof.cpp
             lib/webgpu/memory_budget.cpp
             lib/dawn/BackendBinding.cpp
-            lib/dawn/TracyPlatform.cpp
     )
-    if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    # Dawn's platform hooks for Tracy; the null WebGPU (Vita) has no Dawn platform.
+    if (NOT VITA)
+        target_sources(aurora_core PRIVATE lib/dawn/TracyPlatform.cpp)
+    endif ()
+    if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU" AND NOT VITA)
         set_source_files_properties(lib/dawn/TracyPlatform.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
     endif ()
     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)

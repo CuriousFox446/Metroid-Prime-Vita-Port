@@ -20,6 +20,7 @@
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "texture_replacement.hpp"
+#include "../gx/fifo.hpp"
 #include "../gx/gx.hpp"
 #ifdef AURORA_ENABLE_RMLUI
 #include "../rmlui/pipeline.hpp"
@@ -72,7 +73,9 @@ bool g_heldFrameBuffersTaken = false;
 constexpr uint32_t StorageGrowthCapScale = 6;
 std::array<wgpu::Buffer, StagingBufferCount> g_stagingBuffers;
 std::array<std::atomic<BufferMapState>, StagingBufferCount> g_mappingStates;
-uint32_t g_frameIndex = UINT32_MAX;
+// Advanced by end_frame, which the FIFO thread runs under a deferred frame end while the game
+// reads current_frame().
+std::atomic<uint32_t> g_frameIndex = UINT32_MAX;
 
 std::array<FramePacket, FrameSlotCount> g_framePackets;
 uint64_t g_nextFrameId = 1;
@@ -710,6 +713,12 @@ void initialize() {
       if (mask & 4u) g_bufferSizes.index = std::min(g_bufferSizes.maxIndex, size);
       if (mask & 8u) g_bufferSizes.storage = std::min(g_bufferSizes.maxStorage, size);
     }
+    // AURORA_STAGING_START_UNIFORM_KIB=<n> sets the uniform staging alone, for a platform short of
+    // memory (the Vita's frames use under 4 MiB of it); a frame that needs more spills.
+    if (const char* kib = std::getenv("AURORA_STAGING_START_UNIFORM_KIB")) {
+      const uint64_t size = std::max<uint64_t>(256, (std::strtoull(kib, nullptr, 10) << 10) & ~uint64_t(255));
+      g_bufferSizes.uniform = std::min(g_bufferSizes.maxUniform, size);
+    }
     // The growable cap is relative to the staging size, so it keeps its meaning; but a cap the
     // staging storage already has is no cap.
     if (g_bufferSizes.storageCap != 0 && g_bufferSizes.storageCap <= g_bufferSizes.storage) {
@@ -1022,7 +1031,7 @@ void grow_frame_buffer(StagingKind kind, uint64_t need, const wgpu::CommandEncod
     wgpu::Buffer& current = g_resources.*shared.member;
     encoder.CopyBufferToBuffer(current, 0, buffer, 0, base + device);
     Log.info("frame {} device buffer grown from {} to {} KiB during frame {} (needed {} KiB)", shared.name,
-             device >> 10, grown >> 10, g_frameIndex, need >> 10);
+             device >> 10, grown >> 10, g_frameIndex.load(), need >> 10);
     current = std::move(buffer);
     device = grown;
     if (g_vertexFetchTexture && (kind == StagingKind::Vertex || kind == StagingKind::Storage)) {
@@ -1271,9 +1280,17 @@ void after_submit() noexcept {
   bloom::after_submit();
 }
 
-void gpu_synchronize() { render_worker::synchronize(); }
+// Both wait for a deferred frame end first: what follows (a resize, a quality change, a cache
+// flush) assumes the frame is over and queued.
+void gpu_synchronize() {
+  gx::fifo::finish_frame_end();
+  render_worker::synchronize();
+}
 
-void synchronize() { render_worker::synchronize(); }
+void synchronize() {
+  gx::fifo::finish_frame_end();
+  render_worker::synchronize();
+}
 
 void after_present() noexcept {
   const auto now = PresentClock::now();

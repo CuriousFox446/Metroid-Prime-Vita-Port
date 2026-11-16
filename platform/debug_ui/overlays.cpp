@@ -570,6 +570,59 @@ void HoldBackgroundShadersOnFrontEnd() {
   }
 }
 
+namespace {
+// The toast itself: `done` of `total` since it opened, a count and a bar.
+void DrawCompilingToast(uint32_t done, uint32_t total) {
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  // Top centre: the Android touch overlay has its pause/F1 buttons in the bottom corners.
+  PlaceTopToast(viewport);
+  ImGui::SetNextWindowBgAlpha(0.7f);
+  // Sized to its text: the font scale differs per platform (Android's is larger).
+  if (ImGui::Begin("##shader-compilation-toast", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+                       ImGuiWindowFlags_AlwaysAutoResize)) {
+    char label[64];
+    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", total, total); // widest, so the count doesn't jitter
+    const float width = ImGui::CalcTextSize(label).x;
+    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", done, total);
+    ImGui::TextUnformatted(label);
+    ImGui::ProgressBar(total != 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.f,
+                       ImVec2(width, std::max(6.f, ImGui::GetFontSize() * 0.4f)), "");
+    TopToastPlaced(viewport);
+  }
+  ImGui::End();
+}
+} // namespace
+
+#ifdef __vita__
+// The Vita compiles a material's program when it is first drawn (or warmed up at the title
+// screen), all through play, on a thread of its own: the toast shows while any are waiting or
+// compiling, after half a second, counted from when it opened. The PC's startup pipeline queue
+// below is never filled there, so the toast never showed.
+void DrawShaderCompilationToast() {
+  static double sSince = -1.0;
+  static uint32_t sBase = 0; // finished when the toast opened
+  uint32_t sent = 0;
+  uint32_t finished = 0;
+  aurora_get_program_compiles(&sent, &finished);
+  const uint32_t waiting = sent - finished;
+  if (!sShowShaderCompilation || waiting == 0) {
+    sSince = -1.0;
+    return;
+  }
+  const double now = ImGui::GetTime();
+  if (sSince < 0.0) {
+    sSince = now;
+    sBase = finished;
+  }
+  if (now - sSince < 0.5) {
+    return;
+  }
+  const uint32_t done = finished - sBase;
+  DrawCompilingToast(done, done + waiting);
+}
+#else
 // While the startup compile runs (the pipeline cache and shipped seed, queued before the first
 // frame): after half a second, a count and a bar since the toast opened. Once that queue has
 // drained, shaders met in game compile without it.
@@ -594,36 +647,21 @@ void DrawShaderCompilationToast() {
     return;
   }
   const uint32_t done = stats->createdPipelines >= sBase ? stats->createdPipelines - sBase : 0;
-  const uint32_t total = done + stats->queuedPipelines;
-  const ImGuiViewport* viewport = ImGui::GetMainViewport();
-  // Top centre: the Android touch overlay has its pause/F1 buttons in the bottom corners.
-  PlaceTopToast(viewport);
-  ImGui::SetNextWindowBgAlpha(0.7f);
-  // Sized to its text: the font scale differs per platform (Android's is larger).
-  if (ImGui::Begin("##shader-compilation-toast", nullptr,
-                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
-                       ImGuiWindowFlags_AlwaysAutoResize)) {
-    char label[64];
-    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", total, total); // widest, so the count doesn't jitter
-    const float width = ImGui::CalcTextSize(label).x;
-    std::snprintf(label, sizeof(label), "Compiling shaders %u / %u", done, total);
-    ImGui::TextUnformatted(label);
-    ImGui::ProgressBar(total != 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.f,
-                       ImVec2(width, std::max(6.f, ImGui::GetFontSize() * 0.4f)), "");
-    TopToastPlaced(viewport);
-  }
-  ImGui::End();
+  DrawCompilingToast(done, done + stats->queuedPipelines);
 }
+#endif
 
 // The panel's hotkey hint, from the live Port menu/Screenshot bindings.
 std::string HotkeyHint() {
   std::string hint;
+  const auto add = [&hint](const std::string& part) { hint += (hint.empty() ? "" : "   ") + part; };
   const std::string menu = PortInputRemap::BindingsText(PortInput::Action::PortMenu, " / ");
-  if (!menu.empty()) hint += menu + ": hide   ";
-  hint += "F10: frame limit";
+  if (!menu.empty()) add(menu + ": hide");
+#ifndef __vita__
+  add("F10: frame limit"); // a key, which the Vita does not have
+#endif
   const std::string shot = PortInputRemap::BindingsText(PortInput::Action::Screenshot, " / ");
-  if (!shot.empty()) hint += "   " + shot + ": screenshot";
+  if (!shot.empty()) add(shot + ": screenshot");
   return hint;
 }
 
@@ -632,7 +670,8 @@ std::string HotkeyHint() {
 void DrawMenuHintToast() {
   static double sShownAt = -1.0;
   static bool sDone = false;
-  if (sDone || !sShowMenuHint) {
+  // Metroid Prime Demo has no port menu to point to.
+  if (sDone || !sShowMenuHint || Demo()) {
     return;
   }
   if (sVisible) {

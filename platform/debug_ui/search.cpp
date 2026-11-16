@@ -39,7 +39,9 @@ const DebugPage kDebugPages[] = {
     {"Video", DrawVideoTab},
     {"Mods", DrawModsTab},
     {"Randomizer", DrawRandomizerTab},
+#ifndef __vita__ // not on the Vita's overlay
     {"Archipelago", DrawArchipelagoTab},
+#endif
     {"Tracker", DrawTrackerTab},
     {"Save states", DrawSaveStatesTab},
     {"System", DrawSystemTab},
@@ -343,6 +345,10 @@ void EndSearchJump() {
 }
 
 void DrawSearchField() {
+#ifdef __vita__
+  // None on the Vita: its pages are few, and a step away with the pad.
+  return;
+#endif
   // MP_DEBUG_SEARCH=<query> opens with it typed, for captures of the overlay.
   static bool sPrefill = true;
   if (sPrefill) {
@@ -354,7 +360,7 @@ void DrawSearchField() {
   if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_F)) {
     ImGui::SetKeyboardFocusHere();
   }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__vita__)
   const char* const kHint = "Search settings";
 #else
   const char* const kHint = "Search settings (Ctrl+F)";
@@ -381,6 +387,38 @@ static std::string ShownPlace(const char* place) {
   }
 }
 
+#ifdef __vita__
+// Rows for what the Vita's overlay leaves out on pages it keeps (no file browser, keyboard or PC
+// renderer there): by page, sub-tab and section start, or one label.
+bool HiddenOnVita(const SettingsIndexRow& row) {
+  struct Hidden {
+    const char* page;
+    const char* sub;
+    const char* section; // nullptr: any
+    const char* label;   // nullptr: any
+  };
+  static constexpr Hidden kHidden[] = {
+      {"System", "", "Memory card", nullptr},
+      {"System", "", "Updates", nullptr},
+      {"Video", "Compatibility", nullptr, nullptr},
+      {"Debug", "", "Remastered", nullptr},
+      {"Game", "", "Language", "Add languages from a PAL disc..."},
+      {"Game", "", "Language", "Import the PAL languages again..."},
+      {"Video", "Display", "Display", "Fullscreen (F11)"},
+      {"Video", "Display", "Display", "Fullscreen (hide the status and navigation bars)"},
+      {"Video", "Quality", "Quality", "Show F1 hint at launch"},
+      {"Video", "Quality", "Quality", "Per-pixel lighting"},
+      {"Video", "Quality", "Quality", "Sun shadows"},
+      {"Video", "Quality", "Quality", "Projected actor shadows"},
+  };
+  return std::any_of(std::begin(kHidden), std::end(kHidden), [&row](const Hidden& h) {
+    return std::strcmp(row.page, h.page) == 0 && std::strcmp(row.sub, h.sub) == 0 &&
+           (h.section == nullptr || std::strncmp(row.section, h.section, std::strlen(h.section)) == 0) &&
+           (h.label == nullptr || std::strcmp(row.label, h.label) == 0);
+  });
+}
+#endif
+
 // Every word of the query must be in the row's label, place or keywords. Rows
 // whose label starts with the query come first, then those that contain it,
 // then those whose label has every word. The label and place are searched as
@@ -399,6 +437,16 @@ void DrawSearchResults() {
     }
     std::vector< std::pair< int, const SettingsIndexRow* > > scored;
     for (const SettingsIndexRow& row : kSettingsIndex) {
+      // A page this build leaves out (the Vita's Remastered and Archipelago) has nothing to open.
+      if (std::none_of(std::begin(kDebugPages), std::end(kDebugPages),
+                       [&row](const DebugPage& page) { return std::strcmp(page.name, row.page) == 0; })) {
+        continue;
+      }
+#ifdef __vita__
+      if (HiddenOnVita(row)) {
+        continue;
+      }
+#endif
       const std::string label = port::Lower(port::Translate(row.label));
       std::string all = label + ' ' + port::Lower(row.label) + ' ' + port::Lower(row.keywords);
       for (const char* part : {row.section, row.sub, row.page}) {

@@ -21,6 +21,7 @@
 #include <magic_enum.hpp>
 #include <webgpu/webgpu_cpp.h>
 
+#include "../gx/fifo.hpp"
 #include "../gx/gx.hpp"
 #include "../gfx/frame.hpp"
 #include "../gfx/recording.hpp"
@@ -1583,6 +1584,9 @@ static double g_resizeTargetsMs = 0.0;
 static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight,
                                       bool force) {
   using clock = std::chrono::steady_clock;
+  // A deferred frame end still recording into the old targets (an EFB-scale step does not
+  // synchronize first).
+  gx::fifo::finish_frame_end();
   g_resizeCachesMs = g_resizeTargetsMs = 0.0;
   if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
     return;

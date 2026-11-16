@@ -1,4 +1,5 @@
 #include "MetroidPrime/CAnimData.hpp"
+#include "port_profile.h"
 
 #include "Kyoto/Animation/CAnimTreeBlend.hpp"
 #include "Kyoto/Animation/CAnimTreeNode.hpp"
@@ -336,6 +337,7 @@ float CAnimData::GetAverageVelocity(int animIn) const {
 
 void CAnimData::AdvanceParticles(const CTransform4f& xf, float dt, const CVector3f& scale,
                                  CStateManager& mgr) {
+  PORT_ZONE_TIMED("CAnimData::AdvanceParticles");
   x120_particleDB.Update(dt, x224_pose, **xcc_layoutData, xf, scale, mgr);
 }
 
@@ -490,6 +492,7 @@ CAdvancementDeltas CAnimData::Advance(float dt, const CVector3f& scale, CStateMa
 
 CAdvancementDeltas CAnimData::DoAdvance(float dt, bool& suspendParticles, CRandom16& random,
                                         bool advTree) {
+  PORT_ZONE_TIMED("CAnimData::DoAdvance (animation)");
   suspendParticles = false;
 
   CVector3f offset(0.f, 0.f, 0.f);
@@ -674,6 +677,7 @@ void CAnimData::PrimitiveSetToTokenVector(const rstl::set< CPrimitive >& primSet
 }
 
 void CAnimData::BuildPose() {
+  PORT_ZONE_TIMED("CAnimData::BuildPose");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;
@@ -690,6 +694,7 @@ void CAnimData::BuildPose() {
 }
 
 void CAnimData::PreRender() {
+  PORT_ZONE_TIMED("CAnimData::PreRender");
   if (!x220_31_poseCached) {
     RecalcPoseBuilder(nullptr);
     x220_31_poseCached = true;

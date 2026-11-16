@@ -170,7 +170,10 @@ void DrawDebugTab() {
     DrawVoices();
   }
 
+#ifndef __vita__
+  // Remastered's models and materials, which the Vita does not import.
   DrawRemasteredDebug();
+#endif
 }
 
 } // namespace PortDebug

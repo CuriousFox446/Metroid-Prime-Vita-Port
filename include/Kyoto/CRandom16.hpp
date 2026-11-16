@@ -3,9 +3,19 @@
 
 #include "types.h"
 
+#ifdef TARGET_PC
+// The current generator, for each thread that sets one: the side worker steps particle systems
+// under their own generators while the game thread draws from the game's (port_thread_slot.h).
+#include "port_thread_slot.h"
+#endif
+
 class CRandom16;
 class CGlobalRandom {
+#ifdef TARGET_PC
+  static PortThreadValue< CGlobalRandom* > gCurrentGlobalRandom;
+#else
   static CGlobalRandom* gCurrentGlobalRandom;
+#endif
 
 public:
   CGlobalRandom(CRandom16& rnd);
@@ -19,7 +29,11 @@ private:
 
 class CRandom16 {
   friend class CGlobalRandom;
+#ifdef TARGET_PC
+  static PortThreadValue< CRandom16* > gRandomNumber;
+#else
   static CRandom16* gRandomNumber;
+#endif
   static void _SetRandomNumber(CRandom16* rnd);
 
 public:

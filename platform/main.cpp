@@ -37,6 +37,7 @@
 #include "port_pal_languages.h"
 #include "port_flaahgra_music.h"
 #include "port_room_geo.h"
+#include "port_retail_resident.h"
 #include "port_importers.h"
 #include "port_remastered_import.h"
 #include "port_storage_report.h"
@@ -1000,7 +1001,13 @@ int main(int argc, char** argv) {
     // arena's pages are touched as the heap fills, and the frame buffers start small and grow.
     // Android takes its device buffers at the full limit up front (aurora, issue #165), so
     // when no enabled mod has room geometry it holds the limits back until one loads (port_mods).
+#if defined(__vita__)
+    // Not on the Vita, whose arena is memory taken whole from newlib's heap (no page goes
+    // untouched), and where no room geometry mod runs: there only for an installed one, as before.
+    const bool reserveRoomGeometry = roomGeometry;
+#else
     const bool reserveRoomGeometry = true;
+#endif
     uint32_t mem1Size = MEM1_DEFAULT_SIZE;
     {
         const int envMb = port::EnvInt("MP_MEM1_MB", -1);
@@ -1032,6 +1039,14 @@ int main(int argc, char** argv) {
         const int envMiB = port::EnvInt("MP_ROOM_GEO_RESIDENT_MB", -1);
         residentMiB = static_cast<uint32_t>(
             envMiB >= 0 ? std::clamp(static_cast<unsigned long>(envMiB), 16UL, 2048UL) : kResidentMiB);
+    }
+    // MP_RETAIL_RESIDENT=1: the retail world geometry kept on the GPU too
+    // (port_retail_resident.h), in the room geometry's region when there is one.
+    const bool retailResident = port::EnvFlag("MP_RETAIL_RESIDENT", false);
+    if (retailResident && residentMiB == 0) {
+        const int envMiB = port::EnvInt("MP_RETAIL_RESIDENT_MB", -1);
+        residentMiB = static_cast<uint32_t>(
+            envMiB >= 0 ? std::clamp(static_cast<unsigned long>(envMiB), 16UL, 2048UL) : 48UL);
     }
     uint32_t frameBufferScale = !reserveRoomGeometry ? 1 : resident ? kResidentFrameBuffers : kRoomGeoFrameBuffers;
     const int envFrameBuffers = port::EnvInt("MP_FRAME_BUFFERS", -1);
@@ -1263,6 +1278,12 @@ int main(int argc, char** argv) {
     // gameplay touches, so whatever reaches SDL here is meant for ImGui.
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
     config.logCallback = AndroidLogCallback;
+#elif defined(__vita__)
+    // The rear touch pad is where the hands holding the Vita rest, and the game wants nothing from
+    // it: its touches reached the menus' pointer gestures (PortPointer takes every touch device)
+    // and, as SDL's touch-made mouse events, the Port menu's mouse. SDL stops reading it; the hint
+    // is read when its video starts (aurora_initialize). The front screen stays.
+    SDL_SetHint(SDL_HINT_VITA_ENABLE_BACK_TOUCH, "0");
 #endif
     // SDL3 reaches for its Wayland backend whenever a Wayland display is
     // reachable, and does so even without WAYLAND_DISPLAY — it falls back to the
@@ -1283,7 +1304,7 @@ int main(int argc, char** argv) {
     // /etc/environment does) would otherwise land there, so under Steam a list
     // that allows x11 is narrowed to x11. A list without x11
     // (SDL_VIDEODRIVER=wayland) is still honoured.
-#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(__APPLE__) && !defined(__vita__)
     {
         const char* requested = SDL_GetHint(SDL_HINT_VIDEO_DRIVER);
         const char* x11 = std::getenv("DISPLAY");
@@ -1437,6 +1458,13 @@ int main(int argc, char** argv) {
         const uint32_t got = aurora_get_resident_geometry_mib();
         PortRoomGeo::SetResident(got != 0);
         PortLog::Write("port: room geometry kept on the GPU in %u MiB\n", got);
+    }
+    if (retailResident) {
+        const uint32_t got = aurora_get_resident_geometry_mib();
+        PortRetailResident::SetEnabled(got != 0);
+        PortLog::Write(got != 0 ? "port: retail world geometry kept on the GPU in %u MiB\n"
+                                : "port: retail world geometry not kept on the GPU (no resident room: %u MiB)\n",
+                       got);
     }
     // Apply the persisted render scale. Vsync is applied on the first drawn
     // frame (once the swapchain surface exists) so it uses real capabilities.

@@ -35,6 +35,8 @@ namespace PortDebug {
 void DrawControlsOptions() {
   const bool locked = BeginOriginalLocked();
   ImGui::SeparatorText("Quick setup");
+#if !defined(__vita__)
+  // The Vita has no mouse or keyboard to set up.
   if (ImGui::Button("Use mouse & keyboard")) {
     PortInputRemap::ApplyPreset(PortInput::Family::Keyboard, "mouse");
   }
@@ -43,21 +45,43 @@ void DrawControlsOptions() {
            "Controls > Remap > Presets... has the others.");
   SameLineAfterHelp();
   ImGui::TextDisabled(sInput.mouseAim ? "Mouse aim is on." : "Mouse aim is off.");
+#endif
   // A GameCube pad has no right stick click for the dual-stick layout (as Remap's Presets...).
   ImGui::BeginDisabled(PADIsGCAdapter(0) != 0);
   if (ImGui::Button("Use twin-stick controller")) {
     PortInputRemap::ApplyPreset(PortInput::Family::Pad, "remastered");
   }
   ImGui::EndDisabled();
+#if defined(__vita__)
+  // The Vita's Remastered layout (port_controls.cpp, ApplyPresetMapping): no triggers or stick clicks.
+  ItemHelp("Turns on Twin Stick Aim and the Remastered layout: left stick moves, right stick aims, R "
+           "fires, L locks on, Cross jumps, Square morph ball, Circle missile, Start map, Select pause; "
+           "hold Triangle and press the D-pad to change beams. Replaces your own controller bindings; "
+           "Controls > Remap > Presets... has Modern and the others.");
+#else
   ItemHelp("Turns on Twin Stick Aim and the Remastered layout for all controllers: left stick moves, "
            "right stick aims, RT fire, LT lock on, A jump, X morph ball, right stick click free look. "
            "Replaces your own controller bindings; Controls > Remap > Presets... has Modern and the "
            "others. Not for a GameCube controller, which has no right stick click.");
+#endif
   SameLineAfterHelp();
   ImGui::TextDisabled(PadTwinStick() ? "Twin-stick aim is on." : "Twin-stick aim is off.");
 
   ImGui::SeparatorText("On-screen prompts");
   int glyphs = sPromptGlyphs.load(std::memory_order_relaxed);
+#if defined(__vita__)
+  // The Vita carries its own buttons' icons alone (textures/bindings/vita_*), so the choice is
+  // those (auto, which is the Vita's pad there) or the game's own GameCube art. Any other value
+  // (a settings file from elsewhere) reads as the Vita's.
+  constexpr int kGameCubeGlyphs = 4;
+  static_assert(std::string_view(kPromptGlyphs[kGameCubeGlyphs]) == "gamecube");
+  int vitaGlyphs = glyphs == kGameCubeGlyphs ? 1 : 0;
+  if (ImGui::Combo("Button glyphs", &vitaGlyphs, "PS Vita\0" "GameCube\0")) {
+    sPromptGlyphs.store(vitaGlyphs == 1 ? kGameCubeGlyphs : 0, std::memory_order_relaxed);
+    MarkDirty();
+  }
+  ItemHelp("Which buttons the game's prompts show: the Vita's, or the GameCube's (the game's own art).");
+#else
   if (ImGui::Combo("Button glyphs", &glyphs,
                    "Follow the input in use\0" "Xbox\0" "PlayStation\0" "Nintendo Switch\0" "GameCube\0"
                    "Keyboard & mouse\0" "Steam Deck\0")) {
@@ -66,6 +90,7 @@ void DrawControlsOptions() {
   }
   ItemHelp("Which buttons the game's prompts show. Follow uses the device you last used; GameCube "
            "shows the game's own art.");
+#endif
 
   ImGui::SeparatorText("Buttons");
   bool lockOnToggle = sInput.lockOnToggle;
@@ -290,6 +315,15 @@ void DrawControlsKeyboardMouse() {
   }
   ImGui::SetItemTooltip("Mouse buttons are set in Controls > Remap; keyboard and controller weapon "
                         "bindings also work.");
+  DrawAimCrosshair();
+
+  ImGui::SeparatorText("Mouse buttons");
+  ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
+}
+
+// The aiming crosshair under mouse aim and twin stick: Mouse settings' on the PC, Controller
+// settings' on the Vita, which has no mouse page.
+void DrawAimCrosshair() {
   if (ImGui::Checkbox("Crosshair", &sInput.mouseCrosshair)) {
     MarkDirty();
   }
@@ -300,9 +334,6 @@ void DrawControlsKeyboardMouse() {
     SetCrosshairSize(crosshairSize);
   }
   ImGui::SetItemTooltip("Applies under mouse aim and twin stick.");
-
-  ImGui::SeparatorText("Mouse buttons");
-  ImGui::TextDisabled("Mouse buttons are bound in Controls > Remap (Keyboard & mouse).");
 }
 
 // Flick stick turns only left and right; say so when nothing aims up and down.
@@ -390,6 +421,9 @@ void DrawControlsController() {
     }
     ImGui::EndDisabled();
   }
+#ifdef __vita__
+  DrawAimCrosshair();
+#endif
   const s32 controllerIndex = PADGetIndexForPort(PAD_CHAN0);
   if (SDL_Gamepad* pad = controllerIndex >= 0 ? PADGetSDLGamepadForIndex(static_cast< u32 >(controllerIndex)) : nullptr;
       pad != nullptr && SDL_IsJoystickVirtual(SDL_GetGamepadID(pad))) {
@@ -550,6 +584,15 @@ void DrawControlsTouchGyro() {
   }
   ItemHelp("Moves the face buttons (and the classic C-stick) further in from the edge.");
   ImGui::EndDisabled();
+#elif defined(__vita__)
+  // The Vita has no touch overlay, but its front screen takes the minimap tap
+  // (PortDebug::MinimapTapEvent).
+  ImGui::SeparatorText("Touch screen");
+  bool touchMapTap = sInput.touchMapTap;
+  if (ImGui::Checkbox("Tap minimap for map", &touchMapTap)) {
+    SetTouchMapTap(touchMapTap);
+  }
+  ItemHelp("Tap the minimap on the front screen to open the map, as Z does.");
 #endif
 
   ImGui::SeparatorText("Gyro aim");

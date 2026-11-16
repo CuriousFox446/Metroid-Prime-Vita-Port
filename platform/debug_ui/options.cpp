@@ -114,6 +114,11 @@ bool BootWorld(uint32_t& worldId, uint32_t& areaAssetId) {
   return sSet;
 }
 
+bool Demo() {
+  static const bool sDemo = port::EnvFlag("MP_DEMO");
+  return sDemo;
+}
+
 bool SkipCutscenes() { return Loaded(sSkipCutscenes); }
 
 float CutsceneSpeed() { return Loaded(sCutsceneSpeed); }
@@ -147,6 +152,11 @@ unsigned TurboTicks() {
 }
 
 void SetSimAdaptive(bool enabled) { StoreSetting(sSimAdaptive, enabled); }
+
+unsigned CatchUpFrames() {
+  EnsureInitialized();
+  return sOriginalExperience ? 2u : kCatchUpFrames;
+}
 
 float TickPeriod() { return Loaded(sTickPeriod); }
 
@@ -275,6 +285,11 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
   sample.compiling = pipelines.pending > 0;
   sample.top = top;
   sample.bottom = bottom;
+#ifdef __vita__
+  // The Vita's GPU time is a busy time (vita_gl.cpp's GpuClock), and its CPU sets the pace below
+  // 60 fps however busy the GPU is for a 60 fps frame's worth.
+  sample.busyShare = true;
+#endif
   if (gpuTimes) {
     float total = 0.f;
     float span = 0.f;
@@ -447,6 +462,12 @@ int DrawnLines(float scale) {
 
 void SetCaptureRenderScale(float scale) {
   EnsureInitialized();
+#ifdef __vita__
+  // No supersampled photo on the Vita: it takes no captures, and its frames go up to twice its
+  // screen at most (vita_gl::kMaxRenderScale).
+  (void)scale;
+  return;
+#endif
   const float next = scale > 0.f ? scale : 0.f;
   if (sCaptureScale == next) {
     return;
@@ -1038,7 +1059,17 @@ void SetSunShadows(bool enabled) {
   }
 }
 
-bool ProjectedShadows() { return Loaded(sProjectedShadows); }
+bool ProjectedShadows() {
+#ifdef __vita__
+  // Each shadowed actor draws again into its own map: more than the Vita's FIFO thread has
+  // room for. MP_PROJECTED_SHADOWS=1 lets the setting decide.
+  static const bool allowed = port::EnvFlag("MP_PROJECTED_SHADOWS", false);
+  if (!allowed) {
+    return false;
+  }
+#endif
+  return Loaded(sProjectedShadows);
+}
 void SetProjectedShadows(bool enabled) {
   EnsureInitialized();
   if (sProjectedShadows != enabled) {

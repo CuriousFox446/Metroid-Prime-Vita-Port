@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <mutex>
@@ -18,6 +19,9 @@ namespace {
 constexpr SystemTime kGcnEpochUnix{946684800s};
 std::once_flag s_gameEpochOnce;
 OSTime s_gameEpochOffset;
+// Set once the epoch is: OSGetTime runs thousands of times a frame, and std::call_once's every call
+// (its thread-local callable, pthread_once) was not free on the PS Vita (0.42.0 test 17).
+std::atomic<bool> s_gameEpochReady{false};
 
 #if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L && !_WIN32
 #define CHRONO_TIME_WORKS 1
@@ -98,19 +102,26 @@ OSTime duration_to_ticks(const Duration duration) {
 void initialize_game_epoch() {
   s_gameEpochOffset = OSGetSystemTime() - duration_to_ticks(aurora::time::game_clock::now().time_since_epoch());
 }
+
+void ensure_game_epoch() {
+  if (!s_gameEpochReady.load(std::memory_order_acquire)) {
+    std::call_once(s_gameEpochOnce, initialize_game_epoch);
+    s_gameEpochReady.store(true, std::memory_order_release);
+  }
+}
 } // namespace
 
 OSTick OSGetTick() { return OSGetTime() & 0xFFFFFFFF; }
 
 OSTime OSGetTime() {
-  std::call_once(s_gameEpochOnce, initialize_game_epoch);
+  ensure_game_epoch();
   return s_gameEpochOffset + duration_to_ticks(aurora::time::game_clock::now().time_since_epoch());
 }
 
 OSTime OSGetNativeTime() { return duration_to_ticks(aurora::time::native_clock::now().time_since_epoch()); }
 
 void AuroraInitClock() {
-  std::call_once(s_gameEpochOnce, initialize_game_epoch);
+  ensure_game_epoch();
   if (OSBaseAddress == 0) {
     return;
   }

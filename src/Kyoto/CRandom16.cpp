@@ -2,8 +2,13 @@
 #include "Kyoto/Alloc/CMemory.hpp"
 #include "Kyoto/Basics/CCast.hpp"
 
+#ifdef TARGET_PC
+PortThreadValue< CRandom16* > CRandom16::gRandomNumber(nullptr);
+PortThreadValue< CGlobalRandom* > CGlobalRandom::gCurrentGlobalRandom(nullptr);
+#else
 CRandom16* CRandom16::gRandomNumber = nullptr;
 CGlobalRandom* CGlobalRandom::gCurrentGlobalRandom = nullptr;
+#endif
 
 CGlobalRandom::CGlobalRandom(CRandom16& rnd) : mRandom(rnd) {
   mIsFirst = true;

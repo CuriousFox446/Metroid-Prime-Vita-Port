@@ -194,6 +194,8 @@ Decision Controller::UpdateFromGpu(const Sample& s, double busy, float top, floa
   Learn(mScale, busy);
   const double budget = 1000.0 / s.targetFps;
   const bool slow = s.fps < s.targetFps * kSlow;
+  // The GPU is busy for most of the budget (and, with busyShare, of the second itself).
+  const bool gpuLimited = busy >= budget * kGpuBusy && (!s.busyShare || busy * s.fps >= 1000.0 * kGpuBusy);
   const float fit = std::max(FitBudget(mScale, busy, budget, top, bottom), std::max(mScale * kMaxDropRatio, bottom));
   if (mHoldLow > 0) {
     --mHoldLow;
@@ -218,7 +220,7 @@ Decision Controller::UpdateFromGpu(const Sample& s, double busy, float top, floa
   }
 
   if (mProbation >= 0) {
-    if (slow && busy >= budget * kGpuBusy) {
+    if (slow && gpuLimited) {
       // The raise was too much after all: back to where it was, and wait longer next time.
       mRaiseAfter = std::min(mRaiseAfter * 2, 64);
       mProbation = -1;
@@ -232,7 +234,7 @@ Decision Controller::UpdateFromGpu(const Sample& s, double busy, float top, floa
 
   if (slow) {
     mSteady = 0;
-    if (busy < budget * kGpuBusy) {
+    if (!gpuLimited) {
       // The GPU had time to spare: fewer pixels would not bring the frames back.
       mSlow = 0;
       mReason = Reason::NotGpuBound;

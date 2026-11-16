@@ -3,6 +3,7 @@
 #include "device.hpp"
 #include "internal.hpp"
 #include "io.hpp"
+#include "window.hpp"
 
 #include "magic_enum.hpp"
 
@@ -20,6 +21,19 @@ using namespace std::string_view_literals;
 
 namespace aurora::input {
 absl::flat_hash_map<Uint32, GameController> g_GameControllers;
+
+// player_index's copies (the Vita's) go whenever an index may have moved: one set here, which can
+// take it from another pad, or a pad added or removed (SDL hands indices out as pads come and go).
+static void forget_player_indices() noexcept {
+  for (auto& [instance, controller] : g_GameControllers) {
+    controller.m_playerIndexGeneration = 0;
+  }
+}
+
+void set_gamepad_player_index(SDL_Gamepad* gamepad, Sint32 index) noexcept {
+  SDL_SetGamepadPlayerIndex(gamepad, index);
+  forget_player_indices();
+}
 
 namespace {
 constexpr Module Log{"aurora::input"};
@@ -250,7 +264,7 @@ void apply_port_preferences() noexcept {
     const int32_t player = SDL_GetGamepadPlayerIndex(controller.m_controller);
     if (player >= 0 && player < PAD_MAX_CONTROLLERS && g_portPreferences[player].state != PortPreferenceState::Unset) {
       // Keep SDL's default player assignment from taking explicitly configured ports
-      SDL_SetGamepadPlayerIndex(controller.m_controller, -1);
+      set_gamepad_player_index(controller.m_controller, -1);
     }
   }
 
@@ -271,7 +285,7 @@ void apply_port_preferences() noexcept {
 
       switch (identity_match(preference.identity, controller_identity(controller))) {
       case IdentityMatch::Exact:
-        SDL_SetGamepadPlayerIndex(controller.m_controller, static_cast<int32_t>(port));
+        set_gamepad_player_index(controller.m_controller, static_cast<int32_t>(port));
         claimedControllers[claimedCount++] = instance;
         fallbackController = nullptr;
         break;
@@ -289,7 +303,7 @@ void apply_port_preferences() noexcept {
     }
 
     if (fallbackController != nullptr) {
-      SDL_SetGamepadPlayerIndex(fallbackController->m_controller, static_cast<int32_t>(port));
+      set_gamepad_player_index(fallbackController->m_controller, static_cast<int32_t>(port));
       claimedControllers[claimedCount++] = fallbackInstance;
     }
   }
@@ -329,9 +343,9 @@ void prefer_real_controller_on_first_port() noexcept {
   }
   GameController* wanted = controllers[move.take];
   if (move.give >= 0) {
-    SDL_SetGamepadPlayerIndex(controllers[move.give]->m_controller, pads[move.take].port);
+    set_gamepad_player_index(controllers[move.give]->m_controller, pads[move.take].port);
   }
-  SDL_SetGamepadPlayerIndex(wanted->m_controller, 0);
+  set_gamepad_player_index(wanted->m_controller, 0);
   Log.info("Controller '{}' moved to port 0", SDL_GetGamepadName(wanted->m_controller) != nullptr
                                                   ? SDL_GetGamepadName(wanted->m_controller)
                                                   : "unknown");
@@ -466,6 +480,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
     g_GameControllers[instance] = controller;
+    forget_player_indices();
     apply_port_preferences();
     prefer_real_controller_on_first_port();
     Log.info("Added controller '{}' (instance {}, vid {:04x}, pid {:04x}, type {}, port {})",
@@ -485,6 +500,7 @@ void remove_controller(Uint32 instance) noexcept {
              instance);
     SDL_CloseGamepad(it->second.m_controller);
     g_GameControllers.erase(it);
+    forget_player_indices();
     apply_port_preferences();
     prefer_real_controller_on_first_port();
   }
@@ -499,14 +515,29 @@ bool is_gamecube(Uint32 instance) noexcept {
 
 int32_t player_index(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
+#if defined(__vita__)
+    // SDL_GetGamepadPlayerIndex takes the joystick lock and looks the pad and its joystick up in
+    // SDL's object table, each look-up behind a lock of its own: about 20 us on a Vita, where the
+    // PAD calls look for each port's pad several times a tick (PADRead alone for all four ports).
+    // An index moves only while events are pumped or when it is set here (forget_player_indices),
+    // so the Vita reads it once a pump.
+    GameController& controller = it->second;
+    const uint64_t generation = window::pump_generation();
+    if (generation == 0 || controller.m_playerIndexGeneration != generation) {
+      controller.m_playerIndex = SDL_GetGamepadPlayerIndex(controller.m_controller);
+      controller.m_playerIndexGeneration = generation;
+    }
+    return controller.m_playerIndex;
+#else
     return SDL_GetGamepadPlayerIndex(it->second.m_controller);
+#endif
   }
   return -1;
 }
 
 void set_player_index(Uint32 instance, Sint32 index) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    SDL_SetGamepadPlayerIndex(it->second.m_controller, index);
+    set_gamepad_player_index(it->second.m_controller, index);
   }
 }
 
@@ -531,10 +562,10 @@ bool take_first_port(Uint32 instance) noexcept {
       occupied[port] = get_controller_for_player(port) != nullptr;
     }
     // Clear the taker first: SDL drops whoever holds an index that is handed out again.
-    SDL_SetGamepadPlayerIndex(it->second.m_controller, -1);
-    SDL_SetGamepadPlayerIndex(holder->m_controller, displaced_port(oldPort, occupied));
+    set_gamepad_player_index(it->second.m_controller, -1);
+    set_gamepad_player_index(holder->m_controller, displaced_port(oldPort, occupied));
   }
-  SDL_SetGamepadPlayerIndex(it->second.m_controller, 0);
+  set_gamepad_player_index(it->second.m_controller, 0);
   const char* name = SDL_GetGamepadName(it->second.m_controller);
   Log.info("Controller '{}' took port 0", name != nullptr ? name : "?");
   return true;

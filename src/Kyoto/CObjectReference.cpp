@@ -65,8 +65,14 @@ void CObjectReference::CancelLoad() {
 }
 
 int CObjectReference::RemoveReference() {
+#ifdef TARGET_PC
+  // The count this call left (atomic: see the header), not a second read another thread could move.
+  const int left = x0_refCount.fetch_sub(1, std::memory_order_acq_rel) - 1;
+  if (left == 0) {
+#else
   --x0_refCount;
   if (x0_refCount == 0) {
+#endif
     if (x10_object != nullptr) {
       Unload();
     } else if (IsLoading()) {
@@ -77,15 +83,25 @@ int CObjectReference::RemoveReference() {
     }
   }
 
+#ifdef TARGET_PC
+  return left;
+#else
   return x0_refCount;
+#endif
 }
 
 void CObjectReference::Unlock() {
+#ifdef TARGET_PC
+  if (x2_lockCount.fetch_sub(1, std::memory_order_acq_rel) - 1 != 0) {
+    return;
+  }
+#else
   --x2_lockCount;
 
   if (x2_lockCount != 0) {
     return;
   }
+#endif
 
   if (x10_object != nullptr && xc_objectStore != nullptr) {
     Unload();
