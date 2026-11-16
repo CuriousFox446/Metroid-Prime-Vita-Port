@@ -40,9 +40,11 @@
 #include "MetroidPrime/Player/CPlayerState.hpp"
 #include "MetroidPrime/PortFaceReflection.hpp"
 #include "aurora/envfx.hpp"
+#include "dolphin/gx/GXPortVertexBytes.h"
 #include "port_debug.h"
 #include "port_envfx_assets.h"
 #include "port_mods.h"
+#include "port_profile.h"
 #include "port_room_env.h"
 
 #include <vector>
@@ -61,6 +63,39 @@ static int sPortSnowFirst = 0;
 static short PortStepBack(short v, short step) {
   const float back = sPortSnowBack * static_cast< float >(step);
   return static_cast< short >(v - static_cast< short >(back + (back >= 0.f ? 0.5f : -0.5f)));
+}
+
+// 0.46.0 test 8: a grid's vertices put together here, byte for byte as GXPosition3s16 and
+// GXTexCoord2u8 (or GXTexCoord1s16) write them (each component big-endian, as the FIFO carries it),
+// and sent in one write (GXPortWriteVertexBytes). Those calls wrote a component at a time, each
+// checking the FIFO's room again: Phendrana's snow, ~27,500 vertices a frame, was about 7 ms of the
+// game thread's (test 7). Game thread.
+static std::vector< uchar > sPortVertexBytes;
+
+static uchar* PortVertexRoom(size_t size) {
+  if (sPortVertexBytes.size() < size) {
+    sPortVertexBytes.resize(size);
+  }
+  return sPortVertexBytes.data();
+}
+
+static inline uchar* PortPutS16(uchar* o, short v) {
+  const ushort u = static_cast< ushort >(v);
+  o[0] = static_cast< uchar >(u >> 8);
+  o[1] = static_cast< uchar >(u);
+  return o + 2;
+}
+
+static inline uchar* PortPutPos(uchar* o, const CVectorFixed8_8& p) {
+  o = PortPutS16(o, p.x);
+  o = PortPutS16(o, p.y);
+  return PortPutS16(o, p.z);
+}
+
+static inline uchar* PortPutUv(uchar* o, uchar s, uchar t) {
+  o[0] = s;
+  o[1] = t;
+  return o + 2;
 }
 #endif
 
@@ -116,6 +151,19 @@ void CEnvFxManagerGrid::RenderRainParticles(const CTransform4f& camXf) {
   float absDot = CMath::AbsF(CVector3f::Dot(camXf.GetUp(), CVector3f::Up()));
   CGX::Begin(GX_LINES, GX_VTXFMT6, particleCount * 2);
   short zOffset = static_cast< short >(512.f * (1.f - absDot) + 256.f);
+#ifdef TARGET_PC
+  uchar* const start = PortVertexRoom(static_cast< size_t >(particleCount) * 2 * 8);
+  uchar* o = start;
+  for (int i = 0; i < particleCount; ++i) {
+    CVectorFixed8_8 p = x1c_particles[i];
+    o = PortPutPos(o, p);
+    o = PortPutS16(o, 10);
+    p.z = static_cast< short >(p.z + zOffset);
+    o = PortPutPos(o, p);
+    o = PortPutS16(o, 0);
+  }
+  GXPortWriteVertexBytes(start, static_cast< u32 >(o - start));
+#else
   for (int i = 0; i < particleCount; ++i) {
     CVectorFixed8_8 p = x1c_particles[i];
     GXPosition3s16(p.x, p.y, p.z);
@@ -123,6 +171,7 @@ void CEnvFxManagerGrid::RenderRainParticles(const CTransform4f& camXf) {
     GXPosition3s16(p.x, p.y, p.z + zOffset);
     GXTexCoord1s16(0);
   }
+#endif
   CGX::End();
 }
 
@@ -135,9 +184,11 @@ void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
   short xy = real_to_fixed8_8(0.2f * camXf.Get10());
   short xz = real_to_fixed8_8(0.2f * camXf.Get20());
   CGX::Begin(GX_QUADS, GX_VTXFMT6, particleCount * 4);
+#ifdef TARGET_PC
+  uchar* const start = PortVertexRoom(static_cast< size_t >(particleCount) * 4 * 8);
+  uchar* o = start;
   for (int i = particleCount - 1; i >= 0; --i) {
     CVectorFixed8_8 p = x1c_particles[i];
-#ifdef TARGET_PC
     if (sPortSnowSteps != nullptr) {
       // UpdateSnowParticles gives particle j force (first + size-1-j) & 0xff.
       const CVectorFixed8_8& step =
@@ -146,7 +197,24 @@ void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
       p.y = PortStepBack(p.y, step.y);
       p.z = PortStepBack(p.z, step.z);
     }
-#endif
+    o = PortPutUv(PortPutPos(o, p), 0, 0);
+    p.x += zx;
+    p.y += zy;
+    p.z += zz;
+    o = PortPutUv(PortPutPos(o, p), 0, 2);
+    p.x += xx;
+    p.y += xy;
+    p.z += xz;
+    o = PortPutUv(PortPutPos(o, p), 2, 2);
+    p.x -= zx;
+    p.y -= zy;
+    p.z -= zz;
+    o = PortPutUv(PortPutPos(o, p), 2, 0);
+  }
+  GXPortWriteVertexBytes(start, static_cast< u32 >(o - start));
+#else
+  for (int i = particleCount - 1; i >= 0; --i) {
+    CVectorFixed8_8 p = x1c_particles[i];
     GXPosition3s16(p.x, p.y, p.z);
     GXTexCoord2u8(0, 0);
     p.x += zx;
@@ -165,6 +233,7 @@ void CEnvFxManagerGrid::RenderSnowParticles(const CTransform4f& camXf) {
     GXPosition3s16(p.x, p.y, p.z);
     GXTexCoord2u8(2, 0);
   }
+#endif
   CGX::End();
 }
 
@@ -177,6 +246,27 @@ void CEnvFxManagerGrid::RenderUnderwaterParticles(const CTransform4f& camXf) {
   short xy = real_to_fixed8_8(0.5f * camXf.Get10());
   short xz = real_to_fixed8_8(0.5f * camXf.Get20());
   CGX::Begin(GX_QUADS, GX_VTXFMT6, particleCount * 4);
+#ifdef TARGET_PC
+  uchar* const start = PortVertexRoom(static_cast< size_t >(particleCount) * 4 * 8);
+  uchar* o = start;
+  for (int i = particleCount - 1; i >= 0; --i) {
+    CVectorFixed8_8 p = x1c_particles[i];
+    o = PortPutUv(PortPutPos(o, p), 0, 0);
+    p.x += zx;
+    p.y += zy;
+    p.z += zz;
+    o = PortPutUv(PortPutPos(o, p), 0, 2);
+    p.x += xx;
+    p.y += xy;
+    p.z += xz;
+    o = PortPutUv(PortPutPos(o, p), 2, 2);
+    p.x -= zx;
+    p.y -= zy;
+    p.z -= zz;
+    o = PortPutUv(PortPutPos(o, p), 2, 0);
+  }
+  GXPortWriteVertexBytes(start, static_cast< u32 >(o - start));
+#else
   for (int i = particleCount - 1; i >= 0; --i) {
     CVectorFixed8_8 p = x1c_particles[i];
     GXPosition3s16(p.x, p.y, p.z);
@@ -197,6 +287,7 @@ void CEnvFxManagerGrid::RenderUnderwaterParticles(const CTransform4f& camXf) {
     GXPosition3s16(p.x, p.y, p.z);
     GXTexCoord2u8(2, 0);
   }
+#endif
   CGX::End();
 }
 
@@ -321,7 +412,12 @@ void CEnvFxManager::Update(float dt, CStateManager& mgr) {
   }
 
   UpdateRainSounds(mgr);
-  UpdateVisorSplash(mgr, dt, camXf);
+  {
+#ifdef TARGET_PC
+    PORT_ZONE_TIMED("envfx: visor splash");
+#endif
+    UpdateVisorSplash(mgr, dt, camXf);
+  }
 
   if (fxType == kEFX_None) {
     for (int i = x50_grids.size() - 1; i >= 0; --i) {
@@ -377,7 +473,15 @@ void CEnvFxManager::Update(float dt, CStateManager& mgr) {
 
     CTransform4f xf = GetParticleBoundsToWorldTransform();
     CTransform4f invXf = xf.GetInverse();
-    UpdateBlockedGrids(mgr, fxType, camXf, xf, invXf);
+    {
+#ifdef TARGET_PC
+      PORT_ZONE_TIMED("envfx: blocked grids (ray casts)");
+#endif
+      UpdateBlockedGrids(mgr, fxType, camXf, xf, invXf);
+    }
+#ifdef TARGET_PC
+    PORT_ZONE_TIMED("envfx: particles (new and moved)");
+#endif
     CreateNewParticles(fxType);
 
     switch (fxType) {
@@ -892,6 +996,9 @@ void CEnvFxManager::SetupRainTevs() {
 }
 
 void CEnvFxManager::Render(const CStateManager& mgr) {
+#ifdef TARGET_PC
+  PORT_ZONE("CEnvFxManager::Render (snow, rain)");
+#endif
   EEnvFxType fxType = mgr.GetWorld()->GetNeededEnvFx();
   if (fxType != kEFX_None) {
     if (mgr.GetPlayer()->GetMorphballTransitionState() != CPlayer::kMS_Unmorphed ||

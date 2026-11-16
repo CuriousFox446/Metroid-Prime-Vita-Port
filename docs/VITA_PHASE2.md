@@ -3270,3 +3270,49 @@ What to look for in test 7: Phendrana's frame rate in the open (18.2 FPS in test
 expected, where the game thread takes over), and the FIFO processor's `immediate` there (18 to 24 ms
 a frame in test 6). The snow should look exactly as before.
 
+### Test 7 result
+
+`~/logs/t046_7.log` (c908dab, 248 windows, 204 of them "Phendrana, Sheegoths"). The user: "could be
+that we need to optimize the game thread."
+- The FIFO processor went from 67.2 to 49.5 ms a frame there. The helper decoded about 21,000
+  immediate draws (8.9 million vertices) a report and was 30 to 33% busy. The FIFO processor waited
+  for it at frame ends for 2 to 4% of the time.
+- The frame rate stayed at 15.5 FPS (15.6). The game thread is the limit now: 94% busy, 3.84 ticks
+  of 9.70 ms plus a 22.2 ms draw a frame.
+- Cores: 0 at 77% (helper 32%, render worker 39%), 1 at 94% (game), 2 at 59% (FIFO), 3 at 43%.
+
+The game thread's frame there, in ms:
+- `SM::Update` 31.2 (3.84 ticks):
+  - `SM: Think` 13.4: the two Sheegoths 4.8 (Think 3.1, Move 1.5), the parasites 2.2, the
+    Flickerbats 1.4, the collision actors' Move 1.0
+  - `SM: environment effects` (the snow's update) 3.3
+  - platforms and doors 2.9; PreThink 2.7; the touches 2.6
+- the HUD's update 4.4
+- input about 3
+- `CMFGame::Draw` 22.1: `CStateManager::DrawWorld` 15.1 (7.1 in Magmoor's Puffers' room); the map
+  2.4; the HUD 2.2
+
+The snow's draw is most of that difference. `CEnvFxManagerGrid::RenderSnowParticles` writes each
+flake as four vertices of `GXPosition3s16` and `GXTexCoord2u8`: ~55,000 calls a frame. Each call is a
+function of its own (GXVert.cpp), and each component written checks the FIFO's room again. That is
+about 110 cycles a vertex, some 7 ms a frame for ~27,500 vertices.
+
+## 0.46.0 test 8: the snow's vertices in one write
+
+**The writes.** `GXPortWriteVertexBytes` (new header `dolphin/gx/GXPortVertexBytes.h`, in
+GXVert.cpp) writes a run of vertex bytes into the FIFO at once.
+- The snow's, the rain's and the underwater flakes' loops (`CEnvFxManagerGrid::Render*Particles`)
+  put each vertex together themselves, as those calls wrote it: three s16 big-endian, then the two
+  u8 coordinates (the rain: an s16). Then each grid is sent in one write.
+- The arithmetic is the loops' own, the presentation step back included.
+- A harness (`~/tools/harness/snowbytes.cpp`) ran both ways over 40,000 random grids, cameras and
+  steps: 54 MB of bytes, none different.
+
+**Zones.** `CEnvFxManager::Render (snow, rain)` (a gxsrc stage too, so the snow's draws are counted
+under it rather than under `DrawWorld`), and in the update `envfx: visor splash`,
+`envfx: blocked grids (ray casts)` and `envfx: particles (new and moved)`.
+
+What to look for in test 8: Phendrana's frame rate (15.5 FPS with the Sheegoths). The game thread's
+`DrawWorld` there (15.1 ms a frame in test 7), and the new snow zones. The snow, the rain and the
+underwater flakes should look exactly as before.
+

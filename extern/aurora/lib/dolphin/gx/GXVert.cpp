@@ -2,6 +2,8 @@
 #include "__gx.h"
 #include "../../gx/fifo.hpp"
 
+#include <dolphin/gx/GXPortVertexBytes.h>
+
 namespace {
 // Track vertex count between GXBegin/GXEnd for mismatch detection
 u16 sBeginNVerts = 0;
@@ -266,5 +268,9 @@ void GXParam4f32(const f32 x, const f32 y, const f32 z, const f32 w) {
   aurora::gx::fifo::write_f32(z);
   aurora::gx::fifo::write_f32(w);
 }
+
+// GXPortVertexBytes.h: a run of vertices' bytes, as the GXPosition and GXTexCoord calls would write
+// them, in one write.
+void GXPortWriteVertexBytes(const void* data, u32 size) { aurora::gx::fifo::write_data(data, size); }
 
 } // extern "C"
