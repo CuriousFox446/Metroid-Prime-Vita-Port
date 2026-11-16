@@ -1829,6 +1829,7 @@ void CStateManager::Update(float dt) {
       // and the projectiles' (CEnergyProjectile::Think, 0.46.0 test 3).
       CParticleDatabase::PortSetAsyncWindow(true);
       CEnergyProjectile::PortSetAsyncWindow(true);
+      CScriptEffect::PortSetAsyncWindow(true);
 #endif
       Think(dt);
 #ifdef TARGET_PC
@@ -1837,6 +1838,12 @@ void CStateManager::Update(float dt) {
         PORT_ZONE_TIMED("SM: projectiles' Think finished (side worker steps)");
         CEnergyProjectile::PortFinishAll();
       }
+      {
+        // And each such effect's (0.46.0 test 11).
+        PORT_ZONE_TIMED("SM: effects' Think finished (side worker steps)");
+        CScriptEffect::PortFinishAll();
+      }
+      CScriptEffect::PortSetAsyncWindow(false);
       CEnergyProjectile::PortSetAsyncWindow(false);
       CParticleDatabase::PortSetAsyncWindow(false);
 #endif

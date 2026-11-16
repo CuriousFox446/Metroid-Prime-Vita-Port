@@ -3426,3 +3426,55 @@ What to look for in test 10: third person's frame rate against first person in t
 against 26.6 FPS in test 9), the body moving and aiming exactly as before, and the new zones (the
 pose ~30 ms a frame in test 9).
 
+### Test 10 result
+
+`~/logs/t046_10.log` (8526e5f, 418 windows, third person on from the start, most of it Phendrana
+with the Sheegoths). Clean.
+- The body's pose: 1.3 ms a frame. 6.2 clips sampled a frame, 0.15 ms each; each tree built once.
+- `CStateManager::PreRender` 2.9 ms (28 to 37 in test 9).
+- Phendrana with the Sheegoths in third person: 16.1 FPS, against 18.3 in first person (test 9).
+- What is left of third person is its vertices:
+  - The body's skinning on the fourth core: 6.3 ms a frame, against 2.7.
+  - The core 0 helper is 45% busy and core 0 89%. The FIFO processor waited for the helper at 298
+    frame ends of 300, ~9.4 ms a frame.
+  - The game thread is at 96%: 3.78 ticks of 9.57 ms, plus 20 ms.
+
+The user chose the game thread next. Its zones over test 9's 1,570 play windows (`~/tools/pertick.py`):
+a tick 7.5 ms. `SM::Update` is 5.7 ms of it:
+- `SM: Think` 2.3
+- PreThink 0.6, the touches 0.53
+- the player's collision move 0.37
+- platforms and doors 0.35
+- PostUpdatePlayer 0.25, the player's input 0.23
+- the sorted lists 0.33
+- the camera 0.15
+
+The HUD's update is 1.0 ms a tick (`CSamusHud::Update` 0.71, almost none of it under a named zone).
+The input generator is 0.37 a tick, and the Port actions 1.7 ms a frame (~1 ms of it unnamed). The
+largest Think class is `CScriptEffect`: 0.54 ms a tick, 25 effects. The think profiler itself costs
+little: it times each class's first 32 calls a report, then one in 8.
+
+## 0.46.0 test 11: the effects' particles on the fourth core
+
+**The effects.** `CScriptEffect::Think` steps its `CElementGen` and `CParticleElectric` on the side
+worker while the Think pass goes on, as the projectiles' (0.46.0 test 3).
+- Its rest (`PortThinkTail`) waits for the pass's end (`CScriptEffect::PortFinishAll` in
+  `CStateManager::Update`, after the projectiles'). That rest is the particle counts, the light fed
+  from the system, the nested lights, the die-when-done checks and the modulation colour.
+- It runs sooner when anything reaches the systems first (`PortFinishStep`): a message,
+  `SetActive`, `PreRender`, `AddToRenderer`, `Render`, `CalculateRenderBounds`, the external
+  variables, the barrier, `PortParticleSystem`.
+- The destructor waits for a step still running.
+- What moves: the light's `SetLight` and the deletion request, both to the pass's end.
+  `CGameLight::Think` only counts its lifetime down, so the light the frame draws is the same.
+- The `[particles]` line adds the effects' steps and waits.
+
+**Zones** for the next round:
+- `HUD update:` radar, lag and dynamic lights, targeting (reticles), damage and static; energy,
+  threat, missiles, menus; the frames' widgets; the interfaces and menus.
+- `input: the Port actions' sources check` and `the Port actions' game contexts`.
+
+What to look for in test 11: `SM: Think` against test 9's 2.3 ms a tick where effects are many, the
+`[particles]` effects count and its waits (few, short), and effects looking as before (steam, sparks,
+lava bubbles, waterfalls). And the new HUD and input zones, which name the next targets.
+

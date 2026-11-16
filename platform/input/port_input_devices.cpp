@@ -1468,6 +1468,8 @@ void PollPortActions() {
   static uint64_t sMenuFrame = 0; // the last frame the Port menu was up
   constexpr uint64_t kSecond = 30; // frames
   if (sInit && sFrame != 0) {
+    // Zone (0.46.0 test 11): PollPortActions was 1.7 ms a frame in test 9, ~1 ms of it unnamed.
+    PORT_ZONE_TIMED("input: the Port actions' sources check");
     const Sources sources{UserBindingsVersion(), PADGetIndexForPort(kPort), PADGetControllerType(kPort),
                           SDL_HasGamepad()};
     if (PortDebug::Visible()) sMenuFrame = sFrame;
@@ -1504,7 +1506,11 @@ void PollPortActions() {
       }
     }
   }
-  const uint16_t contexts = GameContexts();
+  uint16_t contexts = 0;
+  {
+    PORT_ZONE_TIMED("input: the Port actions' game contexts");
+    contexts = GameContexts();
+  }
   PORT_ZONE_TIMED("input: the Port actions' engine");
   const PortInput::Output& out = sRuntime.Poll(raw, contexts, static_cast< double >(SDL_GetTicksNS()) / 1e6,
                                                QuietContexts(sRuntime.ActiveContexts(), contexts));

@@ -22,10 +22,27 @@
 
 #include "rstl/math.hpp"
 #ifdef TARGET_PC
+#include <chrono>
 #include <cmath>
 #include "MetroidPrime/ScriptObjects/CScriptSpecialFunction.hpp"
 #include "port_mods.h"
+#include "port_profile.h"
 #include "port_room_env.h"
+
+#include <dolphin/gx/GXExtra.h>
+
+namespace {
+// The window CStateManager::Update opens around its entities' Think (PortSetAsyncWindow).
+bool sPortAsyncWindow = false;
+// Set when the side worker refused a step (no fourth core): every Think runs whole, as before.
+bool sPortNoWorker = false;
+// The effects whose Think has its rest still to run, in the order their steps began.
+CScriptEffect* sPortPendingHead = nullptr;
+CScriptEffect* sPortPendingTail = nullptr;
+uint sPortStatStepped = 0;
+uint sPortStatWaited = 0;
+uint sPortStatWaitUs = 0;
+} // namespace
 #endif
 uint CScriptEffect::mNumParticlesDrawing = 0;
 uint CScriptEffect::mNumParticlesUpdating = 0;
@@ -101,6 +118,7 @@ CScriptEffect::CScriptEffect(const TUniqueId uid, const rstl::string& name, cons
 
 void CScriptEffect::Think(float dt, CStateManager& mgr) {
 #ifdef TARGET_PC
+  PortFinishStep(); // one from before (one Think a tick is the rule, but the pass ends them)
   if (xPortBarrierPlatform != kInvalidUniqueId) {
     if (const CActor* source = TCastToConstPtr<CActor>(mgr.GetObjectById(xPortBarrierPlatform))) {
       if (source->GetActive()) PortFollowBarrier(*source);
@@ -139,7 +157,46 @@ void CScriptEffect::Think(float dt, CStateManager& mgr) {
     }
   }
   x12c_remTime -= dt;
+#ifdef TARGET_PC
+  // 0.46.0 test 11: the effects' systems were the Think pass's largest class (test 9's run: 0.54
+  // ms a tick, 25 effects). Their step goes to the side worker while the pass goes on; what Think
+  // does after it (the counts, the light, the nested lights, the deletion checks, the modulation
+  // colour) runs at the pass's end, or first when anything reaches the systems sooner.
   if (x110_24_enable) {
+    if (sPortAsyncWindow && !sPortNoWorker && (x104_particleSystem.get() || xf4_electric.get())) {
+      xPortTailDt = dt;
+      xPortTailMgr = &mgr;
+      xPortStepJob = GXPortSideJobSubmit(&CScriptEffect::PortStepJob, this);
+      if (xPortStepJob != 0) {
+        ++sPortStatStepped;
+        xPortTailPending = true;
+        PortLinkPending();
+        return;
+      }
+      sPortNoWorker = true;
+    }
+    if (x104_particleSystem.get()) {
+      x104_particleSystem->Update(dt);
+    }
+    if (xf4_electric.get()) {
+      xf4_electric->Update(dt);
+    }
+  }
+  PortThinkTail(dt, mgr);
+}
+
+// What Think does after the systems' step: as it was, from here.
+void CScriptEffect::PortThinkTail(float dt, CStateManager& mgr) {
+#endif
+  if (x110_24_enable) {
+#ifdef TARGET_PC
+    if (x104_particleSystem.get()) {
+      mNumParticlesUpdating += x104_particleSystem->GetParticleCountAll();
+    }
+    if (xf4_electric.get()) {
+      mNumParticlesUpdating += xf4_electric->GetParticleCount();
+    }
+#else
     if (x104_particleSystem.get()) {
       x104_particleSystem->Update(dt);
       mNumParticlesUpdating += x104_particleSystem->GetParticleCountAll();
@@ -148,6 +205,7 @@ void CScriptEffect::Think(float dt, CStateManager& mgr) {
       xf4_electric->Update(dt);
       mNumParticlesUpdating += xf4_electric->GetParticleCount();
     }
+#endif
     if (x108_lightId != kInvalidUniqueId) {
       if (CGameLight* light = TCastToPtr< CGameLight >(mgr.ObjectById(x108_lightId))) {
         if (GetActive()) {
@@ -191,6 +249,9 @@ void CScriptEffect::Think(float dt, CStateManager& mgr) {
 }
 
 void CScriptEffect::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid, CStateManager& mgr) {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   bool oldActive = GetActive();
 #ifdef TARGET_PC
   xPortNestedLights.Forward(msg, uid, GetUniqueId(), mgr);
@@ -306,6 +367,7 @@ void CScriptEffect::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId uid, CSt
 
 void CScriptEffect::AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const {
 #ifdef TARGET_PC
+  const_cast< CScriptEffect* >(this)->PortFinishStep();
   if (xPortBarrierController != kInvalidUniqueId) {
     const CScriptSpecialFunction* owner =
         TCastToConstPtr<CScriptSpecialFunction>(mgr.GetObjectById(xPortBarrierController));
@@ -367,6 +429,7 @@ void CScriptEffect::AddToRenderer(const CFrustumPlanes& frustum, const CStateMan
 
 void CScriptEffect::Render(const CStateManager& mgr) const {
 #ifdef TARGET_PC
+  const_cast< CScriptEffect* >(this)->PortFinishStep();
   if (xPortBarrierController != kInvalidUniqueId) {
     const CScriptSpecialFunction* owner =
         TCastToConstPtr<CScriptSpecialFunction>(mgr.GetObjectById(xPortBarrierController));
@@ -393,6 +456,9 @@ void CScriptEffect::Render(const CStateManager& mgr) const {
 }
 
 void CScriptEffect::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   if (x110_27_useRateInverseCamDist || x111_24_useRateCamDistRange) {
     float genRate = 1.f;
     const float camMagSq =
@@ -420,6 +486,7 @@ ENTITY_ACCEPT_IMPL(CScriptEffect)
 
 #ifdef TARGET_PC
 void CScriptEffect::PortSetExternalVars(const std::vector< SPortExternalVar >& vars) {
+  PortFinishStep();
   xPortExternalVars = vars;
   if (x104_particleSystem.get()) {
     for (size_t i = 0; i < vars.size(); ++i) {
@@ -429,6 +496,7 @@ void CScriptEffect::PortSetExternalVars(const std::vector< SPortExternalVar >& v
 }
 
 bool CScriptEffect::PortSetExternalReal(const PortGuid& guid, float value) {
+  PortFinishStep();
   if (!std::isfinite(value) || !x104_particleSystem.get() ||
       x104_particleSystem->PortGetRealHandle(guid) == kPortNoVar) {
     return false;
@@ -449,6 +517,7 @@ bool CScriptEffect::PortSetExternalReal(const PortGuid& guid, float value) {
 }
 
 void CScriptEffect::PortFollowBarrier(const CActor& source) {
+  PortFinishStep();
   SetTransform(source.GetTransform());
   if (x104_particleSystem.get()) {
     x104_particleSystem->SetOrientation(ClearTrans(GetTransform()));
@@ -473,6 +542,9 @@ bool CScriptEffect::AreBothSystemsDeleteable() const {
 bool CScriptEffect::CanRenderUnsorted(const CStateManager& mgr) const { return false; }
 
 void CScriptEffect::CalculateRenderBounds() {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   const rstl::optional_object< CAABox > particleBounds = x104_particleSystem.get()
                                                              ? x104_particleSystem->GetBounds()
                                                              : rstl::optional_object< CAABox >();
@@ -509,8 +581,97 @@ CAABox CScriptEffect::GetSortingBounds(const CStateManager& mgr) const {
 }
 
 void CScriptEffect::SetActive(const bool active) {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   CActor::SetActive(active);
   SetDrawEnabled(true);
 }
 
-CScriptEffect::~CScriptEffect() {}
+CScriptEffect::~CScriptEffect() {
+#ifdef TARGET_PC
+  // A step still running reads these systems: wait for it. The rest of its Think goes with them.
+  if (xPortStepJob != 0) {
+    while (!GXPortSideJobDone(xPortStepJob)) {
+      GXPortSideJobWait(xPortStepJob);
+    }
+    xPortStepJob = 0;
+  }
+  if (xPortTailPending) {
+    xPortTailPending = false;
+    PortUnlinkPending();
+  }
+#endif
+}
+
+#ifdef TARGET_PC
+void CScriptEffect::PortStepJob(void* data) {
+  PORT_ZONE_TIMED("effect: particle systems (side worker, core 3)");
+  CScriptEffect& effect = *static_cast< CScriptEffect* >(data);
+  if (effect.x104_particleSystem.get()) {
+    effect.x104_particleSystem->Update(effect.xPortTailDt);
+  }
+  if (effect.xf4_electric.get()) {
+    effect.xf4_electric->Update(effect.xPortTailDt);
+  }
+}
+
+void CScriptEffect::PortFinishStep() {
+  if (!xPortTailPending) {
+    return;
+  }
+  xPortTailPending = false;
+  PortUnlinkPending();
+  if (xPortStepJob != 0) {
+    if (!GXPortSideJobDone(xPortStepJob)) {
+      const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+      // Past the side jobs' limit (logged there) it waits again: the worker may still be stepping
+      // the systems, which nothing may read meanwhile.
+      while (!GXPortSideJobDone(xPortStepJob)) {
+        GXPortSideJobWait(xPortStepJob);
+      }
+      ++sPortStatWaited;
+      sPortStatWaitUs += static_cast< uint >(
+          std::chrono::duration_cast< std::chrono::microseconds >(std::chrono::steady_clock::now() - start)
+              .count());
+    }
+    xPortStepJob = 0;
+  }
+  PortThinkTail(xPortTailDt, *xPortTailMgr);
+}
+
+void CScriptEffect::PortLinkPending() {
+  xPortNextPending = nullptr;
+  (sPortPendingTail != nullptr ? sPortPendingTail->xPortNextPending : sPortPendingHead) = this;
+  sPortPendingTail = this;
+}
+
+void CScriptEffect::PortUnlinkPending() {
+  CScriptEffect* prev = nullptr;
+  for (CScriptEffect* e = sPortPendingHead; e != nullptr; prev = e, e = e->xPortNextPending) {
+    if (e == this) {
+      (prev != nullptr ? prev->xPortNextPending : sPortPendingHead) = xPortNextPending;
+      if (sPortPendingTail == this) {
+        sPortPendingTail = prev;
+      }
+      xPortNextPending = nullptr;
+      return;
+    }
+  }
+}
+
+void CScriptEffect::PortSetAsyncWindow(bool open) { sPortAsyncWindow = open; }
+
+void CScriptEffect::PortFinishAll() {
+  while (sPortPendingHead != nullptr) {
+    sPortPendingHead->PortFinishStep();
+  }
+}
+
+void CScriptEffect::PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs) {
+  stepped = sPortStatStepped;
+  waited = sPortStatWaited;
+  waitUs = sPortStatWaitUs;
+  sPortStatStepped = sPortStatWaited = sPortStatWaitUs = 0;
+}
+#endif

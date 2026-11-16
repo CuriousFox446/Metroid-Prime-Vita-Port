@@ -43,7 +43,18 @@ public:
   void PortSetExternalVars(const std::vector< SPortExternalVar >& vars);
   // Updates only this real variable, including the value used after a system rebuild.
   bool PortSetExternalReal(const PortGuid& guid, float value);
-  CElementGen* PortParticleSystem() const { return x104_particleSystem.get(); }
+  CElementGen* PortParticleSystem() const {
+    const_cast< CScriptEffect* >(this)->PortFinishStep();
+    return x104_particleSystem.get();
+  }
+  // 0.46.0 test 11: during the Think pass the systems' step runs on the side worker (as the
+  // projectiles', 0.46.0 test 3); what Think does after it waits for the pass's end
+  // (PortFinishAll, CStateManager::Update), or runs first when anything reaches the systems sooner
+  // (PortFinishStep, which every method that reads or changes them calls).
+  static void PortSetAsyncWindow(bool open);
+  static void PortFinishAll();
+  static void PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs);
+  void PortFinishStep();
   CAssetId PortPartId() const { return x10c_partId; }
   void PortAttachBarrier(TUniqueId controller, TUniqueId platform) {
     xPortBarrierController = controller;
@@ -99,6 +110,17 @@ private:
   CAABox xPortBarrierBounds = CAABox::MakeMaxInvertedBox();
   bool xPortHasBarrierBounds = false;
   bool xPortHidden = false;
+  // The side worker's step (PortSetAsyncWindow): its job, the rest of Think still to run, with its
+  // dt and manager, and the next effect in the pass's list of those.
+  static void PortStepJob(void* effect);
+  void PortThinkTail(float dt, CStateManager& mgr);
+  void PortLinkPending();
+  void PortUnlinkPending();
+  uint xPortStepJob = 0;
+  bool xPortTailPending = false;
+  float xPortTailDt = 0.f;
+  CStateManager* xPortTailMgr = nullptr;
+  CScriptEffect* xPortNextPending = nullptr;
 #endif
 };
 

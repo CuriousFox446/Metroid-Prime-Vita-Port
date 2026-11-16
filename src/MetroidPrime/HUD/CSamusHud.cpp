@@ -1449,17 +1449,27 @@ void CSamusHud::Update(float dt, const CStateManager& mgr, uint helmetVis, bool 
   for (int i = 0; i < 15; ++i) {
     x7ac_profileInfo[i].x0_updateUsec = 0;
   }
+  // Zones (0.46.0 test 11): CSamusHud::Update was 0.71 ms a tick in test 9, little of it named.
   if (!x2ac_radarIntf.null()) {
+    PORT_ZONE_TIMED("HUD update: radar");
     x2ac_radarIntf->Update(dt, mgr);
   }
-  UpdateHudLag(dt, mgr);
-  UpdateHudDynamicLights(dt, mgr);
+  {
+    PORT_ZONE_TIMED("HUD update: lag and dynamic lights");
+    UpdateHudLag(dt, mgr);
+    UpdateHudDynamicLights(dt, mgr);
+  }
   if (targetingManager) {
+    PORT_ZONE_TIMED("HUD update: targeting (reticles)");
     x8_targetingMgr.Update(dt, mgr);
   }
-  UpdateHudDamage(dt, mgr, helmetVis);
-  UpdateStaticInterference(dt, mgr);
+  {
+    PORT_ZONE_TIMED("HUD update: damage and static");
+    UpdateHudDamage(dt, mgr, helmetVis);
+    UpdateStaticInterference(dt, mgr);
+  }
   if (updateHud) {
+    PORT_ZONE_TIMED("HUD update: energy, threat, missiles, menus");
     if (x2bc_nextState != kHS_None) {
       UpdateEnergy(dt, mgr, false);
       UpdateFreeLook(dt, mgr);
@@ -1582,10 +1592,14 @@ void CSamusHud::Update(float dt, const CStateManager& mgr, uint helmetVis, bool 
   } else {
     x594_base_textpane_counter->SetIsVisible(false);
   }
-  x274_loadedFrmeBaseHud->Update(dt);
-  if (x288_loadedSelectedHud != nullptr) {
-    x288_loadedSelectedHud->Update(dt);
+  {
+    PORT_ZONE_TIMED("HUD update: the frames' widgets");
+    x274_loadedFrmeBaseHud->Update(dt);
+    if (x288_loadedSelectedHud != nullptr) {
+      x288_loadedSelectedHud->Update(dt);
+    }
   }
+  PORT_ZONE_TIMED("HUD update: the interfaces and menus");
   if (!x2b4_bossEnergyIntf.null()) {
     x2b4_bossEnergyIntf->Update(dt);
   }
