@@ -18,10 +18,12 @@
 #include "port_log.h"
 #include "port_paths.h"
 #include "port_pointer.h"
+#include "port_translate.h"
 #include "port_update_check.h"
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_locale.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
 
@@ -81,6 +83,7 @@ int sSharpenAmount = 50;
 float sDynScale = 0.f;      // the scale in use; 0 = sRenderScale
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
 bool sHudWide = true;
+bool sStretchMenus = false;
 bool sCinemaBars = false;
 bool sBallBars = false;
 bool sPhazonShell = true;
@@ -114,6 +117,8 @@ bool sCrosshairCustomColor = false;
 bool sCrosshairXRay = false;
 bool sCrosshairThermal = false;
 float sCrosshairColor[3] = {1.f, 1.f, 1.f};
+bool sCrosshairTargetCustomColor = false;
+float sCrosshairTargetColor[3] = {1.f, 0.f, 0.f};
 bool sHideHelmet = false;
 bool sHideVisorEffects = false;
 bool sRevealMap = false;
@@ -143,6 +148,8 @@ int sWalkSpeed = PortDebug::kWalkSpeedDefault;
 // (PortSkipCutscenes::Forced), which the getter does not fold in.
 bool sRevision100Compatibility = false;
 std::string sTextLanguage;
+// Whether the settings file named a language (English is saved as an empty one).
+bool sTextLanguageSaved = false;
 int sElevatorRide = PortDebug::kElevatorRide_Original;
 int sBootLogos = PortDebug::kBootLogos_Skippable;
 bool sSaveStateHotkeys = true;
@@ -165,6 +172,7 @@ std::mutex sRandoMutex;
 PortRandoGen::Settings sRandoSettings;
 float sFirstPersonFov = PortDebug::kFovRetail;
 bool sGunFollowsFov = false;
+bool sBallFollowsFov = true;
 float sGunFov = PortDebug::kFovRetail;
 float sGunOffset[3] = {};
 int sMsaa = 1;
@@ -314,11 +322,6 @@ std::string SettingsFilePath() {
   return (dir.empty() ? std::string("./") : dir) + "port_settings.ini";
 }
 
-bool ParseBool(const std::string& value) {
-  return value == "1" || value == "true" || value == "on" || value == "yes";
-}
-
-
 void MarkDirty() { sSettingsDirty = true; }
 
 PortRemastered::ImportParts RemasteredImportParts() {
@@ -374,6 +377,9 @@ void ApplyUpdateCheck() {
 } // namespace DebugUi
 
 namespace {
+// The SDL joystick id of the pad used since the last TakePadPortForLastUsed; 0 for none.
+std::atomic< uint32_t > sPadUsed{0};
+
 // Whether the player just used a real pad, keyboard or mouse. The touch overlay
 // is itself a virtual pad, and touches also arrive as a mouse, so neither counts.
 // A stick or trigger has to move well past rest, so drift does not count either.
@@ -415,6 +421,12 @@ bool IsPhysicalInput(const SDL_Event& event) {
 } // namespace
 
 namespace DebugUi {
+void TakePadPortForLastUsed() {
+  if (const uint32_t instance = sPadUsed.exchange(0, std::memory_order_acq_rel); instance != 0) {
+    PADTakeFirstPort(instance);
+  }
+}
+
 
 bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
   PortDebug::PhotoTouchEvent(*event);
@@ -429,11 +441,46 @@ bool SDLCALL debug_event_watch(void*, SDL_Event* event) {
     sWindowFullscreen.store(event->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ? 1 : 0,
                             std::memory_order_release);
   }
+  // Every pad plays player 1: the one just used, the touch pad included, takes pad port 0
+  // (TakePadPortForLastUsed, on the game's thread). Axis motion counts past the drift threshold.
+  if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+    sPadUsed.store(event->gbutton.which, std::memory_order_release);
+  } else if (event->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+             std::abs(static_cast< int >(event->gaxis.value)) > 16000) {
+    sPadUsed.store(event->gaxis.which, std::memory_order_release);
+  }
   if (IsPhysicalInput(*event)) {
     sPhysicalInput.store(true, std::memory_order_release);
     sTouchActive.store(false, std::memory_order_release);
   }
   return true;
+}
+
+// The text language code (kTextLanguages) for the system's preferred language,
+// or "" for English and the languages the game has no text in.
+static std::string SystemTextLanguage() {
+  int count = 0;
+  SDL_Locale** locales = SDL_GetPreferredLocales(&count);
+  std::string code;
+  for (int i = 0; locales != nullptr && i < count && code.empty(); ++i) {
+    const std::string language = locales[i]->language != nullptr ? locales[i]->language : "";
+    const std::string country = locales[i]->country != nullptr ? locales[i]->country : "";
+    if (language == "en") {
+      break;
+    } else if (language == "fr") {
+      code = country == "CA" ? "USFR" : "EUFR";
+    } else if (language == "es") {
+      code = country.empty() || country == "ES" ? "EUSP" : "USSP";
+    } else if (language == "de") {
+      code = "EUGE";
+    } else if (language == "it") {
+      code = "EUIT";
+    } else if (language == "nl") {
+      code = "EUDU";
+    }
+  }
+  SDL_free(locales);
+  return code;
 }
 
 void EnsureInitialized() {
@@ -442,6 +489,13 @@ void EnsureInitialized() {
   }
   sInitialized = true;
   LoadSettings();
+  // The menus in the system's language (translations/*.json).
+  port::InitTranslations();
+  // Until a language is chosen, the system's: a European disc has French,
+  // German, Spanish and Italian text, and a Remastered import adds more.
+  if (!sTextLanguageSaved) {
+    sTextLanguage = SystemTextLanguage();
+  }
   const std::string fileSettings = SettingsText();
 
   // Environment variables are explicit per-run overrides and win over the file.

@@ -16,12 +16,17 @@ import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Environment;
 import android.os.Process;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 
 import dev.encounter.aurora.AuroraSurface;
 
@@ -59,6 +64,15 @@ public final class MetroidPrimeActivity extends SDLActivity {
     // in PENDING_DISC_FILE for the native side's next start (platform/main.cpp).
     private static final String DISC_PICK_PREFS = "disc_pick";
     private static final String PENDING_DISC_FILE = "pending_disc_uri";
+    // Another app hands over an Archipelago room with this action and extras
+    // (docs/ARCHIPELAGO.md). The room is left in PENDING_AP_FILE, which the
+    // native side reads at its start, or right away when it is running
+    // (PortAp::OpenHandOff and HandOffArrived).
+    private static final String ACTION_ARCHIPELAGO_CONNECT = "org.metroidprime.port.action.ARCHIPELAGO_CONNECT";
+    private static final String EXTRA_AP_SERVER = "org.metroidprime.port.extra.SERVER";
+    private static final String EXTRA_AP_SLOT = "org.metroidprime.port.extra.SLOT";
+    private static final String EXTRA_AP_PASSWORD = "org.metroidprime.port.extra.PASSWORD";
+    private static final String PENDING_AP_FILE = "pending_ap_connect.json";
     private TouchControlsView touchControls;
     private final AtomicBoolean texturePackCopying = new AtomicBoolean();
     // The data folder the texture pack being picked is copied into.
@@ -68,6 +82,7 @@ public final class MetroidPrimeActivity extends SDLActivity {
     private static native void nativeTexturePackStatus(String status);
     private static native void nativeTexturePackReady();
     private static native void nativeRemasteredPicked(int which, String uri);
+    private static native void nativeArchipelagoRoom();
     // Implemented in src/Kyoto/Graphics/DolphinCGraphics.cpp.
     private static native boolean nativeFramePresented();
     // Implemented in platform/port_memory_log.cpp; level -1 is onLowMemory.
@@ -258,7 +273,19 @@ public final class MetroidPrimeActivity extends SDLActivity {
         } catch (IOException e) {
             Log.e(TAG, "Failed to prepare native resources", e);
         }
+        // Before the native side starts, so its client starts with this room.
+        // Not when Android rebuilds the activity or reopens it from Recents:
+        // that intent's room was taken already.
+        if (savedInstanceState == null
+                && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            takeArchipelagoRoom(getIntent());
+        }
         super.onCreate(savedInstanceState);
+        // (before the game's surface exists: it is made at the whole screen's
+        // size, not at the size left by the status and navigation bars), and
+        // once more after SDL's first window style, which shows them
+        hideSystemBars();
+        barsHandler.post(hideBars);
         if (mLayout != null) {
             touchControls = new TouchControlsView(this);
             mLayout.addView(touchControls, new android.widget.RelativeLayout.LayoutParams(
@@ -282,6 +309,61 @@ public final class MetroidPrimeActivity extends SDLActivity {
         }
         preferHighestRefreshRate();
         warnIfDataFolderUnreachable();
+    }
+
+    /*
+     * The game is full screen (the fullscreen setting, on by default on
+     * Android), but SDL hides the system bars only once the game's window is
+     * made, after its surface was laid out at the size the bars leave
+     * (1920x970 on a 1920x1080 screen): the picture kept that size, with black
+     * bars above and below it. So they are hidden here from the start, and
+     * again whenever the window gets the focus back (a dialog, the
+     * notification shade and the recents screen show them), unless the
+     * player turned full screen off (SDL's own state).
+     *
+     * And whenever they come back while the game is full screen: SDL hides
+     * them again with the legacy flags, which Android 11 and later ignore
+     * once the bars were shown by other means (its record of the flags still
+     * says hidden), so the bars stayed and the game drew between them.
+     */
+    private final Handler barsHandler = new Handler(Looper.getMainLooper());
+    private final Runnable hideBars = this::hideSystemBars;
+
+    private void hideSystemBars() {
+        android.view.Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        }
+        window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && mFullscreenModeActive) {
+            hideSystemBars();
+        }
+    }
+
+    @Override
+    public void onSystemUiVisibilityChange(int visibility) {
+        super.onSystemUiVisibilityChange(visibility);
+        final int hidden = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+        if (mFullscreenModeActive && (visibility & hidden) != hidden) {
+            // (after a while, as SDL does: a swipe shows them for a moment)
+            barsHandler.removeCallbacks(hideBars);
+            barsHandler.postDelayed(hideBars, 1500);
+        }
     }
 
     // Android runs an app at 60 Hz on a 90/120 Hz panel unless the window asks
@@ -497,6 +579,43 @@ public final class MetroidPrimeActivity extends SDLActivity {
         int count;
         while ((count = input.read(buffer)) != -1) {
             output.write(buffer, 0, count);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        takeArchipelagoRoom(intent);
+    }
+
+    // Written down before native hears of it: at a launch the library is not
+    // loaded yet, and platform/main.cpp reads the file once it is.
+    private void takeArchipelagoRoom(Intent intent) {
+        if (intent == null || !ACTION_ARCHIPELAGO_CONNECT.equals(intent.getAction())) {
+            return;
+        }
+        String server = intent.getStringExtra(EXTRA_AP_SERVER);
+        String slot = intent.getStringExtra(EXTRA_AP_SLOT);
+        String password = intent.getStringExtra(EXTRA_AP_PASSWORD);
+        if (server == null || server.trim().isEmpty() || slot == null || slot.trim().isEmpty()) {
+            Log.w(TAG, "An Archipelago room without a server or a slot was ignored");
+            return;
+        }
+        File file = new File(getFilesDir(), PENDING_AP_FILE);
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            org.json.JSONObject room = new org.json.JSONObject();
+            room.put("server", server);
+            room.put("slot", slot);
+            room.put("password", password != null ? password : "");
+            out.write(room.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException | org.json.JSONException e) {
+            Log.w(TAG, "Could not write " + file, e);
+            return;
+        }
+        try {
+            nativeArchipelagoRoom();
+        } catch (UnsatisfiedLinkError e) {
+            // The library is not loaded yet; it reads the file when it starts.
         }
     }
 

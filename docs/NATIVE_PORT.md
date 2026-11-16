@@ -27,6 +27,7 @@ sudo apt-get install ninja-build g++-14 libasound2-dev libpulse-dev libx11-dev \
   libfreetype-dev libpng-dev
 ```
 
+The CI's AlmaLinux package list is in `.github/workflows/ci.yml`.
 See `extern/aurora/docs/building.md` for dependency-provider options.
 
 ```sh
@@ -176,8 +177,10 @@ storage and says so, with buttons to grant access again or stay there.
 and `MP_CACHE_PATH` the caches alone (neither moves the built-in Remastered
 import, which stays in app storage); use separate directories for automated
 testing so runs do not share normal saves/settings (the memory card stays with
-the executable either way). Screenshots are written to `screenshots/` in the
-working directory.
+the executable either way). Screenshots (the Screenshot binding, F12 by default,
+or F1 > Game) are PNGs written to `screenshots/` in the working directory; on
+Android they go to the shared Pictures/Metroid Prime. The console's `shot`
+still writes a BMP there.
 
 ### A Wayland session hangs at startup
 
@@ -400,8 +403,8 @@ The port is built and tested on Linux and Windows (macOS builds and passes
 its tests in CI, see Build). Its own platform code is
 portable - SDL3 and `std::filesystem` throughout - and the CMake keeps the MSVC
 linker paths from the template. The Windows build is exercised by
-`.github/workflows/windows.yml` on `windows-latest`, which only runs when
-started by hand for now (`gh workflow run windows.yml --ref port`): it configures with
+the `windows` job of `.github/workflows/ci.yml` on `windows-latest`, which
+runs on every push to `port`: it configures with
 clang-cl, builds, runs `ctest -L port`, runs the FIFO regressions, packages a
 `dist/` directory with licences, checks that the packaged executable reaches
 main and reports the missing disc image, and uploads the result as an artifact.

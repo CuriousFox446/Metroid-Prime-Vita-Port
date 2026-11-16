@@ -40,6 +40,7 @@
 #include "port_pointer.h"
 #include "port_pointer_menu.h"
 #include "port_savestate.h"
+#include "port_text.h"
 
 #include <cwchar>
 #ifdef MP_ENABLE_SMOKE_DRIVER
@@ -99,8 +100,14 @@ CGuiTextSupport* sText = nullptr;
 PortPointerMath::Rect sHit;
 float sHeld = 0.f;
 int sFilled = -1;
-const wchar_t kLabel[] = L"Exit Game";
-const int kLetters = 8; // in kLabel
+// The label's letters (not its spaces), which fill one by one.
+int Letters(const wchar_t* label) {
+  int letters = 0;
+  for (; *label != L'\0'; ++label) {
+    letters += *label != L' ' ? 1 : 0;
+  }
+  return rstl::max_val(1, letters);
+}
 const uint kZPrompt = 0x6CBE6EF2; // PortPrompts draws the binding
 
 // Select's string with its prompt swapped for Z's, then the label, `filled` letters orange.
@@ -116,16 +123,17 @@ rstl::wstring Text(int filled) {
   }
   text.append(CStringExtras::ConvertToUNICODE(rstl::string(CBasics::Stringize("%8.8X;", kZPrompt))));
   text.append(L" ", -1); // Z's pill is wider than its advance
+  const wchar_t* label = PortText::Get(PortText::kExitGame);
   int split = 0;
-  for (int letters = 0; kLabel[split] != L'\0' && letters < filled; ++split) {
-    letters += kLabel[split] != L' ' ? 1 : 0;
+  for (int letters = 0; label[split] != L'\0' && letters < filled; ++split) {
+    letters += label[split] != L' ' ? 1 : 0;
   }
   if (split > 0) {
     text.append(L"&push;&main-color=#E8701A;", -1);
-    text.append(kLabel, split);
+    text.append(label, split);
     text.append(L"&pop;", -1);
   }
-  text.append(kLabel + split, -1);
+  text.append(label + split, -1);
   return text;
 }
 
@@ -182,8 +190,9 @@ void Update(CGuiTextPane* select, CGuiTextPane* column, bool show, const CFinalI
   } else {
     sHeld = 0.f;
   }
-  int filled = static_cast< int >(sHeld / PortDebug::kMenuExitHoldSeconds * kLetters);
-  filled = rstl::max_val(0, rstl::min_val(kLetters, filled));
+  const int letters = Letters(PortText::Get(PortText::kExitGame));
+  int filled = static_cast< int >(sHeld / PortDebug::kMenuExitHoldSeconds * letters);
+  filled = rstl::max_val(0, rstl::min_val(letters, filled));
   if (filled != sFilled) {
     sFilled = filled;
     sText->SetText(Text(filled));
@@ -800,6 +809,7 @@ bool CFrontEndUI::SFrontEndFrame::PumpLoad() {
       // HUD's spread would pull its text away from the panels behind it.
       if (CGuiCamera* cam = frme->GetFrameCamera()) {
         cam->SetAspectMatch(true, false);
+        cam->PortSetMenu(true);
       }
       FinishedLoading();
       return true;
@@ -1050,6 +1060,7 @@ bool CFrontEndUI::SNewFileSelectFrame::PumpLoad() {
       // SFrontEndFrame::PumpLoad).
       if (CGuiCamera* cam = frme->GetFrameCamera()) {
         cam->SetAspectMatch(true, false);
+        cam->PortSetMenu(true);
       }
       FinishedLoading();
       return true;
@@ -1798,6 +1809,7 @@ bool CFrontEndUI::SFusionBonusFrame::PumpLoad() {
           // Port: keep the GBA screen's proportions in widescreen.
           if (CGuiCamera* cam = frme->GetFrameCamera()) {
             cam->SetAspectMatch(true, false);
+            cam->PortSetMenu(true);
           }
           FinishedLoading();
           return true;
@@ -2812,6 +2824,10 @@ void CFrontEndUI::Draw() const {
       int centerX;
       int centerY;
       xcc_curMoviePtr->PortGetMargins(vpWidth, vpHeight, centerX, centerY);
+      if (PortDebug::StretchMenus()) {
+        // Stretched with the menus over it: the full width, the height kept.
+        centerX = 0;
+      }
 #else
       const int centerX = (static_cast< int >(vidWidth) - vpWidth) / 2;
       const int centerY = (static_cast< int >(vidHeight) - vpHeight) / 2;

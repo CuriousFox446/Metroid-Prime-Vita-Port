@@ -223,7 +223,8 @@ class Wiring(WiringCase):
         # whatever else on the page shows the same text, and the results list hides the id.
         search = SEARCH.read_text()
         self.assertIn('if (std::strstr(text, "##") != nullptr) {\n    return std::strcmp(label, text) == 0;\n  }', search)
-        self.assertIn("ImGui::FindRenderedTextEnd(row.label)", search)
+        self.assertIn("const char* shownLabel = port::Translate(row.label);", search)
+        self.assertIn("shownLabel, ImGui::FindRenderedTextEnd(shownLabel)", search)
         rows = index_rows(INDEX.read_text())
         for label in ("Import##remastered", "Import##dread"):
             found = [row for row in rows if row["label"] == label]

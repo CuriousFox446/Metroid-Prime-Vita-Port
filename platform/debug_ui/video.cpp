@@ -70,6 +70,12 @@ void DrawVideoDisplay() {
     SetAspectMode(static_cast< EAspectMode >(aspect));
     MarkDirty();
   }
+  if (ImGui::Checkbox("Stretch menus to the screen", &sStretchMenus)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("The title and file select menus are made for 4:3.\n"
+                        "Off: kept in proportion, with black bars at the sides.\n"
+                        "On: stretched to fill a wide screen (the image is distorted).");
   if (ImGui::Checkbox("Cutscene black bars", &sCinemaBars)) {
     MarkDirty();
   }
@@ -172,6 +178,8 @@ void DrawVideoDisplay() {
   }
 
   ImGui::SeparatorText("Beam colours");
+  // Its own ID scope: the suit colours' rows above push the same slot numbers.
+  ImGui::PushID("beam colours");
   for (int beam = 0; beam < PortBeamColours::kBeamCount; ++beam) {
     ImGui::PushID(beam);
     const std::optional< uint32_t > picked = PortBeamColours::Colour(beam);
@@ -199,6 +207,7 @@ void DrawVideoDisplay() {
     ImGui::EndDisabled();
     ImGui::PopID();
   }
+  ImGui::PopID();
 
   ImGui::SeparatorText("HUD and view");
   bool hudWide = sHudWide;
@@ -278,6 +287,19 @@ void DrawVideoDisplay() {
     MarkDirty();
   }
   ImGui::EndDisabled();
+  if (ImGui::Checkbox("Crosshair colour on enemies", &sCrosshairTargetCustomColor)) {
+    MarkDirty();
+  }
+  ImGui::SetItemTooltip("The crosshair fades to this colour while it is over an enemy your\n"
+                        "current beam can hurt (not one it is immune to). Remastered style: in\n"
+                        "place of its own red. Off: the game's look. Off under Original experience.");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!sCrosshairTargetCustomColor);
+  if (ImGui::ColorEdit3("##crosshair_target_color", sCrosshairTargetColor,
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
   if (ImGui::Checkbox("Crosshair in X-Ray", &sCrosshairXRay)) {
     MarkDirty();
   }
@@ -330,9 +352,14 @@ void DrawVideoDisplay() {
                        0.017453292f;
     ImGui::SetItemTooltip("Back to the retail 55 deg.");
     ImGui::TextDisabled("About %.0f deg horizontal at this aspect.", hfov);
-    ImGui::SetItemTooltip("First-person vertical FOV (retail 55). Morph ball and cutscene cameras\n"
-                          "are unchanged.");
+    ImGui::SetItemTooltip("First-person vertical FOV (retail 55). Cutscene cameras are unchanged.");
   }
+  bool ballFollowsFov = sBallFollowsFov;
+  if (ImGui::Checkbox("Morph ball follows FOV", &ballFollowsFov)) {
+    SetBallFollowsFov(ballFollowsFov);
+  }
+  ImGui::SetItemTooltip("On: the morph ball's cameras widen or narrow in step with the field of\n"
+                        "view (retail 60 at FOV 55). Off: they keep their retail FOVs.");
   bool gunFollowsFov = sGunFollowsFov;
   if (ImGui::Checkbox("Arm cannon follows FOV", &gunFollowsFov)) {
     SetGunFollowsFov(gunFollowsFov);
@@ -564,7 +591,7 @@ void DrawVideoQuality() {
     if (dynMode == 1) {
       SetRenderScale(0.f);
     } else if (dynMode == 2 && sRenderScale <= 0.f) {
-      SetRenderScale(std::clamp(std::round(BaseRenderScale() * 4.f) / 4.f, 1.f, 4.f));
+      SetRenderScale(std::clamp(std::round(BaseRenderScale() * 4.f) / 4.f, 1.f, PortDebug::kRenderScaleMax));
     }
     ResetDynamicRes();
     MarkDirty();
@@ -591,7 +618,8 @@ void DrawVideoQuality() {
     float scale = sPendingScale > 0.f ? sPendingScale : sRenderScale;
     char label[32];
     std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
-    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, 4.f, label)) {
+    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, PortDebug::kRenderScaleMax, label,
+                           ImGuiSliderFlags_AlwaysClamp)) {
       sPendingScale = scale;
     }
     if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
@@ -601,7 +629,8 @@ void DrawVideoQuality() {
     }
     ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
                           "higher values use more GPU memory. Above 2x it supersamples, and each step\n"
-                          "costs much more GPU time.");
+                          "costs much more GPU time; 8x with MSAA needs about 2 GB of video memory.\n"
+                          "Ctrl+click to type a value.");
   } else if (sRenderScale <= 0.f) {
     ImGui::TextDisabled("Window resolution: %.2fx (%dp)", BaseRenderScale(), DrawnLines(0.f));
   }

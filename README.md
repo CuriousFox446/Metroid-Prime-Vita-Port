@@ -21,6 +21,17 @@ discs: USA 1.00, 1.01 and 1.02, PAL and Trilogy, both USA and PAL.
 reads it from a disc image and never ships any of its assets. This repository
 ships no disc image, and neither does any package or release built from it.
 
+> **Ce dépôt est un fork** de [Odrannnn/MetroidPrimePort](https://github.com/Odrannnn/MetroidPrimePort)
+> dont le but est la prise en charge des langues, **en priorité le français**,
+> avec le disque européen (*Metroid Prime (Europe) (En,Fr,De,Es,It)*), dont les
+> textes existent en français, allemand, espagnol et italien. Au premier
+> lancement le jeu prend la langue du système ; le menu F1 (Language) la change.
+> Chaque push publie une release (onglet *Releases*) : APK Android signé, zip
+> Windows, AppImage et archive Linux, qui acceptent le disque américain comme le
+> disque européen.
+>
+> *This repository is a fork focused on language support, French first.*
+
 ## What it adds over the console release
 
 - **Modern controls:** Mouse & Keyboard, Dual stick camera, Gyro controls, Native touch controls for mobile!
@@ -130,6 +141,8 @@ This port would not exist without the work of these projects. Thank you.
   calibration and aiming spaces.
 - [Kenney Input Prompts](https://kenney.nl/assets/input-prompts) (CC0): the
   controller button icons.
+- [Xelu's Free Controllers & Keyboard Prompts](https://thoseawesomeguys.com/prompts/) (CC0): the
+  Steam Deck button icons.
 - [Dolphin](https://dolphin-emu.org): the texture pack and save formats the port reads and writes.
 
 **Libraries**
