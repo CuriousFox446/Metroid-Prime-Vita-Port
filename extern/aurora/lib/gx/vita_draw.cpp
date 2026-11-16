@@ -323,6 +323,11 @@ struct Stats {
   // 0.46.0 test 5), and the draw-done waits for it.
   u32 helperTokens = 0;
   u32 helperDrawDones = 0;
+  // Immediate draws decoded on the helper (decode_on_helper, 0.46.0 test 7), their vertices, and
+  // the waits for it when the copies' room ran out.
+  u32 immediateOnHelper = 0;
+  u64 immediateVerticesOnHelper = 0;
+  u32 helperStageWaits = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -2273,6 +2278,99 @@ void publish_draw_sync(void* data) {
   gx::set_draw_sync_token(static_cast<u16>(reinterpret_cast<uintptr_t>(data)));
 }
 
+// 0.46.0 test 7. A program's immediate draw of kHelperImmediateMin vertices or more whose attributes
+// all sit in the list (decode_direct's) is decoded on the core 0 helper. Phendrana's snow is ~27,500
+// vertices a frame in ~63 draws, about 13 ms of the FIFO processor's 51 to 67 there (test 6). Its
+// bytes are copied first: the FIFO's buffer is the game's again once the FIFO processor is past it
+// (a drain empties it). The draw is recorded at once, as a skinned call's is; the decode is the same
+// function, so the vertices are too.
+constexpr u32 kHelperImmediateMin = 32;
+struct ImmediateFill {
+  const u8* src = nullptr;
+  vita_gl::Vertex* out = nullptr;
+  u32 count = 0;
+  u32 stride = 0;
+  u32 nsteps = 0;
+  u8 grey = 255;
+  DirectStep steps[GX_VA_TEX7 + 1];
+};
+constexpr size_t kImmediateFills = 256;
+std::array<ImmediateFill, kImmediateFills> sImmediateFills;
+std::array<u32, kImmediateFills> sImmediateFillJobs{};
+size_t sNextImmediateFill = 0;
+// The copies' room, taken in order; all of it free again whenever the helper has run every job
+// (finish_helper_jobs), the frame's end among those times. FIFO thread.
+std::vector<u8> sStage;
+size_t sStageUsed = 0;
+
+void run_immediate_fill(void* data) {
+  const ImmediateFill& f = *static_cast<const ImmediateFill*>(data);
+  decode_direct(f.src, f.steps, f.nsteps, f.stride, f.count, f.grey, f.out);
+}
+
+// Room for `size` bytes the helper will read: when it has run out, what is there is read first.
+u8* stage_bytes(size_t size) noexcept {
+  if (sStageUsed + size > sStage.size()) {
+    if (sLastHelperJob != 0) {
+      ++sStats.helperStageWaits;
+    }
+    finish_helper_jobs(); // every copy read: the room is free from its start
+    if (size > sStage.size()) {
+      sStage.resize(std::max(size, std::max<size_t>(sStage.size() * 2, size_t{1} << 20)));
+    }
+  }
+  u8* at = sStage.data() + sStageUsed;
+  sStageUsed += size;
+  return at;
+}
+
+// `count` vertices from `vtx` decoded into `out` on the helper, when the draw is one for it (false:
+// the caller decodes them, as before).
+bool decode_on_helper(const u8* vtx, const u8* end, GXVtxFmt fmt, u32 count, const TexAttrs& texAttrs,
+                      vita_gl::Vertex* out) noexcept {
+  if (sNoHelper || count < kHelperImmediateMin) {
+    return false;
+  }
+  DecodePlan plan;
+  u32 steps = 0;
+  if (!plan_vertices(g_gxState.vtxFmts[fmt], texAttrs, plan, steps) || steps == 0) {
+    return false;
+  }
+  DirectStep direct[GX_VA_TEX7 + 1];
+  u32 stride = 0;
+  if (!plan_direct(plan.data(), steps, direct, stride) || vtx > end ||
+      static_cast<u64>(count) * stride > static_cast<u64>(end - vtx)) {
+    return false; // decode_vertices takes it (and fails it as before when it reads past the list)
+  }
+  const size_t bytes = static_cast<size_t>(count) * stride;
+  const size_t slot = sNextImmediateFill;
+  if (sImmediateFillJobs[slot] != 0) {
+    side_jobs::wait_helper(sImmediateFillJobs[slot]);
+    sImmediateFillJobs[slot] = 0;
+  }
+  u8* staged = stage_bytes(bytes);
+  std::memcpy(staged, vtx, bytes);
+  ImmediateFill& f = sImmediateFills[slot];
+  f.src = staged;
+  f.out = out;
+  f.count = count;
+  f.stride = stride;
+  f.nsteps = steps;
+  f.grey = grey_for(texAttrs);
+  std::copy(direct, direct + steps, f.steps);
+  const u32 job = side_jobs::submit_helper(&run_immediate_fill, &f);
+  if (job == 0) {
+    sNoHelper = true;
+    return false;
+  }
+  sImmediateFillJobs[slot] = job;
+  sNextImmediateFill = (slot + 1) % kImmediateFills;
+  sLastHelperJob = job;
+  ++sStats.immediateOnHelper;
+  sStats.immediateVerticesOnHelper += count;
+  return true;
+}
+
 // A skinned template's unique vertices for a program's draw and its corners' order of them
 // (SkinnedTemplate::unique): corners alike in their distinct pair, coordinates and vertex colour
 // share one, the order padded for vitaGL's pool (vita_gl::pad_triangle_indices). No order when
@@ -2542,7 +2640,8 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
       vita_gl::Vertex* out = frame_vertices_safe(count, mesh.vertexAt);
       const u8* vtx = vertices.data();
       sLastFail = Fail::None;
-      if (decode_vertices(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out)) {
+      if (decode_on_helper(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out) ||
+          decode_vertices(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out)) {
         mesh.vertexCount = count;
         if (indices != nullptr) {
           mesh.indexCount = static_cast<u32>(indices->size());
@@ -2857,17 +2956,17 @@ void release(const void* key) noexcept {
 }
 
 void finish_helper_jobs() noexcept {
-  if (sLastHelperJob == 0) {
-    return;
+  if (sLastHelperJob != 0) {
+    if (!side_jobs::done_helper(sLastHelperJob)) {
+      const auto start = std::chrono::steady_clock::now();
+      side_jobs::wait_helper(sLastHelperJob);
+      ++sStats.helperFrameWaits;
+      sStats.helperWaitUs += static_cast<u64>(
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+    }
+    sLastHelperJob = 0;
   }
-  if (!side_jobs::done_helper(sLastHelperJob)) {
-    const auto start = std::chrono::steady_clock::now();
-    side_jobs::wait_helper(sLastHelperJob);
-    ++sStats.helperFrameWaits;
-    sStats.helperWaitUs += static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
-  }
-  sLastHelperJob = 0;
+  sStageUsed = 0; // every copy the helper had is read
 }
 
 // 0.46.0 test 5. A skinned model's vertices come from the game's ring (CSkinnedModel::
@@ -2884,6 +2983,7 @@ bool defer_draw_sync(u16 token) noexcept {
   }
   if (side_jobs::done_helper(sLastHelperJob)) {
     sLastHelperJob = 0;
+    sStageUsed = 0;
     return false;
   }
   const u32 job =
@@ -3015,10 +3115,12 @@ void log_stats() noexcept {
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
-  Log.info("core 0 helper: {} skinned calls posed there; waited for at {} frame ends ({:.1f} ms in all), {} times "
-           "for the frame's vertices to grow, {} at a draw done; {} draw sync tokens published by it",
-           s.skinnedOnHelper, s.helperFrameWaits, static_cast<double>(s.helperWaitUs) / 1000.0, s.helperRoomWaits,
-           s.helperDrawDones, s.helperTokens);
+  Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "
+           "for at {} frame ends ({:.1f} ms in all), {} times for the frame's vertices to grow, {} at a draw done, "
+           "{} for the copies' room; {} draw sync tokens published by it",
+           s.skinnedOnHelper, s.immediateOnHelper, s.immediateVerticesOnHelper, s.helperFrameWaits,
+           static_cast<double>(s.helperWaitUs) / 1000.0, s.helperRoomWaits, s.helperDrawDones, s.helperStageWaits,
+           s.helperTokens);
   Log.info("indirect textures: {} materials worked out read an indirect stage, {} of them left fixed-function "
            "({} a layout a program cannot draw, {} a texture without a Vita copy); programs: {} indirect of {}; "
            "{} materials worked out in all with a layout a program cannot draw",

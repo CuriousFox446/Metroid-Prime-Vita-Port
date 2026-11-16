@@ -3218,3 +3218,55 @@ The `presents:` line adds "N left out waiting for theirs" after the fixed-functi
 What to look for in test 6: no white box over the lava (or anywhere) on entering Magmoor's rooms;
 the "left out" count above 0 where programs load; the rest as in test 5.
 
+### Test 6 result
+
+`~/logs/t046_6.log` (203c3ae, 722 windows). The user: "there's no white box in Magmoor Caverns", and
+"Phendrana Drifts could use some optimization, running at sub 20fps".
+
+The log names no areas. Phendrana's windows are told by their enemies: Flickerbats, Sheegoths
+(`CBabygoth`), the fish and the parasites, windows 600 to 725. The tools (`area_fps.py`,
+`kind_*.py`) now have the kinds "Phendrana" and "Phendrana, Sheegoths", and `~/tools/marks.py` maps
+a run's windows by the classes that think in them.
+
+| | FPS | FIFO busy, ms a frame | its immediate draws | game thread: ticks + draw |
+|---|---|---|---|---|
+| Phendrana | 18.2 | 51.4 | 18.3 | 3.01 x 7.74 + 20.5 ms |
+| Phendrana, Sheegoths | 15.6 | 67.2 | 23.7 | 4.09 x 9.06 + 25.7 ms |
+| Magmoor, Puffers | 23.8 | 25.5 | 4.5 | 2.65 x 9.88 + 12.0 ms |
+
+- Phendrana is the FIFO processor's. Its immediate draws a frame with the Sheegoths:
+  - the snow (counted under `CStateManager::DrawWorld`): 63 draws, 27,504 vertices
+  - the map: 530 draws, 5,896 vertices
+  - `CStateManager::RendererDrawCallback`: 409 draws, 4,678 vertices
+  - the particles: 14 draws, 633 vertices
+- Taken from the Puffers' room and Phendrana together, the immediate section costs about 0.48 us a
+  vertex and 4.9 us a draw. The snow alone is about 13 ms a frame.
+- With the Sheegoths the game thread is near its limit too: 60 ticks a second at 9.06 ms, plus a
+  25.7 ms draw a frame, is about 95% at 15.6 FPS. That caps those rooms near 17.7 FPS whatever the
+  FIFO processor does.
+
+## 0.46.0 test 7: the big immediate draws decoded on the core 0 helper
+
+**What it takes.** A program's immediate draw of 32 vertices or more whose attributes all sit in the
+list (`decode_on_helper`). That is the snow's draws and the bigger particle ones; the map's and the
+water's small draws stay where they were. The FIFO processor plans the decode, checks the list holds
+the vertices, reserves the frame's vertices, copies the indices and records the draw. The helper runs
+`decode_direct` into them, the function the FIFO processor ran, so the vertices are the same.
+
+**The bytes are copied first.** The FIFO processor copies the draw's bytes into a room of its own,
+1 MiB to start, grown when one draw needs more. The FIFO's buffer is the game's to write again once
+the FIFO processor is past it, and a drain empties it, so the helper never reads the buffer itself.
+- The room is taken in order and is all free again whenever the helper has run every job
+  (`finish_helper_jobs`, at each frame's end among others).
+- When it runs out within a frame, the FIFO processor waits for the helper first (counted).
+
+**Unchanged.** The other guards stay: the frame's end, the frame's vertices growing, the tokens, the
+draw done.
+
+The `core 0 helper:` line adds the immediate draws and vertices decoded there and the waits for the
+copies' room.
+
+What to look for in test 7: Phendrana's frame rate in the open (18.2 FPS in test 6; up to about 24
+expected, where the game thread takes over), and the FIFO processor's `immediate` there (18 to 24 ms
+a frame in test 6). The snow should look exactly as before.
+
