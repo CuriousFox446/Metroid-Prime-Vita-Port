@@ -410,6 +410,8 @@ bool HiddenOnVita(const SettingsIndexRow& row) {
       {"Video", "Quality", "Quality", "Per-pixel lighting"},
       {"Video", "Quality", "Quality", "Sun shadows"},
       {"Video", "Quality", "Quality", "Projected actor shadows"},
+      // 0.46.0's Steam Input back buttons: Linux's Steam controllers alone (PortSteamTriton).
+      {"Controls", "Touch & gyro", "Back buttons", nullptr},
   };
   return std::any_of(std::begin(kHidden), std::end(kHidden), [&row](const Hidden& h) {
     return std::strcmp(row.page, h.page) == 0 && std::strcmp(row.sub, h.sub) == 0 &&

@@ -2929,3 +2929,65 @@ What to look for in test 25:
   - Magmoor with Puffers: 24.4 (21.4);
   - Triclops and the pirate fight: about the same.
 
+## Upstream 0.46.0 (0.46.0 test 1)
+
+The user sent `MetroidPrimePort-port_source_code.zip`, the original repository being gone, and asked
+to move to 0.46.0 if that is what it holds. It does, by way of a fork:
+
+- It is GitHub's archive of a fork's branch `port` (commit d23b2c4, Nov 13). Its release notes run
+  through Odrannnn/MetroidPrimePort's 0.43.0 to 0.46.0 (Nov 8 to 12, each linking upstream's
+  release); versionName 0.46.0, versionCode 54 (0.42.0: 50).
+- The fork adds French translations of the port's menus, shown when the system's language is
+  French (`translations/fr.json`, `platform/port_translate.cpp`, `cmake/PortTranslations.cmake`; its
+  README's note), and its own CI workflow. A copy of the zip is kept in
+  `~/upstream/zips/MetroidPrimePort-0.46.0-d23b2c4.zip`.
+
+Branch `port-046` (worktree `~/mpport-046`, build dir `build/vita`): `upstream-046` is 0.42.0's
+commit (50b149f) with the zip's tree over it (5e3ddd1, `.vscode` left out, as 0.42.0's was), and
+port-042 (b527787) merged into that (264af01). `~/mpport-042` stays as it was, for a fallback.
+
+**The merge.** 0.42.0 to 0.46.0 changed 291 files (113 added, 4 removed). 47 of them the Vita work
+had changed too; 10 conflicted:
+- `input.cpp`/`hpp`: 0.46.0's first-port moves (choose_first_port's give and take,
+  take_first_port) set pad indices through the Vita's `set_gamepad_player_index`, so the player
+  index copies go with them (0.42.0 test 7).
+- `window.hpp`: 0.46.0's `joystick_update_ns` and the Vita's `pump_generation`, both. 0.46.0 now
+  calls `SDL_UpdateJoysticks` itself in `poll_events`, timed, where SDL's pump called it.
+- `port_echoes_suits_import.cpp`, `settings.cpp`: the Vita's large-stack import thread and its
+  settings taken back from `.tmp`, with 0.46.0's `PortUtf8::FromUtf8`.
+- `port_textures.cpp`, `make_prompt_glyphs.py`: the Steam Deck's icon set and the Vita's, both.
+- `ui_common.cpp`: the Vita's timed zones around 0.46.0's new per-frame calls.
+- `video.cpp`: the Vita's resolution scale stays at most 2x; 0.46.0's 8x elsewhere.
+- `search.cpp`: 0.46.0's translated labels and places, after the Vita's hidden rows and pages.
+
+**For the Vita.**
+- 0.46.0's Steam Controller and Deck reader (`PortSteamTriton`) runs on Linux alone: nothing on the
+  Vita. Its back-button setting is hidden there, and now its search row too.
+- 0.45.0's "the pad used last takes port 0" is left out: the Vita has its one pad, on port 0
+  already, and the check is an SDL call (some 20 us) each frame a stick moves.
+- The VPKs still carry the Vita's prompt icons alone (0.46.0 adds the Steam Deck's).
+- The overlay's font: 0.46.0 merges in a system font with Cyrillic where it finds one. The Vita has
+  none, so the default font stays, with a log line saying so.
+- 0.44.0 logs a frame over 250 ms as an `MP stall` line (the event pump's, input's, the tick's and
+  the draw's shares): loads and shader builds on the Vita will make some.
+- APP_VER is 00.46. The GX state the material records hold is unchanged, so the card's records still
+  warm up.
+- It built for the Vita at the first try; nothing of 0.46.0 needed changing to compile there.
+
+**New in 0.43.0 to 0.46.0** (their release notes, what reaches the Vita):
+- Settings: precise stick deadzones (the sliders the only deadzone, the game's ~12% gone), the
+  crosshair's colour on an enemy the beam hurts, the morph ball camera following the FOV setting,
+  menus stretched to the screen.
+- Prompts switch to the right icon as soon as the input context changes.
+- Fixes: doors with the FPS cap above 60, Central Dynamo's maze in save states, twin-stick and touch
+  aim after an elevator, the left hand looking straight up or down, Fast Morph's zoom, savestates
+  under water, the map counting collected pickups as seen; savestates restore animations and script
+  fields more reliably.
+- Performance: fewer texture and vertex copies.
+
+What to look for in 0.46.0 test 1:
+- That it starts, loads a save and plays as test 24 did, with test 24's map.
+- The new settings above, the prompts switching between contexts, the stick deadzones.
+- The log's `MP stall` lines: where they come and how long.
+- Frame rates against test 24's.
+
