@@ -41,6 +41,9 @@ constexpr int kBackgroundPriority = 130;
 // The longest anyone waits for a job. The worker's take a millisecond or less, so past this it has
 // hung: that is logged, and the waiter goes on without it.
 constexpr uint64_t kWaitLimitUs = 500 * 1000;
+// The worker's sleep with nothing to run is timed too: a wake-up it misses, whatever loses it,
+// costs at most this.
+constexpr auto kSleepSlice = std::chrono::milliseconds(4);
 
 struct Job {
   Fn fn = nullptr;
@@ -55,6 +58,14 @@ struct Worker {
   std::mutex submitMutex; // submitters one at a time
   std::atomic<uint32_t> submitted{0};
   std::atomic<uint32_t> finished{0};
+  // The worker sleeps on these while it has nothing to run, and a submitter wakes it through them
+  // when it is asleep. Not std::atomic's wait on `submitted`: without a futex (newlib), libstdc++
+  // parks every atomic's waiters on one of 16 condition variables picked by address. In 0.46.0
+  // test 1 the worker woke 17 to 40 times a job there, against 1.5 in 0.42.0's tests, and slept
+  // through jobs the game thread waited for (205 past 500 ms in three minutes, none before).
+  std::mutex sleepMutex;
+  std::condition_variable sleepCv;
+  std::atomic<bool> sleeping{false};
   // Those waiting on `cv` (for a job, or a submitter for a free slot). The worker takes the mutex to
   // wake them only when there are some.
   std::atomic<uint32_t> waiters{0};
@@ -118,10 +129,16 @@ void* run(void* arg) {
                        .vitaPriority = w.priority});
   uint32_t next = 1;
   for (;;) {
-    uint32_t submitted = w.submitted.load(std::memory_order_acquire);
-    while (submitted == next - 1) {
-      w.submitted.wait(submitted, std::memory_order_acquire);
-      submitted = w.submitted.load(std::memory_order_acquire);
+    if (w.submitted.load(std::memory_order_acquire) == next - 1) {
+      // seq_cst: the worker marks itself asleep and then reads `submitted`; a submitter writes it and
+      // then reads `sleeping`. So one of them sees the other: either the worker finds the job, or the
+      // submitter wakes it, through the mutex (it cannot slip in between the check and the wait).
+      std::unique_lock lock{w.sleepMutex};
+      w.sleeping.store(true, std::memory_order_seq_cst);
+      while (w.submitted.load(std::memory_order_seq_cst) == next - 1) {
+        w.sleepCv.wait_for(lock, kSleepSlice);
+      }
+      w.sleeping.store(false, std::memory_order_relaxed);
     }
     const Job job = w.ring[next % kSlots];
     const uint64_t start = now_us();
@@ -196,8 +213,13 @@ uint32_t submit_to(Worker* w, Fn fn, void* data) noexcept {
     return 0;
   }
   w->ring[job % kSlots] = {fn, data};
-  w->submitted.store(job, std::memory_order_release);
-  w->submitted.notify_one();
+  w->submitted.store(job, std::memory_order_seq_cst);
+  if (w->sleeping.load(std::memory_order_seq_cst)) {
+    // Through the mutex: a worker between its check and its wait holds it, so this waits for the
+    // wait to begin, and the notify reaches it.
+    { std::lock_guard sleep{w->sleepMutex}; }
+    w->sleepCv.notify_one();
+  }
   return job;
 }
 

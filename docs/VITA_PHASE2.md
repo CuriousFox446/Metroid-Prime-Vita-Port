@@ -2991,3 +2991,28 @@ What to look for in 0.46.0 test 1:
 - The log's `MP stall` lines: where they come and how long.
 - Frame rates against test 24's.
 
+## 0.46.0 test 2: the side worker's own sleep
+
+**Test 1** (9e1754e; the user's log of Nov 15, three and a half minutes, ended without an exit).
+- It started, loaded the save and played; the front end ran as before (57 FPS).
+- In play (a Metaree room) it fell to 2.4 FPS (median; 7.5 mean): 60 `MP stall` lines, nearly every
+  frame 520 to 590 ms, the tick's.
+- None of the side worker's jobs hung in 0.42.0's tests 24 and 25; here 205 did, each for 500 ms (the
+  limit), all of them the game thread's (the particle steps it finishes, `pwait` 339 ms a frame). The
+  FIFO processor's waits stayed short (3.6 ms at most).
+- The worker was not busy (1 to 3%) and core 3 was mostly free (the mixer 23%): it slept with jobs
+  queued. It woke 17 to 40 times a job, against 1.5 in 0.42.0's tests.
+
+**The cause, as far as the log shows.** The worker slept in `std::atomic::wait` on its job count.
+Without a futex (newlib), libstdc++ parks every atomic's waiters on one of 16 condition variables
+picked by address, which the FIFO processor's own atomic waits use too. Its wakes per job say 0.46.0's
+new layout put the worker's beside a busy one, and it then slept through wakes meant for it (which
+step loses them, libstdc++'s or pthread-embedded's, the log does not say).
+
+**The fix** (`vita_side_jobs.cpp`): the worker sleeps on a condition variable of its own. A
+submitter wakes it through its mutex when it is asleep (seq_cst flags on both sides, so neither
+misses the other), and the sleep is timed at 4 ms, so a wake-up lost anyhow costs that at most.
+
+What to look for in test 2: no `has not run after 500 ms` errors, `hung` 0 in the `[side jobs]`
+lines, `pwait` back to a millisecond or so, and the frame rates against test 24's.
+
