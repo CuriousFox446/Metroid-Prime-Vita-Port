@@ -241,13 +241,210 @@ private:
   uint32_t m_capacity = 0;
 };
 
+// 0.46.0 test 9. A frame's vertices ran to some 50,000 in Phendrana (the snow alone ~28,000): ~2.5
+// MiB in one piece, doubled to ~5 MiB when a frame outgrew the spares. With the heap near its
+// ceiling (191 of 229 MiB in use, the 33 MiB free in pieces) test 8 died there: std::bad_alloc for
+// 4,956,896 bytes (88,516 vertices) on the FIFO thread. They come in chunks of one size now, kept
+// for the frames after: no piece larger than a chunk, and the same pieces again and again.
+template <typename T>
+class ChunkPool {
+public:
+  static constexpr uint32_t kChunk = 8192; // elements a chunk (448 KiB of vertices)
+  static ChunkPool& get() noexcept {
+    static ChunkPool& pool = *new ChunkPool;
+    return pool;
+  }
+  std::unique_ptr<T[]> take() {
+    {
+      std::lock_guard lock{m_mutex};
+      if (!m_free.empty()) {
+        std::unique_ptr<T[]> chunk = std::move(m_free.back());
+        m_free.pop_back();
+        return chunk;
+      }
+    }
+    return std::unique_ptr<T[]>(new T[kChunk]);
+  }
+  void put(std::unique_ptr<T[]>&& chunk) noexcept {
+    if (!chunk) {
+      return;
+    }
+    std::unique_ptr<T[]> dropped; // freed after the lock
+    std::lock_guard lock{m_mutex};
+    if (m_free.size() < kKept) {
+      m_free.push_back(std::move(chunk));
+    } else {
+      dropped = std::move(chunk);
+    }
+  }
+
+private:
+  static constexpr size_t kKept = 16;
+  std::mutex m_mutex;
+  std::vector<std::unique_ptr<T[]>> m_free;
+};
+
+// A frame's own vertices (FrameMesh), in chunks (ChunkPool), written by the FIFO thread as it
+// records. A run that does not fit in the last chunk starts the next (one larger than a chunk gets
+// one of its own size); what was handed out never moves, so the core 0 helper's writes need no wait
+// when the frame grows (room). A place is the chunk's number above kOffsetBits and the place in it
+// below: a mesh's vertices are together in one chunk, and two meshes are next to each other (place
+// plus count, merge_into_last) only in the same chunk.
+template <typename T>
+class FrameChunks {
+public:
+  static constexpr uint32_t kOffsetBits = 20;
+  static constexpr uint32_t kOffsetMask = (1u << kOffsetBits) - 1;
+
+  FrameChunks() = default;
+  FrameChunks(FrameChunks&& other) noexcept
+  : m_chunks(std::move(other.m_chunks)), m_used(std::exchange(other.m_used, 0)),
+    m_size(std::exchange(other.m_size, 0)) {}
+  FrameChunks& operator=(FrameChunks&& other) noexcept {
+    if (this != &other) {
+      release();
+      m_chunks = std::move(other.m_chunks);
+      m_used = std::exchange(other.m_used, 0);
+      m_size = std::exchange(other.m_size, 0);
+    }
+    return *this;
+  }
+  ~FrameChunks() { release(); }
+
+  // Room for `count` more, `at` set to their place; the pointer holds for the frame.
+  T* grow(uint32_t count, uint32_t& at) {
+    if (m_chunks.empty() || m_used + count > m_chunks.back().capacity) {
+      add_chunk(count);
+    }
+    Chunk& chunk = m_chunks.back();
+    at = (static_cast<uint32_t>(m_chunks.size() - 1) << kOffsetBits) | m_used;
+    T* const out = chunk.data.get() + m_used;
+    m_used += count;
+    m_size += count;
+    return out;
+  }
+  // Back to `at`, the place the last grow gave (in the last chunk).
+  void trim(uint32_t at) {
+    const uint32_t chunk = at >> kOffsetBits;
+    const uint32_t offset = at & kOffsetMask;
+    if (!m_chunks.empty() && chunk == m_chunks.size() - 1 && offset < m_used) {
+      m_size -= m_used - offset;
+      m_used = offset;
+    }
+  }
+  const T* at(uint32_t place) const { return m_chunks[place >> kOffsetBits].data.get() + (place & kOffsetMask); }
+  T* at(uint32_t place) { return m_chunks[place >> kOffsetBits].data.get() + (place & kOffsetMask); }
+  uint32_t size() const { return m_size; }
+  // Growing never moves what it holds.
+  uint32_t room() const { return UINT32_MAX; }
+
+private:
+  struct Chunk {
+    std::unique_ptr<T[]> data;
+    uint32_t capacity = 0;
+  };
+  void add_chunk(uint32_t count) {
+    Chunk chunk;
+    if (count <= ChunkPool<T>::kChunk) {
+      chunk.data = ChunkPool<T>::get().take();
+      chunk.capacity = ChunkPool<T>::kChunk;
+    } else {
+      chunk.data.reset(new T[count]);
+      chunk.capacity = count;
+    }
+    m_chunks.push_back(std::move(chunk));
+    m_used = 0;
+  }
+  void release() noexcept {
+    for (Chunk& chunk : m_chunks) {
+      if (chunk.capacity == ChunkPool<T>::kChunk) {
+        ChunkPool<T>::get().put(std::move(chunk.data));
+      }
+    }
+    m_chunks.clear();
+    m_used = 0;
+    m_size = 0;
+  }
+  std::vector<Chunk> m_chunks;
+  uint32_t m_used = 0; // in the last chunk
+  uint32_t m_size = 0;
+};
+
+// A vector whose storage, when its frame goes, is kept for the frames after (0.46.0 test 9): a
+// frame's draws are ~1 KiB each, a heavy frame's a megabyte, and were allocated anew each frame
+// and freed a frame or two later. The two largest are kept; a frame takes the smallest that fits.
+template <typename T>
+class VectorPool {
+public:
+  static VectorPool& get() noexcept {
+    static VectorPool& pool = *new VectorPool;
+    return pool;
+  }
+  void put(std::vector<T>&& v) noexcept {
+    if (v.capacity() == 0) {
+      return;
+    }
+    v.clear();
+    std::vector<T> dropped; // freed after the lock
+    std::lock_guard lock{m_mutex};
+    m_spares.push_back(std::move(v));
+    if (m_spares.size() > kKept) {
+      const auto smallest = std::min_element(m_spares.begin(), m_spares.end(), [](const auto& a, const auto& b) {
+        return a.capacity() < b.capacity();
+      });
+      dropped = std::move(*smallest);
+      m_spares.erase(smallest);
+    }
+  }
+  // An empty vector with room for `capacity`: the smallest spare that has it, else a new one.
+  std::vector<T> take(size_t capacity) {
+    {
+      std::lock_guard lock{m_mutex};
+      auto best = m_spares.end();
+      for (auto it = m_spares.begin(); it != m_spares.end(); ++it) {
+        if (it->capacity() >= capacity && (best == m_spares.end() || it->capacity() < best->capacity())) {
+          best = it;
+        }
+      }
+      if (best != m_spares.end()) {
+        std::vector<T> v = std::move(*best);
+        m_spares.erase(best);
+        return v;
+      }
+    }
+    std::vector<T> v;
+    v.reserve(capacity);
+    return v;
+  }
+
+private:
+  static constexpr size_t kKept = 2;
+  std::mutex m_mutex;
+  std::vector<std::vector<T>> m_spares;
+};
+
+template <typename T>
+struct RecycledVector {
+  std::vector<T> v;
+  RecycledVector() = default;
+  RecycledVector(RecycledVector&& other) noexcept : v(std::move(other.v)) {}
+  RecycledVector& operator=(RecycledVector&& other) noexcept {
+    if (this != &other) {
+      VectorPool<T>::get().put(std::move(v));
+      v = std::move(other.v);
+    }
+    return *this;
+  }
+  ~RecycledVector() { VectorPool<T>::get().put(std::move(v)); }
+};
+
 // A frame's draws, their programs' constant rows (ProgramInputs) and the vertices and indices of
 // its own meshes (FrameMesh), and its serial, a new one each frame (from 1), by which the render
 // worker tells one frame's rows from another's; and its EFB copies among the draws, counted.
 struct Frame {
-  std::vector<Draw> draws;
+  RecycledVector<Draw> draws;
   std::vector<std::array<float, 4>> constants;
-  FrameArray<Vertex> vertices;
+  FrameChunks<Vertex> vertices;
   FrameArray<uint16_t> indices;
   // What its draws draw with, each held once (keep), let go with the frame.
   std::vector<std::shared_ptr<const void>> kept;
@@ -1772,10 +1969,10 @@ bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
 bool merge_into_last(const Draw& draw) noexcept {
   const FrameMesh& b = draw.frameMesh;
   if (draw.mesh != nullptr || b.vertexCount == 0 || b.primitive == MeshPrimitive::Points || draw.clear ||
-      draw.copyTo != nullptr || g_recording.draws.empty()) {
+      draw.copyTo != nullptr || g_recording.draws.v.empty()) {
     return false;
   }
-  Draw& last = g_recording.draws.back();
+  Draw& last = g_recording.draws.v.back();
   FrameMesh& a = last.frameMesh;
   if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || a.kind != b.kind ||
       a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
@@ -1828,7 +2025,7 @@ void record(Draw&& draw) noexcept {
     return;
   }
   g_recording.copies += draw.copyTo != nullptr ? 1 : 0;
-  g_recording.draws.push_back(draw);
+  g_recording.draws.v.push_back(draw);
 }
 
 namespace {
@@ -1861,7 +2058,7 @@ const float* recorded_constants(uint32_t at) noexcept { return g_recording.const
 
 uint32_t recording_serial() noexcept { return g_recording.serial; }
 
-uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.size()); }
+uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.v.size()); }
 
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept { return g_recording.vertices.grow(count, at); }
 
@@ -1876,10 +2073,9 @@ uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept {
 }
 
 void end_frame_draws() noexcept {
-  const size_t drawn = g_recording.draws.size();
+  const size_t drawn = g_recording.draws.v.size();
   const size_t rows = g_recording.constants.size();
   const size_t kept = g_recording.kept.size();
-  const uint32_t vertices = g_recording.vertices.size();
   const uint32_t indices = g_recording.indices.size();
   const uint32_t serial = g_recording.serial;
   {
@@ -1892,10 +2088,11 @@ void end_frame_draws() noexcept {
   }
   g_recording = {};
   g_recording.serial = serial + 1 != 0 ? serial + 1 : 1;
-  g_recording.draws.reserve(drawn);
+  // The draws' storage from the spares (VectorPool); the vertices come a chunk at a time as they
+  // are recorded (FrameChunks).
+  g_recording.draws.v = VectorPool<Draw>::get().take(drawn);
   g_recording.constants.reserve(rows);
   g_recording.kept.reserve(kept);
-  g_recording.vertices.reserve(vertices);
   g_recording.indices.reserve(indices);
 }
 
@@ -2763,7 +2960,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
 }
 
 void draw_world(const Frame& frame) {
-  const std::vector<Draw>& draws = frame.draws;
+  const std::vector<Draw>& draws = frame.draws.v;
   if (draws.empty()) {
     return;
   }

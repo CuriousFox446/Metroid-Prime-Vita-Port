@@ -3316,3 +3316,64 @@ What to look for in test 8: Phendrana's frame rate (15.5 FPS with the Sheegoths)
 `DrawWorld` there (15.1 ms a frame in test 7), and the new snow zones. The snow, the rain and the
 underwater flakes should look exactly as before.
 
+### Test 8 result
+
+`~/logs/t046_8.log` (d3f1482, 182 windows). The user: "there was a crash I couldn't replicate". The
+dump was only the cut-short `.tmp`.
+
+**The speed.**
+
+| | test 7 | test 8 |
+|---|---|---|
+| Phendrana, Sheegoths | 15.5 FPS, draw 22.2, `DrawWorld` 15.1 ms | 17.3 FPS, draw 18.2, `DrawWorld` 11.0 ms |
+| Phendrana (open) | 18.2 FPS (test 6) | 19.9 FPS, draw 16.5, `DrawWorld` 9.4 ms |
+
+- The snow's draw is 1.75 to 2.0 ms a frame now, about 7 ms before.
+- Its update: `envfx: particles (new and moved)` 0.55 ms a tick, `envfx: blocked grids (ray casts)`
+  0.25 ms where grids move.
+- With the Sheegoths the game thread (3.55 ticks of 9.82 ms, plus 18.2) and the FIFO processor
+  (53.0 ms) are level, about 53 ms each.
+- Cores: 0 at 86% (helper 36%, render worker 45%), 1 at 88%, 2 at 64%, 3 at 36%.
+
+**The crash.** The log's last lines:
+- `vita: out of memory: operator new(4956896) failed on thread 0x4002025B`, the FIFO processor.
+- The heap at the time: 191,179 KiB in use, 33,768 KiB free (in pieces), 224,948 of 229,376 KiB
+  taken from the system.
+- Then `std::terminate`, an uncaught `std::bad_alloc`.
+
+Its stack, through the ELF (runtime minus 0x1B000): `draw_immediate` → `frame_vertices` →
+`FrameArray<Vertex>::reserve` → `operator new[]`. 4,956,896 bytes is 88,516 vertices: the frame's
+vertices doubling from 44,258.
+- Phendrana's frames record ~45,000 to 50,000 vertices: the snow ~28,700, the map ~6,200, the rest
+  ~10,000. That is ~2.5 MiB in one piece.
+- A frame that outgrew the spares (`SpareStorage`, the two largest kept) asked for twice that in one
+  piece, from a heap near its ceiling.
+- Test 8's spike, 190 MiB in use against a mean of 165, came while the reaper was behind: the render
+  worker destroyed 555 frames itself in 17 reports, against 51 in test 7. The helper takes more of
+  core 0 now.
+- Each frame also allocated its draws (~1 KiB each, a megabyte a heavy frame) anew, freed a frame or
+  two later.
+
+## 0.46.0 test 9: the frame's vertices in chunks
+
+**The vertices.** A frame's own vertices are kept in chunks of 8,192 (448 KiB), not one array
+(`FrameChunks`, vita_gl.cpp).
+- The chunks come from and go back to a pool (`ChunkPool`, 16 kept). No piece is larger than a
+  chunk, and the same pieces are used again and again.
+- A run that does not fit in the last chunk starts the next. One larger than a chunk gets one of its
+  own size; the immediate draws' are at most 65,535.
+- A place is the chunk's number (bits 20 and up) and the place in it. A mesh's vertices are together
+  in one chunk. Two meshes are next to each other (`merge_into_last`: place plus count) only in the
+  same chunk, so draws are joined as before within a chunk and not across one.
+- What was handed out never moves (`room()` is unbounded), so `frame_vertices_safe` no longer waits
+  for the core 0 helper when the frame grows.
+
+**The draws.** A frame's draws keep their storage for the frames after (`RecycledVector`,
+`VectorPool`: the two largest kept). A new recording takes the smallest that fits instead of a new
+megabyte.
+
+The indices stay as they were: a heavy frame's are ~150 KiB.
+
+What to look for in test 9: no out-of-memory crash in Phendrana. The `[heap]` lines' in-use and taken
+figures, against test 8's 165 MiB mean and 190 peak. Frame rates as in test 8.
+
