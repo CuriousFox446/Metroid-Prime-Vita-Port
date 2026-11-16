@@ -7,11 +7,9 @@
 #include "gx.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
-#include "vita_batch.hpp"
 #include "vita_tev.hpp"
 
 #include <dolphin/gx/GXCommandList.h>
-#include <dolphin/gx/GXPortBatch.h>
 #include <fmt/format.h>
 
 #include <tracy/Tracy.hpp>
@@ -310,16 +308,6 @@ struct Stats {
   // The material key's parts worked out again (material_hash).
   u32 keyPipelines = 0;
   u32 keyTextures = 0;
-  // Batches (draw_batch): their primitives, triangles, lines drawn as quads, vertices and draws, and
-  // the primitives and batches left out.
-  u32 batches = 0;
-  u32 batchPrims = 0;
-  u32 batchTriangles = 0;
-  u32 batchSegments = 0;
-  u32 batchVertices = 0;
-  u32 batchDraws = 0;
-  u32 batchSkipped = 0;
-  u32 batchFailed = 0;
 };
 Stats sStats;
 enum class Fail { None, MatrixIndex, Array, Command, Empty };
@@ -2538,192 +2526,6 @@ bool draw_indexed(GXVtxFmt fmt, u16 vtxCount, std::span<const u8> vertices, std:
   return true;
 }
 
-namespace {
-// A batch's material (draw_batch): one TEV stage passing the rasterised colour and alpha on, both
-// channels unlit from the vertices; the rest of GX's state (blending, depth, culling, alpha test,
-// fog) as it is. GX's state is put back as it was when this goes, for the draws after.
-class BatchMaterial {
-public:
-  BatchMaterial() noexcept
-  : m_stage(g_gxState.tevStages[0]), m_swap(g_gxState.tevSwapTable[0]),
-    m_color(g_gxState.colorChannelConfig[GX_COLOR0]), m_alpha(g_gxState.colorChannelConfig[GX_ALPHA0]),
-    m_numTevStages(g_gxState.numTevStages), m_numChans(g_gxState.numChans), m_numTexGens(g_gxState.numTexGens),
-    m_numIndStages(g_gxState.numIndStages) {
-    GXState& s = g_gxState;
-    TevStage stage{};
-    stage.colorPass.d = GX_CC_RASC;
-    stage.alphaPass.d = GX_CA_RASA;
-    stage.channelId = GX_COLOR0A0;
-    s.tevStages[0] = stage;
-    s.tevSwapTable[0] = TevSwap{};
-    ColorChannelConfig unlit{};
-    unlit.matSrc = GX_SRC_VTX;
-    s.colorChannelConfig[GX_COLOR0] = unlit;
-    s.colorChannelConfig[GX_ALPHA0] = unlit;
-    s.numTevStages = 1;
-    s.numChans = 1;
-    s.numTexGens = 0;
-    s.numIndStages = 0;
-    s.dirty |= DirtyPipeline;
-  }
-  ~BatchMaterial() {
-    GXState& s = g_gxState;
-    s.tevStages[0] = m_stage;
-    s.tevSwapTable[0] = m_swap;
-    s.colorChannelConfig[GX_COLOR0] = m_color;
-    s.colorChannelConfig[GX_ALPHA0] = m_alpha;
-    s.numTevStages = m_numTevStages;
-    s.numChans = m_numChans;
-    s.numTexGens = m_numTexGens;
-    s.numIndStages = m_numIndStages;
-    s.dirty |= DirtyPipeline;
-  }
-  BatchMaterial(const BatchMaterial&) = delete;
-  BatchMaterial& operator=(const BatchMaterial&) = delete;
-
-private:
-  TevStage m_stage;
-  TevSwap m_swap;
-  ColorChannelConfig m_color;
-  ColorChannelConfig m_alpha;
-  u8 m_numTevStages;
-  u8 m_numChans;
-  u8 m_numTexGens;
-  u8 m_numIndStages;
-};
-
-// A batch's vertices among the frame's own (vita_gl::frame_vertices), a chunk at a time, each chunk
-// a draw: batch::expand's `out`.
-struct BatchOut {
-  const Material* material = nullptr;
-  u32 at0 = 0; // the chunk's first vertex among the frame's
-  u32 size = 0; // the chunk's room so far
-  vita_gl::Vertex* base = nullptr; // the chunk's first vertex (it moves as the frame's grow)
-  bool open = false;
-  u32 draws = 0;
-
-  u32 room(u32 n) noexcept {
-    u32 at = 0;
-    vita_gl::Vertex* const p = vita_gl::frame_vertices(n, at);
-    if (!open) {
-      at0 = at;
-      open = true;
-    }
-    base = p - (at - at0);
-    const u32 first = size;
-    size += n;
-    return first;
-  }
-  void give_back(u32 n) noexcept {
-    if (n != 0) {
-      size -= n;
-      vita_gl::trim_frame_vertices(at0 + size);
-    }
-  }
-  void put(u32 i, const float pos[3], const u8 rgba[4]) noexcept {
-    vita_gl::Vertex& v = base[i];
-    v = vita_gl::Vertex{};
-    std::memcpy(v.pos, pos, sizeof(v.pos));
-    std::memcpy(v.color, rgba, sizeof(v.color));
-    std::memcpy(v.raw, rgba, sizeof(v.raw));
-  }
-  void chunk(std::vector<u16>& indices, u32 vertices) noexcept {
-    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
-    if (indices.empty() || vertices == 0) {
-      if (open) {
-        vita_gl::trim_frame_vertices(at0);
-      }
-    } else if (material->program == nullptr) {
-      // Fixed-function: every corner, in a mesh of its own.
-      std::vector<vita_gl::Vertex> triangles;
-      triangles.reserve(indices.size());
-      for (const u16 i : indices) {
-        triangles.push_back(base[i]);
-      }
-      vita_gl::trim_frame_vertices(at0);
-      record_draw(vita_gl::make_mesh(std::move(triangles), vita_gl::MeshKind::Immediate, false), *material);
-      ++draws;
-    } else {
-      vita_gl::pad_triangle_indices(indices);
-      vita_gl::FrameMesh mesh{.vertexAt = at0,
-                              .vertexCount = vertices,
-                              .indexAt = 0,
-                              .indexCount = static_cast<u32>(indices.size()),
-                              .kind = vita_gl::MeshKind::Immediate,
-                              .primitive = vita_gl::MeshPrimitive::Triangles};
-      mesh.indexAt = vita_gl::frame_indices(indices.data(), mesh.indexCount);
-      record_draw(nullptr, *material, mesh);
-      ++draws;
-    }
-    open = false;
-    size = 0;
-    base = nullptr;
-  }
-};
-
-static_assert(sizeof(batch::Source) == sizeof(GXPortBatchSource));
-static_assert(sizeof(batch::Prim) == sizeof(GXPortBatchPrim));
-std::vector<batch::Source> sBatchSources;
-batch::Scratch sBatchScratch;
-} // namespace
-
-bool draw_batch(std::span<const u8> sources, u32 sourceCount, std::span<const u8> prims) noexcept {
-  ZoneScoped;
-  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kDispatch);
-  ++sStats.batches;
-  if (sourceCount == 0 || sourceCount > 256 || sources.size() != sourceCount * sizeof(batch::Source)) {
-    ++sStats.batchFailed;
-    return false;
-  }
-  sBatchSources.resize(sourceCount);
-  std::memcpy(sBatchSources.data(), sources.data(), sources.size());
-  const BatchMaterial batchMaterial;
-  const Material& material = current_material();
-  vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kMaterial);
-  if (material.unitCount < 0) {
-    ++sStats.batchFailed;
-    return false;
-  }
-  // The lines' quads are a pixel of the frame wide, in the view the draw is made in.
-  batch::View view{};
-  static_assert(sizeof(Mat3x4<float>) == sizeof(view.mv));
-  std::memcpy(view.mv, &g_gxState.pnMtx[g_gxState.currentPnMtx].pos, sizeof(view.mv));
-  const Mat4x4<float>& proj = g_gxState.proj;
-  for (int c = 0; c < 4; ++c) {
-    view.proj[0][c] = proj.m0[c];
-    view.proj[1][c] = proj.m1[c];
-    view.proj[2][c] = proj.m2[c];
-    view.proj[3][c] = proj.m3[c];
-  }
-  const gfx::Viewport& vp = g_gxState.logicalViewport;
-  const vita_gl::ScreenRect frame = vita_gl::frame_rect(screen_rect(vp.left, vp.top, vp.width, vp.height, false));
-  view.width = static_cast<float>(frame.width);
-  view.height = static_cast<float>(frame.height);
-  const batch::LinePlan plan = batch::plan_lines(view);
-  // GX culls every triangle under GX_CULL_ALL but never a line: the lines alone, their quads unculled.
-  const GXCullMode cull = g_gxState.cullMode;
-  Material unculled;
-  const Material* use = &material;
-  if (cull == GX_CULL_ALL) {
-    unculled = material;
-    unculled.state.cullFace = 0;
-    unculled.programState.cullFace = 0;
-    use = &unculled;
-  }
-  BatchOut out;
-  out.material = use;
-  batch::Counts counts;
-  batch::expand(sBatchSources.data(), sourceCount, prims.data(), prims.size(), plan, cull != GX_CULL_ALL,
-                cull == GX_CULL_FRONT || cull == GX_CULL_BACK, out, sBatchScratch, counts);
-  sStats.batchPrims += counts.prims;
-  sStats.batchTriangles += counts.triangles;
-  sStats.batchSegments += counts.segments;
-  sStats.batchVertices += counts.vertices;
-  sStats.batchDraws += out.draws;
-  sStats.batchSkipped += counts.skipped;
-  return true;
-}
-
 void retained() noexcept { sPosAnswerKnown = false; }
 
 void warm_up_step() noexcept { tev_warm_up_step(); }
@@ -3021,12 +2823,6 @@ void log_stats() noexcept {
            "decodable",
            s.immediate, s.immediateLines, s.immediateLinesNarrowed, s.immediatePoints, s.immediateFailed, s.perCall,
            s.perCallFailed);
-  if (s.batches != 0) {
-    Log.info("batches: {} ({} primitives: {} triangles, {} lines as quads; {} vertices in {} draws; {} primitives "
-             "left out, {} batches not drawn)",
-             s.batches, s.batchPrims, s.batchTriangles, s.batchSegments, s.batchVertices, s.batchDraws,
-             s.batchSkipped, s.batchFailed);
-  }
   Log.info("lists: {} calls, {} recorded; decoded {}, not drawable {} "
            "(matrix index {}, array {}, command {}, empty {}); decoded again for changed textures {}, vertex layout "
            "{}, array {}; {} cached",

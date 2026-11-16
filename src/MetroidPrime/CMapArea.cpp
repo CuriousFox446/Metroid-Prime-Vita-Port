@@ -19,7 +19,6 @@
 #endif
 
 #include <dolphin/gx/GXEnum.h>
-#include <dolphin/gx/GXPortBatch.h>
 #include <dolphin/os.h>
 
 #include <stdint.h>
@@ -270,79 +269,7 @@ void PortDrawIndexed(GXPrimitive primitive, const std::vector< uchar >& indices,
     at += count;
   }
 }
-
-// A GXPortDrawBatch record and its indices, appended.
-void PortBatchPrim(std::vector< uchar >& out, uchar primitive, uchar source, const uchar* indices, int count,
-                   const GXColor& color) {
-  GXPortBatchPrim prim;
-  prim.primitive = primitive;
-  prim.source = source;
-  prim.count = static_cast< u16 >(count);
-  prim.color[0] = color.r;
-  prim.color[1] = color.g;
-  prim.color[2] = color.b;
-  prim.color[3] = color.a;
-  const uchar* bytes = reinterpret_cast< const uchar* >(&prim);
-  out.insert(out.end(), bytes, bytes + sizeof(prim));
-  out.insert(out.end(), indices, indices + count);
-}
 } // namespace
-
-// 0.42.0 test 25: what Draw sends, as a batch's records. The fill's primitives as they are when the
-// surface's colour has alpha, then each outline pass's strips when the outline's has, in the
-// colours Draw gives them; the batch makes the triangles and lines GX would.
-bool CMapArea::CMapAreaSurface::PortBatch(std::vector< unsigned char >& out, unsigned char source,
-                                          const CColor& surfColor, const CColor& lineColor,
-                                          float lineWidth) const {
-  if (surfColor.GetAlpha() > 0.0f) {
-    const GXColor color = surfColor.GetGXColor();
-    const int numSurfaces = CBasics::SwapBytes(*x18_surfOffset);
-    const int* surface = &x18_surfOffset[1];
-    for (int i = 0; i < numSurfaces; ++i) {
-      const uint primType = CBasics::SwapBytes(static_cast< uint >(*surface++));
-      const int numVertices = CBasics::SwapBytes(*surface++);
-      const uchar* data = reinterpret_cast< const uchar* >(surface);
-      surface += ((numVertices + 3) & ~3) / 4;
-      switch (primType) {
-      case GX_QUADS:
-      case GX_TRIANGLES:
-      case GX_TRIANGLESTRIP:
-      case GX_TRIANGLEFAN:
-      case GX_LINES:
-      case GX_LINESTRIP:
-        break;
-      default:
-        return false;
-      }
-      if (numVertices < 0 || numVertices > 0xFFFF) {
-        return false;
-      }
-      if (numVertices != 0) {
-        PortBatchPrim(out, static_cast< uchar >(primType), source, data, numVertices, color);
-      }
-    }
-  }
-  if (lineColor.GetAlpha() > 0.0f) {
-    const bool thickLine = lineWidth > 1.f;
-    const GXColor color = lineColor.WithAlphaModulatedBy(thickLine ? 0.5f : 1.0f).GetGXColor();
-    const int numOutlines = CBasics::SwapBytes(*x1c_outlineOffset);
-    for (int j = 0; j < (thickLine ? 1 : 0) + 1; ++j) {
-      const int* outline = &x1c_outlineOffset[1];
-      for (int i = 0; i < numOutlines; ++i) {
-        const int numVertices = CBasics::SwapBytes(*outline++);
-        const uchar* data = reinterpret_cast< const uchar* >(outline);
-        outline += ((numVertices + 3) & ~3) / 4;
-        if (numVertices < 0 || numVertices > 0xFFFF) {
-          return false;
-        }
-        if (numVertices != 0) {
-          PortBatchPrim(out, static_cast< uchar >(GX_LINESTRIP), source, data, numVertices, color);
-        }
-      }
-    }
-  }
-  return true;
-}
 #endif
 
 void CMapArea::CMapAreaSurface::Draw(const CVector3f* verts, uint vertexCount, const CColor& surfColor,

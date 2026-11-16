@@ -2912,3 +2912,20 @@ What to look for in test 25:
 - The map and minimap drawn as before: the rooms' fills, their outlines, the thick ones on the map
   screen, the colours, the selected and flashing rooms. A line's end or corner may differ by a pixel.
 
+**Test 25** (c647ad0; the user's log of Nov 15).
+
+- The map "looked like it was glitching", and the user asked for it back as it was. The batch is
+  reverted; the map is drawn as test 24 drew it. c647ad0 keeps the batch, should it come back.
+- The log shows the batch working as built: every frame's map in one draw (`HUD: the map` 50
+  primitives a frame against test 24's ~300), no primitive left out, none failed. What looked wrong
+  is not in the log, and there is no photo.
+- A suspect for a later look: the minimap is drawn with a GEQUAL depth test against its frame's mask,
+  0.02 units apart, squashed into the HUD's 1/512 of the depth range. The batch's positions are
+  rounded differently from the GPU's (each area's transform applied on the CPU), and its outline
+  corners are stepped far along the squashed axis. Either could flip that test for some pixels.
+- The speed it gave, against test 24's medians:
+  - the map screen: 28 to 33 FPS (10 to 22);
+  - Metaree rooms: 36.4 (28.9);
+  - Magmoor with Puffers: 24.4 (21.4);
+  - Triclops and the pirate fight: about the same.
+

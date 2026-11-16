@@ -13,10 +13,6 @@
 #include "rstl/single_ptr.hpp"
 #include "rstl/vector.hpp"
 
-#ifdef TARGET_PC
-#include <vector>
-#endif
-
 class IWorld;
 
 class CMapArea {
@@ -44,11 +40,6 @@ public:
 #ifdef TARGET_PC
     // Calls fn with the vertex indices of each filled triangle Draw emits.
     void PortForEachTriangle(void (*fn)(void* ctx, int a, int b, int c), void* ctx) const;
-    // Draw's primitives as GXPortDrawBatch records (GXPortBatchPrim, each followed by its
-    // indices), appended to out in Draw's order and colours, from batch source `source`. False for
-    // a fill primitive no batch draws (points): Draw draws the surface then.
-    bool PortBatch(std::vector< unsigned char >& out, unsigned char source, const CColor& surfColor,
-                   const CColor& lineColor, float lineWidth) const;
 #endif
   };
   enum EVisMode { kVM_Always, kVM_MapStationOrVisit, kVM_Visit, kVM_Never };

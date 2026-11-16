@@ -26,11 +26,6 @@
 #include "port_map_marks.h"
 #include "port_map_pickups.h"
 
-#include <dolphin/gx/GXPortBatch.h>
-
-#include <cstring>
-#include <vector>
-
 namespace {
 // Rooms mode: true when the area still holds a pickup whose memory relay is not
 // in the world's mailbox.
@@ -46,19 +41,6 @@ bool PortRoomHoldsPickup(const IWorld& world, int areaIdx) {
     }
   }
   return false;
-}
-
-// The colour DrawAreas draws a surface in: its area's, shaded by how far the surface faces the
-// camera. One function for DrawAreas' loop and PortDrawSurfaceBatch, so both work it out alike.
-CColor PortSurfaceColor(const CColor& surfaceColor, const CTransform4f& cameraXf,
-                        const CTransform4f& areaXf, const CMapArea::CMapAreaSurface& surface) {
-  float linear = gpTweakAutoMapper->x54_mapSurfaceNormColorLinear;
-  float constant = gpTweakAutoMapper->x58_mapSurfaceNormColorConstant;
-  float shade = linear * rstl::max_val(0.f, CVector3f::Dot(-1.f * cameraXf.GetForward(),
-                                                           areaXf.Rotate(surface.GetNormal())));
-  shade = constant + shade;
-  const CColor normalColor(shade, shade, shade, 1.f);
-  return CColor::Modulate(surfaceColor, normalColor);
 }
 } // namespace
 #endif
@@ -489,16 +471,7 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
     EDrawMode lastMode = kDM_Invalid;
     int lastArea = -1;
     CMapArea::CMapAreaSurface::SetupGXMaterial();
-    int first = 0;
-#ifdef TARGET_PC
-    // 0.42.0 test 25: the surfaces, sorted ahead of the doors and objects, as one draw.
-    first = PortDrawSurfaceBatch(parms, sortInfos);
-    if (first > 0) {
-      lastMode = kDM_Surface;
-      lastArea = sortInfos[first - 1].GetAreaIndex();
-    }
-#endif
-    for (int i = first; i < sortInfos.size(); ++i) {
+    for (int i = 0; i < sortInfos.size(); ++i) {
       const CMapObjectSortInfo& info = sortInfos[i];
       CMapObjectSortInfo::EObjectCode type = info.GetObjectCode();
       int areaIdx = info.GetAreaIndex();
@@ -509,9 +482,6 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
       const CTransform4f& areaXf = area->GetAreaPostTransform(parms.GetWorld(), areaIdx);
       if (type == CMapObjectSortInfo::kOC_Surface) {
         const CMapArea::CMapAreaSurface& surface = area->GetSurface(idx);
-#ifdef TARGET_PC
-        const CColor color = PortSurfaceColor(surfaceColor, cameraXf, areaXf, surface);
-#else
         float linear = gpTweakAutoMapper->x54_mapSurfaceNormColorLinear;
         float constant = gpTweakAutoMapper->x58_mapSurfaceNormColorConstant;
         float shade =
@@ -520,7 +490,6 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
         shade = constant + shade;
         const CColor normalColor(shade, shade, shade, 1.f);
         const CColor color = CColor::Modulate(surfaceColor, normalColor);
-#endif
         bool needsVertices = lastArea != areaIdx || lastMode != kDM_Surface;
         if (needsVertices) {
           gpRender->SetModelMatrix(modelXf * areaXf);
@@ -566,86 +535,6 @@ void CMapWorld::DrawAreas(const CMapWorldDrawParms& parms, int selArea,
 }
 
 #ifdef TARGET_PC
-// 0.42.0 test 25: the surfaces at the head of DrawAreas' sorted list (their code sorts them ahead of
-// the doors and objects) drawn as one GXPortDrawBatch, in their order: each surface's fill, then its
-// outline passes, in the colours the loop gives them (CMapAreaSurface::PortBatch), each area's
-// vertices through its own transform. The minimap sent some 300 GX draws a frame, a fill or an
-// outline each, the map screen 2,600 to 5,400 (test 24's log). Returns how many of the list it drew;
-// 0 when it drew none (no Vita path, MP_MAP_BATCH=0, a fill no batch draws) and the loop draws them.
-int CMapWorld::PortDrawSurfaceBatch(const CMapWorldDrawParms& parms,
-                                    const rstl::vector< CMapObjectSortInfo >& sortInfos) const {
-  static const bool sEnabled = [] {
-    const char* env = getenv("MP_MAP_BATCH");
-    return env == nullptr || env[0] != '0';
-  }();
-  if (!sEnabled || GXPortDrawBatchAvailable() == GX_FALSE) {
-    return 0;
-  }
-  int count = 0;
-  while (count < sortInfos.size() &&
-         sortInfos[count].GetObjectCode() == CMapObjectSortInfo::kOC_Surface) {
-    ++count;
-  }
-  if (count == 0) {
-    return 0;
-  }
-  static std::vector< GXPortBatchSource > sources;
-  static std::vector< int > areaSources;
-  static std::vector< uchar > prims;
-  sources.clear();
-  prims.clear();
-  areaSources.assign(GetNumAreas(), -1);
-  const CTransform4f& cameraXf = parms.GetCameraTransform();
-  const float outlineWidth = parms.GetOutlineWidthScale();
-  bool thick = false;
-  for (int i = 0; i < count; ++i) {
-    const CMapObjectSortInfo& info = sortInfos[i];
-    const int areaIdx = info.GetAreaIndex();
-    if (areaIdx < 0 || areaIdx >= static_cast< int >(areaSources.size())) {
-      return 0;
-    }
-    CMapArea* area = GetMapArea(areaIdx);
-    const CTransform4f areaXf = area->GetAreaPostTransform(parms.GetWorld(), areaIdx);
-    int& source = areaSources[areaIdx];
-    if (source < 0) {
-      if (sources.size() >= 256) {
-        return 0;
-      }
-      source = static_cast< int >(sources.size());
-      GXPortBatchSource s;
-      s.positions = reinterpret_cast< const f32* >(area->GetVertices());
-      s.count = area->GetVertexCount();
-      const float m[3][4] = {
-          {areaXf.Get00(), areaXf.Get01(), areaXf.Get02(), areaXf.Get03()},
-          {areaXf.Get10(), areaXf.Get11(), areaXf.Get12(), areaXf.Get13()},
-          {areaXf.Get20(), areaXf.Get21(), areaXf.Get22(), areaXf.Get23()},
-      };
-      std::memcpy(s.mtx, m, sizeof(s.mtx));
-      sources.push_back(s);
-    }
-    const CMapArea::CMapAreaSurface& surface = area->GetSurface(info.GetLocalObjectIndex());
-    const CColor color = PortSurfaceColor(info.GetSurfaceColor(), cameraXf, areaXf, surface);
-    if (!surface.PortBatch(prims, static_cast< uchar >(source), color, info.GetOutlineColor(),
-                           outlineWidth)) {
-      return 0;
-    }
-    thick = thick || (info.GetOutlineColor().GetAlpha() > 0.f && outlineWidth > 1.f);
-  }
-  if (!prims.empty()) {
-    // The areas' transforms are the sources'; the plane's projection is the draw's.
-    gpRender->SetModelMatrix(parms.GetPlaneProjectionTransform());
-    if (GXPortDrawBatch(sources.data(), static_cast< u32 >(sources.size()), prims.data(),
-                        static_cast< u32 >(prims.size())) == GX_FALSE) {
-      return 0;
-    }
-  }
-  if (thick) {
-    // Where the loop's last outline pass leaves it.
-    CGraphics::SetLineWidth(outlineWidth - 1.f, kTO_One);
-  }
-  return count;
-}
-
 // Port: a white dot for each pickup not yet collected (PortMapPickups), in the
 // rooms this pass drew (Seen mode: only those the player has seen, or that a
 // map station mapped); tracker colours in an Archipelago game. With pickup

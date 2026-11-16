@@ -338,10 +338,6 @@ void program_compiles(uint32_t& sent, uint32_t& finished) noexcept;
 constexpr float kMaxRenderScale = 2.f;
 void render_size_for_scale(float scale, int& width, int& height) noexcept;
 void set_render_scale(float scale) noexcept;
-// A rectangle of the screen's pixels (as Draw's viewport) in the pixels of the frames at the scale
-// asked for now (any thread): what the render worker sets it as when it draws at that scale. A
-// scale asked for while a frame is recorded takes the next present, so that frame's may differ.
-ScreenRect frame_rect(const ScreenRect& r) noexcept;
 // Sharpening of a frame drawn up from fewer pixels (aurora_set_present_sharpness; 0 off, to 1).
 void set_present_sharpness(float sharpness) noexcept;
 // The GPU's busy time a frame over the last half second or so, ms (vita_gl.cpp's GpuClock); 0
@@ -383,7 +379,6 @@ inline void render_size_for_scale(float, int& width, int& height) noexcept {
   height = kScreenHeight;
 }
 inline void set_render_scale(float) noexcept {}
-inline ScreenRect frame_rect(const ScreenRect& r) noexcept { return r; }
 inline void set_present_sharpness(float) noexcept {}
 inline float gpu_busy_ms() noexcept { return -1.f; }
 #endif
