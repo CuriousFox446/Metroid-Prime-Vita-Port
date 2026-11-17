@@ -351,6 +351,27 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
       source = kPhoneSource;
       sGyroStatus = "phone";
       haveAccel = sPhoneAccel != nullptr && SDL_GetSensorData(sPhoneAccel, accel, 3);
+#if defined(__vita__)
+      // The Vita's own motion sensor (its pad has none). SDL's driver passes sceMotion's readings
+      // through, and its accelerometer gives gravity's own direction (lying face up, z is -1 g),
+      // where SDL's axes and GamepadMotionHelpers (gravity = -accel) take a reading at rest to point
+      // away from the ground. So gravity came out upside down, and player and world space turned
+      // yaw the wrong way: in 0.46.0 test 18, "the gyro aim's x-axis is reversed". Pitch, the gyro's
+      // own x, was right. The first reading is logged as it came, to check the sign by.
+      if (haveAccel) {
+        static bool sLogged = false;
+        if (!sLogged) {
+          sLogged = true;
+          PortLog::Write("port: gyro: the Vita's motion sensor, first reading as SDL gives it: accel %.2f %.2f "
+                         "%.2f m/s^2 (turned to SDL's sign: at rest, away from the ground), gyro %.3f %.3f "
+                         "%.3f rad/s\n",
+                         accel[0], accel[1], accel[2], gyro[0], gyro[1], gyro[2]);
+        }
+        accel[0] = -accel[0];
+        accel[1] = -accel[1];
+        accel[2] = -accel[2];
+      }
+#endif
       // The phone reports its own axes (x right, y up in its natural
       // orientation), so turn them to the screen's, as SDL does for its
       // accelerometer: landscape would otherwise swap pitch and yaw. Then it

@@ -3838,3 +3838,36 @@ What to look for in test 18:
 - The Sheegoth rooms against test 16's 12 FPS (and tests 7 to 10's 15.5 to 18.3).
 - The side workers' `[side jobs]` lines: "the game thread ran N of them itself".
 - Particles, effects and projectiles looking as before.
+
+### Test 18 result
+
+`~/logs/t046_18.log` (e51156d, 3.5 minutes in Phendrana): a clean exit, no freeze. The game thread
+took slot 3 at its first wait (its stack below the wait: 0x84a01000 to 0x84e00330).
+- **The Sheegoth rooms ran at 17.7 FPS** (median, 60 windows), against test 16's 12.0, and as tests 7
+  to 10 did (15.5 to 18.3): 3.4 ticks a frame of 9.3 ms each, Think 3.0 ms a tick.
+- **The particle waits fell to 0.4 ms a frame**, from test 16's 10.9 (`~/tools/pwaits.py`).
+- The game thread ran 170 to 540 of the fourth core's worker's jobs itself in each 12 to 18 s report,
+  about 0.1 ms each (21 to 51 ms a report). It ran 13 to 210 of side worker 2's.
+- Its waits on side worker 2 came to 0.5 to 9 ms a report (test 16: 1.4 to 2.4 s).
+- **Gyro aim turned the wrong way left and right** (the user: "the gyro aim's x-axis is reversed").
+  Up and down were right. See test 19.
+
+## 0.46.0 test 19: the Vita's gyro aim turns the right way
+
+The Vita's pad has no motion sensor in SDL, so gyro aim reads the console's own through SDL's sensor
+API (the "phone" source in `platform/debug_ui/input.cpp`). SDL's Vita driver passes `sceMotion`'s
+readings through as they are. Its accelerometer gives gravity's own direction: lying face up, z is
+-1 g. SDL's axes, and GamepadMotionHelpers after them (gravity = -accel), take a reading at rest to
+point away from the ground. So the gravity the port tracked was upside down.
+- In player space (`gyro_space=1`, the default) and world space, yaw is turned about gravity, so it
+  came out reversed.
+- Pitch is the gyro's own x axis, so it was right.
+- The local spaces do not use gravity.
+
+On the Vita the accelerometer reading is now negated before it is used. The first reading is logged
+as SDL gives it (`port: gyro: the Vita's motion sensor, first reading ...`). Held normally, its y
+should be negative, which confirms the sign.
+
+What to look for in test 19:
+- Gyro aim turning the same way as the console, left and right, with up and down as before.
+- The log's "first reading" line.
