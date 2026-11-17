@@ -450,6 +450,11 @@ typedef void (*GXPortSideJobFn)(void* data);
 // Queues fn(data); its number (above 0), or 0 when there is no worker. `data` must live until the
 // job has run.
 u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data);
+// 0.46.0 test 16: as GXPortSideJobSubmit, on whichever side worker has fewer jobs queued (the fourth
+// core's, or a second on the first core), for jobs in no order with each other: each object's
+// particle step. Its number works with GXPortSideJobDone and GXPortSideJobWait, not with
+// GXPortSideJobFence.
+u32 GXPortSideJobSubmitAny(GXPortSideJobFn fn, void* data);
 // Whether the job has run (true for 0, no job).
 GXBool GXPortSideJobDone(u32 job);
 // The calling thread waits until the job has run.

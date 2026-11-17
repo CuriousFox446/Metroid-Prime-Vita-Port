@@ -632,6 +632,16 @@ u32 GXPortSideJobSubmit(GXPortSideJobFn fn, void* data) {
 #endif
 }
 
+u32 GXPortSideJobSubmitAny(GXPortSideJobFn fn, void* data) {
+#if defined(__vita__)
+  return aurora::side_jobs::submit_any(fn, data);
+#else
+  (void)fn;
+  (void)data;
+  return 0;
+#endif
+}
+
 GXBool GXPortSideJobDone(u32 job) {
 #if defined(__vita__)
   return aurora::side_jobs::done(job) ? GX_TRUE : GX_FALSE;

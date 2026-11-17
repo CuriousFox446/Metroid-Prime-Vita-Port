@@ -16,6 +16,10 @@ using Fn = void (*)(void* data);
 // Queues fn(data) and returns its number (above 0), or 0 when there is no worker. Any thread but
 // the worker's own.
 uint32_t submit(Fn fn, void* data) noexcept;
+// 0.46.0 test 16: as submit, on whichever side worker has fewer jobs queued: the fourth core's or
+// the second, on the first core (per-thread slot 2). For jobs in no order with each other (each
+// object's particle step); its number works with done and wait, not with a FIFO fence.
+uint32_t submit_any(Fn fn, void* data) noexcept;
 // Whether the job has run (true for 0, no job).
 bool done(uint32_t job) noexcept;
 // Waits until the job has run, at most half a second (a hang, which is logged, then let go).

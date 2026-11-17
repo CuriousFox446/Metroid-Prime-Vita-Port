@@ -143,7 +143,7 @@ void CExplosion::Think(float dt, CStateManager& mgr) {
     xPortStepDt = step;
     xPortTailDt = dt;
     xPortTailMgr = &mgr;
-    xPortStepJob = GXPortSideJobSubmit(&CExplosion::PortStepJob, this);
+    xPortStepJob = GXPortSideJobSubmitAny(&CExplosion::PortStepJob, this);
     if (xPortStepJob != 0) {
       ++sPortStatStepped;
       xPortTailPending = true;

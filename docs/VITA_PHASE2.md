@@ -3704,3 +3704,52 @@ What to look for in test 15:
 - I8 and IA8 in the memory line.
 - The GPU in Magmoor's effect-heavy places.
 - The cost test where the frame rate is lowest.
+
+### Test 15 result
+
+`~/logs/t046_15.log` (25d8eb9, 3.6 minutes, Magmoor's Triclops room with flying pirates): a clean
+exit.
+- I8 and IA8 textures uploaded.
+- Texture memory: the front end holds 234 I8 textures (34 MiB), its movies' Y/U/V planes, where test 14
+  held 55 RGBA8 (32 MiB). Every format but CMPR decoded to RGBA8 before, so those planes had copies
+  then too. The cache keeps about the same bytes, now four times as many old movie frames, some 25 MiB
+  of them still there in play (in test 14 too). A memory saving for later.
+- The GPU cost test ran three times there (850 to 940 draws, GPU 33 to 44 ms a frame):
+  - Drawing kinds into one pixel made the GPU slower (+7 to +17 ms). A scissor changed at every draw
+    cost more than the pixels saved (test 16 changes the phase).
+  - The "no ..." phases were all large and noisy (the scene moved; one run drifted 40%): blended
+    10 to 23 ms, immediate 10 to 18, alpha-tested 5 to 18 (23 to 27 draws), skinned 5 to 22, display
+    lists 8 to 26, the one small EFB copy 0 to 12. No draws: 3.4 ms.
+  - Even with no draws the frames took 53 ms. **That room is the game thread's**, not the GPU's:
+    3.5 ticks a frame of 10.9 ms, SM: Think 18.4 ms a frame (the flying pirates 4.7, the player
+    1.8, the projectiles 1.5), drawing 17.
+- The game thread waited for the side worker's particle steps 2.0 s in 16.9 s (7 ms a frame). The
+  fourth core ran them one after another beside the mixer (44% of the core); cores 0 and 2 were half
+  idle (render worker 25-31% with the helper 18-21%; the FIFO processor 50-55%).
+- Off the Vita, on the PC: a dozen generated fragment programs compiled with the Vita's compiler
+  (`~/harness/halfexp`). With `fastprecision` on they lose 5 to 13% of their instructions. With the TEV
+  colour maths written in half, about 10% (and most variants need their mixed calls cleaned up first).
+  Too little for a rebuild of every program, so it is set aside.
+
+## 0.46.0 test 16: a second side worker for the particle steps
+
+**A second side worker** (`vita_side_jobs.cpp`), on the first core: priority 159, below the core 0
+helper and above the render worker.
+- `GXPortSideJobSubmitAny` gives a job to whichever side worker has fewer queued. Its number carries
+  bit 31 for the second, so `GXPortSideJobDone` and `GXPortSideJobWait` find the right one.
+- These are particle steps, each object's own and in no order: the actors' (`CParticleDatabase`),
+  the projectiles', the effects' and the explosions'.
+- Skinning stays on the fourth core's worker, with the FIFO processor's fences.
+- The particle code's per-thread statics (`port_thread_slot.h`, `CParticleGlobals`) have a third
+  slot, the second worker's, told apart by its stack as the first's is.
+- The log's `[side jobs] side worker 2` line counts its jobs.
+
+**The GPU cost test** has "everything" after every two phases, and gives each phase's change
+against the mean of the two around it. The one-pixel phase is every draw's, the scissor set once a
+frame.
+
+What to look for in test 16:
+- The `[side jobs]` lines: the game thread's waits (the "other threads" figure), and side worker 2's
+  jobs.
+- The Triclops room and other particle-heavy fights against test 15.
+- Effects, particles and projectiles looking as before.

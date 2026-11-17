@@ -33,8 +33,8 @@ CPortVarTable* PortReadVarTable(CInputStream& in) {
 #endif
 
 #ifdef TARGET_PC
-// The game thread's and the side worker's (CParticleGlobals::PortSlot).
-CParticleGlobals::SPortSlot CParticleGlobals::sPortSlots[2];
+// The game thread's and each side worker's (CParticleGlobals::PortSlot).
+CParticleGlobals::SPortSlot CParticleGlobals::sPortSlots[kPortThreadSlots];
 #else
 int CParticleGlobals::mParticleLifetime = 0.f;
 float CParticleGlobals::mParticleLifetimeReal = 0.f;

@@ -364,7 +364,7 @@ void CParticleDatabase::Update(float dt, const CPoseAsTransforms& pose,
     PortLinkPending();
     if (any) {
       // The second, on the side worker; without one, here (and every update whole from now on).
-      xPortJob = GXPortSideJobSubmit(&CParticleDatabase::PortStepJob, this);
+      xPortJob = GXPortSideJobSubmitAny(&CParticleDatabase::PortStepJob, this);
       if (xPortJob != 0) {
         ++sPortStatAsync;
       } else {

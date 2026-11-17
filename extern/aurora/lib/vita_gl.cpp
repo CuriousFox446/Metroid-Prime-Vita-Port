@@ -2953,13 +2953,14 @@ enum : uint32_t {
   kLists = 1u << 5,       // display lists (the rooms, most models)
   kDraws = 1u << 6,       // every draw (the clears and the copies stay)
 };
-// Test 15: draws kept, each into one pixel (a 1x1 scissor): their vertices are shaded and binned as
-// before, their pixels left out. "Everything" less such a phase is what those draws' pixels cost
-// (fragment programs, blending, texture reads); the phase less "no ..." what their vertices do.
+// Test 15 drew a kind of draw into one pixel (a 1x1 scissor) to leave its pixels out, its vertices
+// in; but the scissor changed at each draw, and those changes cost the GPU more than the pixels
+// saved (+7 to +17 ms in the Triclops room). Test 16 keeps one such phase, every draw, its scissor
+// set once a frame. And an "everything" phase comes after every two others: a phase's change is
+// against the mean of the two around it, so the scene's own drift (an enemy coming closer) is
+// mostly taken out.
 enum : uint32_t {
   kTinyAll = 1u << 0,
-  kTinyLists = 1u << 1,
-  kTinyBlended = 1u << 2,
 };
 struct Phase {
   const char* name;
@@ -2968,17 +2969,18 @@ struct Phase {
 };
 constexpr Phase kPhases[] = {
     {"everything", 0, 0},
-    {"every draw into one pixel (its vertices kept, its pixels not)", 0, kTinyAll},
-    {"display lists into one pixel", 0, kTinyLists},
-    {"blended draws into one pixel", 0, kTinyBlended},
     {"no EFB copies", kCopies, 0},
     {"no immediate draws", kImmediate, 0},
+    {"everything", 0, 0},
     {"no blended draws", kBlended, 0},
     {"no alpha-tested draws", kAlphaTested, 0},
+    {"everything", 0, 0},
     {"no skinned draws", kSkinned, 0},
     {"no display lists", kLists, 0},
+    {"everything", 0, 0},
+    {"every draw into one pixel (its vertices kept, its pixels not)", 0, kTinyAll},
     {"no draws (the clears and copies alone)", kDraws, 0},
-    {"everything again", 0, 0},
+    {"everything", 0, 0},
 };
 constexpr size_t kPhaseCount = std::size(kPhases);
 constexpr uint64_t kSettleUs = 400000;
@@ -3029,13 +3031,6 @@ bool skips(const Draw& draw) noexcept {
          ((s & kSkinned) != 0 && kind == MeshKind::Skinned) || ((s & kLists) != 0 && kind == MeshKind::List);
 }
 
-// Whether the test draws this draw into one pixel now (render worker).
-bool tiny(const Draw& draw) noexcept {
-  const uint32_t t = g_tiny;
-  return (t & kTinyAll) != 0 || ((t & kTinyLists) != 0 && kind_of(draw) == MeshKind::List) ||
-         ((t & kTinyBlended) != 0 && draw.state.blend);
-}
-
 void count(const Draw& draw) noexcept {
   const MeshKind kind = kind_of(draw);
   Counts& c = g_counts;
@@ -3053,10 +3048,23 @@ void log_results() noexcept {
   std::string text;
   for (size_t i = 0; i < kPhaseCount; ++i) {
     const Result& r = st.results[i];
-    const bool delta = i != 0 && i + 1 != kPhaseCount;
+    const bool everything = kPhases[i].skip == 0 && kPhases[i].tiny == 0;
+    std::string delta;
+    if (!everything) {
+      // Against the mean of the "everything" phases just before and just after it.
+      size_t before = i;
+      while (before > 0 && !(kPhases[before].skip == 0 && kPhases[before].tiny == 0)) {
+        --before;
+      }
+      size_t after = i;
+      while (after + 1 < kPhaseCount && !(kPhases[after].skip == 0 && kPhases[after].tiny == 0)) {
+        ++after;
+      }
+      const double ref = (st.results[before].gpuMs + st.results[after].gpuMs) / 2.0;
+      delta = fmt::format(" ({:+.1f} against the {:.1f} around it)", r.gpuMs - ref, ref);
+    }
     text += fmt::format("{}{}: GPU {:.1f} ms a frame{}, frame {:.1f} ms ({} frames)", i != 0 ? "; " : "",
-                        kPhases[i].name, r.gpuMs, delta ? fmt::format(" ({:+.1f})", r.gpuMs - base) : std::string{},
-                        r.frameMs, r.frames);
+                        kPhases[i].name, r.gpuMs, delta, r.frameMs, r.frames);
   }
   const double f = static_cast<double>(std::max<uint64_t>(g_counts.frames, 1));
   // The two "everything" phases apart by more than a sixth: the scene changed while it ran.
@@ -3418,11 +3426,17 @@ void draw_world(const Frame& frame) {
   // (present's clear and the overlay run without it).
   ScreenRect viewport;
   ScreenRect scissor;
-  const auto apply_rects = [&viewport, &scissor]() {
+  // The GPU cost test's "every draw into one pixel": the scissor 1x1 for the whole frame, set once.
+  const bool tinyAll = (gpu_test::g_tiny & gpu_test::kTinyAll) != 0;
+  const auto apply_rects = [&viewport, &scissor, tinyAll]() {
     const ScreenRect v = g_world.rect(viewport);
     const ScreenRect s = g_world.rect(scissor);
     glViewport(v.x, v.y, v.width, v.height);
-    glScissor(s.x, s.y, s.width, s.height);
+    if (tinyAll) {
+      glScissor(0, 0, 1, 1);
+    } else {
+      glScissor(s.x, s.y, s.width, s.height);
+    }
   };
   apply_rects();
   glEnable(GL_SCISSOR_TEST);
@@ -3432,15 +3446,17 @@ void draw_world(const Frame& frame) {
   uint8_t width = 1;
   glLineWidth(1.f);
   glPointSize(1.f);
-  const auto set_rects = [&viewport, &scissor](const ScreenRect& v, const ScreenRect& s) {
+  const auto set_rects = [&viewport, &scissor, tinyAll](const ScreenRect& v, const ScreenRect& s) {
     if (!(v == viewport)) {
       const ScreenRect r = g_world.rect(v);
       glViewport(r.x, r.y, r.width, r.height);
       viewport = v;
     }
     if (!(s == scissor)) {
-      const ScreenRect r = g_world.rect(s);
-      glScissor(r.x, r.y, r.width, r.height);
+      if (!tinyAll) {
+        const ScreenRect r = g_world.rect(s);
+        glScissor(r.x, r.y, r.width, r.height);
+      }
       scissor = s;
     }
   };
@@ -3520,11 +3536,6 @@ void draw_world(const Frame& frame) {
       continue; // the GPU cost test leaves this kind out now
     }
     set_rects(draw.viewport, draw.scissor);
-    if (gpu_test::g_tiny != 0 && gpu_test::tiny(draw)) {
-      // The GPU cost test draws this kind into one pixel now; the next draw's scissor is set again.
-      glScissor(0, 0, 1, 1);
-      scissor = ScreenRect{-1, -1, -1, -1};
-    }
     const MeshPrimitive primitive = draw.mesh != nullptr ? draw.mesh->primitive() : draw.frameMesh.primitive;
     if (primitive != MeshPrimitive::Triangles && draw.width != width) {
       glLineWidth(static_cast<GLfloat>(draw.width));

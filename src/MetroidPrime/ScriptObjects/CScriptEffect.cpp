@@ -166,7 +166,7 @@ void CScriptEffect::Think(float dt, CStateManager& mgr) {
     if (sPortAsyncWindow && !sPortNoWorker && (x104_particleSystem.get() || xf4_electric.get())) {
       xPortTailDt = dt;
       xPortTailMgr = &mgr;
-      xPortStepJob = GXPortSideJobSubmit(&CScriptEffect::PortStepJob, this);
+      xPortStepJob = GXPortSideJobSubmitAny(&CScriptEffect::PortStepJob, this);
       if (xPortStepJob != 0) {
         ++sPortStatStepped;
         xPortTailPending = true;

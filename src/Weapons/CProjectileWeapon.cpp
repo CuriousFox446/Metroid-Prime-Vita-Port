@@ -224,7 +224,7 @@ void CProjectileWeapon::UpdateParticleFX() {
 
 bool CProjectileWeapon::PortStepOnSideWorker() {
   PORT_PW_FINISH();
-  const uint job = GXPortSideJobSubmit(&CProjectileWeapon::PortStepJob, this);
+  const uint job = GXPortSideJobSubmitAny(&CProjectileWeapon::PortStepJob, this);
   if (job == 0) {
     return false;
   }

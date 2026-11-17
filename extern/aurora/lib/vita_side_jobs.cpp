@@ -22,6 +22,9 @@
 extern "C" {
 uintptr_t gPortSideStackLow = 0;
 uintptr_t gPortSideStackSpan = 0;
+// The second side worker's (0.46.0 test 16): per-thread slot 2.
+uintptr_t gPortSide2StackLow = 0;
+uintptr_t gPortSide2StackSpan = 0;
 }
 
 namespace aurora::side_jobs {
@@ -46,6 +49,15 @@ constexpr int kBackgroundPriority = 130;
 // the fights), whose present the FIFO processor's frame feeds; below the DVD worker (112).
 constexpr int kHelperPriority = 158;
 constexpr int kHelperCore = 0;
+// The second side worker's (0.46.0 test 16): on the first core, below its helper and above the render
+// worker. In test 15's Triclops room the game thread waited for the side worker's particle steps
+// 2 s in 17 (7 ms a frame) while the fourth core, the mixer's too, ran them one by one, and the
+// first and third cores were half idle. The steps are each object's own, in no order, so either
+// worker takes one (submit_any).
+constexpr int kSecondPriority = 159;
+constexpr int kSecondCore = 0;
+// A second worker's job number: its own, with this bit (job numbers stay far below it).
+constexpr uint32_t kSecondTag = 1u << 31;
 // The longest anyone waits for a job. The worker's take a millisecond or less, so past this it has
 // hung: that is logged, and the waiter goes on without it.
 constexpr uint64_t kWaitLimitUs = 500 * 1000;
@@ -63,7 +75,8 @@ struct Worker {
   const char* name = "side worker";
   int priority = kPriority;
   int core = thread::kVitaSystemCore;
-  bool sideStack = false; // exports its stack for the per-thread statics (the side worker only)
+  bool sideStack = false; // exports its stack for the per-thread statics (the side workers only)
+  int stackSlot = 1;      // which per-thread slot that stack is (port_thread_slot.h): 1 or 2
   std::array<Job, kSlots> ring{};
   std::mutex submitMutex; // submitters one at a time
   std::atomic<uint32_t> submitted{0};
@@ -104,6 +117,7 @@ struct Worker {
 std::atomic<Worker*> sWorker{nullptr};
 std::atomic<Worker*> sBackground{nullptr};
 std::atomic<Worker*> sHelper{nullptr};
+std::atomic<Worker*> sSecond{nullptr};
 
 uint64_t now_us() noexcept { return sceKernelGetProcessTimeWide(); }
 
@@ -199,8 +213,8 @@ void* run(void* arg) {
     // down: the range leaves out its last 16 KiB, which more than covers what started the thread.
     uintptr_t sp;
     __asm__ volatile("mov %0, sp" : "=r"(sp));
-    gPortSideStackLow = sp - (kStack - 16 * 1024);
-    gPortSideStackSpan = kStack - 16 * 1024;
+    (w.stackSlot == 2 ? gPortSide2StackLow : gPortSideStackLow) = sp - (kStack - 16 * 1024);
+    (w.stackSlot == 2 ? gPortSide2StackSpan : gPortSideStackSpan) = kStack - 16 * 1024;
   }
   thread::set_current({.name = w.name,
                        .priority = thread::Priority::High,
@@ -236,7 +250,7 @@ void* run(void* arg) {
 
 // A worker thread on `core`; none on the fourth core without it open.
 Worker* start_worker(const char* name, int priority, int core, bool sideStack, std::atomic<Worker*>& slot,
-                     const char* what, bool claiming = false) noexcept {
+                     const char* what, bool claiming = false, int stackSlot = 1) noexcept {
   if (core == thread::kVitaSystemCore && !thread::vita_core3_available()) {
     return nullptr;
   }
@@ -245,6 +259,7 @@ Worker* start_worker(const char* name, int priority, int core, bool sideStack, s
   w->priority = priority;
   w->core = core;
   w->sideStack = sideStack;
+  w->stackSlot = stackSlot;
   w->claiming = claiming;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
@@ -269,6 +284,13 @@ Worker* side_worker() noexcept {
       start_worker("side worker", kPriority, thread::kVitaSystemCore, true, sWorker,
                    "CPU skinning, which the FIFO processor waits for where a model's draws begin; the actors' "
                    "and the projectiles' particle steps, which the game thread finishes later in the tick");
+  return started;
+}
+
+Worker* second_worker() noexcept {
+  static Worker* const started =
+      start_worker("side worker 2", kSecondPriority, kSecondCore, true, sSecond,
+                   "particle steps beside the fourth core's side worker, whichever has fewer queued", false, 2);
   return started;
 }
 
@@ -376,9 +398,36 @@ void log_worker(Worker* w, const char* lane) noexcept {
 
 uint32_t submit(Fn fn, void* data) noexcept { return submit_to(side_worker(), fn, data); }
 
-bool done(uint32_t job) noexcept { return done_in(sWorker.load(std::memory_order_acquire), job); }
+uint32_t submit_any(Fn fn, void* data) noexcept {
+  Worker* const first = side_worker();
+  Worker* const second = second_worker();
+  const auto queued = [](const Worker* w) {
+    return w->submitted.load(std::memory_order_relaxed) - w->finished.load(std::memory_order_relaxed);
+  };
+  // The one with fewer jobs queued; the fourth core's on a tie (or alone).
+  if (second != nullptr && (first == nullptr || queued(second) < queued(first))) {
+    const uint32_t job = submit_to(second, fn, data);
+    if (job != 0) {
+      return job | kSecondTag;
+    }
+  }
+  return submit_to(first, fn, data);
+}
 
-void wait(uint32_t job, bool fifo) noexcept { wait_in(sWorker.load(std::memory_order_acquire), job, fifo); }
+bool done(uint32_t job) noexcept {
+  if ((job & kSecondTag) != 0) {
+    return done_in(sSecond.load(std::memory_order_acquire), job & ~kSecondTag);
+  }
+  return done_in(sWorker.load(std::memory_order_acquire), job);
+}
+
+void wait(uint32_t job, bool fifo) noexcept {
+  if ((job & kSecondTag) != 0) {
+    wait_in(sSecond.load(std::memory_order_acquire), job & ~kSecondTag, fifo);
+    return;
+  }
+  wait_in(sWorker.load(std::memory_order_acquire), job, fifo);
+}
 
 uint32_t submit_background(Fn fn, void* data) noexcept { return submit_to(background_worker(), fn, data); }
 
@@ -419,5 +468,6 @@ void log_stats() noexcept {
   log_worker(sWorker.load(std::memory_order_acquire), "");
   log_worker(sBackground.load(std::memory_order_acquire), " background lane");
   log_worker(sHelper.load(std::memory_order_acquire), " core 0 helper");
+  log_worker(sSecond.load(std::memory_order_acquire), " side worker 2");
 }
 } // namespace aurora::side_jobs
