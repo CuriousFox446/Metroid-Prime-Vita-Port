@@ -25,19 +25,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
-#if defined(__vita__)
-#include <psp2/io/fcntl.h>
-#endif
 
 #if defined(MP_HAVE_OPENSSL)
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
-#define MP_NSP_CRYPTO 1
-#elif defined(__vita__)
-// PS Vita (0.46.0 test 13): no OpenSSL there; the reader's few calls (AES-128 ECB, CTR and XTS)
-// come from port_soft_crypto.h, checked against OpenSSL 3.5.
-#include "port_soft_crypto.h"
-#define MP_NSP_CRYPTO 1
 #endif
 
 namespace PortRemastered {
@@ -54,15 +45,6 @@ bool SourceFile::Open(const std::string& path) {
     m_fd = dup(int(fd));
     return m_fd >= 0;
   }
-#if defined(__vita__)
-  // PS Vita (0.46.0 test 13): newlib's off_t is 32 bits there, too short for a Switch image of
-  // several GB, so the file is read with sceIoPread's 64-bit offsets.
-  m_vitaFd = sceIoOpen(path.c_str(), SCE_O_RDONLY, 0);
-  if (m_vitaFd >= 0) {
-    return true;
-  }
-  m_vitaFd = -1;
-#endif
   // A descriptor of its own, so that reads can run side by side with pread.
   m_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (m_fd >= 0) {
@@ -88,12 +70,6 @@ bool SourceFile::Open(const std::string& path) {
 }
 
 void SourceFile::Close() {
-#if defined(__vita__)
-  if (m_vitaFd >= 0) {
-    sceIoClose(m_vitaFd);
-    m_vitaFd = -1;
-  }
-#endif
 #if !defined(_WIN32)
   if (m_fd >= 0) {
     close(m_fd);
@@ -110,20 +86,6 @@ void SourceFile::Close() {
 }
 
 size_t SourceFile::ReadSome(uint64_t offset, void* out, size_t size) {
-#if defined(__vita__)
-  if (m_vitaFd >= 0) {
-    size_t done = 0;
-    while (done < size) {
-      const SceSSize got = sceIoPread(m_vitaFd, static_cast<char*>(out) + done, SceSize(size - done),
-                                      SceOff(offset + done));
-      if (got <= 0) {
-        break;
-      }
-      done += size_t(got);
-    }
-    return done;
-  }
-#endif
 #if !defined(_WIN32)
   if (m_fd >= 0) {
     // pread leaves the position alone, which the duplicate shares with the caller's.
@@ -180,7 +142,7 @@ size_t SourceFile::ReadSome(uint64_t offset, void* out, size_t size) {
 
 bool SourceFile::ReadAt(uint64_t offset, void* out, size_t size) { return ReadSome(offset, out, size) == size; }
 
-#if defined(MP_NSP_CRYPTO)
+#if defined(MP_HAVE_OPENSSL)
 namespace {
 
 constexpr uint64_t kMediaUnit = 0x200;
@@ -943,7 +905,7 @@ bool ExtractThermalNoise(const Nsp& nsp, std::vector<uint8_t>& out, std::string&
   return NsoReadImage(nso, kThermalNoiseMemOffset, kThermalNoiseSize, out, error);
 }
 
-#else // !MP_NSP_CRYPTO
+#else // !MP_HAVE_OPENSSL
 
 Nsp::~Nsp() = default;
 

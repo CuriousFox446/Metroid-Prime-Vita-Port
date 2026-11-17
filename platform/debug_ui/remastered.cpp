@@ -342,13 +342,12 @@ void DrawBuiltinModToggle(const char* modName, const char* label, bool stale) {
 void DrawBuiltinMods() {
   ImGui::SeparatorText("Built-in mods");
   const PortMods::Status& status = PortMods::CurrentStatus();
+#ifndef __vita__
+  // Not on the Vita: Prime Remastered's and Dread's imports read Switch dumps and draw models far
+  // heavier than it can. Echoes' suits, from a GameCube disc, are its one built-in mod.
   // One prod.keys serves both imports, so the page has one row for it, above both sections and
   // inside neither: it stays visible whichever of them is open, and neither section owns it.
   DrawImportKeys();
-#ifndef __vita__
-  // Not on the Vita: Prime Remastered's import reads a Switch dump and draws models and rooms far
-  // heavier than it can. Dread's Samus is there since 0.46.0 test 13, on the user's wish to try it
-  // (its image and keys found in ux0:data/MetroidDread, its suits drawn by their TEV materials).
   // MP_DEBUG_TAB=Mods/<section>, and the old Remastered and Dread page names, open one of these.
   if (StartSection("Mods", "Prime Remastered")) {
     ImGui::SetNextItemOpen(true);
@@ -375,7 +374,6 @@ void DrawBuiltinMods() {
     }
     ImGui::Unindent();
   }
-#endif
   if (StartSection("Mods", "Metroid Dread")) {
     ImGui::SetNextItemOpen(true);
   }
@@ -394,6 +392,7 @@ void DrawBuiltinMods() {
     DrawDreadSamusImport();
     ImGui::Unindent();
   }
+#endif
   if (StartSection("Mods", "Metroid Prime 2: Echoes")) {
     ImGui::SetNextItemOpen(true);
   }

@@ -64,13 +64,7 @@ struct Converter::State {
     if (img.width <= 0 || img.height <= 0 || img.rgba.size() != size_t(img.width) * size_t(img.height) * 4) {
       throw Fail{"texture " + IdToString(map.id) + " decoded to nothing"};
     }
-#if defined(__vita__)
-    // PS Vita (0.46.0 test 13): one kept, not three; each is up to 16 MiB, on a heap the game shares.
-    constexpr size_t kKept = 1;
-#else
-    constexpr size_t kKept = 3;
-#endif
-    if (opened.size() >= kKept) {
+    if (opened.size() >= 3) {
       opened.erase(opened.begin());
     }
     opened.emplace_back(map.src, std::move(img));
@@ -401,9 +395,6 @@ struct Converter::State {
         if (src->volume) {
           ncap = 0;  // every texel exact: the atlas is the TXTR, never a .dds
           cap = 512;
-        } else if (opt.txtrOnly) {
-          ncap = 0;  // the TXTR is the map itself (ConvertOptions::txtrOnly)
-          cap = kPbrMax[k];
         }
       }
     } else if (alpha == "full") {
@@ -559,10 +550,9 @@ struct Converter::State {
     if (w != img.width || h != img.height) {
       img = Resize(img, w, h, mapKind);
     }
-    // The stub is sampled raw: an sRGB texture's holds linear bytes, mipped as data. A TXTR that is
-    // the map itself (txtrOnly) keeps the bytes as authored, for the TEV.
+    // The stub is sampled raw: an sRGB texture's holds linear bytes, mipped as data.
     MapKind stubKind = mapKind;
-    if (srgbTex && !(opt.txtrOnly && k >= 0 && src != nullptr && !src->volume)) {
+    if (srgbTex) {
       for (size_t i = 0; i < img.rgba.size(); i += 4) {
         for (int c = 0; c < 3; ++c) {
           img.rgba[i + c] = SrgbToLinearByte(img.rgba[i + c]);

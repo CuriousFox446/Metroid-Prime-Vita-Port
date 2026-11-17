@@ -3608,36 +3608,22 @@ What to look for in test 12:
   next round's subject.
 
 The user then asked to try the Metroid Dread mod (its image auto-detected in ux0:data/MetroidDread),
-and for the port to rebuild all its shaders at each new build again.
+and for the port to rebuild all its shaders at each new build again (test 13, rolled back).
 
-## 0.46.0 test 13: Dread Samus on the Vita, shaders rebuilt per build
+## 0.46.0 test 13: rolled back to test 12
 
-**Shaders per build** (`vita_gl.cpp`): vita_programs/build holds "binaries 3 build <revision>". Any
-other content (test 20 to test 12's "binaries 3" among them) has the card thread delete the program
-binaries first. materials.bin stays, so the warm-up builds every known program again in one batch,
-behind the "Compiling shaders" toast: the long wait once a build, as tallon25 to 0.42.0 test 19.
+The first test 13 (410d8db, 78a1058) tried the Dread Samus import on the Vita and went back to
+rebuilding the shaders at each new build:
+- The image and keys were found in ux0:data/MetroidDread (keys also in ux0:data/MetroidPrime).
+- A software AES (ECB, CTR, XTS) stood in for the missing OpenSSL. It matched OpenSSL 3.5 on 100 of
+  100 cases.
+- The image was read with sceIoPread, for offsets past 2 GB.
+- The textures were TXTR only, and PBR was off on the Vita.
 
-**Dread Samus** (DREAD_SAMUS.md, "On the PS Vita"). Upstream left the import off the Vita. It is on
-now (F1 > Mods > Built-in mods > Metroid Dread; Prime Remastered stays off):
-- The image and the keys are found in ux0:data/MetroidDread: the first .nsp or .xci by name
-  (`DefaultDreadImagePath`) and prod.keys (`DefaultKeysPath`, else ux0:data/MetroidPrime/prod.keys).
-  They are looked for again every two seconds while not found, and can be typed.
-- The NSP reader had nothing to decrypt with on the Vita (no OpenSSL). `port_soft_crypto.h` gives it
-  AES-128 ECB, CTR and XTS under OpenSSL's names. It was checked against OpenSSL 3.5 (FIPS-197's vector,
-  and 100 of 100 random cases of the three modes, CTR's counter carrying past 64 bits among them).
-- The image is read with `sceIoPread` (64-bit offsets). newlib's off_t is 32 bits on the Vita, and the
-  image is several GB.
-- The import runs on a thread with a 2 MiB stack.
-- The converter keeps one decoded image, not three (each up to 16 MiB).
-- Textures (`ConvertOptions::txtrOnly`): no BC7, BC5 or ASTC .dds, which the Vita cannot draw. Each
-  map's TXTR is the map itself, up to `kPbrMax` (the albedo 1024, as CMPR; the rest 256), with a
-  colour map's sRGB bytes as authored, for the TEV.
-- Drawing: `CCubeMaterial::PortPBRAllowed` is false on the Vita, so the suits draw by their TEV
-  fallback and fallback glow. Dread's own metal, normal maps and reflections do not show.
-- The suit colours do not recolour the Dread suits there (they redo the BCLR .dds).
+The user tried it, and it did not work. They chose a full rollback: the code is test 12's (58f89bc)
+again, reverted commit by commit, so the per-build shader rebuild went too. The card's program
+binaries carry the first test 13's "binaries 3 build <revision>" marker. Test 12's code reads that as
+another format, so it deletes them once: the first start rebuilds every program, and from then on
+builds keep them.
 
-What to look for in test 13:
-- The first start's program batch (the toast), then none on the next start.
-- The Dread import's log lines ("dread: ...") and its end.
-- The suits in the Morph Ball transitions, cutscenes, the pause screen and the first-person cannon,
-  and the frame rate with them.
+The new test 13 is that rollback, staged under the same name.

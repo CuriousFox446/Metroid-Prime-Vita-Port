@@ -67,10 +67,6 @@ struct ConvertOptions {
   int material = -1;      // force every surface onto this retail material
   bool pbr = true;        // false keeps every material on the retail TEV path
   int maxTexture = 2048;  // largest edge of a TEV path texture
-  // PS Vita (0.46.0 test 13): a PBR map has no .dds (the Vita takes none of BC7, BC5 or ASTC, and
-  // draws a PBR material by its TEV fallback): its TXTR holds the map itself, up to kPbrMax, as
-  // authored (a colour map's sRGB bytes, which the TEV reads as GX does), not the linear stub.
-  bool txtrOnly = false;
   // Remaps U of one role's coordinates (TEV path): from [u0, u1] onto [lo, hi].
   bool squeeze = false;
   std::string squeezeRole;

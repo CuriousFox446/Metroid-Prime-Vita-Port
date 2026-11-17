@@ -9,34 +9,9 @@
 #include "port_dread_samus.h"
 #include "port_utf8_path.h"
 
-#if defined(__vita__)
-#include <pthread.h>
-#endif
-
 namespace PortRemastered {
 namespace ImportDetail {
 namespace {
-
-#if defined(__vita__)
-// PS Vita (0.46.0 test 13): `work` on a thread with a 2 MiB stack, waited for. A std::thread's stack
-// there is the system's default, small for the texture decoders' and the converter's frames.
-void RunOnLargeStack(const std::function<void()>& work) {
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 2u << 20);
-  pthread_t thread;
-  const auto run = [](void* arg) -> void* {
-    (*static_cast<const std::function<void()>*>(arg))();
-    return nullptr;
-  };
-  if (pthread_create(&thread, &attr, run, const_cast<std::function<void()>*>(&work)) == 0) {
-    pthread_join(thread, nullptr);
-  } else {
-    work();
-  }
-  pthread_attr_destroy(&attr);
-}
-#endif
 
 constexpr const char* kDreadStaging = ".dread-samus.staging";
 constexpr const char* kDreadOld = ".dread-samus.old";
@@ -237,24 +212,7 @@ bool StartDreadSamusImport(const std::string& nspPath, const std::string& keysPa
   sCancel = false;
   sState.running = true;
   sState.message = "Starting";
-#if defined(__vita__)
-  sThread = std::thread([nspPath, keysPath, romfs, modsPath = FromUtf8(mods)] {
-    RunOnLargeStack([&] {
-      // The Vita's heap is the game's, and a few hundred MiB in all: an import that runs out of it
-      // fails, and says so, where an uncaught std::bad_alloc would end the game.
-      try {
-        RunDread(nspPath, keysPath, romfs, modsPath);
-      } catch (const std::bad_alloc&) {
-        std::error_code ec;
-        fs::remove_all(modsPath / kDreadStaging, ec);
-        PortLog::Write("dread: the import ran out of memory\n");
-        Finish(false, "Out of memory. Start the import from the title screen, where the game holds the least.");
-      }
-    });
-  });
-#else
   sThread = std::thread(RunDread, nspPath, keysPath, romfs, FromUtf8(mods));
-#endif
   return true;
 }
 

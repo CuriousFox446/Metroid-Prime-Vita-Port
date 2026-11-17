@@ -789,13 +789,8 @@ inline constexpr const char* kTextDiscName = ".disc";
 inline constexpr const char* kHudFolder = "hud";
 inline constexpr const char* kHudDiscName = kTextDiscName;
 
-// ~/.switch/prod.keys if it is there, else empty. On the PS Vita (0.46.0 test 13), prod.keys in
-// kVitaDreadFolder, else in ux0:data/MetroidPrime.
+// ~/.switch/prod.keys if it is there, else empty.
 std::string DefaultKeysPath();
-// PS Vita (0.46.0 test 13): the folder the user puts Metroid Dread's image and prod.keys in, and the
-// first .nsp or .xci there (by name), else empty. Empty elsewhere.
-#define kVitaDreadFolder "ux0:data/MetroidDread"
-std::string DefaultDreadImagePath();
 
 // Starts an import on worker threads; `threads` 0 leaves a couple of cores to
 // the game. The disc must be open. False (with the reason in the state's

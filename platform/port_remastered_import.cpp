@@ -4365,17 +4365,6 @@ std::string InstalledModFolder() {
 }
 
 std::string DefaultKeysPath() {
-#if defined(__vita__)
-  // PS Vita (0.46.0 test 13): prod.keys beside the Dread image (DefaultDreadImagePath), else in the
-  // game's own folder. No file picker there, and no home folder.
-  for (const char* candidate : {kVitaDreadFolder "/prod.keys", "ux0:data/MetroidPrime/prod.keys"}) {
-    std::error_code ec;
-    if (fs::is_regular_file(candidate, ec)) {
-      return candidate;
-    }
-  }
-  return {};
-#else
   const char* home = port::HomeFolder();
   if (home == nullptr) {
     return {};
@@ -4387,28 +4376,6 @@ std::string DefaultKeysPath() {
   }
   const std::u8string text = path.u8string();
   return std::string(text.begin(), text.end());
-#endif
-}
-
-std::string DefaultDreadImagePath() {
-#if defined(__vita__)
-  // The first .nsp or .xci in the folder, by name (any case).
-  std::vector<std::string> found;
-  std::error_code ec;
-  for (fs::directory_iterator it{kVitaDreadFolder, ec}; !ec && it != fs::directory_iterator{}; it.increment(ec)) {
-    std::string name = it->path().filename().string();
-    std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    std::error_code kind;
-    if ((lower.ends_with(".nsp") || lower.ends_with(".xci")) && it->is_regular_file(kind)) {
-      found.push_back(std::string(kVitaDreadFolder) + "/" + name);
-    }
-  }
-  std::sort(found.begin(), found.end());
-  return found.empty() ? std::string() : found.front();
-#else
-  return {};
-#endif
 }
 
 bool StartMovieImport(const std::string& nspPath, const std::string& keysPath) {
