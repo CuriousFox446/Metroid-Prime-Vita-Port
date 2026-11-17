@@ -197,8 +197,27 @@ std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t hei
     if (texelWgpuFormat != wgpu::TextureFormat::RGBA8Unorm || texels.size() < bytes) {
       return {};
     }
-    level0.assign(texels.data(), texels.data() + bytes);
     levels = wanted;
+    // 0.46.0 test 15: an intensity texture keeps a byte a texel on the GPU (decoded as (I, I, I, I)),
+    // one with alpha two (I, I, I, A): the same values, in a quarter and a half of RGBA8's bytes, for
+    // the particles, effects and HUD pieces drawn large and blended (test 14's heaviest frames).
+    const bool intensity = format == GX_TF_I4 || format == GX_TF_I8;
+    const bool intensityAlpha = format == GX_TF_IA4 || format == GX_TF_IA8;
+    if (intensity || intensityAlpha) {
+      const size_t texelCount = bytes / 4;
+      level0.resize(texelCount * (intensity ? 1 : 2));
+      for (size_t i = 0; i < texelCount; ++i) {
+        if (intensity) {
+          level0[i] = texels[i * 4];
+        } else {
+          level0[i * 2] = texels[i * 4];
+          level0[i * 2 + 1] = texels[i * 4 + 3];
+        }
+      }
+      texelFormat = intensity ? vita_gl::TexelFormat::I8 : vita_gl::TexelFormat::IA8;
+    } else {
+      level0.assign(texels.data(), texels.data() + bytes);
+    }
   }
   return vita_gl::make_texture(width, height, texelFormat, std::move(level0), levels);
 }

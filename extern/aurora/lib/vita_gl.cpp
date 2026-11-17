@@ -86,8 +86,8 @@ std::atomic_bool g_fontsChanged{false};
 
 // The game's textures on the GPU, by format: count and bytes (uploaded on the render worker,
 // freed wherever their last holder lets go).
-std::atomic<int64_t> g_textureCount[2];
-std::atomic<int64_t> g_textureBytes[2];
+std::atomic<int64_t> g_textureCount[kTexelFormats];
+std::atomic<int64_t> g_textureBytes[kTexelFormats];
 // Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
 std::atomic<int64_t> g_pendingCount;
 std::atomic<int64_t> g_pendingBytes;
@@ -121,10 +121,13 @@ void log_memory(const char* when) {
                           kPatcherBuffer / 1024, sceGxmShaderPatcherGetHostMemAllocated(gxm_shader_patcher) / 1024);
   }
   Log.info("{}: vitaGL memory free of total (MiB): VRAM {}, RAM {}, phycont {}, budget {}; "
-           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB); not yet uploaded: {} ({:.1f} MiB){}",
+           "textures on the GPU: {} RGBA8 ({:.1f} MiB), {} BC1 ({:.1f} MiB), {} I8 ({:.1f} MiB), {} IA8 ({:.1f} "
+           "MiB); not yet uploaded: {} ({:.1f} MiB){}",
            when, pool(VGL_MEM_VRAM), pool(VGL_MEM_RAM), pool(VGL_MEM_PHYCONT), pool(VGL_MEM_BUDGET),
            g_textureCount[0].load(), g_textureBytes[0].load() / kMiB, g_textureCount[1].load(),
-           g_textureBytes[1].load() / kMiB, g_pendingCount.load(), g_pendingBytes.load() / kMiB, patcher);
+           g_textureBytes[1].load() / kMiB, g_textureCount[2].load(), g_textureBytes[2].load() / kMiB,
+           g_textureCount[3].load(), g_textureBytes[3].load() / kMiB, g_pendingCount.load(),
+           g_pendingBytes.load() / kMiB, patcher);
 }
 
 // A FrameArray's storage: its elements, and how many fit.
@@ -681,7 +684,7 @@ public:
   uint64_t bytes() const noexcept {
     uint64_t total = 0;
     for (uint32_t level = 0; level < m_levels; ++level) {
-      total += m_format == TexelFormat::BC1 ? bc1_level_bytes(level) : rgba8_level_bytes(level);
+      total += m_format == TexelFormat::BC1 ? bc1_level_bytes(level) : plain_level_bytes(level);
     }
     return total;
   }
@@ -739,27 +742,40 @@ public:
         }
       } else {
         // 0.46.0 test 14: its levels too (gfx/texture.cpp, make_vita_texture), each after the
-        // transfers before it as a BC1 chain's.
+        // transfers before it as a BC1 chain's. Test 15: an intensity texture in a byte a texel
+        // (GL_INTENSITY, sampled (I, I, I, I)), one with alpha in two (GL_LUMINANCE_ALPHA, (I, I, I, A)).
+        GLint internalFormat = GL_RGBA;
+        GLenum dataFormat = GL_RGBA;
+        if (m_format == TexelFormat::I8) {
+          internalFormat = GL_INTENSITY;
+          dataFormat = GL_RED;
+        } else if (m_format == TexelFormat::IA8) {
+          internalFormat = GL_LUMINANCE_ALPHA;
+          dataFormat = GL_LUMINANCE_ALPHA;
+        }
         size_t offset = 0;
         uint32_t uploaded = 0;
         for (uint32_t level = 0; level < m_levels; ++level) {
-          const auto size = static_cast<size_t>(rgba8_level_bytes(level));
+          const auto size = static_cast<size_t>(plain_level_bytes(level));
           if (offset + size > m_cpu.size()) {
             break;
           }
           if (level != 0) {
             sceGxmTransferFinish();
           }
-          glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, std::max(width >> level, 1),
-                       std::max(height >> level, 1), 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data() + offset);
+          glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), internalFormat, std::max(width >> level, 1),
+                       std::max(height >> level, 1), 0, dataFormat, GL_UNSIGNED_BYTE, m_cpu.data() + offset);
           offset += size;
           ++uploaded;
         }
         m_levels = std::max(uploaded, 1u);
-        static int sRgbaChainsLogged = 0;
-        if (uploaded > 1 && sRgbaChainsLogged < 4) {
-          ++sRgbaChainsLogged;
-          Log.info("RGBA8 texture {}x{} uploaded with {} levels ({} bytes)", m_width, m_height, uploaded, offset);
+        static int sChainsLogged[kTexelFormats] = {};
+        static constexpr const char* kNames[kTexelFormats] = {"RGBA8", "BC1", "I8", "IA8"};
+        const int kind = static_cast<int>(m_format);
+        if ((uploaded > 1 || m_format != TexelFormat::RGBA8) && sChainsLogged[kind] < 3) {
+          ++sChainsLogged[kind];
+          Log.info("{} texture {}x{} uploaded with {} levels ({} bytes)", kNames[kind], m_width, m_height, uploaded,
+                   offset);
         }
       }
       m_bytes = static_cast<int64_t>(m_cpu.size());
@@ -875,9 +891,10 @@ private:
     return false;
   }
 
-  // An RGBA8 level's bytes: four a texel.
-  uint64_t rgba8_level_bytes(uint32_t level) const noexcept {
-    return uint64_t{std::max(m_width >> level, 1u)} * std::max(m_height >> level, 1u) * 4;
+  // An RGBA8, I8 or IA8 level's bytes: four, one or two a texel.
+  uint64_t plain_level_bytes(uint32_t level) const noexcept {
+    const uint64_t texel = m_format == TexelFormat::I8 ? 1 : m_format == TexelFormat::IA8 ? 2 : 4;
+    return uint64_t{std::max(m_width >> level, 1u)} * std::max(m_height >> level, 1u) * texel;
   }
 
   // A BC1 level's bytes: its 4x4 blocks, 8 bytes each.
@@ -2936,26 +2953,39 @@ enum : uint32_t {
   kLists = 1u << 5,       // display lists (the rooms, most models)
   kDraws = 1u << 6,       // every draw (the clears and the copies stay)
 };
+// Test 15: draws kept, each into one pixel (a 1x1 scissor): their vertices are shaded and binned as
+// before, their pixels left out. "Everything" less such a phase is what those draws' pixels cost
+// (fragment programs, blending, texture reads); the phase less "no ..." what their vertices do.
+enum : uint32_t {
+  kTinyAll = 1u << 0,
+  kTinyLists = 1u << 1,
+  kTinyBlended = 1u << 2,
+};
 struct Phase {
   const char* name;
   uint32_t skip;
+  uint32_t tiny;
 };
 constexpr Phase kPhases[] = {
-    {"everything", 0},
-    {"no EFB copies", kCopies},
-    {"no immediate draws", kImmediate},
-    {"no blended draws", kBlended},
-    {"no alpha-tested draws", kAlphaTested},
-    {"no skinned draws", kSkinned},
-    {"no display lists", kLists},
-    {"no draws (the clears and copies alone)", kDraws},
-    {"everything again", 0},
+    {"everything", 0, 0},
+    {"every draw into one pixel (its vertices kept, its pixels not)", 0, kTinyAll},
+    {"display lists into one pixel", 0, kTinyLists},
+    {"blended draws into one pixel", 0, kTinyBlended},
+    {"no EFB copies", kCopies, 0},
+    {"no immediate draws", kImmediate, 0},
+    {"no blended draws", kBlended, 0},
+    {"no alpha-tested draws", kAlphaTested, 0},
+    {"no skinned draws", kSkinned, 0},
+    {"no display lists", kLists, 0},
+    {"no draws (the clears and copies alone)", kDraws, 0},
+    {"everything again", 0, 0},
 };
 constexpr size_t kPhaseCount = std::size(kPhases);
 constexpr uint64_t kSettleUs = 400000;
 constexpr uint64_t kMeasureUs = 1200000;
 std::atomic<bool> g_start{false};
 uint32_t g_skip = 0;     // render worker: what the draws leave out now
+uint32_t g_tiny = 0;     // render worker: what the draws draw into one pixel now
 bool g_counting = false; // render worker: the first phase counts its draws by kind
 struct Counts {
   uint64_t frames = 0;
@@ -2999,6 +3029,13 @@ bool skips(const Draw& draw) noexcept {
          ((s & kSkinned) != 0 && kind == MeshKind::Skinned) || ((s & kLists) != 0 && kind == MeshKind::List);
 }
 
+// Whether the test draws this draw into one pixel now (render worker).
+bool tiny(const Draw& draw) noexcept {
+  const uint32_t t = g_tiny;
+  return (t & kTinyAll) != 0 || ((t & kTinyLists) != 0 && kind_of(draw) == MeshKind::List) ||
+         ((t & kTinyBlended) != 0 && draw.state.blend);
+}
+
 void count(const Draw& draw) noexcept {
   const MeshKind kind = kind_of(draw);
   Counts& c = g_counts;
@@ -3022,10 +3059,18 @@ void log_results() noexcept {
                         r.frameMs, r.frames);
   }
   const double f = static_cast<double>(std::max<uint64_t>(g_counts.frames, 1));
+  // The two "everything" phases apart by more than a sixth: the scene changed while it ran.
+  const double last = st.results[kPhaseCount - 1].gpuMs;
+  const double drift = base > 0.0 ? std::abs(last - base) / base : 0.0;
+  const std::string changed =
+      drift > 1.0 / 6.0 ? fmt::format(" THE SCENE CHANGED while it ran (its two \"everything\" phases {:.0f}% apart): "
+                                      "read it with care.",
+                                      100.0 * drift)
+                        : std::string{};
   Log.info("GPU cost test: {}. The first phase's draws a frame: {:.1f} EFB copies; {:.0f} draws, {:.0f} of them "
-           "immediate, {:.0f} blended, {:.0f} alpha-tested, {:.0f} skinned, {:.0f} display lists",
+           "immediate, {:.0f} blended, {:.0f} alpha-tested, {:.0f} skinned, {:.0f} display lists.{}",
            text, g_counts.copies / f, g_counts.draws / f, g_counts.immediate / f, g_counts.blended / f,
-           g_counts.alphaTested / f, g_counts.skinned / f, g_counts.lists / f);
+           g_counts.alphaTested / f, g_counts.skinned / f, g_counts.lists / f, changed);
 }
 
 // Render worker, after each swap: starts the test when asked, and moves it on.
@@ -3037,6 +3082,7 @@ void step() noexcept {
     st.phase = 0;
     st.phaseStart = now;
     g_skip = kPhases[0].skip;
+    g_tiny = kPhases[0].tiny;
     g_counts = {};
     Log.info("GPU cost test: started, {} phases of {:.1f} s; parts of the picture are left out till it ends",
              kPhaseCount, static_cast<double>(kSettleUs + kMeasureUs) / 1e6);
@@ -3069,10 +3115,12 @@ void step() noexcept {
   if (st.phase == static_cast<int>(kPhaseCount)) {
     log_results();
     g_skip = 0;
+    g_tiny = 0;
     st.phase = -1;
     return;
   }
   g_skip = kPhases[st.phase].skip;
+  g_tiny = kPhases[st.phase].tiny;
   st.phaseStart = now;
   st.measuring = false;
 }
@@ -3472,6 +3520,11 @@ void draw_world(const Frame& frame) {
       continue; // the GPU cost test leaves this kind out now
     }
     set_rects(draw.viewport, draw.scissor);
+    if (gpu_test::g_tiny != 0 && gpu_test::tiny(draw)) {
+      // The GPU cost test draws this kind into one pixel now; the next draw's scissor is set again.
+      glScissor(0, 0, 1, 1);
+      scissor = ScreenRect{-1, -1, -1, -1};
+    }
     const MeshPrimitive primitive = draw.mesh != nullptr ? draw.mesh->primitive() : draw.frameMesh.primitive;
     if (primitive != MeshPrimitive::Triangles && draw.width != width) {
       glLineWidth(static_cast<GLfloat>(draw.width));

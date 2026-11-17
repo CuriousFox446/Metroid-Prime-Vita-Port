@@ -99,10 +99,14 @@ struct FrameMesh {
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): as RGBA8
 // (each level's texels in rows) or as BC1 (DXT1, from an opaque CMPR texture: each level's blocks
 // in rows), `levels` of them back to back in `texels`, halving down (RGBA8's first level alone
-// before 0.46.0 test 14). Uploaded on the render worker at its first draw; freed there once nothing
-// holds it. One with a single level samples it with a sampler's mipmapped filters as with their
-// plain ones.
-enum class TexelFormat : uint8_t { RGBA8, BC1 };
+// before 0.46.0 test 14). Since test 15 an intensity texture (GX's I4, I8) as I8, a byte a texel
+// sampled as (I, I, I, I) (GL_INTENSITY: GXM's U8_RRRR), and one with alpha (IA4, IA8) as IA8, the
+// intensity then the alpha, sampled as (I, I, I, A) (GL_LUMINANCE_ALPHA: GXM's A8L8): GX's own
+// values, in a quarter and a half of RGBA8's bytes. Uploaded on the render worker at its first draw;
+// freed there once nothing holds it. One with a single level samples it with a sampler's mipmapped
+// filters as with their plain ones.
+enum class TexelFormat : uint8_t { RGBA8, BC1, I8, IA8 };
+inline constexpr int kTexelFormats = 4;
 class Texture;
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
                                       std::vector<uint8_t> texels, uint32_t levels = 1) noexcept;

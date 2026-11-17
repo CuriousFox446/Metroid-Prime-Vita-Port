@@ -72,7 +72,7 @@ void DrawPerformanceTab() {
     sGpuTestArmed = true;
   }
   ItemHelp("Stand still where the frame rate is low, press this and close the menu. About a second "
-           "later, for some 15 seconds, parts of the picture are left out one kind at a time, and the "
+           "later, for some 20 seconds, parts of the picture are left out one kind at a time, and the "
            "log gets what each kind costs the GPU.");
 #endif
 

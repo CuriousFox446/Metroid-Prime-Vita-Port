@@ -3663,3 +3663,44 @@ What to look for in test 14:
 - The frame rate where test 12 was GPU-bound.
 - The GPU cost test's line from a heavy scene or two: the Thardus room with the thermal visor,
   Phendrana with snow and Sheegoths, the save station.
+
+### Test 14 result
+
+`~/logs/t046_14.log` (4ba0d9f, 5.3 minutes in Magmoor: the lava rooms, the Triclops, a flying-pirate
+fight, a save station, an elevator): a clean exit, 3 long stalls (room loads).
+- RGBA8 textures uploaded with their levels ("RGBA8 texture 64x64 uploaded with 3 levels").
+- The GPU cost test ran three times, all in lighter places than test 12's heavy ones (17 ms of GPU a
+  frame):
+  - One run was at 60 FPS, where the clock reads high (6 ms with no draws at all).
+  - One run's scene changed mid-test: the "everything" phases read 17.3 and 28.6 ms.
+  - The clearest (622 draws, 23.7 ms frames, so not GPU-bound) gave display lists -10.2 ms of 17.4,
+    skinned -3.8, blended -3.0, immediate -0.6, alpha-tested and EFB copies about 0, no draws 1.4 ms.
+- The heaviest GPU reports (27 to 38 ms, up to 100% busy) came with the visor's billboard effects and
+  the effects' particles: 240 to 270 blended draws a frame of 255 to 320.
+
+## 0.46.0 test 15: intensity textures in their own bytes, the cost test's pixels and vertices
+
+**Intensity textures** (`gfx/texture.cpp`, `vita_gl.cpp`). GX's intensity formats (I4, I8) now go to the
+GPU a byte a texel: `GL_INTENSITY`, GXM's U8_RRRR, sampled (I, I, I, I). Those with alpha (IA4, IA8) go
+two bytes a texel: `GL_LUMINANCE_ALPHA`, GXM's A8L8, sampled (I, I, I, A).
+- These are the particles', the effects' and most HUD pieces' textures, drawn large and blended in
+  test 14's heaviest frames.
+- They were RGBA8, four bytes a texel. The values sampled are the same, from a quarter and a half of
+  the bytes, levels and all (test 14).
+- The presents' memory line counts I8 and IA8 apart.
+
+**The GPU cost test** (F1 > Performance) has three more phases. Each draws a kind of draw into one
+pixel (a 1x1 scissor), so its vertices are shaded and binned as before and its pixels are not:
+- every draw
+- the display lists
+- the blended draws
+
+"Everything" less such a phase is what those draws' pixels cost; that phase less "no ..." is what
+their vertices cost. When the two "everything" phases are more than a sixth apart, the line says the
+scene changed. It runs some 20 s.
+
+What to look for in test 15:
+- Particles, effects and the HUD looking exactly as before.
+- I8 and IA8 in the memory line.
+- The GPU in Magmoor's effect-heavy places.
+- The cost test where the frame rate is lowest.
