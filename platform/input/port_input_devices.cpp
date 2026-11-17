@@ -24,6 +24,10 @@
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_touch.h>
 
+#if defined(__vita__)
+#include <psp2/touch.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -1529,7 +1533,21 @@ void PollPortActions() {
     PortDebug::SetGyroButton(false);
     return;
   }
+#if defined(__vita__)
+  // The Gyro aim button's default is the right stick's click, which the Vita's own controls do not
+  // have (SDL reads them with sceCtrlPeekBufferPositive2: no L3 or R3 there), so in 0.46.0 test 19
+  // "hold to aim" and "toggle to aim" did nothing. There a finger on the rear touch pad holds it too,
+  // read from the panel itself: SDL's rear touches stay off (b9b0124: they reached the menus'
+  // gestures and the Port menu's mouse). A pad's R3 (a PS TV's) still works.
+  bool rearTouch = false;
+  {
+    SceTouchData touch{};
+    rearTouch = sceTouchPeek(SCE_TOUCH_PORT_BACK, &touch, 1) > 0 && touch.reportNum > 0;
+  }
+  PortDebug::SetGyroButton(out.Held(Action::GyroAim) || rearTouch);
+#else
   PortDebug::SetGyroButton(out.Held(Action::GyroAim));
+#endif
   if (out.Pressed(Action::ResetAim)) PortDebug::RequestResetAim();
   if (out.Pressed(Action::PortMenu)) PortDebug::RequestToggle();
   if (out.Pressed(Action::SaveState)) PortDebug::RequestSaveStateHotkey(1);

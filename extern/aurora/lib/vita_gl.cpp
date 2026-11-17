@@ -1169,10 +1169,21 @@ JobThread& compiler_thread() noexcept {
 // with the game streaming a room from the disc image on the same card each waited behind its
 // reads: 250 to 850 ms stalls at room changes (a run through Tallon Overworld, 7dfaad5).
 JobThread& card_thread() noexcept {
-  // On the render worker's core, as the other helpers at the busy threads' priority (thread.cpp), and
-  // just below it there as the frame reaper is: at its priority a card read held the core for as long
-  // as it ran (test 8: 16% busy while the room's programs loaded).
-  static JobThread& jobs = *new JobThread("program cache", thread::Priority::Normal, 128 * 1024, 0, 170);
+  // Was on the render worker's core, just below it as the frame reaper is (170): at its priority a
+  // card read held the core for as long as it ran (test 8: 16% busy while the room's programs
+  // loaded). But since 0.46.0 the first core is full in the fights (the render worker, the core 0
+  // helper, side worker 2 and the DVD worker: 90% and more), and there it starved. In 0.46.0 test 19's
+  // Sheegoth fight a program took 1.4 to 6.2 s to load: its draws went fixed-function meanwhile (the
+  // Sheegoths black when hit: their hit flash's program), 28 skinned draws a frame at 0.45 ms each,
+  // which kept the render worker at 99% and the loads starved, and the music's refills from the disc
+  // image on the same card came more than 2 s late (the music repeating and overlapping) while its
+  // reads waited behind a starved card thread's. Since test 20 it is on the fourth core, the least
+  // busy (the mixer 35%, the side worker 18%), below its three threads (128 to 130); without that
+  // core, where it was.
+  static JobThread& jobs = thread::vita_core3_available()
+                               ? *new JobThread("program cache", thread::Priority::Normal, 128 * 1024,
+                                                thread::kVitaSystemCore, 131)
+                               : *new JobThread("program cache", thread::Priority::Normal, 128 * 1024, 0, 170);
   return jobs;
 }
 

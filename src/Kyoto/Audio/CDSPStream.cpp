@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <chrono>
+
 #if defined(__ANDROID__)
 #include <android/log.h>
 // Port diagnostic: streamed-audio (music) refill tracing. Android apps have no
@@ -86,6 +88,15 @@ static struct {
 // said once a refill. The mixer then plays that read's half again: the music repeats, and the other
 // channel's stream runs on ahead of this one's.
 static bool sRefillLateReported[4];
+// And when that read was asked for (0.46.0 test 20), so the late line and its read's end say how long
+// it took: test 19's came while a program load starved on the card the disc image is on.
+static std::chrono::steady_clock::time_point sRefillIssued[4];
+
+static unsigned RefillAgeMs(int idx) {
+  return static_cast< unsigned >(
+      std::chrono::duration_cast< std::chrono::milliseconds >(std::chrono::steady_clock::now() - sRefillIssued[idx])
+          .count());
+}
 
 void CDSPStream::OpenFiles(const char* fileName, CDSPStream& stream) {
   DVDOpen(const_cast< char* >(fileName), &stream.x50_fileInfo1);
@@ -445,6 +456,7 @@ void CDSPStream::BufferStream() {
       // guarded this with OSDisableInterrupts, which is a no-op on PC.
       xec_readsPending = secondReadLen != 0 ? 2 : 1;
       sRefillLateReported[this - g_Streams] = false;
+      sRefillIssued[this - g_Streams] = std::chrono::steady_clock::now();
       DVDReadAsyncPrio(&x50_fileInfo1, buf, static_cast< s32 >(readLen),
                        static_cast< s32 >(x18_headerSize + xcc_fileCur), ReadCompleted, 1);
       if (secondReadLen != 0) {
@@ -506,8 +518,9 @@ u32 CDSPStream::UpdateStream(void*, u32 destOffset, void*, u32 len, u32 user) {
 
   if (!sRefillLateReported[stream - g_Streams]) {
     sRefillLateReported[stream - g_Streams] = true;
-    MP_STREAM_LOG("refill late file=%s pending=%u fileCur=%u: its last read is still under way",
-                  stream->x10_fileName.data(), stream->xec_readsPending, stream->xcc_fileCur);
+    MP_STREAM_LOG("refill late file=%s pending=%u fileCur=%u: its last read is still under way (asked for %u ms ago)",
+                  stream->x10_fileName.data(), stream->xec_readsPending, stream->xcc_fileCur,
+                  RefillAgeMs(static_cast< int >(stream - g_Streams)));
   }
   return 0;
 }
@@ -570,6 +583,9 @@ void CDSPStream::ReadCompleted(s32, DVDFileInfo* fileInfo) {
                 stream.xcc_fileCur);
   if (stream.xec_readsPending != 0) {
     return;
+  }
+  if (sRefillLateReported[idx]) {
+    MP_STREAM_LOG("late refill read done file=%s after %u ms", stream.x10_fileName.data(), RefillAgeMs(idx));
   }
 
   if (stream.xf0_stopRequested != 0) {

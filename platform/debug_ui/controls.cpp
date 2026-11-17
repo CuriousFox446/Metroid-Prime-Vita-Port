@@ -601,11 +601,18 @@ void DrawControlsTouchGyro() {
   if (ImGui::Combo("Mode", &gyroMode, gyroModes, IM_ARRAYSIZE(gyroModes))) {
     SetGyroMode(gyroMode);
   }
+#if defined(__vita__)
+  ItemHelp("Tilt the Vita to aim. Hold to aim: only while a finger is on the rear touch pad (the "
+           "Gyro aim button). Hold to pause: always, except while a finger is on it (to recentre). "
+           "Toggle: tap it to start and stop. A PS TV pad's right stick click works too. Needs twin "
+           "stick (not the classic layout).");
+#else
   ItemHelp("Tilt the pad or phone to aim. Hold to aim: only while the Gyro aim button is held. "
            "Hold to pause: always, except while it is held (to recentre). Toggle: press to start "
            "and stop. The button is right stick click or left Ctrl (Remap page). Needs mouse aim, "
            "twin stick or the touch "
            "controls (not the classic layout).");
+#endif
   ImGui::BeginDisabled(sInput.gyroMode == 0 && !sInput.springFlick);
   const char* gyroSources[] = {"Auto", "Controller", "Phone"};
   int gyroSource = sInput.gyroSource;

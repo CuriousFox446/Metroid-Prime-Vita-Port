@@ -3871,3 +3871,48 @@ should be negative, which confirms the sign.
 What to look for in test 19:
 - Gyro aim turning the same way as the console, left and right, with up and down as before.
 - The log's "first reading" line.
+
+### Test 19 result
+
+`~/logs/t046_19.log` (df0d11a, 3 minutes in Phendrana, the Sheegoth fights): a clean exit. The user:
+"the good ol' music overlapping itself", "the sheegoth briefly turn all black the moment [I] damage
+them", and "hold to aim" and "toggle to aim" seemed to do nothing.
+- **The gyro's sign is confirmed.** The first reading, held normally: accel -0.32 -7.00 -6.83 m/s²,
+  toward the ground as predicted. No more word of a reversed x-axis.
+- **Programs starved on the card.** 115 programs were loaded from the card's cache in all (one went
+  to the compiler), taking 25 s, about 220 ms each. Where the Sheegoths fought, four took 10 s between
+  them, one 6.2 s. A program's draws are fixed-function until it is linked, and the Sheegoths' hit
+  flash needs a program of its own: black when hit. The "program cache" thread did these reads on
+  core 0 at priority 170, below everything there. In the fights core 0 was full: render worker 43%,
+  core 0 helper 32-46%, side worker 2 5-12%, the DVD worker. It ran 0-1% of the time.
+- **A feedback loop.** Meanwhile 28 skinned draws a frame were drawn fixed-function, at 0.45 ms each
+  (13 ms a frame, five times a program draw's cost). That kept the render worker at 99%, which starved
+  the loads further.
+- **The music came late in that same stretch** (log lines 12140-13159, render worker 99-100%). Four
+  `refill late` lines: the streams' reads from the disc image waited more than 2 s on the card, where
+  the starved card thread's reads were under way.
+- **Hold to aim and toggle to aim.** The Gyro aim button's default is the right stick's click. The
+  Vita's own controls have none: SDL reads them with `sceCtrlPeekBufferPositive2`, which gives no
+  L3 or R3 on the handheld.
+
+## 0.46.0 test 20: the program loads on the fourth core, the rear pad as the Gyro aim button
+
+**The program cache thread on the fourth core** (`vita_gl.cpp`, `card_thread`), at priority 131.
+That is below the side worker, the mixer and the background lane (128 to 130), which keep the core
+about 55% busy in play. Without that core it stays where it was (core 0, 170). Through a movie the
+background lane fills the core; a load then waits, but so do the movie's own reads, which the lane
+waits on, so the wait ends itself.
+
+**The rear touch pad is the Gyro aim button on the Vita** (`port_input_devices.cpp`). A finger on it
+holds the button: hold to aim aims while it is there, hold to pause pauses, and toggle switches on
+each fresh touch. It is read from the panel itself (`sceTouchPeek`); SDL's rear touches stay off, as
+since b9b0124. A PS TV pad's right stick click still works. The Port menu's Gyro aim help says so.
+
+**The music's late refills say how long they took** (`CDSPStream.cpp`): the `refill late` line adds
+when its read was asked for, and a `late refill read done ... after N ms` line follows when it ends.
+
+What to look for in test 20:
+- The Sheegoths no longer black when hit, or for a frame at most.
+- The music in the fights, and any `refill late` lines with their times.
+- Gyro aim with hold to aim, hold to pause and toggle: a finger on the rear touch pad.
+- The `presents` lines' program loads ("N loaded from the card ... ms").
