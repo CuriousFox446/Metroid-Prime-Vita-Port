@@ -106,7 +106,7 @@ public:
     int xPortSlot2Percentage = 0;
     float xPortSlot2Remainder = 0.f;
   };
-  static SPortSlot sPortSlots[kPortThreadSlots]; // the game thread's, each side worker's (port_thread_slot.h)
+  static SPortSlot sPortSlots[kPortThreadSlots]; // the game thread's, each side worker's, the game thread's side jobs' (port_thread_slot.h)
   static SPortSlot& PortSlot() { return sPortSlots[PortThreadSlot()]; }
   template < typename T, T SPortSlot::*Member >
   struct PortField {

@@ -20,12 +20,15 @@ uint32_t submit(Fn fn, void* data) noexcept;
 // the second, on the first core (per-thread slot 2). For jobs in no order with each other (each
 // object's particle step); its number works with done and wait, not with a FIFO fence.
 uint32_t submit_any(Fn fn, void* data) noexcept;
-// Whether the job has run (true for 0, no job).
+// Whether the job has run (true for 0, no job). Since 0.46.0 test 18 the job alone: those queued
+// before it may still be running.
 bool done(uint32_t job) noexcept;
 // Waits until the job has run, at most half a second (a hang, which is logged, then let go).
 // `fifo`: the FIFO processor's wait, which the log counts apart from the others. Since 0.46.0 test
 // 17 the game thread's wait runs submit_any's jobs up to this one that no worker has taken yet (the
 // workers' own jobs, submit's, it leaves to them), so a side worker's jobs may end out of order.
+// Since test 18 those run in per-thread slot 3 (port_thread_slot.h): their code sees itself on a
+// side job, as on a worker.
 void wait(uint32_t job, bool fifo) noexcept;
 // The background lane (0.42.0 test 23): a second thread on the fourth core, below MusyX's mixer, for
 // long jobs nobody waits for soon (a movie frame's decode). Its own numbers: a job of one lane means

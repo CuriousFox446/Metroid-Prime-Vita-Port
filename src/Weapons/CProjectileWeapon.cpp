@@ -30,6 +30,8 @@
 
 // A step still on the side worker is finished before anything reads or changes the systems or what
 // the step reads (PortStepOnSideWorker); on the side worker itself (the step's own calls) it is not.
+// "On the side worker" is PortThreadSlot() != 0: a worker's slot, or slot 3, where the game thread
+// runs a step it waits for (0.46.0 test 18; in test 17's slot 0 the step waited for itself).
 #define PORT_PW_FINISH() PortFinishStep()
 // A system the step finds finished: deleted on the game thread, and on the side worker kept for the
 // game thread to delete (PortRetire), the pointer cleared at once as before either way.

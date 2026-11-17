@@ -3799,3 +3799,42 @@ What to look for in test 17:
 - The Sheegoth rooms against test 16's 12 FPS and tests 7 to 10's 15.5 to 18.3.
 - The `[particles]` waits and the `[side jobs]` lines.
 - Particles, effects and projectiles looking as before.
+
+### Test 17 result
+
+**The game froze** soon after play began in Phendrana (`~/logs/t046_17.log`, 13679b0). The log's last
+lines:
+- `side worker: job 2243 has not run after 500 ms (the worker has run 2242)`
+- then the watchdog: no frame for 5, 15 and 30 s, the game thread in "game tick (UpdateTicks)".
+
+The cause was a projectile's step. Job 2243 was one the game thread was running itself, in its
+wait. A projectile's particle step calls its own accessors (`UpdateChildParticleSystems`,
+`IsSystemDeletable`), and each of those first finishes the step (`PORT_PW_FINISH`). Those finishes are
+skipped "on the side worker itself", which `CProjectileWeapon::PortFinishStep` tells by
+`PortThreadSlot() != 0`. In the game thread's slot 0 the check failed, so the step waited for its own
+job, which could never end while it waited. Its finish waits again after each 500 ms, so the game
+thread stayed there.
+
+## 0.46.0 test 18: the game thread's side jobs in a slot of their own
+
+**Slot 3** (`port_thread_slot.h`). While the game thread runs a side job in its wait (`run_stolen`), the
+part of its stack below the wait is per-thread slot 3.
+- The job's code sees itself on a side job, as on a worker: a projectile's step skips its own finishes
+  again.
+- The particle code's statics there (the random generator, the variables in scope, the child seeds, the
+  globals) are the job's own. The game thread's slot-0 state, that of the code around the wait, stays
+  as it was.
+- The game thread's stack bottom comes from the kernel at its first wait (the log says so once). If
+  the kernel does not give it, the game thread runs no jobs and only waits.
+
+**A side worker's job is done once it has run**, whatever ran ahead of it (`ran`). Before this, `done`
+and `wait` asked for every job up to it. Two threads now run a worker's jobs, so a step could wait on
+another one running ahead of it. The helper keeps the old rule, and so does a submit waiting for a
+free slot.
+
+What to look for in test 18:
+- No freeze, especially when firing and in fights.
+- The log's "the game thread runs the particle steps" line, once.
+- The Sheegoth rooms against test 16's 12 FPS (and tests 7 to 10's 15.5 to 18.3).
+- The side workers' `[side jobs]` lines: "the game thread ran N of them itself".
+- Particles, effects and projectiles looking as before.
