@@ -1502,22 +1502,41 @@ void delete_program_binaries(const std::string& previous, const std::string& cur
 // (VITA_PHASE2.md, "The map's GPU crash: stale shaders").
 constexpr const char* kFixedFunctionCache = "ux0:data/shader_cache";
 
-// Whether the file at `path`, `size` bytes, is one whole GXP: its magic and version, and its
-// header's size (at byte 8: every byte of the program, unpadded) the file's own.
-bool whole_gxp(const std::filesystem::path& path, uintmax_t size) noexcept {
+// Why the file at `path`, `size` bytes, is not one whole GXP (empty when it is): its magic and
+// version, and its header's size (at byte 8: every byte of the program, unpadded) within the file.
+// 0.46.0 test 12: a file longer than its header says is kept (`padded`). The check wanted the two
+// equal, and the same 8 of 31 files failed it at every start (292 to 480 bytes, vertex and fragment
+// shaders alike): vitaGL compiled those 8 again in each session (~145 ms each, two of them in the
+// save station's warm-up) and wrote them back, for the next start to delete. A file cut short is
+// shorter than its header says, which still fails.
+std::string gxp_flaw(const std::filesystem::path& path, uintmax_t size, bool& padded) noexcept {
+  padded = false;
   if (size < 16 || size > kMaxBinary) {
-    return false;
+    return fmt::format("{} bytes", size);
   }
   std::FILE* file = std::fopen(path.c_str(), "rb");
   if (file == nullptr) {
-    return true; // vitaGL cannot read it either, and compiles the shader again
+    return {}; // vitaGL cannot read it either, and compiles the shader again
   }
   uint8_t head[12] = {};
   const bool read = std::fread(head, sizeof(head), 1, file) == 1;
   std::fclose(file);
+  if (!read) {
+    return "its header unread";
+  }
+  if (std::memcmp(head, "GXP", 4) != 0) {
+    return "no GXP magic";
+  }
+  if (head[4] != 1) {
+    return fmt::format("version {}.{}", head[4], head[5]);
+  }
   uint32_t field = 0;
   std::memcpy(&field, head + 8, sizeof(field));
-  return read && std::memcmp(head, "GXP", 4) == 0 && head[4] == 1 && field == size;
+  if (field < 16 || field > size) {
+    return fmt::format("its header says {} bytes", field);
+  }
+  padded = field < size;
+  return {};
 }
 
 // Before vitaGL reads any, the fixed-function cache's files that are not whole GXPs deleted
@@ -1525,7 +1544,13 @@ bool whole_gxp(const std::filesystem::path& path, uintmax_t size) noexcept {
 void check_fixed_function_cache() noexcept {
   const auto start = std::chrono::steady_clock::now();
   uint32_t checked = 0;
-  std::vector<std::pair<std::filesystem::path, uintmax_t>> broken;
+  uint32_t padded = 0;
+  struct Broken {
+    std::filesystem::path path;
+    uintmax_t size;
+    std::string flaw;
+  };
+  std::vector<Broken> broken;
   std::error_code ec;
   std::filesystem::directory_iterator versions{kFixedFunctionCache, ec};
   for (; !ec && versions != std::filesystem::directory_iterator{}; versions.increment(ec)) {
@@ -1539,34 +1564,39 @@ void check_fixed_function_cache() noexcept {
           continue;
         }
         ++checked;
-        if (!whole_gxp(it->path(), size)) {
-          broken.emplace_back(it->path(), size);
+        bool longer = false;
+        std::string flaw = gxp_flaw(it->path(), size, longer);
+        if (!flaw.empty()) {
+          broken.push_back({it->path(), size, std::move(flaw)});
         }
+        padded += longer ? 1 : 0;
       }
     }
   }
   // Deleted once listed: not while the folder is read.
   std::string names;
   uint32_t removed = 0;
-  for (const auto& [path, size] : broken) {
+  for (const Broken& b : broken) {
     std::error_code gone;
-    if (!std::filesystem::remove(path, gone)) {
+    if (!std::filesystem::remove(b.path, gone)) {
       continue;
     }
     if (++removed <= 8) {
-      const std::filesystem::path& folder = path.parent_path();
-      names += fmt::format("{}{}/{}/{} ({} bytes)", names.empty() ? "" : ", ",
+      const std::filesystem::path& folder = b.path.parent_path();
+      names += fmt::format("{}{}/{}/{} ({} bytes: {})", names.empty() ? "" : ", ",
                            folder.parent_path().filename().string(), folder.filename().string(),
-                           path.filename().string(), size);
+                           b.path.filename().string(), b.size, b.flaw);
     }
   }
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   if (removed == 0) {
-    Log.info("vitaGL's fixed-function shaders ({}): {} on the card, all whole ({:.0f} ms)", kFixedFunctionCache,
-             checked, ms);
+    Log.info("vitaGL's fixed-function shaders ({}): {} on the card, all whole, {} of them longer than their header "
+             "says ({:.0f} ms)",
+             kFixedFunctionCache, checked, padded, ms);
   } else {
-    Log.warn("vitaGL's fixed-function shaders ({}): {} on the card, {} not whole GXPs deleted ({:.0f} ms): {}{}",
-             kFixedFunctionCache, checked, removed, ms, names, removed > 8 ? ", ..." : "");
+    Log.warn("vitaGL's fixed-function shaders ({}): {} on the card ({} longer than their header says, kept), {} not "
+             "whole GXPs deleted ({:.0f} ms): {}{}",
+             kFixedFunctionCache, checked, padded, removed, ms, names, removed > 8 ? ", ..." : "");
   }
 }
 

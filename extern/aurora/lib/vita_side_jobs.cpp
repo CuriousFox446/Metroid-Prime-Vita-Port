@@ -143,9 +143,13 @@ void run_claimed(Worker& w, uint32_t job) noexcept {
     }
   }
   j.fn(j.data);
-  w.doneSeq[job % kSlots].store(job, std::memory_order_release);
-  uint32_t f = w.finished.load(std::memory_order_acquire);
-  while (w.doneSeq[(f + 1) % kSlots].load(std::memory_order_acquire) == f + 1) {
+  // All seq_cst: two threads ending neighbouring jobs at once each write their slot and then read
+  // `finished` and the other's slot. With weaker orders both could read the other's old value, and
+  // `finished` would stop short of the later job until a later job ended: at the frame's end there
+  // is none, and its wait would never end. In one total order, one of them sees the other.
+  w.doneSeq[job % kSlots].store(job, std::memory_order_seq_cst);
+  uint32_t f = w.finished.load(std::memory_order_seq_cst);
+  while (w.doneSeq[(f + 1) % kSlots].load(std::memory_order_seq_cst) == f + 1) {
     // seq_cst as below (has_run, wait_until): a waiter that counted itself sees this or is woken.
     if (w.finished.compare_exchange_weak(f, f + 1, std::memory_order_seq_cst)) {
       ++f;

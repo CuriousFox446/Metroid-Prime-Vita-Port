@@ -3563,6 +3563,14 @@ at again after its first load only while the Port menu is up. Only this game wri
 movie still plays (not looping, its last frame not shown), the transition waits for that last frame,
 up to 5 s more.
 
+**vitaGL's own shaders kept** (`check_fixed_function_cache`). Since the check began, the same 8 of 31
+files in ux0:data/shader_cache failed it at every start (292 to 480 bytes) and were deleted. vitaGL
+then compiled those 8 again in each session (~145 ms each; two came in the save station's warm-up and
+one in play) and wrote them back. The check wanted the GXP header's size to equal the file's. It now
+keeps a file longer than its header says (counted as "longer than their header says"). Magic,
+version and a file cut short (shorter than its header) still fail. Each deleted file's reason is
+logged.
+
 **Frame pacing.**
 - The `presents` line counts the presents by the vblanks between them: 1 or less, 2, 3, 4, 5 or
   more.
@@ -3578,4 +3586,6 @@ What to look for in test 12:
 - `[side jobs] core 0 helper`: the FIFO processor's waits down, and the jobs it ran itself.
 - `SM: Think` down where explosions are many.
 - The save-select movie playing to its end.
+- The fixed-function shaders line at the start: none deleted, and no "vitaGL compiled" lines after
+  the first session.
 - The pacing counts, at the default and, if the user wants to try it, at the 30 cap.
