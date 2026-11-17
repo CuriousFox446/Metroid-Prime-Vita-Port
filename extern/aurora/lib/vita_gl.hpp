@@ -347,6 +347,9 @@ void set_present_sharpness(float sharpness) noexcept;
 // The GPU's busy time a frame over the last half second or so, ms (vita_gl.cpp's GpuClock); 0
 // before the first. Any thread.
 float gpu_busy_ms() noexcept;
+// vitaGL's swap interval from the next present on (any thread; applied on the render worker):
+// the vblanks a frame stays up at least, 1 to 4.
+void set_swap_interval(uint32_t vblanks) noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -386,5 +389,6 @@ inline void render_size_for_scale(float, int& width, int& height) noexcept {
 inline void set_render_scale(float) noexcept {}
 inline void set_present_sharpness(float) noexcept {}
 inline float gpu_busy_ms() noexcept { return -1.f; }
+inline void set_swap_interval(uint32_t) noexcept {}
 #endif
 } // namespace aurora::vita_gl

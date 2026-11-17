@@ -11,6 +11,7 @@
 #include <dolphin/os.h>
 #include <SDL3/SDL_stdinc.h>
 #include <psp2/common_dialog.h>
+#include <psp2/display.h>
 #include <psp2/gxm.h>
 #include <psp2/ime_dialog.h>
 #include <psp2/kernel/clib.h>
@@ -551,6 +552,86 @@ void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept {
   }
 }
 
+// Copy surfaces (a copy texture's texture at one size and the framebuffer drawing into it) no copy
+// texture holds any more: kept kSurfaceKeptFrames presents before they are deleted, and taken again
+// meanwhile by a copy at their size. vitaGL frees a texture's memory at once, not a few frames
+// later, when no draw has sampled it for a few frames or ever since it was made (its last_frame
+// OBJ_NOT_USED), and a draw into its framebuffer does not count: a surface made again at another
+// size (glTexImage2D) or deleted soon after a copy into it, before any draw sampled it, let that
+// copy's scene, still to run on the GPU, write into a freed block of vitaGL's heap, whose
+// bookkeeping lives in its free blocks (0.46.0 test 11: a data abort in SceLibKernel's heap code on
+// the render worker, in glBufferData, after the Thardus fight with the copies heavy). The GPU runs
+// a frame or two behind, and vitaGL's own deferred frees wait 4 (FRAME_PURGE_FREQ).
+struct KeptSurface {
+  GLuint texture = 0;
+  GLuint framebuffer = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  uint32_t frame = 0; // g_surfaceFrame when it was let go
+};
+constexpr uint32_t kSurfaceKeptFrames = 8;
+std::vector<KeptSurface> g_keptSurfaces; // render worker
+uint32_t g_surfaceFrame = 0;             // render worker: presents
+uint64_t g_keptSurfaceBytes = 0;
+struct SurfaceStats {
+  uint32_t made = 0;
+  uint32_t reused = 0;
+  uint32_t letGo = 0;
+  uint32_t deleted = 0;
+};
+SurfaceStats g_surfaceStats;
+
+// Render worker: a surface no copy texture holds now.
+void keep_surface(GLuint texture, GLuint framebuffer, uint16_t width, uint16_t height) noexcept {
+  g_keptSurfaces.push_back({texture, framebuffer, width, height, g_surfaceFrame});
+  g_keptSurfaceBytes += uint64_t{width} * height * 4;
+  ++g_surfaceStats.letGo;
+}
+
+// Render worker: a kept surface at `width` x `height`, taken (its framebuffer bound), or false. A
+// copy into it runs after the scenes that used it before, as a surface copied into frame after frame
+// does.
+bool take_kept_surface(int width, int height, GLuint& texture, GLuint& framebuffer) noexcept {
+  for (auto it = g_keptSurfaces.begin(); it != g_keptSurfaces.end(); ++it) {
+    if (it->width == width && it->height == height) {
+      texture = it->texture;
+      framebuffer = it->framebuffer;
+      g_keptSurfaceBytes -= uint64_t{it->width} * it->height * 4;
+      g_keptSurfaces.erase(it);
+      ++g_surfaceStats.reused;
+      glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Render worker, after each present: deletes the surfaces kept kSurfaceKeptFrames presents, which
+// the GPU is done with (vitaGL may free them at once).
+void delete_kept_surfaces() noexcept {
+  ++g_surfaceFrame;
+  if (g_keptSurfaces.empty() || g_surfaceFrame - g_keptSurfaces.front().frame < kSurfaceKeptFrames) {
+    return;
+  }
+  std::vector<GLuint> textures;
+  std::vector<GLuint> framebuffers;
+  size_t done = 0;
+  for (; done < g_keptSurfaces.size(); ++done) {
+    const KeptSurface& s = g_keptSurfaces[done];
+    if (g_surfaceFrame - s.frame < kSurfaceKeptFrames) {
+      break;
+    }
+    textures.push_back(s.texture);
+    framebuffers.push_back(s.framebuffer);
+    g_keptSurfaceBytes -= uint64_t{s.width} * s.height * 4;
+  }
+  g_keptSurfaces.erase(g_keptSurfaces.begin(), g_keptSurfaces.begin() + static_cast<ptrdiff_t>(done));
+  // The framebuffers first: a texture still attached to one is only marked for later.
+  glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()), framebuffers.data());
+  glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+  g_surfaceStats.deleted += static_cast<uint32_t>(done);
+}
+
 class Texture : public Kept {
 public:
   Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> texels, uint32_t levels) noexcept
@@ -566,24 +647,26 @@ public:
     settle_pending();
     const int kind = static_cast<int>(m_format);
     if (m_surfaces != nullptr) {
-      // A copy texture: its texture and framebuffer for each size it was copied at, and the
-      // stand-in it was bound as before its first copy, if that is still about.
-      std::vector<GLuint> textures;
-      std::vector<GLuint> framebuffers;
-      if (m_id != 0 && !is_surface(m_id)) {
-        textures.push_back(m_id);
+      // A copy texture: its texture and framebuffer for each size it was copied at, kept a few
+      // frames for the copies' scenes still to run (keep_surface), and the stand-in it was bound as
+      // before its first copy, if that is still about (only ever sampled: deleted now).
+      const GLuint standIn = m_id != 0 && !is_surface(m_id) ? m_id : 0;
+      std::array<CopySurface, kCopySurfaces> surfaces = *m_surfaces;
+      int64_t count = standIn != 0 ? 1 : 0;
+      for (const CopySurface& surface : surfaces) {
+        count += surface.texture != 0 ? 1 : 0;
       }
-      for (const CopySurface& surface : *m_surfaces) {
-        if (surface.texture != 0) {
-          textures.push_back(surface.texture);
-          framebuffers.push_back(surface.framebuffer);
-        }
-      }
-      g_textureCount[kind].fetch_sub(static_cast<int64_t>(textures.size()), std::memory_order_relaxed);
+      g_textureCount[kind].fetch_sub(count, std::memory_order_relaxed);
       g_textureBytes[kind].fetch_sub(m_bytes, std::memory_order_relaxed);
-      gfx::render_worker::enqueue_work([textures = std::move(textures), framebuffers = std::move(framebuffers)] {
-        glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()), framebuffers.data());
-        glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+      gfx::render_worker::enqueue_work([standIn, surfaces] {
+        if (standIn != 0) {
+          glDeleteTextures(1, &standIn);
+        }
+        for (const CopySurface& surface : surfaces) {
+          if (surface.texture != 0) {
+            keep_surface(surface.texture, surface.framebuffer, surface.width, surface.height);
+          }
+        }
       });
       return;
     }
@@ -716,20 +799,31 @@ public:
           surface = &s;
         }
       }
-      if (surface->texture == 0) {
-        glGenTextures(1, &surface->texture);
-        glGenFramebuffers(1, &surface->framebuffer);
-        g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
+      if (surface->texture != 0) {
+        // Never made again in place (keep_surface says why): let go for a few frames, and another
+        // of the new size taken or made.
+        const int64_t old = static_cast<int64_t>(surface->width) * surface->height * 4;
+        g_textureCount[kind].fetch_sub(1, std::memory_order_relaxed);
+        g_textureBytes[kind].fetch_sub(old, std::memory_order_relaxed);
+        m_bytes -= old;
+        keep_surface(surface->texture, surface->framebuffer, surface->width, surface->height);
+        *surface = {};
       }
-      glBindTexture(GL_TEXTURE_2D, surface->texture);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-      const int64_t bytes = (static_cast<int64_t>(width) * height - static_cast<int64_t>(surface->width) * surface->height) * 4;
+      if (!take_kept_surface(width, height, surface->texture, surface->framebuffer)) {
+        glGenTextures(1, &surface->texture);
+        glBindTexture(GL_TEXTURE_2D, surface->texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glGenFramebuffers(1, &surface->framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, surface->framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surface->texture, 0);
+        ++g_surfaceStats.made;
+      }
+      const int64_t bytes = static_cast<int64_t>(width) * height * 4;
+      g_textureCount[kind].fetch_add(1, std::memory_order_relaxed);
       g_textureBytes[kind].fetch_add(bytes, std::memory_order_relaxed);
       m_bytes += bytes;
       surface->width = static_cast<uint16_t>(width);
       surface->height = static_cast<uint16_t>(height);
-      glBindFramebuffer(GL_FRAMEBUFFER, surface->framebuffer);
-      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surface->texture, 0);
     } else {
       glBindFramebuffer(GL_FRAMEBUFFER, surface->framebuffer);
     }
@@ -2561,6 +2655,14 @@ std::atomic<uint32_t> g_renderSize{static_cast<uint32_t>(kScreenWidth) << 16 | k
 uint32_t g_renderSizeFailed = 0;
 std::atomic<float> g_sharpness{0.f};
 
+// 0.46.0 test 12, frame pacing: vitaGL's swap interval asked for (set_swap_interval) and the one
+// given it (render worker), and how many vblanks apart the presents came since the last report (1
+// to 4, then 5 or more; sceDisplayGetVcount after each swap).
+std::atomic<uint32_t> g_swapInterval{1};
+uint32_t g_swapApplied = 1;
+uint32_t g_lastVcount = 0;
+std::array<uint32_t, 5> g_pacing{};
+
 // The scenes vitaGL sizes a render target for (vglSetupRenderTargetScenesNum): the display's, which
 // takes a frame's copies (record_copy makes 7 a frame at most) and one, and a copy's framebuffer's.
 // A frame drawn at another scale takes the display's for its framebuffer, made with it.
@@ -3456,6 +3558,10 @@ void set_present_sharpness(float sharpness) noexcept {
 
 float gpu_busy_ms() noexcept { return g_gpuMs.load(std::memory_order_relaxed); }
 
+void set_swap_interval(uint32_t vblanks) noexcept {
+  g_swapInterval.store(std::clamp<uint32_t>(vblanks, 1, 4), std::memory_order_relaxed);
+}
+
 void init_imgui() noexcept {
   // No GL calls: the backend makes its font texture at its first NewFrame (present).
   ImGui_ImplOpenGL2_Init();
@@ -3715,8 +3821,10 @@ void present(ImDrawData* overlay) noexcept {
              "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
              "failed, {} built or being built by their turn); uniforms sent/kept: vertex {}/{}, fragment {}/{}; "
              "textures bound/kept: {}/{}; EFB copies made on the GPU: {} ({:.0f} kpixels written, {:.1f} ms on "
-             "the render worker, {:.2f} ms each), {} before the copy program was built; the GPU busy {:.1f} ms a "
-             "frame ({:.0f}% of the time); frames drawn at {}x{}",
+             "the render worker, {:.2f} ms each), {} before the copy program was built; copy surfaces: {} made, "
+             "{} taken again from {} let go ({} deleted {} frames on; {} kept now, {:.1f} MiB); the GPU busy "
+             "{:.1f} ms a frame ({:.0f}% of the time); frames drawn at {}x{}; frame pacing (presents this many "
+             "vblanks apart): 1 or less {}, 2 {}, 3 {}, 4 {}, 5 or more {}, swap interval {}",
              g_presentStats.presents, g_presentStats.framesWithDraws,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.merged) / g_presentStats.framesWithDraws : 0.0,
@@ -3732,16 +3840,20 @@ void present(ImDrawData* overlay) noexcept {
              g_uniformStats.fragment.skipped, g_uniformStats.textureBinds, g_uniformStats.texturesKept,
              g_presentStats.copies, g_presentStats.copyPixels / 1000.0, g_presentStats.copyUs / 1000.0,
              g_presentStats.copies != 0 ? g_presentStats.copyUs / 1000.0 / g_presentStats.copies : 0.0,
-             g_presentStats.copiesWaiting,
+             g_presentStats.copiesWaiting, g_surfaceStats.made, g_surfaceStats.reused, g_surfaceStats.letGo,
+             g_surfaceStats.deleted, kSurfaceKeptFrames, g_keptSurfaces.size(), g_keptSurfaceBytes / 1048576.0,
              g_gpu.reportFrames != 0 ? static_cast<double>(g_gpu.reportBusyUs) / 1000.0 / g_gpu.reportFrames : 0.0,
              g_gpu.reportUs != 0 ? 100.0 * static_cast<double>(g_gpu.reportBusyUs) / static_cast<double>(g_gpu.reportUs)
                                  : 0.0,
-             g_world.width, g_world.height);
+             g_world.width, g_world.height, g_pacing[0], g_pacing[1], g_pacing[2], g_pacing[3], g_pacing[4],
+             g_swapApplied);
+    g_pacing = {};
     g_gpu.reportBusyUs = 0;
     g_gpu.reportUs = 0;
     g_gpu.reportFrames = 0;
     g_presentStats = {};
     g_uniformStats = {};
+    g_surfaceStats = {};
     log_memory("presents");
     thread::log_cpu();
     side_jobs::log_stats();
@@ -3753,9 +3865,23 @@ void present(ImDrawData* overlay) noexcept {
   g_clock.mark(kOverlay);
   // A system keyboard that is up (open_keyboard) draws over the frame at the swap.
   gpu_watch();
+  const uint32_t interval = g_swapInterval.load(std::memory_order_relaxed);
+  if (interval != g_swapApplied) {
+    eglSwapInterval(nullptr, static_cast<EGLint>(interval));
+    g_swapApplied = interval;
+    Log.info("frame pacing: each frame up {} vblank{} at least", interval, interval == 1 ? "" : "s");
+  }
   const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
   gpu_swapped(swapStart);
+  {
+    const uint32_t vcount = sceDisplayGetVcount();
+    if (g_lastVcount != 0) {
+      ++g_pacing[std::clamp<uint32_t>(vcount - g_lastVcount, 1, 5) - 1];
+    }
+    g_lastVcount = vcount;
+  }
+  delete_kept_surfaces();
   g_clock.mark(kSwap);
   if (g_clock.on) {
     ++g_clock.frames;

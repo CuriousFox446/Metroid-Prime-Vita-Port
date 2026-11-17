@@ -1966,6 +1966,10 @@ bool sResumeSound = false;
 bool sResumeInFlow = true;
 int sResumeFrames = 0;
 PortSaveState::ResumeInfo sResumeInfo;
+// 0.46.0 test 12: how long a screen transition has waited past its timer for its movie's last
+// frame (Update), and the most it waits.
+float sMovieHold = 0.f;
+constexpr float kMovieHoldMax = 5.f;
 
 // Pad, keyboard and the window's buttons all end here.
 void AnswerResume(bool yes) {
@@ -2543,7 +2547,25 @@ CIOWin::EMessageReturn CFrontEndUI::Update(float dt, CArchitectureQueue& queue) 
           } else if (x54_nextScreen == kS_AttractMovie) {
             CompleteStateTransition();
           } else if (x50_curScreen != x54_nextScreen) {
+#ifdef TARGET_PC
+            // 0.46.0 test 12: the timer is the transition movie's length in ticks, and the movie's
+            // own end (the check above) its last frame shown. Both end together on the GameCube; the
+            // port decodes the frames on the side worker's background lane, holding the shown one
+            // while the next is not ready, so on the Vita the movie ran behind its timer and the
+            // file-select->game movie was cut before its end. A movie still playing is waited
+            // for (the check above ends the transition at its last frame), for kMovieHoldMax at most.
+            const bool playing = xcc_curMoviePtr != nullptr && xcc_curMoviePtr->CanDrawVideo() &&
+                                 !xcc_curMoviePtr->IsLooping() && !xcc_curMoviePtr->GetIsMovieFinishedPlaying();
+            if (playing && sMovieHold < kMovieHoldMax) {
+              sMovieHold += dt;
+              SetFadeBlackTimer(1e-4f); // this check again next tick
+            } else {
+              sMovieHold = 0.f;
+              CompleteStateTransition();
+            }
+#else
             CompleteStateTransition();
+#endif
           }
         }
       }
@@ -2976,6 +2998,9 @@ void CFrontEndUI::StartStateTransition(EScreen screen) {
 }
 
 void CFrontEndUI::CompleteStateTransition() {
+#ifdef TARGET_PC
+  sMovieHold = 0.f;
+#endif
   EScreen oldScreen = x50_curScreen;
   x50_curScreen = x54_nextScreen;
 

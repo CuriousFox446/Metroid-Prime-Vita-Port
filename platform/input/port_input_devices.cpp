@@ -788,6 +788,16 @@ void PublishLocked(PortInput::UserBindings bindings) {
 void RefreshLocked() {
   const auto now = std::chrono::steady_clock::now();
   if (sUserLoaded && now - sUserChecked < std::chrono::seconds(1)) return;
+#if defined(__vita__)
+  // 0.46.0 test 11: the look at controls.toml's time once a second is a stat on the memory card, on
+  // the main thread before the ticks (PollPortActions' sources check comes first in the frame); with
+  // the card busy (the disc image's streamed music, an area loading) it took tens of ms and at worst
+  // hundreds ([zones] "input: the Port actions' sources check" up to 43 ms a frame over a window,
+  // [split] input 10 to 15 ms): a hitch every second. On the Vita the file changes only by this game
+  // (SetUserBindings publishes what it writes), so after the first load it is looked at again only
+  // while the Port menu is up.
+  if (sUserLoaded && !PortDebug::Visible()) return;
+#endif
   sUserChecked = now;
   if (!sUserLoaded) InstallKeyNames();
   const bool first = !sUserLoaded;

@@ -16,6 +16,24 @@
 #include "MetroidPrime/Cameras/CCameraManager.hpp"
 #include "MetroidPrime/Cameras/CFirstPersonCamera.hpp"
 #include "MetroidPrime/TCastTo.hpp"
+#include "port_profile.h"
+
+#include <dolphin/gx/GXExtra.h>
+
+#include <chrono>
+
+namespace {
+// The window CStateManager::Update opens around its entities' Think (PortSetAsyncWindow).
+bool sPortAsyncWindow = false;
+// Set when the side worker refused a step (no fourth core): every Think runs whole, as before.
+bool sPortNoWorker = false;
+// The explosions whose Think has its rest still to run, in the order their steps began.
+CExplosion* sPortPendingHead = nullptr;
+CExplosion* sPortPendingTail = nullptr;
+uint sPortStatStepped = 0;
+uint sPortStatWaited = 0;
+uint sPortStatWaitUs = 0;
+} // namespace
 #endif
 
 CExplosion::CExplosion(const TLockedToken< CGenDescription >& particle, TUniqueId uid, bool active,
@@ -65,9 +83,26 @@ CExplosion::CExplosion(const TLockedToken< CElectricDescription >& electric, TUn
   xe8_particleGen->SetModulationColor(color);
 }
 
-CExplosion::~CExplosion() {}
+CExplosion::~CExplosion() {
+#ifdef TARGET_PC
+  // A step still running reads the system: wait for it. The rest of its Think goes with it.
+  if (xPortStepJob != 0) {
+    while (!GXPortSideJobDone(xPortStepJob)) {
+      GXPortSideJobWait(xPortStepJob);
+    }
+    xPortStepJob = 0;
+  }
+  if (xPortTailPending) {
+    xPortTailPending = false;
+    PortUnlinkPending();
+  }
+#endif
+}
 
 void CExplosion::AddToRenderer(const CFrustumPlanes& frustum, const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  const_cast< CExplosion* >(this)->PortFinishStep();
+#endif
   if (GetPreRenderClipped()) {
     return;
   }
@@ -81,11 +116,17 @@ void CExplosion::AddToRenderer(const CFrustumPlanes& frustum, const CStateManage
 }
 
 void CExplosion::PreRender(CStateManager& mgr, const CFrustumPlanes& frustum) {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   CActor::PreRender(mgr, frustum);
   SetPreRenderClipped(!xf4_25_hasRenderBounds || !frustum.BoxInFrustumPlanes(GetRenderBoundsCached()));
 }
 
 void CExplosion::Think(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  PortFinishStep(); // one from before (one Think a tick is the rule, but the pass ends them)
+#endif
   if (GetTransformDirtySpare()) {
     xe8_particleGen->SetGlobalTranslation(GetTranslation());
     xe8_particleGen->SetOrientation(GetTransform().GetRotation());
@@ -93,7 +134,30 @@ void CExplosion::Think(float dt, CStateManager& mgr) {
   }
 #ifdef TARGET_PC
   // CExplosionMP1::Think (0xd0e300); the 15 s lifetime below still counts real time.
-  xe8_particleGen->Update(xPortFixedStep ? 1.0 / 60.0 : dt);
+  const double step = xPortFixedStep ? 1.0 / 60.0 : dt;
+  // 0.46.0 test 12: explosions (a pickup's flash, the Bombus' blasts, Thardus' rocks) were up to 6
+  // ms a frame of test 11's Think pass, nearly all the system's step. It goes to the side worker
+  // while the pass goes on, as the effects' did in test 11; the rest runs at the pass's end, or
+  // first when anything reaches the system sooner.
+  if (sPortAsyncWindow && !sPortNoWorker) {
+    xPortStepDt = step;
+    xPortTailDt = dt;
+    xPortTailMgr = &mgr;
+    xPortStepJob = GXPortSideJobSubmit(&CExplosion::PortStepJob, this);
+    if (xPortStepJob != 0) {
+      ++sPortStatStepped;
+      xPortTailPending = true;
+      PortLinkPending();
+      return;
+    }
+    sPortNoWorker = true;
+  }
+  xe8_particleGen->Update(step);
+  PortThinkTail(dt, mgr);
+}
+
+// What Think does after the system's step: as it was, from here.
+void CExplosion::PortThinkTail(float dt, CStateManager& mgr) {
 #else
   xe8_particleGen->Update(dt);
 #endif
@@ -141,12 +205,83 @@ void CExplosion::PortUpdateNestedLights(CStateManager& mgr) {
                            GetCurrentAreaId(), rstl::string_l("ExplodePHDR_") + GetDebugName(),
                            PortNestedLightSourceId(GetSourceId()), 1);
 }
+
+void CExplosion::SetActive(bool active) {
+  PortFinishStep();
+  CActor::SetActive(active);
+}
+
+void CExplosion::PortStepJob(void* data) {
+  PORT_ZONE_TIMED("explosion: particle system (side worker, core 3)");
+  CExplosion& explosion = *static_cast< CExplosion* >(data);
+  explosion.xe8_particleGen->Update(explosion.xPortStepDt);
+}
+
+void CExplosion::PortFinishStep() {
+  if (!xPortTailPending) {
+    return;
+  }
+  xPortTailPending = false;
+  PortUnlinkPending();
+  if (xPortStepJob != 0) {
+    if (!GXPortSideJobDone(xPortStepJob)) {
+      const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+      // Past the side jobs' limit (logged there) it waits again: the worker may still be stepping
+      // the system, which nothing may read meanwhile.
+      while (!GXPortSideJobDone(xPortStepJob)) {
+        GXPortSideJobWait(xPortStepJob);
+      }
+      ++sPortStatWaited;
+      sPortStatWaitUs += static_cast< uint >(
+          std::chrono::duration_cast< std::chrono::microseconds >(std::chrono::steady_clock::now() - start)
+              .count());
+    }
+    xPortStepJob = 0;
+  }
+  PortThinkTail(xPortTailDt, *xPortTailMgr);
+}
+
+void CExplosion::PortLinkPending() {
+  xPortNextPending = nullptr;
+  (sPortPendingTail != nullptr ? sPortPendingTail->xPortNextPending : sPortPendingHead) = this;
+  sPortPendingTail = this;
+}
+
+void CExplosion::PortUnlinkPending() {
+  CExplosion* prev = nullptr;
+  for (CExplosion* e = sPortPendingHead; e != nullptr; prev = e, e = e->xPortNextPending) {
+    if (e == this) {
+      (prev != nullptr ? prev->xPortNextPending : sPortPendingHead) = xPortNextPending;
+      if (sPortPendingTail == this) {
+        sPortPendingTail = prev;
+      }
+      xPortNextPending = nullptr;
+      return;
+    }
+  }
+}
+
+void CExplosion::PortSetAsyncWindow(bool open) { sPortAsyncWindow = open; }
+
+void CExplosion::PortFinishAll() {
+  while (sPortPendingHead != nullptr) {
+    sPortPendingHead->PortFinishStep();
+  }
+}
+
+void CExplosion::PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs) {
+  stepped = sPortStatStepped;
+  waited = sPortStatWaited;
+  waitUs = sPortStatWaitUs;
+  sPortStatStepped = sPortStatWaited = sPortStatWaitUs = 0;
+}
 #endif
 
 ENTITY_ACCEPT_IMPL(CExplosion)
 
 void CExplosion::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId sender, CStateManager& mgr) {
 #ifdef TARGET_PC
+  PortFinishStep();
   xPortNestedLights.Forward(msg, sender, GetUniqueId(), mgr);
 #endif
   switch (msg) {
@@ -192,6 +327,9 @@ void CExplosion::AcceptScriptMsg(EScriptObjectMessage msg, TUniqueId sender, CSt
 }
 
 void CExplosion::CalculateRenderBounds() {
+#ifdef TARGET_PC
+  PortFinishStep();
+#endif
   rstl::optional_object< CAABox > bounds = xe8_particleGen->GetBounds();
   if (bounds) {
     SetRenderBounds(*bounds);
@@ -204,6 +342,9 @@ void CExplosion::CalculateRenderBounds() {
 }
 
 void CExplosion::Render(const CStateManager& mgr) const {
+#ifdef TARGET_PC
+  const_cast< CExplosion* >(this)->PortFinishStep();
+#endif
   if (mgr.GetThermalDrawFlag() == kTD_Hot && xf4_24_renderThermalHot) {
     CElementGen::SetSubtractBlend(true);
     CCubeModel::SetRenderModelBlack(true);

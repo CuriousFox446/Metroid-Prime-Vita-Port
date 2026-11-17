@@ -4,7 +4,10 @@
 #include "thread.hpp"
 
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <pthread.h>
+
+#include <fmt/format.h>
 
 #include <algorithm>
 #include <array>
@@ -12,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 
 // The side worker's stack, for the game's per-thread statics (platform/include/port_thread_slot.h):
 // a stack pointer in [low, low + span) is the side worker's. Written by it before its first job.
@@ -52,6 +56,7 @@ constexpr auto kSleepSlice = std::chrono::milliseconds(4);
 struct Job {
   Fn fn = nullptr;
   void* data = nullptr;
+  bool ordered = false; // runs after every job before it has (the helper's, where two threads run them)
 };
 
 struct Worker {
@@ -63,6 +68,14 @@ struct Worker {
   std::mutex submitMutex; // submitters one at a time
   std::atomic<uint32_t> submitted{0};
   std::atomic<uint32_t> finished{0};
+  // The core 0 helper's (0.46.0 test 12): its jobs are claimed one by one, by it or by the FIFO
+  // processor while that waits (wait_helper), so they may end out of order: each slot keeps the
+  // number of the last job run in it, and `finished` moves on over those that have run in a row.
+  bool claiming = false;
+  std::atomic<uint32_t> claimed{0};
+  std::array<std::atomic<uint32_t>, kSlots> doneSeq{};
+  std::atomic<uint32_t> stolen{0};
+  std::atomic<uint64_t> stolenUs{0};
   // The worker sleeps on these while it has nothing to run, and a submitter wakes it through them
   // when it is asleep. Not std::atomic's wait on `submitted`: without a futex (newlib), libstdc++
   // parks every atomic's waiters on one of 16 condition variables picked by address. In 0.46.0
@@ -119,8 +132,64 @@ bool wait_until(Worker& w, const Ready& ready) noexcept {
   return ok;
 }
 
+// A claimed job run, on whichever thread claimed it, and its end counted: `finished` moves on over
+// every job that has run in a row from it.
+void run_claimed(Worker& w, uint32_t job) noexcept {
+  const Job j = w.ring[job % kSlots];
+  if (j.ordered) {
+    // After every job before it: the one the other thread runs, if any, is short.
+    while (!has_run(w, job - 1)) {
+      sceKernelDelayThread(20);
+    }
+  }
+  j.fn(j.data);
+  w.doneSeq[job % kSlots].store(job, std::memory_order_release);
+  uint32_t f = w.finished.load(std::memory_order_acquire);
+  while (w.doneSeq[(f + 1) % kSlots].load(std::memory_order_acquire) == f + 1) {
+    // seq_cst as below (has_run, wait_until): a waiter that counted itself sees this or is woken.
+    if (w.finished.compare_exchange_weak(f, f + 1, std::memory_order_seq_cst)) {
+      ++f;
+    }
+  }
+  if (w.waiters.load(std::memory_order_seq_cst) != 0) {
+    std::lock_guard lock{w.waitMutex};
+    w.cv.notify_all();
+  }
+}
+
+// The helper's loop: as run's, each job claimed first.
+void run_claiming(Worker& w) {
+  for (;;) {
+    uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+    if (c == w.submitted.load(std::memory_order_seq_cst)) {
+      std::unique_lock lock{w.sleepMutex};
+      w.sleeping.store(true, std::memory_order_seq_cst);
+      while (w.claimed.load(std::memory_order_seq_cst) == w.submitted.load(std::memory_order_seq_cst)) {
+        w.sleepCv.wait_for(lock, kSleepSlice);
+      }
+      w.sleeping.store(false, std::memory_order_relaxed);
+      continue;
+    }
+    if (!w.claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
+      continue;
+    }
+    const uint64_t start = now_us();
+    run_claimed(w, c + 1);
+    w.busyUs.fetch_add(now_us() - start, std::memory_order_relaxed);
+    w.jobs.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
 void* run(void* arg) {
   Worker& w = *static_cast<Worker*>(arg);
+  if (w.claiming) {
+    thread::set_current({.name = w.name,
+                         .priority = thread::Priority::High,
+                         .vitaCore = w.core,
+                         .vitaPriority = w.priority});
+    run_claiming(w);
+    return nullptr;
+  }
   if (w.sideStack) {
     // Every frame the jobs make lies below this one, in the stack's kStack bytes from about here
     // down: the range leaves out its last 16 KiB, which more than covers what started the thread.
@@ -163,7 +232,7 @@ void* run(void* arg) {
 
 // A worker thread on `core`; none on the fourth core without it open.
 Worker* start_worker(const char* name, int priority, int core, bool sideStack, std::atomic<Worker*>& slot,
-                     const char* what) noexcept {
+                     const char* what, bool claiming = false) noexcept {
   if (core == thread::kVitaSystemCore && !thread::vita_core3_available()) {
     return nullptr;
   }
@@ -172,6 +241,7 @@ Worker* start_worker(const char* name, int priority, int core, bool sideStack, s
   w->priority = priority;
   w->core = core;
   w->sideStack = sideStack;
+  w->claiming = claiming;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, kStack);
@@ -207,11 +277,13 @@ Worker* background_worker() noexcept {
 Worker* helper_worker() noexcept {
   static Worker* const started =
       start_worker("core 0 helper", kHelperPriority, kHelperCore, false, sHelper,
-                   "the FIFO processor's skinned calls' vertices, which its frame's end waits for");
+                   "the FIFO processor's skinned calls' vertices and long immediate draws, which its frame's end "
+                   "waits for, running those still unclaimed itself then",
+                   true);
   return started;
 }
 
-uint32_t submit_to(Worker* w, Fn fn, void* data) noexcept {
+uint32_t submit_to(Worker* w, Fn fn, void* data, bool ordered = false) noexcept {
   if (w == nullptr || fn == nullptr) {
     return 0;
   }
@@ -226,7 +298,7 @@ uint32_t submit_to(Worker* w, Fn fn, void* data) noexcept {
     }
     return 0;
   }
-  w->ring[job % kSlots] = {fn, data};
+  w->ring[job % kSlots] = {fn, data, ordered};
   w->submitted.store(job, std::memory_order_seq_cst);
   if (w->sleeping.load(std::memory_order_seq_cst)) {
     // Through the mutex: a worker between its check and its wait holds it, so this waits for the
@@ -278,16 +350,22 @@ void log_worker(Worker* w, const char* lane) noexcept {
   const uint32_t otherWaits = w->otherWaits.exchange(0, std::memory_order_relaxed);
   const uint64_t otherWaitUs = w->otherWaitUs.exchange(0, std::memory_order_relaxed);
   const uint32_t hangs = w->hangs.exchange(0, std::memory_order_relaxed);
+  const uint32_t stolen = w->stolen.exchange(0, std::memory_order_relaxed);
+  const uint64_t stolenUs = w->stolenUs.exchange(0, std::memory_order_relaxed);
   if (span == 0) {
     return;
   }
   const double seconds = static_cast<double>(span) / 1e6;
+  const std::string ranThere =
+      w->claiming ? fmt::format(", and ran {} of them itself while it waited ({:.1f} ms in all)", stolen,
+                                static_cast<double>(stolenUs) / 1000.0)
+                  : std::string{};
   Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core {}, busy {:.1f} ms a second ({:.0f}%); "
-           "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms), the other threads for {} "
+           "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms){}, the other threads for {} "
            "({:.1f} ms); {} hung",
            lane, seconds, jobs, jobs / seconds, w->core, static_cast<double>(busyUs) / 1000.0 / seconds,
            100.0 * static_cast<double>(busyUs) / static_cast<double>(span), fifoWaits,
-           static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, otherWaits,
+           static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, ranThere, otherWaits,
            static_cast<double>(otherWaitUs) / 1000.0, hangs);
 }
 } // namespace
@@ -304,14 +382,31 @@ bool done_background(uint32_t job) noexcept { return done_in(sBackground.load(st
 
 void wait_background(uint32_t job) noexcept { wait_in(sBackground.load(std::memory_order_acquire), job, false); }
 
-uint32_t submit_helper(Fn fn, void* data) noexcept { return submit_to(helper_worker(), fn, data); }
+uint32_t submit_helper(Fn fn, void* data, bool ordered) noexcept {
+  return submit_to(helper_worker(), fn, data, ordered);
+}
 
 bool done_helper(uint32_t job) noexcept { return done_in(sHelper.load(std::memory_order_acquire), job); }
 
 void wait_helper(uint32_t job) noexcept {
   Worker* const w = sHelper.load(std::memory_order_acquire);
-  // Past the limit (logged) it waits again: the job writes into the frame being recorded.
-  while (!done_in(w, job)) {
+  // 0.46.0 test 12: the jobs up to it the helper has not claimed yet run here first. Core 0 was
+  // full in the fights (the render worker a third of it, the helper up to 56%, the DVD worker above
+  // both), and the FIFO processor waited for the helper for up to half its time on the third core
+  // (test 11's Thardus fight: 5.9 s in 12.3 s, 20 ms a frame at its end).
+  while (w != nullptr && !done_in(w, job)) {
+    uint32_t c = w->claimed.load(std::memory_order_seq_cst);
+    if (static_cast<int32_t>(c - job) < 0) {
+      if (w->claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
+        const uint64_t start = now_us();
+        run_claimed(*w, c + 1);
+        w->stolen.fetch_add(1, std::memory_order_relaxed);
+        w->stolenUs.fetch_add(now_us() - start, std::memory_order_relaxed);
+      }
+      continue;
+    }
+    // The rest are the helper's: past the limit (logged) it waits again, as the job writes into the
+    // frame being recorded.
     wait_in(w, job, true);
   }
 }

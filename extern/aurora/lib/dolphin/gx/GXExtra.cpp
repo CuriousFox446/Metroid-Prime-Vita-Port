@@ -1186,7 +1186,11 @@ u32 GXPortGetGpuTimes(GXPortGpuTime*, u32, float* totalMs, float* spanMs) {
   }
   return 0;
 }
+
+void GXPortSetSwapInterval(u32 vblanks) { aurora::vita_gl::set_swap_interval(vblanks); }
 #else
+void GXPortSetSwapInterval(u32) {}
+
 void GXPortSetGpuTimes(GXBool on) { aurora::webgpu::gpu_prof::set_enabled(on != GX_FALSE); }
 
 GXBool GXPortGpuTimesSupported(void) { return aurora::webgpu::gpu_prof::supported() ? GX_TRUE : GX_FALSE; }

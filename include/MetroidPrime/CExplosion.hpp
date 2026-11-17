@@ -47,6 +47,17 @@ public:
   const CGenDescription* PortFaceReflectDesc() const;
   // A Remastered PART: Remastered builds no face light list, so its lights skip the face.
   bool PortIsRemastered() const;
+  // 0.46.0 test 12, as CScriptEffect's (test 11): while CStateManager's Think pass is open
+  // (PortSetAsyncWindow), Think sends its system's step to the side worker; the rest of Think (the
+  // light, the nested lights, the lifetime and the deletion checks) runs at the pass's end
+  // (PortFinishAll, after the effects'), or first when anything here reaches the system sooner
+  // (PortFinishStep). Code outside that reads xe8_particleGen does so on a new explosion (no step
+  // yet) or after the pass.
+  static void PortSetAsyncWindow(bool open);
+  static void PortFinishAll();
+  static void PortTakeStepStats(uint& stepped, uint& waited, uint& waitUs);
+  void PortFinishStep();
+  void SetActive(bool active) override;
 #endif
 
 #ifdef TARGET_PC
@@ -55,6 +66,16 @@ private:
   // CExplosionMP1 +0x254 bit 3 (ctor flag 0x10): Think steps the particles by a fixed 1/60 s.
   bool xPortFixedStep;
   void PortUpdateNestedLights(CStateManager& mgr);
+  static void PortStepJob(void* explosion);
+  void PortThinkTail(float dt, CStateManager& mgr);
+  void PortLinkPending();
+  void PortUnlinkPending();
+  uint xPortStepJob = 0;
+  bool xPortTailPending = false;
+  double xPortStepDt = 0.0; // the system's step
+  float xPortTailDt = 0.f; // Think's
+  CStateManager* xPortTailMgr = nullptr;
+  CExplosion* xPortNextPending = nullptr;
 #endif
 
 public:

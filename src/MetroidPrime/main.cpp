@@ -45,6 +45,7 @@
 #include "dolphin/os/OSMutex.h"
 #include "dolphin/pad.h"
 #include "dolphin/vi.h"
+#include <dolphin/gx/GXExtra.h>
 
 #include "Kyoto/Alloc/CMemory.hpp"
 #include "Kyoto/Audio/CDSPStreamManager.hpp"
@@ -75,6 +76,7 @@ extern bool PortSmokeFrame(unsigned frame);
 #include "Kyoto/Graphics/CGraphics.hpp"
 #include "Kyoto/Graphics/CTexture.hpp"
 #include "Kyoto/Particles/CElementGen.hpp"
+#include "MetroidPrime/CExplosion.hpp"
 #include "MetroidPrime/CParticleDatabase.hpp"
 #include "MetroidPrime/ScriptObjects/CScriptEffect.hpp"
 #include "Weapons/CProjectileWeapon.hpp"
@@ -1404,14 +1406,19 @@ int CMain::RsMain(int argc, const char* const* argv) {
               // 0.46.0 test 11: the effects' (CScriptEffect) likewise.
               uint effects, effectWaits, effectWaitUs;
               CScriptEffect::PortTakeStepStats(effects, effectWaits, effectWaitUs);
+              // 0.46.0 test 12: the explosions' (CExplosion) too.
+              uint blasts, blastWaits, blastWaitUs;
+              CExplosion::PortTakeStepStats(blasts, blastWaits, blastWaitUs);
               PortLog::Write("[particles] per frame: %.1f system steps (%.1f of systems with nothing to step), %.1f "
                              "particles updated, %.1f created; %.1f actors' updates stepped on the side worker, "
                              "%.1f waited for (%.2f ms); %.1f projectiles' effects stepped there, %.1f waited for "
-                             "(%.2f ms); %.1f effects' systems stepped there, %.1f waited for (%.2f ms)\n",
+                             "(%.2f ms); %.1f effects' systems stepped there, %.1f waited for (%.2f ms); %.1f "
+                             "explosions' systems stepped there, %.1f waited for (%.2f ms)\n",
                              steps / frames, idle / frames, particles / frames, created / frames, async / frames,
                              waited / frames, waitUs / 1000.0 / frames, shots / frames, shotWaits / frames,
                              shotWaitUs / 1000.0 / frames, effects / frames, effectWaits / frames,
-                             effectWaitUs / 1000.0 / frames);
+                             effectWaitUs / 1000.0 / frames, blasts / frames, blastWaits / frames,
+                             blastWaitUs / 1000.0 / frames);
             }
             {
               // 0.42.0 test 22: MusyX's lock, which the mixer held through its whole mix and every
@@ -1442,6 +1449,15 @@ int CMain::RsMain(int argc, const char* const* argv) {
       aurora::phase::set(aurora::phase::Main, "frame pacing");
       // 60 under the 60 FPS cap, else the FPS cap setting (0 = unlimited).
       const int frameRateCap = PortDebug::FrameRateCap();
+#if defined(__vita__)
+      // 0.46.0 test 12, frame pacing: a cap that divides 60 (30 the lowest the setting takes) holds
+      // each frame that many vblanks (vitaGL's swap interval), so frames under it come evenly: at 30,
+      // every frame up two vblanks and two ticks, where vsync alone gives a frame two vblanks, the
+      // next three. The deadline below stays as it was.
+      GXPortSetSwapInterval(frameRateCap > 0 && frameRateCap < 60 && 60 % frameRateCap == 0
+                                ? static_cast< u32 >(60 / frameRateCap)
+                                : 1u);
+#endif
       if (frameRateCap > 0 && !PortDebug::Turbo()) {
         const uint64_t framePeriodNs = 1000000000ull / static_cast< uint64_t >(frameRateCap);
         nextFrameDeadline += framePeriodNs;

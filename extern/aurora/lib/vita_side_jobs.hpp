@@ -30,8 +30,11 @@ void wait_background(uint32_t job) noexcept;
 // The core 0 helper (0.46.0 test 4): a thread on the first core, beside the render worker (core 0
 // had half its time free), for the FIFO processor's own work that each draw does apart (a skinned
 // call's vertices), which the FIFO processor waits for by its frame's end. Its own numbers too.
-// Its wait does not give up: a job writes into the frame being recorded.
-uint32_t submit_helper(Fn fn, void* data) noexcept;
+// Its wait does not give up: a job writes into the frame being recorded. Since 0.46.0 test 12 the
+// FIFO processor runs the jobs up to the one it waits for that the helper has not taken yet, so two
+// threads may run them at once: a job must not share scratch with another, and an `ordered` one
+// runs only once every job before it has.
+uint32_t submit_helper(Fn fn, void* data, bool ordered = false) noexcept;
 bool done_helper(uint32_t job) noexcept;
 void wait_helper(uint32_t job) noexcept;
 // The log's [side jobs] lines: what each worker ran and who waited for it, since the last lines.

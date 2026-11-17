@@ -76,6 +76,9 @@ float sTickPeriod = 1.f / 60.f;
 uint64_t sTimingWallNs = 0;
 uint64_t sTimingWallLastNs = 0;
 unsigned sTimingFrames = 0, sTimingTicks = 0;
+// The presented frames by the ticks each ran (0 to 3, then 4 or more), for the [timing] line: an
+// even frame rate runs the same count every frame (Vita 0.46.0 test 12, frame pacing).
+unsigned sTicksPerFrame[5] = {};
 // Every iteration of the window, presented or not, its slowest and how many overran
 // a 60 Hz period; published as sFrameWork.
 int sWorkIterations = 0, sWorkSlow = 0;
@@ -313,7 +316,10 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
   sMainLoopRan = true;
   sTimingNs += durationNs;
   sTimingTicks += ticks;
-  if (presented) ++sTimingFrames;
+  if (presented) {
+    ++sTimingFrames;
+    ++sTicksPerFrame[std::min(ticks, 4u)];
+  }
   {
     // MP_SLOW_FRAME_MS=<ms>: log every iteration whose work took longer, to tie a
     // hitch to what happened then (logcat on Android).
@@ -353,9 +359,12 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     // whenever the cap or vsync left the loop idle.
     sActualTps = sTimingTicks / (wallSeconds > 0.0 ? wallSeconds : seconds);
     if (sTraceTiming) {
-      PortLog::Write("[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%d\n",
-                     sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? 60 : sFpsCap);
+      PortLog::Write("[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%d; frames by "
+                     "ticks: 0 %u, 1 %u, 2 %u, 3 %u, 4+ %u\n",
+                     sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? 60 : sFpsCap, sTicksPerFrame[0],
+                     sTicksPerFrame[1], sTicksPerFrame[2], sTicksPerFrame[3], sTicksPerFrame[4]);
     }
+    std::fill(std::begin(sTicksPerFrame), std::end(sTicksPerFrame), 0u);
     UpdateDynamicRes(sActualFps, sTimingFrames);
     sFrameWork.frames = sWorkIterations;
     sFrameWork.avgMs = sWorkIterations > 0 ? static_cast< float >(sTimingNs) / 1e6f / sWorkIterations : 0.f;

@@ -205,6 +205,9 @@ void GXPortSetGpuTimes(GXBool on);
 // returns how many there are; the totals are the sum of all passes and first begin to last end.
 GXBool GXPortGpuTimesSupported(void);
 u32 GXPortGetGpuTimes(GXPortGpuTime* out, u32 max, float* totalMs, float* spanMs);
+// PS Vita (0.46.0 test 12): the display's vblanks each frame stays up at least (vitaGL's swap
+// interval: 1 by default, 2 for an even 30 FPS). Nothing elsewhere.
+void GXPortSetSwapInterval(u32 vblanks);
 u32 GXGetPBRCostTest(void);
 // Aurora extension: a three-piece tone curve over the lit colour x, which is taken as
 // already exposed (see GX_AURORA_SET_PBR_TONE). Row 0 is the toe, (a x + b) x^2 + c x below

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -2224,13 +2225,22 @@ std::array<u32, kHelperFills> sHelperFillJobs{};
 size_t sNextHelperFill = 0;
 u32 sLastHelperJob = 0;
 bool sNoHelper = false;
-// The helper's own posed pairs (sPosed is the FIFO processor's).
-std::vector<PosedVertex> sHelperPosed;
+// The helper's jobs' posed pairs (sPosed is the FIFO processor's own path's). Two: since 0.46.0
+// test 12 the FIFO processor runs jobs the helper has not taken while it waits for them
+// (side_jobs::wait_helper), so two fills may run at once, each with one of these.
+std::vector<PosedVertex> sHelperPosed[2];
+std::atomic<bool> sHelperPosedTaken{false};
 
 void run_helper_fill(void* data) {
   const SkinnedFill& f = *static_cast<const SkinnedFill*>(data);
-  pose_skinned(f, sHelperPosed);
-  write_skinned(f, sHelperPosed);
+  // The first if it is free; else the other thread has it, and the second is free (two threads).
+  const bool second = sHelperPosedTaken.exchange(true, std::memory_order_acquire);
+  std::vector<PosedVertex>& posed = sHelperPosed[second ? 1 : 0];
+  pose_skinned(f, posed);
+  write_skinned(f, posed);
+  if (!second) {
+    sHelperPosedTaken.store(false, std::memory_order_release);
+  }
 }
 
 // The fill sent to the helper (false: none, the caller fills it).
@@ -2986,8 +2996,9 @@ bool defer_draw_sync(u16 token) noexcept {
     sStageUsed = 0;
     return false;
   }
-  const u32 job =
-      side_jobs::submit_helper(&publish_draw_sync, reinterpret_cast<void*>(static_cast<uintptr_t>(token)));
+  // Ordered: after every call before it, wherever each ran (the FIFO processor runs some itself).
+  const u32 job = side_jobs::submit_helper(&publish_draw_sync,
+                                           reinterpret_cast<void*>(static_cast<uintptr_t>(token)), true);
   if (job == 0) {
     finish_helper_jobs();
     return false;

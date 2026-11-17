@@ -3478,3 +3478,104 @@ What to look for in test 11: `SM: Think` against test 9's 2.3 ms a tick where ef
 `[particles]` effects count and its waits (few, short), and effects looking as before (steam, sparks,
 lava bubbles, waterfalls). And the new HUD and input zones, which name the next targets.
 
+
+### Test 11 result
+
+`~/logs/t046_11.log` (3d754c5, 703 windows: a save loaded in Phendrana, the Scatter Bombus
+(`CAtomicAlpha`), Quarantine Cave and the Thardus fight, the Spider Ball, then the elevator) ended
+in a crash after the fight. The user also named slow moments: the save station animation, picking up
+health and missiles, and enemies with electric attacks. They asked for frame pacing to be checked,
+and for the animation after choosing a save file, which is cut before its end.
+
+**The crash** (`~/crash/dumps/t046_11.psp2dmp`): a data abort in SceLibKernel's heap code on the
+render worker, in `glBufferData` (`gpu_alloc_mapped_aligned_for_gpu`). The cause is in vitaGL
+(e119b3e).
+- `gpu_free_texture_data` frees a texture's memory at once when no draw has sampled it for 4 frames
+  (`FRAME_PURGE_FREQ`), or ever since it was made (`last_frame` is `OBJ_NOT_USED` after each
+  allocation). Otherwise it marks it for the garbage collector, 4 frames on.
+- A draw *into* a texture through its framebuffer does not count as a use.
+- A copy surface (`Texture::target`) was made again in place at another size (`glTexImage2D`), or
+  deleted with its copy texture, soon after a copy into it and before any draw sampled it. Its memory
+  went back to the heap while that copy's scene, still to run on the GPU, wrote into it. The heap's
+  bookkeeping lives in its free blocks, so it broke.
+- 0.42.0 test 10's crash was the same kind (a GPU transfer into a moved mip chain).
+- The fight's copies were the heaviest of the run: the thermal visor, 300 to 450 Mpix a report.
+
+**The slow moments.**
+- The save station (Samus appearing after the load) is the session's warm-up: programs still
+  loading, vitaGL compiling fixed-function shaders of its own (145 ms each, 8 in the run), then
+  GPU-bound (the swap 51 ms a present).
+- Pickups and the Bombus' blasts: GPU-bound at their worst (the swap 79 ms, 316 immediate draws and
+  1.4 MiB of their vertices a present). Explosions (`CExplosion`, a pickup's flash among them) were
+  3 to 6 ms a frame of the Think pass.
+- The core 0 helper was the FIFO side's limit in the heavy rooms. In the fight it was 44 to 56% busy
+  (7.4 M immediate vertices in 13.5 s, the snow's and the particles'). Core 0 was full (the render
+  worker 36%, the DVD worker above both). The FIFO processor waited for the helper 4 to 6 s in each
+  12 s report, ~20 ms a frame at its end.
+- The GPU was busy 22 to 52 ms a frame throughout Phendrana and the fight.
+
+**Frame pacing.** 18 stalls over 250 ms (`MP stall`). Ten of them were the frame's input part, 161
+to 444 ms. That part was `PollPortActions`' sources check: `[zones] input: the Port actions' sources
+check` reached 43 ms a frame over a window, and `[split] input` was 10 to 15 ms. Inside it,
+`UserBindingsVersion` looks at controls.toml's time once a second: a stat on the memory card, on the
+main thread, which waits behind the disc image's streamed music and the area loads. The rest were
+area loads (`TravelToArea`, 0.3 to 1 s) and the warm-up's draws.
+
+**The save-select cut.** The file-select->game movie ends its transition at its last frame, and a
+timer of the movie's length (in ticks) ends it too. The port decodes the movie's frames on the
+background lane and holds the shown frame while the next is not ready. On the Vita the movie ran
+behind its timer, and the timer won.
+
+## 0.46.0 test 12: the copy surfaces kept, the card's stat, the helper's backlog shared
+
+**The copy surfaces** (`vita_gl.cpp`).
+- A copy surface is never made again in place. One the LRU lets go, and every surface of a copy
+  texture that goes, is kept for `kSurfaceKeptFrames` (8) presents, then deleted after the swap
+  (`delete_kept_surfaces`).
+- Meanwhile a copy at its size takes it again (`take_kept_surface`) instead of making one: this
+  also saves the render-target remakes the fight's churn cost.
+- The `presents` line adds the surfaces made, taken again, let go, deleted and kept.
+
+**The card's stat** (`RefreshLocked`, `port_input_devices.cpp`). On the Vita, controls.toml is looked
+at again after its first load only while the Port menu is up. Only this game writes it there, and
+`SetUserBindings` publishes what it writes.
+
+**The helper's backlog shared** (`vita_side_jobs.cpp`).
+- The core 0 helper's jobs are claimed one by one. While the FIFO processor waits for one
+  (`wait_helper`: the frame's end, a full ring slot, a template), it runs the jobs up to it that the
+  helper has not taken.
+- A job's end is counted per slot. `finished` moves over the jobs that have run in a row, so "done"
+  still means every job up to it.
+- The draw sync token's publish job is `ordered`: it runs only after every job before it, wherever
+  they ran.
+- Two fills may run at once, so the helper's posed pairs are two (`sHelperPosed`).
+- The `[side jobs] core 0 helper` line adds the jobs the FIFO processor ran itself and their time.
+
+**The explosions** (`CExplosion`): as test 11's effects.
+- Think sends the system's step to the side worker while the pass goes on. The rest (the light, the
+  nested lights, the lifetime and deletion checks) runs at the pass's end (`PortFinishAll`, after
+  the effects') or sooner (`PortFinishStep`: a message, `SetActive`, `PreRender`, `AddToRenderer`,
+  `Render`, `CalculateRenderBounds`).
+- The fixed 1/60 s step of a Remastered flag-0x10 explosion stays a double, as before.
+- `[particles]` adds the explosions' steps and waits.
+
+**The save-select cut** (`CFrontEndUI::Update`). When the timer runs out while the transition's
+movie still plays (not looping, its last frame not shown), the transition waits for that last frame,
+up to 5 s more.
+
+**Frame pacing.**
+- The `presents` line counts the presents by the vblanks between them: 1 or less, 2, 3, 4, 5 or
+  more.
+- `[timing]` counts the presented frames by the ticks each ran.
+- A frame-rate cap that divides 60 sets vitaGL's swap interval (`GXPortSetSwapInterval`, applied
+  before the swap). The Port menu's lowest is 30 (the 60 FPS cap off, the FPS cap 30): every frame
+  then stays up two vblanks and runs two ticks.
+- The default is unchanged (60, interval 1).
+
+What to look for in test 12:
+- No crash after heavy copies.
+- No `MP stall` with a large input part.
+- `[side jobs] core 0 helper`: the FIFO processor's waits down, and the jobs it ran itself.
+- `SM: Think` down where explosions are many.
+- The save-select movie playing to its end.
+- The pacing counts, at the default and, if the user wants to try it, at the 30 cap.
