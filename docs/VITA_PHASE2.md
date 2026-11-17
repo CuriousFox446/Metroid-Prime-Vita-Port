@@ -3753,3 +3753,49 @@ What to look for in test 16:
   jobs.
 - The Triclops room and other particle-heavy fights against test 15.
 - Effects, particles and projectiles looking as before.
+
+### Test 16 result
+
+`~/logs/t046_16.log` (950d0e5, 11.5 minutes in Phendrana, mostly the Sheegoth rooms): a clean exit.
+Side worker 2 started on core 0 at priority 159.
+- **Slower, not faster.** The Sheegoth rooms ran at 12.0 FPS (median of 263 windows), against 15.5 to
+  18.3 in tests 7 to 10. That was 4.7 ticks a frame of 11.6 ms each, where tests 7 to 10 had 3.2 to 3.8
+  ticks of 9.4 to 9.8 ms. SM: Think took 5.6 ms a tick (3.2 to 3.5 before).
+- The difference is waiting. The game thread waited for the particle steps 10.9 ms a frame there
+  (tests 7 to 10: 0.25 to 0.47 ms; `~/tools/pwaits.py`). It waited about once a frame, but 5 to 7 ms
+  each time: the effects' steps 7.5 ms a frame over 1.1 waits, the projectiles' 2.5 ms over 0.5.
+- The `[side jobs]` lines: side worker 2 was busy only 4 to 10% of core 0. Even so, the game thread
+  waited for it 1.4 to 2.4 s in each 13 to 21 s report, about 3 ms a wait. For the fourth core's
+  worker it waited 0.2 s. Below the core 0 helper (158, 28% busy in bursts for the FIFO processor),
+  the second worker waited for its core while the game thread waited for it.
+- The GPU cost test ran three times in a snowy room: 1130 to 1160 draws a frame, about 670 of them
+  immediate, 690 blended, 10 to 29 alpha-tested, 48 skinned and 420 display lists.
+  - Every phase took 80 to 96 ms a frame, even with no draws (81 ms). The room is the game thread's.
+  - The GPU took 27 to 44 ms a frame. With every draw kept to one pixel it took 9 to 10 ms, and with no
+    draws 3.5 to 4.8. So about two thirds of its time is pixels.
+  - No blended draws saved 15 to 26 ms. No alpha-tested ones saved 8 to 17 ms, from only 10 to 29 draws,
+    as in test 15. No immediate ones saved 8 to 19 ms. The first run's scene drifted (33%).
+
+## 0.46.0 test 17: the game thread runs the particle steps it waits for
+
+**The game thread runs the steps it would wait for** (`vita_side_jobs.cpp`, `wait_game`). Both side
+workers now claim their jobs one by one, as the core 0 helper does.
+- When the game thread waits for a particle step that no worker has taken yet, it runs the queued steps
+  up to that one itself, in order.
+- A step a worker has begun, it waits for.
+- The fourth core's skinning jobs (`GXPortSideJobSubmit`) stay that worker's: the game thread waits
+  until the worker takes one, then goes on.
+- The steps it runs use the game thread's per-thread slot, as they did before the side workers. A wait
+  inside one of them only waits.
+
+**Side worker 2 at priority 157**, above the core 0 helper. The game thread waits for its jobs within
+the tick. The FIFO processor runs the helper's unclaimed jobs itself while it waits.
+
+The side workers' `[side jobs]` lines end with "and the game thread ran N of them itself while it
+waited". Their "other threads" figure now counts only the time spent waiting. The `[particles]` line's
+"waited for" figures include the steps the game thread ran.
+
+What to look for in test 17:
+- The Sheegoth rooms against test 16's 12 FPS and tests 7 to 10's 15.5 to 18.3.
+- The `[particles]` waits and the `[side jobs]` lines.
+- Particles, effects and projectiles looking as before.

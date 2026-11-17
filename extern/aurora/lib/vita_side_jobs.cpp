@@ -49,12 +49,15 @@ constexpr int kBackgroundPriority = 130;
 // the fights), whose present the FIFO processor's frame feeds; below the DVD worker (112).
 constexpr int kHelperPriority = 158;
 constexpr int kHelperCore = 0;
-// The second side worker's (0.46.0 test 16): on the first core, below its helper and above the render
-// worker. In test 15's Triclops room the game thread waited for the side worker's particle steps
-// 2 s in 17 (7 ms a frame) while the fourth core, the mixer's too, ran them one by one, and the
-// first and third cores were half idle. The steps are each object's own, in no order, so either
-// worker takes one (submit_any).
-constexpr int kSecondPriority = 159;
+// The second side worker's (0.46.0 test 16): on the first core, above the render worker. In test 15's
+// Triclops room the game thread waited for the side worker's particle steps 2 s in 17 (7 ms a frame)
+// while the fourth core, the mixer's too, ran them one by one, and the first and third cores were
+// half idle. The steps are each object's own, in no order, so either worker takes one (submit_any).
+// Test 16 had it below the helper (159), and in Phendrana's Sheegoth rooms the game thread waited for
+// it 5 to 7 ms at a time (1.9 s in 21, against 0.2 s for the fourth core's): the helper's bursts for
+// the FIFO processor held it off its core. Since test 17 it is above the helper: the game thread waits
+// for its jobs within the tick, and the FIFO processor runs the helper's unclaimed jobs itself.
+constexpr int kSecondPriority = 157;
 constexpr int kSecondCore = 0;
 // A second worker's job number: its own, with this bit (job numbers stay far below it).
 constexpr uint32_t kSecondTag = 1u << 31;
@@ -68,7 +71,8 @@ constexpr auto kSleepSlice = std::chrono::milliseconds(4);
 struct Job {
   Fn fn = nullptr;
   void* data = nullptr;
-  bool ordered = false; // runs after every job before it has (the helper's, where two threads run them)
+  bool ordered = false;   // runs after every job before it has (the helper's, where two threads run them)
+  bool stealable = false; // submit_any's: the game thread may run it while it waits (wait_game)
 };
 
 struct Worker {
@@ -84,6 +88,8 @@ struct Worker {
   // The core 0 helper's (0.46.0 test 12): its jobs are claimed one by one, by it or by the FIFO
   // processor while that waits (wait_helper), so they may end out of order: each slot keeps the
   // number of the last job run in it, and `finished` moves on over those that have run in a row.
+  // The side workers' too since 0.46.0 test 17, whose stealable jobs the game thread claims while it
+  // waits (wait_game).
   bool claiming = false;
   std::atomic<uint32_t> claimed{0};
   std::array<std::atomic<uint32_t>, kSlots> doneSeq{};
@@ -200,14 +206,6 @@ void run_claiming(Worker& w) {
 
 void* run(void* arg) {
   Worker& w = *static_cast<Worker*>(arg);
-  if (w.claiming) {
-    thread::set_current({.name = w.name,
-                         .priority = thread::Priority::High,
-                         .vitaCore = w.core,
-                         .vitaPriority = w.priority});
-    run_claiming(w);
-    return nullptr;
-  }
   if (w.sideStack) {
     // Every frame the jobs make lies below this one, in the stack's kStack bytes from about here
     // down: the range leaves out its last 16 KiB, which more than covers what started the thread.
@@ -220,6 +218,10 @@ void* run(void* arg) {
                        .priority = thread::Priority::High,
                        .vitaCore = w.core,
                        .vitaPriority = w.priority});
+  if (w.claiming) {
+    run_claiming(w);
+    return nullptr;
+  }
   uint32_t next = 1;
   for (;;) {
     if (w.submitted.load(std::memory_order_acquire) == next - 1) {
@@ -283,14 +285,16 @@ Worker* side_worker() noexcept {
   static Worker* const started =
       start_worker("side worker", kPriority, thread::kVitaSystemCore, true, sWorker,
                    "CPU skinning, which the FIFO processor waits for where a model's draws begin; the actors' "
-                   "and the projectiles' particle steps, which the game thread finishes later in the tick");
+                   "and the projectiles' particle steps, which the game thread finishes later in the tick, "
+                   "running those still untaken itself then",
+                   true);
   return started;
 }
 
 Worker* second_worker() noexcept {
   static Worker* const started =
       start_worker("side worker 2", kSecondPriority, kSecondCore, true, sSecond,
-                   "particle steps beside the fourth core's side worker, whichever has fewer queued", false, 2);
+                   "particle steps beside the fourth core's side worker, whichever has fewer queued", true, 2);
   return started;
 }
 
@@ -309,7 +313,7 @@ Worker* helper_worker() noexcept {
   return started;
 }
 
-uint32_t submit_to(Worker* w, Fn fn, void* data, bool ordered = false) noexcept {
+uint32_t submit_to(Worker* w, Fn fn, void* data, bool ordered = false, bool stealable = false) noexcept {
   if (w == nullptr || fn == nullptr) {
     return 0;
   }
@@ -324,7 +328,7 @@ uint32_t submit_to(Worker* w, Fn fn, void* data, bool ordered = false) noexcept 
     }
     return 0;
   }
-  w->ring[job % kSlots] = {fn, data, ordered};
+  w->ring[job % kSlots] = {fn, data, ordered, stealable};
   w->submitted.store(job, std::memory_order_seq_cst);
   if (w->sleeping.load(std::memory_order_seq_cst)) {
     // Through the mutex: a worker between its check and its wait holds it, so this waits for the
@@ -361,6 +365,61 @@ void wait_in(Worker* w, uint32_t job, bool fifo) noexcept {
   }
 }
 
+// The game thread: the thread of the first submit_any (the particle steps, which only it queues).
+std::atomic<SceUID> sGameThread{0};
+// The game thread's own: it is running a job in wait_game, whose own waits only wait.
+bool sGameStealing = false;
+
+// The game thread's wait for a side worker's job (0.46.0 test 17): the stealable jobs up to it that
+// no worker has taken yet run here, in their order, as the FIFO processor does with the helper's
+// (wait_helper). In test 16's Sheegoth rooms the game thread waited for the particle steps 11 ms a
+// frame, 5 to 7 ms at a time, for jobs the second worker had not begun. A job the worker has taken
+// it waits for, and one of the worker's own kind (a skinned model's vertices, submit's) it leaves to
+// the worker: it waits till that is taken, then goes on. The jobs it runs use its per-thread slot
+// (port_thread_slot.h), as they did before the side workers.
+void wait_game(Worker& w, uint32_t job) noexcept {
+  const uint64_t start = now_us();
+  uint64_t ranUs = 0;
+  bool waited = false;
+  bool ok = true;
+  sGameStealing = true;
+  while (!has_run(w, job)) {
+    uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+    if (static_cast<int32_t>(c - job) < 0) {
+      // Job c + 1 was queued before `job` was: its slot holds it till it has run.
+      if (w.ring[(c + 1) % kSlots].stealable) {
+        if (w.claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
+          const uint64_t ranStart = now_us();
+          run_claimed(w, c + 1);
+          const uint64_t took = now_us() - ranStart;
+          ranUs += took;
+          w.stolen.fetch_add(1, std::memory_order_relaxed);
+          w.stolenUs.fetch_add(took, std::memory_order_relaxed);
+        }
+        continue;
+      }
+      waited = true;
+      ok = wait_until(w, [&] { return has_run(w, job) || w.claimed.load(std::memory_order_seq_cst) != c; });
+    } else {
+      waited = true;
+      ok = wait_until(w, [&] { return has_run(w, job); });
+    }
+    if (!ok) {
+      break;
+    }
+  }
+  sGameStealing = false;
+  if (waited) {
+    const uint64_t spent = now_us() - start;
+    w.otherWaits.fetch_add(1, std::memory_order_relaxed);
+    w.otherWaitUs.fetch_add(spent > ranUs ? spent - ranUs : 0, std::memory_order_relaxed);
+  }
+  if (!ok && w.hangs.fetch_add(1, std::memory_order_relaxed) == 0) {
+    Log.error("{}: job {} has not run after {} ms (the worker has run {}): going on without it", w.name, job,
+              kWaitLimitUs / 1000, w.finished.load(std::memory_order_relaxed));
+  }
+}
+
 void log_worker(Worker* w, const char* lane) noexcept {
   if (w == nullptr) {
     return;
@@ -382,23 +441,33 @@ void log_worker(Worker* w, const char* lane) noexcept {
     return;
   }
   const double seconds = static_cast<double>(span) / 1e6;
-  const std::string ranThere =
-      w->claiming ? fmt::format(", and ran {} of them itself while it waited ({:.1f} ms in all)", stolen,
-                                static_cast<double>(stolenUs) / 1000.0)
-                  : std::string{};
+  // Who runs a claiming worker's jobs while waiting: the FIFO processor the helper's, the game thread
+  // the side workers' (0.46.0 test 17; its waits then count only the time it did not run any).
+  const bool gameRuns = w->claiming && w->sideStack;
+  const std::string fifoRan =
+      w->claiming && !gameRuns ? fmt::format(", and ran {} of them itself while it waited ({:.1f} ms in all)", stolen,
+                                             static_cast<double>(stolenUs) / 1000.0)
+                               : std::string{};
+  const std::string gameRan =
+      gameRuns ? fmt::format(", and the game thread ran {} of them itself while it waited ({:.1f} ms in all)", stolen,
+                             static_cast<double>(stolenUs) / 1000.0)
+               : std::string{};
   Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core {}, busy {:.1f} ms a second ({:.0f}%); "
            "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms){}, the other threads for {} "
-           "({:.1f} ms); {} hung",
+           "({:.1f} ms){}; {} hung",
            lane, seconds, jobs, jobs / seconds, w->core, static_cast<double>(busyUs) / 1000.0 / seconds,
            100.0 * static_cast<double>(busyUs) / static_cast<double>(span), fifoWaits,
-           static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, ranThere, otherWaits,
-           static_cast<double>(otherWaitUs) / 1000.0, hangs);
+           static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, fifoRan, otherWaits,
+           static_cast<double>(otherWaitUs) / 1000.0, gameRan, hangs);
 }
 } // namespace
 
 uint32_t submit(Fn fn, void* data) noexcept { return submit_to(side_worker(), fn, data); }
 
 uint32_t submit_any(Fn fn, void* data) noexcept {
+  if (sGameThread.load(std::memory_order_relaxed) == 0) {
+    sGameThread.store(sceKernelGetThreadId(), std::memory_order_relaxed);
+  }
   Worker* const first = side_worker();
   Worker* const second = second_worker();
   const auto queued = [](const Worker* w) {
@@ -406,12 +475,12 @@ uint32_t submit_any(Fn fn, void* data) noexcept {
   };
   // The one with fewer jobs queued; the fourth core's on a tie (or alone).
   if (second != nullptr && (first == nullptr || queued(second) < queued(first))) {
-    const uint32_t job = submit_to(second, fn, data);
+    const uint32_t job = submit_to(second, fn, data, false, true);
     if (job != 0) {
       return job | kSecondTag;
     }
   }
-  return submit_to(first, fn, data);
+  return submit_to(first, fn, data, false, true);
 }
 
 bool done(uint32_t job) noexcept {
@@ -422,11 +491,19 @@ bool done(uint32_t job) noexcept {
 }
 
 void wait(uint32_t job, bool fifo) noexcept {
-  if ((job & kSecondTag) != 0) {
-    wait_in(sSecond.load(std::memory_order_acquire), job & ~kSecondTag, fifo);
+  Worker* const w = (job & kSecondTag) != 0 ? sSecond.load(std::memory_order_acquire)
+                                             : sWorker.load(std::memory_order_acquire);
+  const uint32_t own = job & ~kSecondTag;
+  // The game thread runs what it can (wait_game); not inside a job it runs there, nor any other thread
+  // (the FIFO processor: the jobs' per-thread slot 0 is the game thread's).
+  if (!fifo && w != nullptr && w->claiming && own != 0 &&
+      sceKernelGetThreadId() == sGameThread.load(std::memory_order_relaxed) && !sGameStealing) {
+    if (!has_run(*w, own)) {
+      wait_game(*w, own);
+    }
     return;
   }
-  wait_in(sWorker.load(std::memory_order_acquire), job, fifo);
+  wait_in(w, own, fifo);
 }
 
 uint32_t submit_background(Fn fn, void* data) noexcept { return submit_to(background_worker(), fn, data); }

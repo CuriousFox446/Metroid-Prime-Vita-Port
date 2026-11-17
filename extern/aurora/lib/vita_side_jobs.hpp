@@ -2,8 +2,8 @@
 
 // The PS Vita's side worker (0.42.0 test 18): one thread on the fourth core, the system's own, which
 // the CapUnlocker plugin opens to games. The game thread hands it work whose results it does not
-// read itself (a skinned model's vertices: only the FIFO processor reads those), and the jobs run one
-// at a time, in the order they came. The FIFO processor waits for a job where the FIFO says to
+// read itself (a skinned model's vertices: only the FIFO processor reads those), and the worker runs
+// them one at a time, in the order they came. The FIFO processor waits for a job where the FIFO says to
 // (GX_AURORA_PORT_SIDE_JOB_FENCE), the game thread where it must (a display list being recorded).
 // Without the fourth core there is no worker: submit returns 0 and the caller does the work itself.
 // The public face is GXPortSideJob* (dolphin/gx/GXExtra.h).
@@ -23,7 +23,9 @@ uint32_t submit_any(Fn fn, void* data) noexcept;
 // Whether the job has run (true for 0, no job).
 bool done(uint32_t job) noexcept;
 // Waits until the job has run, at most half a second (a hang, which is logged, then let go).
-// `fifo`: the FIFO processor's wait, which the log counts apart from the others.
+// `fifo`: the FIFO processor's wait, which the log counts apart from the others. Since 0.46.0 test
+// 17 the game thread's wait runs submit_any's jobs up to this one that no worker has taken yet (the
+// workers' own jobs, submit's, it leaves to them), so a side worker's jobs may end out of order.
 void wait(uint32_t job, bool fifo) noexcept;
 // The background lane (0.42.0 test 23): a second thread on the fourth core, below MusyX's mixer, for
 // long jobs nobody waits for soon (a movie frame's decode). Its own numbers: a job of one lane means
