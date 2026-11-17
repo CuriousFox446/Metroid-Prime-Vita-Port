@@ -3627,3 +3627,39 @@ another format, so it deletes them once: the first start rebuilds every program,
 builds keep them.
 
 The new test 13 is that rollback, staged under the same name.
+
+## 0.46.0 test 14: the textures' levels, and a GPU cost test
+
+Test 12's heavy scenes were the GPU's: busy 40 to 52 ms a frame in Phendrana and the Thardus fight.
+Its reports put no single thing behind it. The heaviest frames had tiny EFB copies (7 kpixels a frame)
+and 290 to 460 blended and 110 to 190 immediate draws. In light frames the clock reads high: a frame
+of one draw read 8 to 10 ms, the display callback's vblank wait among it.
+
+**The textures' levels** (`gfx/texture.cpp`, `make_vita_texture`; `vita_gl.cpp`, `Texture`).
+- Since 0.42.0 test 11 a CMPR texture's Vita copy has had its mip levels (down to 16x16). Every other
+  GX format (I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, the palette formats) had its first level alone.
+- The game's mipmapped filters then sampled that one level as their plain ones. A far surface read
+  its full-size texels, shimmering where the GameCube's levels smoothed it, and the GPU fetched texels
+  from across the whole texture for each pixel.
+- Their levels now come too, down to 16x16 as CMPR's, uploaded one by one, each after the GPU's
+  transfers before it, as BC1 chains are (0.42.0 test 10).
+- The cost is a third more memory for those textures. Test 12 had at least 23 MiB of VRAM free, and
+  its RGBA8 textures, the copy surfaces among them, were about 30 MiB.
+
+**The GPU cost test** (`vita_gl.cpp`, `gpu_test`; F1 > Performance > "Run the GPU cost test").
+- Stand still where the frame rate is low, press it, and close the menu. About a second later the
+  test leaves one kind of draw out at a time for 1.6 s each, 0.4 s of it for the GPU to catch up:
+  EFB copies, immediate draws, blended draws, alpha-tested draws, skinned draws, display lists, and
+  every draw (the clears and copies alone).
+- It runs everything before and after, to see the scene did not change.
+- One log line, "GPU cost test:", gives each phase's GPU busy time a frame (and its change), its
+  frame time, and the first phase's draws a frame by kind.
+- The picture is wrong for those 15 s.
+
+What to look for in test 14:
+- Far surfaces less shimmery, the same up close.
+- "RGBA8 texture ... uploaded with N levels" lines.
+- VRAM in the presents lines.
+- The frame rate where test 12 was GPU-bound.
+- The GPU cost test's line from a heavy scene or two: the Thardus room with the thermal visor,
+  Phendrana with snow and Sheegoths, the save station.

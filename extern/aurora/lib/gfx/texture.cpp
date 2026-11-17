@@ -169,21 +169,36 @@ std::shared_ptr<vita_gl::Texture> make_vita_texture(uint32_t width, uint32_t hei
     }
   }
   if (level0.empty()) {
+    // 0.46.0 test 14: with its levels too, down to 16x16 as CMPR's, where the texture has them (GX
+    // mipmaps power-of-two textures alone). Until then every texture but CMPR's had its first level
+    // alone, and the game's mipmapped filters sampled it as their plain ones: a far surface read its
+    // full-size texels, shimmering where the GameCube's levels smoothed it, and the GPU fetched texels
+    // scattered across the whole texture for each pixel.
+    uint32_t wanted = 1;
+    while (wanted < mips && (width >> wanted) >= 16 && (height >> wanted) >= 16) {
+      ++wanted;
+    }
     ConvertedTexture converted;
     ArrayRef<uint8_t> texels = data;
     auto texelWgpuFormat = to_wgpu(format);
     if (format != InvalidTextureFormat) {
-      converted = convert_texture(format, width, height, 1, data, false);
+      converted = convert_texture(format, width, height, wanted, data, false);
     }
     if (!converted.data.empty()) {
       texels = converted.data;
       texelWgpuFormat = converted.format;
+    } else {
+      wanted = 1; // the texels as they came: the first level's alone are known to be there
     }
-    const size_t level0Bytes = size_t{width} * height * 4;
-    if (texelWgpuFormat != wgpu::TextureFormat::RGBA8Unorm || texels.size() < level0Bytes) {
+    size_t bytes = 0;
+    for (uint32_t level = 0; level < wanted; ++level) {
+      bytes += size_t{std::max(width >> level, 1u)} * std::max(height >> level, 1u) * 4;
+    }
+    if (texelWgpuFormat != wgpu::TextureFormat::RGBA8Unorm || texels.size() < bytes) {
       return {};
     }
-    level0.assign(texels.data(), texels.data() + level0Bytes);
+    level0.assign(texels.data(), texels.data() + bytes);
+    levels = wanted;
   }
   return vita_gl::make_texture(width, height, texelFormat, std::move(level0), levels);
 }

@@ -1188,8 +1188,12 @@ u32 GXPortGetGpuTimes(GXPortGpuTime*, u32, float* totalMs, float* spanMs) {
 }
 
 void GXPortSetSwapInterval(u32 vblanks) { aurora::vita_gl::set_swap_interval(vblanks); }
+
+void GXPortRunGpuCostTest(void) { aurora::vita_gl::start_gpu_cost_test(); }
 #else
 void GXPortSetSwapInterval(u32) {}
+
+void GXPortRunGpuCostTest(void) {}
 
 void GXPortSetGpuTimes(GXBool on) { aurora::webgpu::gpu_prof::set_enabled(on != GX_FALSE); }
 

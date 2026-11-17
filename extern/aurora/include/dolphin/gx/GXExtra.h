@@ -208,6 +208,9 @@ u32 GXPortGetGpuTimes(GXPortGpuTime* out, u32 max, float* totalMs, float* spanMs
 // PS Vita (0.46.0 test 12): the display's vblanks each frame stays up at least (vitaGL's swap
 // interval: 1 by default, 2 for an even 30 FPS). Nothing elsewhere.
 void GXPortSetSwapInterval(u32 vblanks);
+// PS Vita (0.46.0 test 14): the GPU cost test, from the next frame: each kind of draw left out in
+// turn for a second or so, and the GPU's busy time a frame without it logged. Nothing elsewhere.
+void GXPortRunGpuCostTest(void);
 u32 GXGetPBRCostTest(void);
 // Aurora extension: a three-piece tone curve over the lit colour x, which is taken as
 // already exposed (see GX_AURORA_SET_PBR_TONE). Row 0 is the toe, (a x + b) x^2 + c x below

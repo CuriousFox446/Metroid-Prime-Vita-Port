@@ -523,6 +523,9 @@ void DrawLogSection();
 void DrawDiscCheckSection();
 void DrawDebugTab();
 void DrawPerformanceTab();
+// Each frame (RecordFrame): starts the GPU cost test once its button was pressed and the menu has
+// been closed some 30 frames (PS Vita).
+void GpuCostTestTick();
 void DrawLanguageSection();
 void DrawRemasteredDebug();
 void DrawSaveStatesTab();

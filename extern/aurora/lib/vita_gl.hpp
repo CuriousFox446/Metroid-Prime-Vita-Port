@@ -96,11 +96,12 @@ struct FrameMesh {
   MeshPrimitive primitive = MeshPrimitive::Triangles;
 };
 
-// A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): as RGBA8,
-// its first level only; or as BC1 (DXT1, from an opaque CMPR texture), `levels` of them back to
-// back in `texels` (each level's blocks in rows, halving down). Uploaded on the render worker at
-// its first draw; freed there once nothing holds it. One with a single level samples it with a
-// sampler's mipmapped filters as with their plain ones.
+// A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): as RGBA8
+// (each level's texels in rows) or as BC1 (DXT1, from an opaque CMPR texture: each level's blocks
+// in rows), `levels` of them back to back in `texels`, halving down (RGBA8's first level alone
+// before 0.46.0 test 14). Uploaded on the render worker at its first draw; freed there once nothing
+// holds it. One with a single level samples it with a sampler's mipmapped filters as with their
+// plain ones.
 enum class TexelFormat : uint8_t { RGBA8, BC1 };
 class Texture;
 std::shared_ptr<Texture> make_texture(uint32_t width, uint32_t height, TexelFormat format,
@@ -350,6 +351,9 @@ float gpu_busy_ms() noexcept;
 // vitaGL's swap interval from the next present on (any thread; applied on the render worker):
 // the vblanks a frame stays up at least, 1 to 4.
 void set_swap_interval(uint32_t vblanks) noexcept;
+// The GPU cost test (0.46.0 test 14), from the next present on: each kind of draw left out in turn,
+// what the GPU's busy time a frame is without it logged (vita_gl.cpp, gpu_test). Any thread.
+void start_gpu_cost_test() noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -390,5 +394,6 @@ inline void set_render_scale(float) noexcept {}
 inline void set_present_sharpness(float) noexcept {}
 inline float gpu_busy_ms() noexcept { return -1.f; }
 inline void set_swap_interval(uint32_t) noexcept {}
+inline void start_gpu_cost_test() noexcept {}
 #endif
 } // namespace aurora::vita_gl

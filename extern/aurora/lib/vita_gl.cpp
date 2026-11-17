@@ -636,7 +636,7 @@ class Texture : public Kept {
 public:
   Texture(uint32_t width, uint32_t height, TexelFormat format, std::vector<uint8_t> texels, uint32_t levels) noexcept
   : m_cpu(std::move(texels)), m_width(width), m_height(height), m_format(format),
-    m_levels(format == TexelFormat::BC1 ? std::max(levels, 1u) : 1) {
+    m_levels(std::max(levels, 1u)) {
     m_pending = static_cast<int64_t>(m_cpu.size());
     if (m_pending != 0) {
       g_pendingCount.fetch_add(1, std::memory_order_relaxed);
@@ -679,12 +679,9 @@ public:
   }
 
   uint64_t bytes() const noexcept {
-    if (m_format != TexelFormat::BC1) {
-      return uint64_t{m_width} * m_height * 4;
-    }
     uint64_t total = 0;
     for (uint32_t level = 0; level < m_levels; ++level) {
-      total += bc1_level_bytes(level);
+      total += m_format == TexelFormat::BC1 ? bc1_level_bytes(level) : rgba8_level_bytes(level);
     }
     return total;
   }
@@ -741,7 +738,29 @@ public:
           Log.info("BC1 texture {}x{} uploaded with {} levels ({} bytes)", m_width, m_height, uploaded, offset);
         }
       } else {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data());
+        // 0.46.0 test 14: its levels too (gfx/texture.cpp, make_vita_texture), each after the
+        // transfers before it as a BC1 chain's.
+        size_t offset = 0;
+        uint32_t uploaded = 0;
+        for (uint32_t level = 0; level < m_levels; ++level) {
+          const auto size = static_cast<size_t>(rgba8_level_bytes(level));
+          if (offset + size > m_cpu.size()) {
+            break;
+          }
+          if (level != 0) {
+            sceGxmTransferFinish();
+          }
+          glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), GL_RGBA, std::max(width >> level, 1),
+                       std::max(height >> level, 1), 0, GL_RGBA, GL_UNSIGNED_BYTE, m_cpu.data() + offset);
+          offset += size;
+          ++uploaded;
+        }
+        m_levels = std::max(uploaded, 1u);
+        static int sRgbaChainsLogged = 0;
+        if (uploaded > 1 && sRgbaChainsLogged < 4) {
+          ++sRgbaChainsLogged;
+          Log.info("RGBA8 texture {}x{} uploaded with {} levels ({} bytes)", m_width, m_height, uploaded, offset);
+        }
       }
       m_bytes = static_cast<int64_t>(m_cpu.size());
       const int kind = static_cast<int>(m_format);
@@ -856,6 +875,11 @@ private:
     return false;
   }
 
+  // An RGBA8 level's bytes: four a texel.
+  uint64_t rgba8_level_bytes(uint32_t level) const noexcept {
+    return uint64_t{std::max(m_width >> level, 1u)} * std::max(m_height >> level, 1u) * 4;
+  }
+
   // A BC1 level's bytes: its 4x4 blocks, 8 bytes each.
   uint64_t bc1_level_bytes(uint32_t level) const noexcept {
     const uint64_t width = std::max(m_width >> level, 1u);
@@ -892,7 +916,7 @@ private:
   uint32_t m_width;
   uint32_t m_height;
   TexelFormat m_format;
-  uint32_t m_levels; // a BC1 texture's levels in m_cpu (and on the GPU); 1 for the rest
+  uint32_t m_levels; // its levels in m_cpu (and on the GPU), back to back; 1 for a copy texture
   GLuint m_id = 0;
   int64_t m_bytes = 0;
   Sampler m_sampler{};
@@ -2799,6 +2823,9 @@ struct GpuClock {
   uint64_t reportBusyUs = 0;
   uint64_t reportUs = 0;
   uint32_t reportFrames = 0;
+  // Every busy stretch ended so far, and the open one's part counted into a window (the GPU cost
+  // test reads it: gpu_busy_total).
+  uint64_t totalBusyUs = 0;
 };
 GpuClock g_gpu;
 std::atomic<uint32_t> g_displayed{0};
@@ -2837,7 +2864,13 @@ void gpu_changed(bool busy, uint32_t sent) noexcept {
     }
   }
   g.busyUs += now - g.since;
+  g.totalBusyUs += now - g.since;
   g.busy = false;
+}
+
+// The GPU's busy time so far, the stretch still open counted to `now` (render worker).
+uint64_t gpu_busy_total(uint64_t now) noexcept {
+  return g_gpu.totalBusyUs + (g_gpu.busy && now > g_gpu.since ? now - g_gpu.since : 0);
 }
 
 // A look at the fence (render worker).
@@ -2875,6 +2908,7 @@ void gpu_swapped(uint64_t swapStart) noexcept {
   uint64_t busy = g.busyUs;
   if (g.busy) {
     busy += now - g.since;
+    g.totalBusyUs += now - g.since;
     g.since = now;
   }
   g_gpuMs.store(static_cast<float>(static_cast<double>(busy) / 1000.0 / g.frames), std::memory_order_relaxed);
@@ -2885,6 +2919,164 @@ void gpu_swapped(uint64_t swapStart) noexcept {
   g.frames = 0;
   g.windowStart = now;
 }
+
+// 0.46.0 test 14: the GPU cost test (start_gpu_cost_test, from the Port menu's Performance tab).
+// Test 12's heavy scenes kept the GPU busy 40 to 52 ms a frame, more than anything else, and the
+// clock above times frames whole. With the player standing still where the frame rate is low, the
+// test leaves one kind of draw out at a time, each for 1.2 s after 0.4 s for the GPU to catch up (it
+// runs a frame or two behind), and logs the GPU's busy time a frame and the frame time without it:
+// what each kind costs the GPU. The picture is wrong while it runs (about 15 s).
+namespace gpu_test {
+enum : uint32_t {
+  kCopies = 1u << 0,      // EFB copies and their palette conversions
+  kImmediate = 1u << 1,   // immediate and indexed draws (particles, snow, beams, the HUD's quads)
+  kBlended = 1u << 2,     // every draw that blends
+  kAlphaTested = 1u << 3, // every draw with an alpha test
+  kSkinned = 1u << 4,     // skinned calls
+  kLists = 1u << 5,       // display lists (the rooms, most models)
+  kDraws = 1u << 6,       // every draw (the clears and the copies stay)
+};
+struct Phase {
+  const char* name;
+  uint32_t skip;
+};
+constexpr Phase kPhases[] = {
+    {"everything", 0},
+    {"no EFB copies", kCopies},
+    {"no immediate draws", kImmediate},
+    {"no blended draws", kBlended},
+    {"no alpha-tested draws", kAlphaTested},
+    {"no skinned draws", kSkinned},
+    {"no display lists", kLists},
+    {"no draws (the clears and copies alone)", kDraws},
+    {"everything again", 0},
+};
+constexpr size_t kPhaseCount = std::size(kPhases);
+constexpr uint64_t kSettleUs = 400000;
+constexpr uint64_t kMeasureUs = 1200000;
+std::atomic<bool> g_start{false};
+uint32_t g_skip = 0;     // render worker: what the draws leave out now
+bool g_counting = false; // render worker: the first phase counts its draws by kind
+struct Counts {
+  uint64_t frames = 0;
+  uint64_t copies = 0;
+  uint64_t immediate = 0;
+  uint64_t blended = 0;
+  uint64_t alphaTested = 0;
+  uint64_t skinned = 0;
+  uint64_t lists = 0;
+  uint64_t draws = 0;
+};
+Counts g_counts;
+struct Result {
+  double gpuMs = 0.0;
+  double frameMs = 0.0;
+  uint32_t frames = 0;
+};
+struct State {
+  int phase = -1; // -1: not running
+  uint64_t phaseStart = 0;
+  bool measuring = false;
+  uint64_t measureStart = 0;
+  uint64_t busyStart = 0;
+  uint32_t swapsStart = 0;
+  Result results[kPhaseCount];
+};
+State g_state;
+
+MeshKind kind_of(const Draw& draw) noexcept { return draw.mesh != nullptr ? draw.mesh->kind() : draw.frameMesh.kind; }
+
+// Whether the test leaves this draw out now (render worker).
+bool skips(const Draw& draw) noexcept {
+  const uint32_t s = g_skip;
+  if ((s & kDraws) != 0) {
+    return true;
+  }
+  const MeshKind kind = kind_of(draw);
+  return ((s & kImmediate) != 0 && (kind == MeshKind::Immediate || kind == MeshKind::Indexed)) ||
+         ((s & kBlended) != 0 && draw.state.blend) ||
+         ((s & kAlphaTested) != 0 && draw.state.alphaFunc != GL_ALWAYS) ||
+         ((s & kSkinned) != 0 && kind == MeshKind::Skinned) || ((s & kLists) != 0 && kind == MeshKind::List);
+}
+
+void count(const Draw& draw) noexcept {
+  const MeshKind kind = kind_of(draw);
+  Counts& c = g_counts;
+  ++c.draws;
+  c.immediate += kind == MeshKind::Immediate || kind == MeshKind::Indexed ? 1 : 0;
+  c.blended += draw.state.blend ? 1 : 0;
+  c.alphaTested += draw.state.alphaFunc != GL_ALWAYS ? 1 : 0;
+  c.skinned += kind == MeshKind::Skinned ? 1 : 0;
+  c.lists += kind == MeshKind::List ? 1 : 0;
+}
+
+void log_results() noexcept {
+  const State& st = g_state;
+  const double base = st.results[0].gpuMs;
+  std::string text;
+  for (size_t i = 0; i < kPhaseCount; ++i) {
+    const Result& r = st.results[i];
+    const bool delta = i != 0 && i + 1 != kPhaseCount;
+    text += fmt::format("{}{}: GPU {:.1f} ms a frame{}, frame {:.1f} ms ({} frames)", i != 0 ? "; " : "",
+                        kPhases[i].name, r.gpuMs, delta ? fmt::format(" ({:+.1f})", r.gpuMs - base) : std::string{},
+                        r.frameMs, r.frames);
+  }
+  const double f = static_cast<double>(std::max<uint64_t>(g_counts.frames, 1));
+  Log.info("GPU cost test: {}. The first phase's draws a frame: {:.1f} EFB copies; {:.0f} draws, {:.0f} of them "
+           "immediate, {:.0f} blended, {:.0f} alpha-tested, {:.0f} skinned, {:.0f} display lists",
+           text, g_counts.copies / f, g_counts.draws / f, g_counts.immediate / f, g_counts.blended / f,
+           g_counts.alphaTested / f, g_counts.skinned / f, g_counts.lists / f);
+}
+
+// Render worker, after each swap: starts the test when asked, and moves it on.
+void step() noexcept {
+  const uint64_t now = sceKernelGetProcessTimeWide();
+  State& st = g_state;
+  if (g_start.exchange(false, std::memory_order_acq_rel)) {
+    st = {};
+    st.phase = 0;
+    st.phaseStart = now;
+    g_skip = kPhases[0].skip;
+    g_counts = {};
+    Log.info("GPU cost test: started, {} phases of {:.1f} s; parts of the picture are left out till it ends",
+             kPhaseCount, static_cast<double>(kSettleUs + kMeasureUs) / 1e6);
+    return;
+  }
+  if (st.phase < 0) {
+    return;
+  }
+  if (!st.measuring) {
+    if (now - st.phaseStart >= kSettleUs) {
+      st.measuring = true;
+      st.measureStart = now;
+      st.busyStart = gpu_busy_total(now);
+      st.swapsStart = g_gpu.swaps;
+      g_counting = st.phase == 0;
+    }
+    return;
+  }
+  if (now - st.measureStart < kMeasureUs) {
+    return;
+  }
+  Result& r = st.results[st.phase];
+  r.frames = g_gpu.swaps - st.swapsStart;
+  if (r.frames != 0) {
+    r.gpuMs = static_cast<double>(gpu_busy_total(now) - st.busyStart) / 1000.0 / r.frames;
+    r.frameMs = static_cast<double>(now - st.measureStart) / 1000.0 / r.frames;
+  }
+  g_counting = false;
+  ++st.phase;
+  if (st.phase == static_cast<int>(kPhaseCount)) {
+    log_results();
+    g_skip = 0;
+    st.phase = -1;
+    return;
+  }
+  g_skip = kPhases[st.phase].skip;
+  st.phaseStart = now;
+  st.measuring = false;
+}
+} // namespace gpu_test
 
 // A GL texture that is the display's back buffer as the frame's draws so far left it (render
 // worker): the EFB copies' source, sampled linear for a halved copy. vitaGL binds a texture's GXM
@@ -3099,6 +3291,9 @@ void draw_world(const Frame& frame) {
   ++g_presentStats.framesWithDraws;
   g_presentStats.draws += draws.size();
   g_presentStats.merged += frame.merged;
+  if (gpu_test::g_counting) {
+    ++gpu_test::g_counts.frames;
+  }
   glUseProgram(0);
   // GX's front faces are clockwise (Aurora's WebGPU pipelines say so too).
   glFrontFace(GL_CW);
@@ -3239,6 +3434,10 @@ void draw_world(const Frame& frame) {
       // bound again at its next draw, and the matrices and the line width are loaded again.
       const uint64_t start = sceKernelGetProcessTimeWide();
       --copiesLeft;
+      gpu_test::g_counts.copies += gpu_test::g_counting ? 1 : 0;
+      if ((gpu_test::g_skip & gpu_test::kCopies) != 0) {
+        continue; // the GPU cost test's: the destination keeps what it held
+      }
       // Or a copy's conversion through its palette (palette_on_gpu), alike but for its program.
       const bool palette = draw.copyKind == CopyKind::Palette4 || draw.copyKind == CopyKind::Palette8;
       Program& copier = palette ? *g_paletteProgram : *g_copyProgram;
@@ -3265,6 +3464,12 @@ void draw_world(const Frame& frame) {
       g_presentStats.copyUs += sceKernelGetProcessTimeWide() - start;
       g_clock.mark(kCopy);
       continue;
+    }
+    if (gpu_test::g_counting) {
+      gpu_test::count(draw);
+    }
+    if (gpu_test::g_skip != 0 && gpu_test::skips(draw)) {
+      continue; // the GPU cost test leaves this kind out now
     }
     set_rects(draw.viewport, draw.scissor);
     const MeshPrimitive primitive = draw.mesh != nullptr ? draw.mesh->primitive() : draw.frameMesh.primitive;
@@ -3588,6 +3793,8 @@ void set_present_sharpness(float sharpness) noexcept {
 
 float gpu_busy_ms() noexcept { return g_gpuMs.load(std::memory_order_relaxed); }
 
+void start_gpu_cost_test() noexcept { gpu_test::g_start.store(true, std::memory_order_release); }
+
 void set_swap_interval(uint32_t vblanks) noexcept {
   g_swapInterval.store(std::clamp<uint32_t>(vblanks, 1, 4), std::memory_order_relaxed);
 }
@@ -3904,6 +4111,7 @@ void present(ImDrawData* overlay) noexcept {
   const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
   gpu_swapped(swapStart);
+  gpu_test::step();
   {
     const uint32_t vcount = sceDisplayGetVcount();
     if (g_lastVcount != 0) {

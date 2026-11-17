@@ -4,10 +4,33 @@
 #include "debug_ui_internal.h"
 
 #include <aurora/imgui.h>
+#include <dolphin/gx/GXExtra.h>
 #include <imgui_internal.h>
 
 
 namespace PortDebug {
+
+namespace {
+// The GPU cost test's button (PS Vita, 0.46.0 test 14): pressed, the test waits for the menu to close
+// and some 30 frames more (GpuCostTestTick), so the menu is not among what the GPU draws.
+bool sGpuTestArmed = false;
+int sGpuTestClosedFrames = 0;
+} // namespace
+
+void GpuCostTestTick() {
+  if (!sGpuTestArmed) {
+    return;
+  }
+  if (Visible()) {
+    sGpuTestClosedFrames = 0;
+    return;
+  }
+  if (++sGpuTestClosedFrames >= 30) {
+    sGpuTestArmed = false;
+    sGpuTestClosedFrames = 0;
+    GXPortRunGpuCostTest();
+  }
+}
 
 void DrawPerformanceTab() {
   ImGui::SeparatorText("Frame rate");
@@ -44,6 +67,14 @@ void DrawPerformanceTab() {
   } else {
     ImGui::Text("Simulation %.1f ticks/s (target %u)", sActualTps, SimRate());
   }
+#if defined(__vita__)
+  if (ImGui::Button(sGpuTestArmed ? "Close the menu to start##gpu-test" : "Run the GPU cost test##gpu-test")) {
+    sGpuTestArmed = true;
+  }
+  ItemHelp("Stand still where the frame rate is low, press this and close the menu. About a second "
+           "later, for some 15 seconds, parts of the picture are left out one kind at a time, and the "
+           "log gets what each kind costs the GPU.");
+#endif
 
   bool smooth = sSmoothFrames;
   if (ImGui::Checkbox("Smooth uncapped frames", &smooth)) {

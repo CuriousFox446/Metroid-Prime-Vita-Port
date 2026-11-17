@@ -314,6 +314,7 @@ static void UpdateDynamicRes(double fps, unsigned frames) {
 
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
   sMainLoopRan = true;
+  GpuCostTestTick();
   sTimingNs += durationNs;
   sTimingTicks += ticks;
   if (presented) {
