@@ -239,7 +239,18 @@ bool StartDreadSamusImport(const std::string& nspPath, const std::string& keysPa
   sState.message = "Starting";
 #if defined(__vita__)
   sThread = std::thread([nspPath, keysPath, romfs, modsPath = FromUtf8(mods)] {
-    RunOnLargeStack([&] { RunDread(nspPath, keysPath, romfs, modsPath); });
+    RunOnLargeStack([&] {
+      // The Vita's heap is the game's, and a few hundred MiB in all: an import that runs out of it
+      // fails, and says so, where an uncaught std::bad_alloc would end the game.
+      try {
+        RunDread(nspPath, keysPath, romfs, modsPath);
+      } catch (const std::bad_alloc&) {
+        std::error_code ec;
+        fs::remove_all(modsPath / kDreadStaging, ec);
+        PortLog::Write("dread: the import ran out of memory\n");
+        Finish(false, "Out of memory. Start the import from the title screen, where the game holds the least.");
+      }
+    });
   });
 #else
   sThread = std::thread(RunDread, nspPath, keysPath, romfs, FromUtf8(mods));
