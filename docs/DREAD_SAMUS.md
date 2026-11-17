@@ -38,6 +38,21 @@ file; the pick is kept, so open the page again. The image is not copied: the
 import reads it through the picked file's descriptor. The key file comes from
 the "Pick the keys..." button in the shared row above both sections.
 
+## On the PS Vita
+
+Experimental there too. Put the game's `.nsp` or `.xci` and your `prod.keys` in
+`ux0:data/MetroidDread`: the section finds them (the first image by name; the
+keys, or `ux0:data/MetroidPrime/prod.keys`) and only needs **Import**. The
+paths can also be typed. The import takes several minutes; started from the
+title screen it has the most memory to work in.
+
+The Vita's renderer has no PBR shader, so the suits are drawn with their TEV
+fallback materials: the albedo and the glow, without Dread's metal, normal maps
+or reflections. Their textures are written for it (each map's TXTR at full size,
+no BC7/BC5 `.dds`), and the suit colours do not recolour them. The bodies are far
+heavier than Prime's, so expect the frame rate to drop where they are drawn,
+and switch the first-person cannon off in the section if it costs too much.
+
 ## From a terminal
 
     metroid_prime_port --import-dread-samus <image.nsp|image.xci> [key file]

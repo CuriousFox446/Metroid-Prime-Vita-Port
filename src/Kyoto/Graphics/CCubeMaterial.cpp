@@ -1078,9 +1078,17 @@ uint CCubeMaterial::sPortAreaLights = 0;
 uint CCubeMaterial::sPortTevLightSkip = 0;
 
 bool CCubeMaterial::PortPBRAllowed(const CModelFlags& flags) {
+#if defined(__vita__)
+  // PS Vita (0.46.0 test 13): its renderer has no PBR shader (vita_draw.cpp translates the TEV), so a
+  // PBR material (the Dread Samus import's suits) draws by its TEV fallback and fallback glow, as
+  // the paths this rejects do everywhere.
+  (void)flags;
+  return false;
+#else
   return !sbRenderModelBlack &&
          (!CCubeRenderer::That()->GetThermal() || sPortPBRThermal != kPT_None) &&
          flags.GetTrans() == CModelFlags::kT_Opaque;
+#endif
 }
 
 bool CCubeMaterial::PortScreenCopyUsed() {

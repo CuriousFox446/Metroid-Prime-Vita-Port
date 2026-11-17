@@ -3589,3 +3589,55 @@ What to look for in test 12:
 - The fixed-function shaders line at the start: none deleted, and no "vitaGL compiled" lines after
   the first session.
 - The pacing counts, at the default and, if the user wants to try it, at the 30 cap.
+
+### Test 12 result
+
+`~/logs/t046_12.log` (58f89bc, 1,088 windows, 18.5 minutes): a clean exit, no crash.
+- Long stalls: 5 (test 11: 18), all area loads or one draw. None is the input part (the card's stat).
+- vitaGL's own shaders: 31 on the card, all kept (8 longer than their header says); not one compiled
+  in the session (8 before).
+- The core 0 helper: the FIFO processor waited for it 20 to 75 ms in each 6 to 16 s report (test 11:
+  4 to 6 s in 12 s) and ran thousands of its jobs itself (up to 10,640 jobs, 4.0 s, in 11 s).
+- Explosions: 2 to 6 systems a frame stepped on the side worker, no waits.
+- Copy surfaces: made, taken again and deleted 8 presents on, as meant.
+- FPS by median: the Thardus fight 22.7 (21.6 in test 11), windows with explosions 22.6 (20.8), the
+  Scatter Bombus 31.8 (32.2), Phendrana 27.6 (28.8; another route).
+- Pacing over the run (`~/tools/pacing.py`): presents 1 vblank apart or less 63%, 2 22%, 3 9%, 4 4%,
+  5 or more 2%. Frames by ticks: 1 53%, 2 28%, 3 10%, 4+ 5%, 0 4%.
+- The heavy scenes are now the GPU's: busy 22 to 52 ms a frame where test 11 measured it. That is the
+  next round's subject.
+
+The user then asked to try the Metroid Dread mod (its image auto-detected in ux0:data/MetroidDread),
+and for the port to rebuild all its shaders at each new build again.
+
+## 0.46.0 test 13: Dread Samus on the Vita, shaders rebuilt per build
+
+**Shaders per build** (`vita_gl.cpp`): vita_programs/build holds "binaries 3 build <revision>". Any
+other content (test 20 to test 12's "binaries 3" among them) has the card thread delete the program
+binaries first. materials.bin stays, so the warm-up builds every known program again in one batch,
+behind the "Compiling shaders" toast: the long wait once a build, as tallon25 to 0.42.0 test 19.
+
+**Dread Samus** (DREAD_SAMUS.md, "On the PS Vita"). Upstream left the import off the Vita. It is on
+now (F1 > Mods > Built-in mods > Metroid Dread; Prime Remastered stays off):
+- The image and the keys are found in ux0:data/MetroidDread: the first .nsp or .xci by name
+  (`DefaultDreadImagePath`) and prod.keys (`DefaultKeysPath`, else ux0:data/MetroidPrime/prod.keys).
+  They are looked for again every two seconds while not found, and can be typed.
+- The NSP reader had nothing to decrypt with on the Vita (no OpenSSL). `port_soft_crypto.h` gives it
+  AES-128 ECB, CTR and XTS under OpenSSL's names. It was checked against OpenSSL 3.5 (FIPS-197's vector,
+  and 100 of 100 random cases of the three modes, CTR's counter carrying past 64 bits among them).
+- The image is read with `sceIoPread` (64-bit offsets). newlib's off_t is 32 bits on the Vita, and the
+  image is several GB.
+- The import runs on a thread with a 2 MiB stack.
+- The converter keeps one decoded image, not three (each up to 16 MiB).
+- Textures (`ConvertOptions::txtrOnly`): no BC7, BC5 or ASTC .dds, which the Vita cannot draw. Each
+  map's TXTR is the map itself, up to `kPbrMax` (the albedo 1024, as CMPR; the rest 256), with a
+  colour map's sRGB bytes as authored, for the TEV.
+- Drawing: `CCubeMaterial::PortPBRAllowed` is false on the Vita, so the suits draw by their TEV
+  fallback and fallback glow. Dread's own metal, normal maps and reflections do not show.
+- The suit colours do not recolour the Dread suits there (they redo the BCLR .dds).
+
+What to look for in test 13:
+- The first start's program batch (the toast), then none on the next start.
+- The Dread import's log lines ("dread: ...") and its end.
+- The suits in the Morph Ball transitions, cutscenes, the pause screen and the first-person cannon,
+  and the frame rate with them.

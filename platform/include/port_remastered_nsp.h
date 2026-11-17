@@ -58,6 +58,7 @@ private:
   std::mutex m_streamMutex;
   std::ifstream m_stream;
   int m_fd = -1;
+  int m_vitaFd = -1;        // PS Vita: sceIoOpen's, read with sceIoPread (64-bit offsets)
   void* m_handle = nullptr; // Windows: a HANDLE opened for overlapped reads
 };
 

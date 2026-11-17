@@ -139,6 +139,15 @@ void DrawImportKeys() {
     }
 #endif
   }
+#if defined(__vita__)
+  // PS Vita (0.46.0 test 13): found in ux0:data/MetroidDread (DefaultKeysPath), looked for again every
+  // two seconds while there is none, in case it is copied there while the game runs.
+  static double sKeysLooked = 0.0;
+  if (sKeys[0] == '\0' && ImGui::GetTime() - sKeysLooked >= 2.0) {
+    sKeysLooked = ImGui::GetTime();
+    std::snprintf(sKeys, sizeof(sKeys), "%s", PortRemastered::DefaultKeysPath().c_str());
+  }
+#endif
   {
     // Only the key picks: the image picks stay for the section that shows them.
     std::lock_guard lock(sRemasteredPickMutex);
@@ -177,10 +186,13 @@ void DrawImportKeys() {
 #else
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
   ImGui::InputTextWithHint("##import-keys", "prod.keys", sKeys, sizeof(sKeys));
+#if !defined(__vita__)
+  // No file dialog on the Vita: the path is found (DefaultKeysPath) or typed.
   ImGui::SameLine();
   if (ImGui::Button("Browse...##import-keys")) {
     OpenRemasteredDialog(1);
   }
+#endif
 #endif
   ItemHelp("One file: both the Remastered import and the Dread import read it.");
 }
@@ -449,6 +461,15 @@ void DrawDreadSamusImport() {
       sDreadPick.clear();
     }
   }
+#if defined(__vita__)
+  // PS Vita (0.46.0 test 13): the first .nsp or .xci in ux0:data/MetroidDread, looked for again every
+  // two seconds while there is none.
+  static double sImageLooked = -10.0;
+  if (sImage[0] == '\0' && ImGui::GetTime() - sImageLooked >= 2.0) {
+    sImageLooked = ImGui::GetTime();
+    std::snprintf(sImage, sizeof(sImage), "%s", PortRemastered::DefaultDreadImagePath().c_str());
+  }
+#endif
 #endif
   // Drawn straight into the Metroid Dread section body, like the Remastered import in its own.
   const PortRemastered::ImportState state = PortRemastered::ImportStatus();
@@ -466,6 +487,14 @@ void DrawDreadSamusImport() {
   ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
   ImGui::TextWrapped("Android may close the game while you pick a file. The pick is kept: open this page again.");
   ImGui::PopStyleColor();
+#elif defined(__vita__)
+  // No file dialog on the Vita: the image and the keys are found in ux0:data/MetroidDread, or typed.
+  ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+  ImGui::TextWrapped("Put the game's .nsp or .xci and prod.keys in " kVitaDreadFolder ": they are found there. "
+                     "The import takes several minutes; from the title screen it has the most memory to work in.");
+  ImGui::PopStyleColor();
+  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+  ImGui::InputTextWithHint("##dread-image", "Metroid Dread .nsp or .xci", sImage, sizeof(sImage));
 #else
   // The button's label is long, so the path field gives up the width it needs: a narrow window
   // would clip the label otherwise.

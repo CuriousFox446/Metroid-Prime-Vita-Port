@@ -995,6 +995,9 @@ bool Import(const Io& io, Result& result, std::string& error) {
     }
     PortRemastered::Model built;
     PortRemastered::ConvertOptions opt;
+#if defined(__vita__)
+    opt.txtrOnly = true;  // 0.46.0 test 13: textures the Vita draws (ConvertOptions::txtrOnly)
+#endif
     if (!BuildModel(reskin, meshMats, built, opt.boneWeights, &why)) {
       failTarget(why);
       continue;
@@ -1134,6 +1137,9 @@ bool Import(const Io& io, Result& result, std::string& error) {
       return Fail(&error, label + ": " + (error.empty() ? "no cutscene body" : error));
     std::vector<const PortDread::SuitMaterial*> mats;
     PortRemastered::ConvertOptions opt;
+#if defined(__vita__)
+    opt.txtrOnly = true;  // 0.46.0 test 13: textures the Vita draws (ConvertOptions::txtrOnly)
+#endif
     opt.setTextures.resize(kBeams);
     for (PortDread::ReskinMesh& rm : fit.meshes) {
       const PortDread::SuitMaterial* plain = rm.bsmat_path.empty() ? nullptr : material(rm.bsmat_path);
@@ -1227,6 +1233,9 @@ bool Import(const Io& io, Result& result, std::string& error) {
     }
     PortRemastered::Model built;
     PortRemastered::ConvertOptions opt;
+#if defined(__vita__)
+    opt.txtrOnly = true;  // 0.46.0 test 13: textures the Vita draws (ConvertOptions::txtrOnly)
+#endif
     if (!BuildModel(fit, mats, built, opt.boneWeights, &error)) return false;
     opt.retail = t.cmdl;
     opt.outputModel = modelId;
