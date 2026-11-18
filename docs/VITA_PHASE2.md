@@ -4168,3 +4168,39 @@ from the Mods menu (the Echoes image stays in `ux0:data/MetroidPrime2`).
 What to look for in test 26:
 - After the import: Wave's cannon blue like Echoes' Light Beam, Plasma's olive with white streaks
   like the Annihilator; Power and Ice as before.
+
+### Test 26 result
+
+The user imported again (Wave's cannon now Light's blue) and sent a video of Echoes on a tablet
+over the Vita, firing a missile in each: "when you shoot a rocket they're supposed to retract and
+then extend open".
+- Frames: Windows' own decoder (`frames.ps1` in the session scratchpad, Windows.Media.Editing
+  thumbnails; it decodes this portrait video whole only at 540x960) and, at full size, the built-in
+  browser with the video as a blob (seekable) drawn into a canvas grid.
+- **The Vita does it.** Closed cone at rest (5.5 s), the shell sliding back over the barrel as the
+  missile leaves (6.00-6.07 s), the kick (6.1-6.4 s), the plates open into a crown by 6.5 s, closed
+  again by 16.5 s: Echoes' cycle in Echoes' own footage (closed until 3.3 s, open 4.5-11 s). The
+  first-shot anim was rendered on the Echoes model posed as Prime's engine poses it
+  (`~/tools/gunrender.py`, triangles from the CMDL, skinned by the CSKR): the four petals (`gNoz*`,
+  material 1) are the mint shell; they spread and slide back as the nozzle retracts (frames 1-4),
+  then push out turning 45°.
+- **What differs is the shine.** The petals' mint is a TEV stage adding (a grey mask) x
+  `268C5D8B`, a sphere map: a dark green ball on a mint ground. UV mode 6 (`CCubeMaterial
+  HandleAnimatedUV`) takes it by the world normal plus 0.05 x the model's world position, which
+  scrolls Prime's own streaky reflection `7ED07D1F` as Samus moves. On the sphere map that lands on
+  the dark ball or the mint ground by where she stands: mint in the Phendrana photos, dark teal in
+  the video's room, so the retract and open barely show.
+
+## 0.46.0 test 27: Echoes' cannon shine from the camera
+
+`CCubeMaterial::PortSetCameraModelUv`: while `CGunWeapon::Draw` draws Echoes' cannon, UV mode 6
+uses the model matrix relative to the camera (`GetViewMatrix().GetQuickInverse() * model`), so
+its position term is a few hundredths and its normals are the camera's. The lookup is then
+steady: faces up, sideways or toward the camera take the mint ground, as Echoes' footage shows.
+Prime's own gun keeps the world lookup. Echoes' renderer is not known to do exactly this (an
+approximation of its look).
+
+What to look for in test 27:
+- The Echoes cannon's front shell mint at rest, in any room, and the plates visibly mint as they
+  pull back and open on a missile shot.
+- Prime's cannon (Echoes cannon setting off) as before.

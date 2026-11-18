@@ -652,7 +652,11 @@ void CGunWeapon::Draw(const bool drawSuitArm, const CStateManager& mgr, const CT
         // The cannon is drawn whether or not the suit arm is: it is the gun model too.
         xb0_suitArmModelData->Render(mgr, cannonXf, lights, flags.UseShaderSet(x20c_shaderIdx));
       } else {
+        // Echoes' cannon: its shine aimed from the camera, so its mint shell stays mint wherever
+        // Samus stands, as in Echoes (0.46.0 test 27).
+        CCubeMaterial::PortSetCameraModelUv(mPortEchoesCannon);
         x10_solidModelData->Render(mgr, xf, lights, flags.UseShaderSet(x20c_shaderIdx));
+        CCubeMaterial::PortSetCameraModelUv(false);
       }
       if (tint) {
         CCubeModel::PortSetBeamGlow(nullptr, -1, 0);
