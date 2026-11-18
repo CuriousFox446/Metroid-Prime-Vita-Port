@@ -128,6 +128,9 @@ void CWaveBeam::Fire(const bool underwater, const float dt,
   CAnimData& animData = *x10_solidModelData->AnimationData();
   animData.EnableLooping(false);
   animData.SetAnimation(CAnimPlaybackParms(skShootAnim[chargeState], -1, 1.f, true), false);
+#ifdef TARGET_PC
+  PortEndAnimStandIn();
+#endif
 }
 
 #ifdef TARGET_PC

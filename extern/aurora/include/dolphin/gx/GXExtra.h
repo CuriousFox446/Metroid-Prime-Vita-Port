@@ -216,6 +216,9 @@ void GXPortRunGpuCostTest(void);
 // the outside cut off by the scissor. 1 turns it off. GXGetViewport still gives the viewport as set.
 // The front end's menus use it to fill a wide screen with their letterboxed 4:3 frames.
 void GXPortSetViewportZoom(float zoom, float centerX, float centerY);
+// Port (0.46.0 test 24): the zoom in force and its centre, for code that maps what was drawn back
+// to the screen (the pointer's hit rects). 1 when off.
+float GXPortGetViewportZoom(float* centerX, float* centerY);
 u32 GXGetPBRCostTest(void);
 // Aurora extension: a three-piece tone curve over the lit colour x, which is taken as
 // already exposed (see GX_AURORA_SET_PBR_TONE). Row 0 is the toe, (a x + b) x^2 + c x below

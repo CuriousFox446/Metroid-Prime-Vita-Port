@@ -4046,3 +4046,44 @@ What to look for in test 23:
 - Press Start pulsing at the first title, without a game first.
 - Its place: inside the picture above the bottom, the copyright beside and below it.
 - The attract movies (leave the title alone for a while) without lines.
+
+### Test 23 result
+
+`~/logs/t046_23.log` (02c63b1): a clean exit, with `pointer_menus=1`, `touch_controls=1` and the
+Echoes mods on ("echoes-suits serves the arm cannon of 5 beam(s)"). The user raised no problem with
+Press Start or the movies. Two others:
+- **The main menu "kinda finicky"** by touch, "probably because it doesn't align with how the main
+  menu is now". It doesn't: widgets record their hit rects as they draw (`PortGuiHit::RecordCorners`,
+  `Project`), from `CGraphics`' projection and viewport. Test 22's zoom scales only GX's transform
+  (`GXPortSetViewportZoom`), so the rects were the unzoomed menu's: about 1.32 times too close to the
+  screen's centre. Rows away from the centre missed or hit their neighbours.
+- **The Echoes arm cannon opening for a missile** (the user's photo: split open), which Prime 2's
+  cannon never does. The import skins Echoes' cannon to Prime's gun skeleton by joint name
+  (`ConvertCskr`, the beam ANCS with the model swapped, `PatchGunAncs`), so Prime's gun anims move
+  it. A missile shot is Prime's anim 7 (`kGAT_MissileShoot`: open and fire), then the reload (8);
+  7 s on, or at a beam shot, the cannon closes (5, `kGAT_FromMissile`). `ReturnToRestPose` plays 6
+  (`kGAT_ToMissile`) after a fidget in missile mode. `CPlayerGun::Update` moves to its next state
+  when the solid model's anim runs out, so these anims also set the missiles' timing.
+
+## 0.46.0 test 24: menu taps where the zoomed menu shows, Echoes' cannon stays shut
+
+**Hit rects zoomed with the menu** (`port_pointer.cpp`, `CurrentProjection`). The viewport the rects
+are projected into is scaled about the zoom's centre as GX scales it (`GXPortGetViewportZoom`, new
+beside the setter), so taps and clicks land on what is shown. It is 1 outside the front end.
+
+**Echoes' cannon keeps shut for missiles** (`CGunWeapon::PlayAnim`). When the beam's gun is Echoes'
+cannon (`mPortEchoesCannon`, from `LoadGunModels`), Prime's missile anims are played otherwise: the
+missile shot as a beam shot (anim 4, its kick), the reload not at all, and the opening (6) and
+closing (5) as the rest pose (0). The time of Prime's anim is kept (`mPortAnimStandIn`, counted down
+in `Update`), and `CPlayerGun::Update` waits on it (`PortAnimTimeRemaining`), so missiles fire and
+reload at Prime's pace. Any other anim the gun starts (shot, fidget, combo, return to default)
+drops the stand-in. Sounds are unchanged. The log names each stand-in once ("gun: Echoes' cannon
+...").
+
+What to look for in test 24:
+- Tapping each main menu and file select row: the row under the finger is the one chosen, at the
+  screen's edges too. "Exit Game" (hold) on the file select as well.
+- With the Echoes cannon: missiles fire with a kick and the cannon stays whole, also after waiting
+  7 s or firing the beam. Missiles as fast as before.
+- Super missiles and the other charge combos still play Prime's combo anims: say if those open
+  the cannon too.

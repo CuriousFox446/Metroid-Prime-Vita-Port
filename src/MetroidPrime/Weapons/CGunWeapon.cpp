@@ -43,6 +43,7 @@
 #include "port_beam_colours.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_log.h"
 #include "port_model_variant.h"
 #endif
 
@@ -154,6 +155,8 @@ void CGunWeapon::LoadGunModels(CStateManager& mgr) {
 #ifdef TARGET_PC
   // Echoes' arm cannon (echoes-suits mod): the beam's ANCS with Echoes' gun and hologram.
   const CAssetId ancsId = PortEchoesSuits::GunAncs(x214_ancsId);
+  mPortEchoesCannon = ancsId != x214_ancsId;
+  mPortAnimStandIn = -1.f;
   x10_solidModelData = CAnimRes(ancsId, 0, x4_scale, defaultAnim, false);
   x60_holoModelData = CAnimRes(ancsId, 1, x4_scale, defaultAnim, false);
 #else
@@ -225,6 +228,9 @@ void CGunWeapon::LoadProjectileData(CStateManager& mgr) {
 bool CGunWeapon::PlayPasAnim(SamusGun::EAnimationState state, CStateManager& mgr, float angle) {
   switch (state) {
   case SamusGun::kAS_ComboFire:
+#ifdef TARGET_PC
+    mPortAnimStandIn = -1.f;
+#endif
     x100_gunController->EnterComboFire(mgr, x200_beamId);
     break;
   default:
@@ -251,13 +257,68 @@ void CGunWeapon::PlayAnim(NWeaponTypes::EGunAnimType type, bool loop) {
     return;
   }
   CAnimData& animData = *x10_solidModelData->AnimationData();
+#ifdef TARGET_PC
+  mPortAnimStandIn = -1.f;
+  if (mPortEchoesCannon) {
+    // Echoes' cannon never opens for missiles (Prime 2): a missile shot kicks as a beam shot does,
+    // the reload leaves the pose be, and going to or from missiles is the rest pose. The gun still
+    // waits as long as Prime's anim would (PortAnimTimeRemaining).
+    int standIn = -2; // -2: Prime's anim; -1: none
+    switch (type) {
+    case NWeaponTypes::kGAT_MissileShoot:
+      standIn = skShootAnim[CPlayerState::kCS_Normal];
+      break;
+    case NWeaponTypes::kGAT_MissileReload:
+      standIn = -1;
+      break;
+    case NWeaponTypes::kGAT_ToMissile:
+    case NWeaponTypes::kGAT_FromMissile:
+      standIn = skAnimTypeList[NWeaponTypes::kGAT_BasePosition];
+      break;
+    default:
+      break;
+    }
+    if (standIn != -2) {
+      mPortAnimStandIn = animData.GetAnimationDuration(skAnimTypeList[type]);
+      static uint sLogged = 0;
+      if ((sLogged & (1u << type)) == 0) {
+        sLogged |= 1u << type;
+        if (standIn >= 0) {
+          PortLog::Write("gun: Echoes' cannon plays anim %d for Prime's missile anim %d (%.2f s)\n", standIn,
+                         skAnimTypeList[type], mPortAnimStandIn);
+        } else {
+          PortLog::Write("gun: Echoes' cannon leaves out Prime's missile anim %d (%.2f s)\n", skAnimTypeList[type],
+                         mPortAnimStandIn);
+        }
+      }
+      if (standIn >= 0) {
+        animData.EnableLooping(false);
+        animData.SetAnimation(CAnimPlaybackParms(standIn, -1, 1.f, true), false);
+      }
+      return;
+    }
+  }
+#endif
   animData.EnableLooping(loop);
 
   const CAnimPlaybackParms parms(skAnimTypeList[type], -1, 1.f, true);
   animData.SetAnimation(parms, false);
 }
 
+#ifdef TARGET_PC
+bool CGunWeapon::PortAnimTimeRemaining() const {
+  if (mPortAnimStandIn >= 0.f) {
+    return mPortAnimStandIn > 0.001f;
+  }
+  return x10_solidModelData->GetAnimationData()->IsAnimTimeRemaining(0.001f,
+                                                                     rstl::string_l("Whole Body"));
+}
+#endif
+
 void CGunWeapon::Reset(CStateManager& mgr) {
+#ifdef TARGET_PC
+  mPortAnimStandIn = -1.f;
+#endif
   if (!x218_26_loaded)
     return;
 
@@ -271,6 +332,17 @@ void CGunWeapon::Reset(CStateManager& mgr) {
 void CGunWeapon::Update(float dt, CStateManager& mgr) {
   if (x218_26_loaded) {
     x10_solidModelData->AdvanceAnimation(dt, mgr, kInvalidAreaId, true);
+#ifdef TARGET_PC
+    if (mPortAnimStandIn > 0.f) {
+      mPortAnimStandIn -= dt * x10_solidModelData->GetAnimationData()->GetPlaybackRate();
+      if (mPortAnimStandIn < 0.f) {
+        mPortAnimStandIn = 0.f;
+      }
+    } else if (mPortAnimStandIn == 0.f) {
+      // Ran out a frame ago and no state waited on it (ReturnToRestPose's): the anim again.
+      mPortAnimStandIn = -1.f;
+    }
+#endif
     x100_gunController->Update(dt, mgr);
     if (x218_28_suitArmLocked) {
       LoadSuitArm(mgr);
@@ -815,15 +887,24 @@ void CGunWeapon::Fire(const bool underwater, const float dt,
   animData.EnableLooping(false);
   CAnimPlaybackParms parms(skShootAnim[chargeState], -1, 1.f, true);
   animData.SetAnimation(parms, false);
+#ifdef TARGET_PC
+  mPortAnimStandIn = -1.f;
+#endif
 }
 
 void CGunWeapon::ReturnToDefault(CStateManager& mgr) {
+#ifdef TARGET_PC
+  mPortAnimStandIn = -1.f;
+#endif
   x100_gunController->ReturnToDefault(mgr, 0.f, false);
 }
 
 bool CGunWeapon::ComboFireOver() const { return x100_gunController->IsComboOver(); }
 
 void CGunWeapon::EnterFidget(CStateManager& mgr, SamusGun::EFidgetType type, int parm2) {
+#ifdef TARGET_PC
+  mPortAnimStandIn = -1.f;
+#endif
   x100_gunController->EnterFidget(mgr, s32(type), s32(x200_beamId), parm2);
 }
 

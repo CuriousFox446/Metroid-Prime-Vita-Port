@@ -6,6 +6,7 @@
 #include "Kyoto/Math/CVector3f.hpp"
 
 #include <SDL3/SDL.h>
+#include <dolphin/gx/GXExtra.h>
 
 #include <cstdio>
 
@@ -355,6 +356,16 @@ void CurrentProjection(PortPointerMath::Projection& proj, PortPointerMath::Viewp
   const CViewport& v = CGraphics::GetViewport();
   vp = {static_cast< float >(v.mLeft), static_cast< float >(v.mTop), static_cast< float >(v.mWidth),
         static_cast< float >(v.mHeight)};
+  // The front end's menus draw zoomed about a point (GXPortSetViewportZoom, in these units): the
+  // viewport as GX scales it, so hits land where the widgets show (0.46.0 test 24).
+  float cx = 0.f, cy = 0.f;
+  const float zoom = GXPortGetViewportZoom(&cx, &cy);
+  if (zoom != 1.f) {
+    vp.left = cx + (vp.left - cx) * zoom;
+    vp.top = cy + (vp.top - cy) * zoom;
+    vp.width *= zoom;
+    vp.height *= zoom;
+  }
 }
 
 void RecordCorners(const CGuiWidget* widget, const CTransform4f& model, const CVector3f* points,

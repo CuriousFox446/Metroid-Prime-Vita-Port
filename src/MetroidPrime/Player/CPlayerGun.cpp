@@ -1125,14 +1125,22 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
   x740_grappleArm->Update(grappleSwingT, advDt, mgr);
 
   if (x338_nextState != kNS_StatusQuo) {
+#ifndef TARGET_PC
     const CAnimData& animData = *x72c_currentBeam->GetSolidModelData().GetAnimationData();
+#endif
     if (gunState == CGunMorph::kGS_InWipeDone) {
       if (x338_nextState == kNS_ChangeWeapon) {
         ChangeWeapon(playerState, mgr);
         x338_nextState = kNS_StatusQuo;
       }
+#ifdef TARGET_PC
+      // The gun's anim, or Prime's missile timing where Echoes' cannon leaves its anim out.
+    } else if (!x72c_currentBeam->PortAnimTimeRemaining() || x832_30_requestReturnToDefault) {
+      x72c_currentBeam->PortEndAnimStandIn();
+#else
     } else if (!animData.IsAnimTimeRemaining(0.001f, rstl::string_l("Whole Body")) ||
                x832_30_requestReturnToDefault) {
+#endif
       bool statusQuo = true;
       switch (x338_nextState) {
       case kNS_EnterMissile:

@@ -151,6 +151,16 @@ void GXPortSetViewportZoom(float zoom, float centerX, float centerY) {
   }
 }
 
+float GXPortGetViewportZoom(float* centerX, float* centerY) {
+  if (centerX != nullptr) {
+    *centerX = sViewportZoomX;
+  }
+  if (centerY != nullptr) {
+    *centerY = sViewportZoomY;
+  }
+  return sViewportZoom;
+}
+
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {
   sLastViewport = {left, top, width, height, nearZ, farZ, field, true};
   // GX's own record keeps the viewport as given (GXGetViewport); only the transform below zooms.

@@ -127,6 +127,10 @@ public:
   void PortStartMuzzleFlash();
   // CGunWeaponMP1::UpdateMuzzleFlash 0xca1e74.
   void PortUpdateMuzzleFlash(float dt, const CVector3f& scale, const CTransform4f& xf);
+  // Whether the gun's anim has time left, or the stand-in for a missile anim Echoes' cannon leaves
+  // out (PlayAnim): CPlayerGun's next state waits on it. PortEndAnimStandIn: that wait is over.
+  bool PortAnimTimeRemaining() const;
+  void PortEndAnimStandIn() { mPortAnimStandIn = -1.f; }
 #endif
   virtual void EnableFx(const bool enable) {}
   virtual void EnableSecondaryFx(const ESecondaryFxType type) {
@@ -277,6 +281,13 @@ protected:
   // xb0_suitArmModelData holds the Dread cannon (port_dread_samus_mod.h): it is drawn in place
   // of the gun model, which it carries along with the arm.
   bool mPortDreadCannon = false;
+
+  // Echoes' arm cannon (echoes-suits, PortEchoesSuits::GunAncs) is skinned to Prime's gun skeleton,
+  // whose missile anims open the barrel; Echoes' cannon never opens. For it PlayAnim plays the
+  // beam's shot or rest pose in their place, and mPortAnimStandIn keeps the time left of Prime's
+  // anim (< 0: none), so missiles keep Prime's timing (0.46.0 test 24).
+  bool mPortEchoesCannon = false;
+  float mPortAnimStandIn = -1.f;
 #endif
 };
 CHECK_SIZEOF(CGunWeapon, 0x21c)
