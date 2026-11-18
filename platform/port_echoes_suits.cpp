@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -861,21 +862,41 @@ bool ConvertGunAnim(const std::vector<uint8_t>& in, const std::vector<EchoesJoin
 
   std::map<uint32_t, const EchoesJoint*> byId;
   for (const EchoesJoint& joint : from) byId[joint.id] = &joint;
+  // Every channel Echoes lists is posed whole there: a joint without a rotation track unrotated,
+  // one without an offset track at its skeleton place (each beam's open anim ends with the gills
+  // there, its close anim starts there). Prime's pose builder keeps a joint's last offset when the
+  // anim gives none (CAnimData::RecalcPoseBuilder), so the beam's gill pose would stay through the
+  // generic missile anims, which list the gills without tracks: the offset is written out instead.
   struct Planned {
     uint32_t channel, joint;
+    int16_t place[3];  // the skeleton place, in offset steps, for a channel without an offset track
   };
   std::vector<Planned> plan;
   bool root = false;
   for (uint32_t c = 0; c < channels; ++c) {
-    if (chans[c].rot.keys == 0 && chans[c].off.keys == 0) continue;
+    const bool tracks = chans[c].rot.keys != 0 || chans[c].off.keys != 0;
     const auto joint = byId.find(chans[c].joint);
     const int found = joint != byId.end() ? to.Find(joint->second->name) : -1;
     if (found < 0) {
+      if (!tracks) continue;  // posed by neither game's anims
       return Fail(error, "joint " + (joint != byId.end() ? joint->second->name : std::to_string(chans[c].joint)) +
                              " has no Prime namesake");
     }
-    plan.push_back({c, to.joints[size_t(found)].id});
-    root = root || to.joints[size_t(found)].id == 3;
+    const PortDread::PrimeJoint& pj = to.joints[size_t(found)];
+    Planned p{c, pj.id, {0, 0, 0}};
+    if (chans[c].off.keys == 0) {
+      const int parent = pj.parent != PortDread::kPrimeNoParent ? to.IndexOfId(pj.parent) : -1;
+      for (int j = 0; j < 3; ++j) {
+        const float local = pj.head[j] - (parent >= 0 ? to.joints[size_t(parent)].head[j] : 0.f);
+        const float stepsAway = std::round(local / offsetMult);
+        if (!(offsetMult > 0.f) || std::fabs(stepsAway) > 32767.f) {
+          return Fail(error, "joint " + pj.name + "'s skeleton place does not fit the ANIM's offset steps");
+        }
+        p.place[j] = int16_t(stepsAway);
+      }
+    }
+    plan.push_back(p);
+    root = root || pj.id == 3;
   }
   // CFBStreamedCompression measures the root's travel, by index among the channels.
   if (!root) return Fail(error, "ANIM without the root joint");
@@ -890,12 +911,10 @@ bool ConvertGunAnim(const std::vector<uint8_t>& in, const std::vector<EchoesJoin
       Put16(list, uint16_t(c.rot.keys ? c.rot.init[j] : 0));
       list.push_back(c.rot.keys ? c.rot.bits[j] : 0);
     }
-    Put16(list, c.off.keys ? steps : 0);
-    if (c.off.keys) {
-      for (int j = 0; j < 3; ++j) {
-        Put16(list, uint16_t(c.off.init[j]));
-        list.push_back(c.off.bits[j]);
-      }
+    Put16(list, steps);  // a still offset at the skeleton place where Echoes has none: no bits
+    for (int j = 0; j < 3; ++j) {
+      Put16(list, uint16_t(c.off.keys ? c.off.init[j] : p.place[j]));
+      list.push_back(c.off.keys ? c.off.bits[j] : 0);
     }
   }
   BitWriter w;

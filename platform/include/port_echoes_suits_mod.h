@@ -23,7 +23,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 8: Dark Samus's Morph Ball (kDarkBall).
 // 9: Echoes' missile anims for the cannon, added to each beam's ANCS variant (kMissileAnimNames).
 // 10: the cannon's Light and Annihilator sets back on Wave and Plasma (kGunSets), as Echoes pairs them.
-inline constexpr int kVersion = 10;
+// 11: the missile anims pose every joint Echoes lists (the gills close for missiles, as in Echoes).
+inline constexpr int kVersion = 11;
 
 // The first-person arm cannon (CGunWeapon::LoadGunModels: characters 0 and 1 of each beam's ANCS).
 // Echoes' gun and hologram have Prime's ids and are skinned on its own CINF 46ED31E0, the same 50

@@ -173,9 +173,10 @@ bool PatchGunAncs(std::vector<uint8_t>& ancs, std::string* error);
 
 // An Echoes compressed gun ANIM (version 2, 0x0101 where Prime has its EVNT id; u8 joint ids, a scale
 // track per channel) in Prime's layout (CFBStreamedCompression) for `to`, joints matched by name:
-// channels with no track left out (both games pose those unrotated at their skeleton place), a
-// still rotation for those with an offset alone (Prime reads one for every channel), the keys
-// re-packed bit for bit, `evnt` as its EVNT. False on a scale track or a joint `to` lacks.
+// every channel Echoes lists, a still rotation where it has no rotation track and a still offset
+// at `to`'s skeleton place where it has no offset track (Echoes poses a listed joint so; Prime's
+// pose builder would keep the joint's last offset), the keys re-packed bit for bit, `evnt` as its
+// EVNT. False on a scale track or a joint with tracks that `to` lacks.
 bool ConvertGunAnim(const std::vector<uint8_t>& in, const std::vector<EchoesJoint>& from, const PortDread::PrimeSkeleton& to,
                     uint32_t evnt, std::vector<uint8_t>& out, std::string* error);
 
