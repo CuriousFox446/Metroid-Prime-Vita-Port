@@ -3916,3 +3916,23 @@ What to look for in test 20:
 - The music in the fights, and any `refill late` lines with their times.
 - Gyro aim with hold to aim, hold to pause and toggle: a finger on the rear touch pad.
 - The `presents` lines' program loads ("N loaded from the card ... ms").
+
+### Test 20 result
+
+`~/logs/t046_20.log` (1698cea, about 35,000 frames). It covers a new game's opening (the intro, the
+space scene, the frigate), mods turned on mid-game, and the Fusion Suit unlock tried. No hang or error.
+The log stops without its closing line: the game was closed from the home screen. (The crash dump in
+Downloads from that afternoon is another app's, `msr-headless`.)
+- **Program loads are fast again.** The program cache thread ran on core 3 at 131. 158 loads from the
+  card took 42 ms each on average (test 19: about 220 ms); the slowest report's took 160 ms each.
+- **Fresh compiles.** 106 programs were not on the card yet (the frigate's, and the materials whose
+  shaders test 15's intensity textures changed). They were compiled on the Vita, 2.2 s each. Their
+  draws were fixed-function meanwhile, up to 9,600 in a 300-present report. A one-time cost: the card
+  keeps them.
+- **The music came late four times**, all in the frigate (`int_introstage`). The late reads took 2.0 to
+  2.4 s, one 4.1 s. Several came just after new programs were written to the card, but other bursts
+  of programs passed without one. The card stalls now and then, and a refill has 2 s of slack: the
+  streams' 4 s ring (0x11DC0 bytes, `CDSPStream`), refilled half at a time.
+- Turning mods on reloaded them (the Echoes suits, 195 resources): a 3.1 s stall, then play went on.
+- The frame rate through the run: median 36 FPS, 23 to 46 by stretch.
+- Neither gyro aim nor the Sheegoths came up in this run.
