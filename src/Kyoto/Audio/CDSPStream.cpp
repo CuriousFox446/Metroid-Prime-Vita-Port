@@ -98,6 +98,25 @@ static unsigned RefillAgeMs(int idx) {
           .count());
 }
 
+// Each stream's ring: the game's is 0x11DC0 bytes of 32 kHz ADPCM, 4 s, read from the disc one half
+// (2 s) at a time while the other plays, so a refill has 2 s to arrive. On the Vita the disc image is
+// on the memory card, which now and then stalls for 2 to 4 s (0.46.0 test 20: the frigate's music
+// came late four times, its reads taking 2.0 to 4.1 s), and a late refill replays its half (the music
+// repeating) and leaves that channel 2 s behind the other (the two overlapping). Since 0.46.0 test 21
+// the music's two streams (0 and 1, not the one-shots) have twice the ring there: 8 s, read 4 s at a
+// time, so a refill has 4 s. The one-shots (jingles) keep the game's: a stream ends one refill after
+// its first silent half, which a longer half would hold back by up to 2 s. In the port's MusyX (its
+// PC target) a stream's ring is host memory (hw_aramdma.c, aramAllocateStreamBuffer), not the
+// emulated ARAM, so the bigger rings take nothing from the samples: 292 KiB more of RAM in all.
+static const uint kGameRingBytes = 0x11DC0;
+#if defined(__vita__)
+static const uint kMusicRingBytes = 0x23B80;
+#else
+static const uint kMusicRingBytes = kGameRingBytes;
+#endif
+
+static uint PortRingBytes(uchar oneshot) { return oneshot != 0 ? kGameRingBytes : kMusicRingBytes; }
+
 void CDSPStream::OpenFiles(const char* fileName, CDSPStream& stream) {
   DVDOpen(const_cast< char* >(fileName), &stream.x50_fileInfo1);
   DVDOpen(const_cast< char* >(fileName), &stream.x8c_fileInfo2);
@@ -154,7 +173,8 @@ int CDSPStream::FindStreamIdx(int handle) {
 }
 
 void CDSPStream::DoAllocateStream() {
-  xd4_buffer = CMemory::Alloc(0x11DC0, IAllocator::kHI_RoundUpLen, IAllocator::kSC_Unk1,
+  // The ring this stream was given (PortRingBytes; the game's 0x11DC0), with its samples set to match.
+  xd4_buffer = CMemory::Alloc(xd8_bufferBytes, IAllocator::kHI_RoundUpLen, IAllocator::kSC_Unk1,
                               IAllocator::kTP_Heap, CCallStack(-1, "??(??)"));
   xc8_streamId = sndStreamAllocEx(
       static_cast< u8 >(0xFF), xd4_buffer, xdc_streamSamples, static_cast< u32 >(32000),
@@ -172,16 +192,17 @@ void CDSPStream::Initialize() {
     CDSPStream& stream = g_Streams[i];
     stream.x0_state = 0;
     stream.xd4_buffer = nullptr;
-    stream.xd8_bufferBytes = 0x11DC0;
-    stream.xdc_streamSamples = 0x1F410;
+    stream.x1_oneshot = i < 2 ? 0 : 1;
+    stream.xd8_bufferBytes = PortRingBytes(stream.x1_oneshot);
+    stream.xdc_streamSamples = (stream.xd8_bufferBytes >> 3) * 14; // the game's 0x1F410 for 0x11DC0
     stream.xc8_streamId = static_cast< uint >(-1);
     if (i < 2) {
-      stream.x1_oneshot = 0;
       stream.DoAllocateStream();
-    } else {
-      stream.x1_oneshot = 1;
     }
   }
+  MP_STREAM_LOG("music streams: a ring of %u bytes (%u ms), refilled %u ms at a time; one-shots %u bytes (%u ms)",
+                kMusicRingBytes, ((kMusicRingBytes >> 3) * 14) / 32, ((kMusicRingBytes >> 4) * 14) / 32,
+                kGameRingBytes, ((kGameRingBytes >> 3) * 14) / 32);
   sHandleCounter = 0;
   g_StreamData.unkCounter = 0;
 }
@@ -203,6 +224,9 @@ uint CDSPStream::AllocateStream(const SStreamInfo& info, char vol, char pan) {
   x28_loopEndByte = info.x18_loopEndByte;
   x2c_adpcmInfo = info.x1c_adpcmInfo;
 
+  // The ring's size before a one-shot's buffer and MusyX stream are made again (DoAllocateStream).
+  xd8_bufferBytes = PortRingBytes(x1_oneshot);
+  xdc_streamSamples = (xd8_bufferBytes >> 3) * 14;
   if (xd4_buffer == nullptr) {
     DoAllocateStream();
   }
@@ -214,11 +238,6 @@ uint CDSPStream::AllocateStream(const SStreamInfo& info, char vol, char pan) {
   xf0_stopRequested = 0;
   xec_readsPending = 1;
   xe0_curBuffer = 1;
-  xd8_bufferBytes = 0x11DC0;
-  xdc_streamSamples = (xd8_bufferBytes >> 3) * 14;
-  if (xd8_bufferBytes > 0x11DC0) {
-    xd8_bufferBytes = 0x11DC0;
-  }
 
   uint fileCur = xd8_bufferBytes >> 1;
   xcc_fileCur = fileCur;

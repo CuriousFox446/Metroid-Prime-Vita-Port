@@ -3936,3 +3936,23 @@ Downloads from that afternoon is another app's, `msr-headless`.)
 - Turning mods on reloaded them (the Echoes suits, 195 resources): a 3.1 s stall, then play went on.
 - The frame rate through the run: median 36 FPS, 23 to 46 by stretch.
 - Neither gyro aim nor the Sheegoths came up in this run.
+
+## 0.46.0 test 21: the music's ring doubled
+
+**The music's two streams have an 8 s ring on the Vita** (`CDSPStream.cpp`, `PortRingBytes`):
+0x23B80 bytes of 32 kHz ADPCM, read 4 s at a time, where the game's is 0x11DC0 (4 s, read 2 s at a
+time). A refill now has 4 s to arrive before its channel replays a half and falls behind the other.
+That covers test 20's late reads but the 4.1 s one.
+- The one-shot streams (2 and 3: jingles such as the item fanfare) keep the game's ring. A stream
+  ends one refill after its first silent half, and a longer half would hold a jingle's end, and the
+  music coming back after it, up to 2 s later.
+- The cost is RAM, not ARAM. In the port's MusyX (its PC target), a stream's ring is host memory
+  (`hw_aramdma.c`, `aramAllocateStreamBuffer`: malloc), and samples are not stored in the emulated
+  ARAM either (`aramStoreData` returns NULL). So the bigger rings take nothing from the sound effects:
+  292 KiB more in all (each music stream's staging half-buffers and its MusyX ring).
+- The log says the sizes once at the start (`mpstream: music streams: a ring of 146304 bytes ...`).
+
+What to look for in test 21:
+- The music playing and looping as before: the frigate's, Phendrana's, the item fanfare and the
+  music's return after it.
+- `refill late` lines, now only past 4 s (`asked for ... ms ago`).
