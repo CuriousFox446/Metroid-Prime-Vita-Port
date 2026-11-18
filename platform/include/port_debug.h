@@ -228,6 +228,12 @@ void SetHudWide(bool enabled);
 // distorted, background movie included. Off by default and under Original experience.
 bool StretchMenus();
 void SetStretchMenus(bool enabled);
+// Port (0.46.0 test 22): those menus kept in proportion but zoomed until their 4:3 frame's width
+// fills a wider screen. Their picture is a band letterboxed inside it (the movies' and the frames'
+// black above and below), so only black is cut. On by default on the Vita; off under Stretch menus
+// and Original experience.
+bool ZoomMenus();
+void SetZoomMenus(bool enabled);
 // Scripted 16:9 cutscene bars (CCameraFilterPass kFS_CinemaBars). Off by default:
 // below 16:9 the cinematic camera already renders the full shot, so it fills the
 // screen instead.

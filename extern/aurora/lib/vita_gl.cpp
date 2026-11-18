@@ -747,7 +747,12 @@ public:
         GLint internalFormat = GL_RGBA;
         GLenum dataFormat = GL_RGBA;
         if (m_format == TexelFormat::I8) {
-          internalFormat = GL_INTENSITY;
+          // 0.46.0 test 22: given as GL_RED, which vitaGL copies in as it is (its fast_store), and
+          // turned to (I, I, I, I) below, once every level is in (U8_R and U8_RRRR are one layout,
+          // two swizzles). As GL_INTENSITY vitaGL put each texel through its read and write
+          // callbacks: a movie frame's three planes (640x480 and two 320x240) took the render worker
+          // 20 to 40 ms, and the title and file select menus ran at 24 FPS in test 21.
+          internalFormat = GL_RED;
           dataFormat = GL_RED;
         } else if (m_format == TexelFormat::IA8) {
           internalFormat = GL_LUMINANCE_ALPHA;
@@ -767,6 +772,12 @@ public:
                        std::max(height >> level, 1), 0, dataFormat, GL_UNSIGNED_BYTE, m_cpu.data() + offset);
           offset += size;
           ++uploaded;
+        }
+        if (m_format == TexelFormat::I8) {
+          // After the last level: vitaGL sets the texture up again (its stored U8_R) as it adds each.
+          if (SceGxmTexture* gxm = vglGetGxmTexture(GL_TEXTURE_2D)) {
+            sceGxmTextureSetFormat(gxm, SCE_GXM_TEXTURE_FORMAT_U8_RRRR);
+          }
         }
         m_levels = std::max(uploaded, 1u);
         static int sChainsLogged[kTexelFormats] = {};

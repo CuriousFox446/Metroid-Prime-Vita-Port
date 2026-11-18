@@ -89,6 +89,11 @@ template <class Owns> BallOwnership ResolveBallOwnership(int suit, bool spider, 
 // Main requires the winning variant ANCS AND its referenced main CMDL.
 bool ReplacesBall(int suit, bool spider);
 bool ReplacesLowBall(int suit, bool spider);
+// 0.46.0 test 22: whether any mod (the Echoes suits import, Dread Samus, another) serves the suit's
+// Spider Ball, ANCS and main CMDL, as ReplacesBall asks; not the port's generated looks (its Power
+// Suit spider ball is Prime's own, recoloured). Prime's spider ball glass is a shell for Prime's own
+// spider ball: over a mod's ball it drew a second ball around it (CMorphBall::LoadMorphBallModel).
+bool ModServesSpiderBall(int suit);
 
 // The in-game body CMDL of a CPlayerState::EPlayerSuit (0 Power, 1 Gravity, 2 Varia, 3 Phazon;
 // also BallTransitionsANCS's character index), 0 for the suits the mod leaves alone (Fusion).

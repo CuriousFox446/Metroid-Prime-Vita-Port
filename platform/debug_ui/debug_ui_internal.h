@@ -71,6 +71,7 @@ extern float sDynScale;
 extern PortDebug::EAspectMode sAspectMode;
 extern bool sHudWide;
 extern bool sStretchMenus;
+extern bool sZoomMenus;
 extern bool sCinemaBars;
 extern bool sBallBars;
 extern bool sPhazonShell;

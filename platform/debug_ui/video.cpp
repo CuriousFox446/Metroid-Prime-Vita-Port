@@ -78,6 +78,14 @@ void DrawVideoDisplay() {
   ImGui::SetItemTooltip("The title and file select menus are made for 4:3.\n"
                         "Off: kept in proportion, with black bars at the sides.\n"
                         "On: stretched to fill a wide screen (the image is distorted).");
+  ImGui::BeginDisabled(sStretchMenus);
+  if (ImGui::Checkbox("Zoom menus to fill the screen", &sZoomMenus)) {
+    MarkDirty();
+  }
+  ImGui::EndDisabled();
+  ImGui::SetItemTooltip("The title and file select menus' picture is a wide band inside their 4:3 frame.\n"
+                        "On: zoomed in proportion until the frame fills the screen's width; only the\n"
+                        "black above and below the band is cut. Off: the whole 4:3 frame, smaller.");
   if (ImGui::Checkbox("Cutscene black bars", &sCinemaBars)) {
     MarkDirty();
   }

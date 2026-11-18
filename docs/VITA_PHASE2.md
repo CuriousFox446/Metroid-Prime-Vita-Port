@@ -3956,3 +3956,54 @@ What to look for in test 21:
 - The music playing and looping as before: the frigate's, Phendrana's, the item fanfare and the
   music's return after it.
 - `refill late` lines, now only past 4 s (`asked for ... ms ago`).
+
+### Test 21 result
+
+`~/logs/t046_21.log` (08825a0, 4.5 minutes, the front end then Phendrana with the Spider Ball): a
+clean exit. The music's ring line is there (146304 bytes, 8001 ms, refilled 4000 ms at a time).
+- **One late refill, a 7.9 s read** (`ice_worldmainR`). Nothing else was logged around it: the card
+  stalled past even the new 4 s of slack.
+- **The title and file select menus ran at 24 FPS**: "the main menu+save select menu became slow".
+  On their movie screens tests 18 to 20 ran at 36 to 41 FPS, with 17 to 18 ms a present of the render
+  worker's on textures. Test 21: 33 ms. Each movie frame is three new I8 textures (640x480 and two
+  320x240 planes). Since test 15 they go to vitaGL as `GL_INTENSITY` from `GL_RED`, and vitaGL copies
+  only like for like (its `fast_store`), so it put each of the frame's 460,000 texels through a read
+  and a write callback: 20 to 40 ms a frame of the render worker's. Why this run was slower than test
+  20 is not known; the cost was there before.
+- **"Zoom it in to make it fit the Vita's screen (not by stretching)"**: the menus are drawn in
+  proportion, their 4:3 frame centred. Their picture is a wide band letterboxed inside that frame,
+  so black showed on all four sides (the user's photos).
+- **"Even though you got the spider ball, it also still uses the default morphball model at the same
+  time"**, with the Echoes suits mod on (the user: "I had the echoes mod enabled, silly me"). That
+  import gives the Varia and Light Spider Balls their plain Echoes balls, as Echoes has none of its
+  own. But Prime's spider ball glass, a shell for Prime's own spider ball, was still drawn round
+  them: two balls at once. Only Dread's balls left it out.
+- On the photos' run (not this log) the "Compiling shaders" toast counted 28 in the front end: the
+  materials test 20's run had seen and not compiled, made at the start (the warm-up sends them).
+
+## 0.46.0 test 22: menus at speed and zoomed, the spider ball's glass
+
+**Intensity textures copied, not converted** (`vita_gl.cpp`, `Texture::bind`): given to vitaGL as
+`GL_RED`, which it copies in as it is, then turned to `SCE_GXM_TEXTURE_FORMAT_U8_RRRR` once every
+level is in (`sceGxmTextureSetFormat` on `vglGetGxmTexture`). U8_R and U8_RRRR are one layout with
+two swizzles, so draws sample (I, I, I, I) as before. A movie frame's planes should now take a few ms.
+
+**The menus zoomed to fill the screen** (Video > "Zoom menus to fill the screen", `zoom_menus`, on by
+default on the Vita; off under Stretch menus and Original experience).
+- `CFrontEndUI::Draw` scales GX's viewport about the screen's centre (`GXPortSetViewportZoom`, in
+  `GXTransform.cpp`) until the 4:3 frame's 640 units span its width: 790/640, about 1.23, on the Vita.
+- The layout is untouched, and `GXGetViewport` still gives the viewport as set. The Vita draws a
+  viewport larger than the screen as it is, cut by the scissor.
+- The zoom stops at 4/3, where a 16:9 band (three quarters of the frame's height) meets the top and
+  bottom, for screens wider still.
+
+**No Prime spider glass over a mod's ball** (`CMorphBall::LoadMorphBallModel`).
+`PortDreadSamus::ModServesSpiderBall(suit)` is true when any mod's resources won the suit's Spider
+Ball ANCS and main CMDL (`port_mods.cpp`, by the winning resources' mod names). The port's own
+generated looks carry no mod name, so its Power Suit spider ball, Prime's recoloured, keeps the glass.
+
+What to look for in test 22:
+- The title and file select menus' frame rate (back near 40 or above) and their movies.
+- The menus filling the screen's width, the band whole: the "MAIN MENU" title and the bottom legends.
+- With the Echoes mod on: one ball with the Spider Ball. With it off: Prime's spider ball and its glass.
+- HUD and other I8 textures looking as before.

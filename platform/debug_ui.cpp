@@ -84,6 +84,12 @@ float sDynScale = 0.f;      // the scale in use; 0 = sRenderScale
 PortDebug::EAspectMode sAspectMode = PortDebug::kAspect_Window;
 bool sHudWide = true;
 bool sStretchMenus = false;
+// On by default on the Vita (0.46.0 test 22: the user asked for the menus zoomed to fill its screen).
+#if defined(__vita__)
+bool sZoomMenus = true;
+#else
+bool sZoomMenus = false;
+#endif
 bool sCinemaBars = false;
 bool sBallBars = false;
 bool sPhazonShell = true;

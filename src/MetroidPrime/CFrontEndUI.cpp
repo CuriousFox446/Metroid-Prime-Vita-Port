@@ -37,6 +37,7 @@
 
 #include "port_apclient.h"
 #include "port_debug.h"
+#include <dolphin/gx/GXExtra.h>
 #include "port_pointer.h"
 #include "port_pointer_menu.h"
 #include "port_savestate.h"
@@ -90,6 +91,43 @@ bool FusionLinked() {
 }
 
 #ifdef TARGET_PC
+// Port (0.46.0 test 22): the menus zoomed to fill a wide screen (PortDebug::ZoomMenus) for one
+// CFrontEndUI::Draw: GX's viewport scaled about the screen's centre until the 4:3 frame's 640
+// units span the viewport's width (the user: "zoom it in to make it fit the Vita's screen (not by
+// stretching)"). The menus' picture is a band letterboxed inside that frame, the title and file
+// select movies' and the frames over them, so the zoom cuts only black above and below it. It stops
+// at 4/3, where a 16:9 band (three quarters of the frame's height) meets the screen's top and
+// bottom, for screens wider still. The layout, and GXGetViewport, stay as they were.
+class PortMenuZoom {
+public:
+  PortMenuZoom() {
+    if (!PortDebug::ZoomMenus() || PortDebug::AspectMode() == PortDebug::kAspect_4_3) {
+      return;
+    }
+    const auto& vp = CGraphics::GetViewport();
+    if (vp.mWidth <= 0 || vp.mHeight <= 0) {
+      return;
+    }
+    const float zoom = rstl::min_val(static_cast< float >(vp.mWidth) / 640.f, 4.f / 3.f);
+    if (zoom <= 1.01f) {
+      return;
+    }
+    GXPortSetViewportZoom(zoom, static_cast< float >(vp.mLeft) + 0.5f * static_cast< float >(vp.mWidth),
+                          static_cast< float >(vp.mTop) + 0.5f * static_cast< float >(vp.mHeight));
+    mOn = true;
+  }
+  ~PortMenuZoom() {
+    if (mOn) {
+      GXPortSetViewportZoom(1.f, 0.f, 0.f);
+    }
+  }
+  PortMenuZoom(const PortMenuZoom&) = delete;
+  PortMenuZoom& operator=(const PortMenuZoom&) = delete;
+
+private:
+  bool mOn = false;
+};
+
 // Port: "Exit Game" on the main menu (PortDebug::MenuExit; Prime 2's issue #80). The Select
 // legend draws it as its companion (CGuiTextPane::PortSetCompanion) a line below it, under
 // the left column, with the Z prompt in place of Select's A; holding Z, or a finger or mouse
@@ -2824,6 +2862,7 @@ void CFrontEndUI::Draw() const {
 #ifdef TARGET_PC
   if (sResumeStage == kRS_Accepting || sResumeStage == kRS_Starting)
     return; // black until the game starts
+  const PortMenuZoom portZoom;
 #endif
 
   if (xec_emuFrme.get() != nullptr) {

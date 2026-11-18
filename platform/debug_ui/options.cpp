@@ -517,6 +517,13 @@ bool StretchMenus() {
 
 void SetStretchMenus(bool enabled) { StoreSetting(sStretchMenus, enabled); }
 
+bool ZoomMenus() {
+  EnsureInitialized();
+  return sZoomMenus && !sStretchMenus && !sOriginalExperience;
+}
+
+void SetZoomMenus(bool enabled) { StoreSetting(sZoomMenus, enabled); }
+
 bool CinemaBars() {
   EnsureInitialized();
   return sCinemaBars || sOriginalExperience;

@@ -211,6 +211,11 @@ void GXPortSetSwapInterval(u32 vblanks);
 // PS Vita (0.46.0 test 14): the GPU cost test, from the next frame: each kind of draw left out in
 // turn for a second or so, and the GPU's busy time a frame without it logged. Nothing elsewhere.
 void GXPortRunGpuCostTest(void);
+// Port (0.46.0 test 22): every viewport GX is given from now on, and the one in force, scaled by
+// `zoom` about (centerX, centerY), in the viewport's units: what is drawn grows about that point,
+// the outside cut off by the scissor. 1 turns it off. GXGetViewport still gives the viewport as set.
+// The front end's menus use it to fill a wide screen with their letterboxed 4:3 frames.
+void GXPortSetViewportZoom(float zoom, float centerX, float centerY);
 u32 GXGetPBRCostTest(void);
 // Aurora extension: a three-piece tone curve over the lit colour x, which is taken as
 // already exposed (see GX_AURORA_SET_PBR_TONE). Row 0 is the toe, (a x + b) x^2 + c x below

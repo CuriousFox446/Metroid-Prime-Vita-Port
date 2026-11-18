@@ -2928,9 +2928,12 @@ void CMorphBall::LoadMorphBallModel(CStateManager& mgr) {
 #endif
           );
       x6c_lowPolyBallModelShader = skSpiderBallLowPoly[modelIdx].x4_shader;
+      // Port: Prime's glass is the shell of Prime's own spider ball; none over a mod's (Dread's, or
+      // the Echoes suits import's, whose Varia and Light Spider Balls are their plain balls: 0.46.0
+      // test 21 drew the glass round the Echoes Varia ball, two balls at once).
       if (skSpiderBallGlass[modelIdx].x0_name != nullptr
 #ifdef TARGET_PC
-          && !PortDreadSamus::ReplacesBall(modelIdx, true)
+          && !PortDreadSamus::ReplacesBall(modelIdx, true) && !PortDreadSamus::ModServesSpiderBall(modelIdx)
 #endif
       ) {
         x60_spiderBallGlassModel =

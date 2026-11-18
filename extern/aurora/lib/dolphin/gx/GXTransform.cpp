@@ -124,7 +124,46 @@ void GXSetViewport(float left, float top, float width, float height, float nearZ
   GXSetViewportJitter(left, top, width, height, nearZ, farZ, 1);
 }
 
+// GXPortSetViewportZoom's (game thread, as every GX call): the zoom and its centre, and the last
+// viewport as the game gave it, to apply the zoom to at once.
+static float sViewportZoom = 1.f;
+static float sViewportZoomX = 0.f;
+static float sViewportZoomY = 0.f;
+static struct {
+  float left, top, width, height, nearZ, farZ;
+  u32 field;
+  bool set;
+} sLastViewport = {};
+
+void GXPortSetViewportZoom(float zoom, float centerX, float centerY) {
+  if (!(zoom > 0.f)) {
+    zoom = 1.f;
+  }
+  if (zoom == sViewportZoom && centerX == sViewportZoomX && centerY == sViewportZoomY) {
+    return;
+  }
+  sViewportZoom = zoom;
+  sViewportZoomX = centerX;
+  sViewportZoomY = centerY;
+  if (sLastViewport.set) {
+    const auto vp = sLastViewport;
+    GXSetViewportJitter(vp.left, vp.top, vp.width, vp.height, vp.nearZ, vp.farZ, vp.field);
+  }
+}
+
 void GXSetViewportJitter(float left, float top, float width, float height, float nearZ, float farZ, u32 field) {
+  sLastViewport = {left, top, width, height, nearZ, farZ, field, true};
+  // GX's own record keeps the viewport as given (GXGetViewport); only the transform below zooms.
+  const float givenLeft = left;
+  const float givenTop = top;
+  const float givenWidth = width;
+  const float givenHeight = height;
+  if (sViewportZoom != 1.f) {
+    left = sViewportZoomX + (left - sViewportZoomX) * sViewportZoom;
+    top = sViewportZoomY + (top - sViewportZoomY) * sViewportZoom;
+    width *= sViewportZoom;
+    height *= sViewportZoom;
+  }
   float sx;
   float sy;
   float sz;
@@ -147,10 +186,10 @@ void GXSetViewportJitter(float left, float top, float width, float height, float
   sz = zmax - zmin;
   oz = zmax;
 
-  __gx->vpLeft = left;
-  __gx->vpTop = top;
-  __gx->vpWd = width;
-  __gx->vpHt = height;
+  __gx->vpLeft = givenLeft;
+  __gx->vpTop = field == 0 ? givenTop - 0.5f : givenTop;
+  __gx->vpWd = givenWidth;
+  __gx->vpHt = givenHeight;
   __gx->vpNearz = nearZ;
   __gx->vpFarz = farZ;
 

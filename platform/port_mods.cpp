@@ -80,6 +80,8 @@ std::unordered_map<uint32_t, std::string> sHudBars;
 std::set<uint32_t> sDreadBodies;
 std::set<uint32_t> sDreadBalls;
 std::set<uint32_t> sDreadLowBalls;
+// The suits whose Spider Ball a mod serves, any mod (PortDreadSamus::ModServesSpiderBall).
+std::set<int> sModSpiderBalls;
 std::set<uint32_t> sDreadCannons;  // first-person cannon variants (PortDreadSamus::FirstPersonCannon)
 // The Dread-proportioned CINFs it serves (PortDreadSamus::Skeleton).
 std::set<uint32_t> sDreadSkeletons;
@@ -469,6 +471,7 @@ bool PortDreadSamus::ReplacesBall(int suit, bool spider) {
 bool PortDreadSamus::ReplacesLowBall(int suit, bool spider) {
   return PortMods::sDreadLowBalls.count(BallModel(suit, spider)) != 0;
 }
+bool PortDreadSamus::ModServesSpiderBall(int suit) { return PortMods::sModSpiderBalls.count(suit) != 0; }
 namespace {
 bool sDreadCannonShown = true;
 }
@@ -657,6 +660,7 @@ void Initialize() {
   sRetailPlacements.clear();
   sDreadBodies.clear();
   sDreadBalls.clear();
+  sModSpiderBalls.clear();
   sDreadCannons.clear();
   sDreadLowBalls.clear();
   sDreadSkeletons.clear();
@@ -1084,6 +1088,13 @@ void Initialize() {
       const uint32_t model = PortDreadSamus::BallModel(t.suit, t.spider);
       if (ownership.main) sDreadBalls.insert(model);
       if (ownership.low) sDreadLowBalls.insert(model);
+      // Any mod's Spider Ball, by the resources that won (the generated looks carry no mod name).
+      if (t.spider && PortDreadSamus::ResolveBallOwnership(t.suit, true, [&](uint32_t type, uint32_t id) {
+                        const auto it = loose.find({type, id});
+                        return it != loose.end() && !it->second.mod.empty();
+                      }).main) {
+        sModSpiderBalls.insert(t.suit);
+      }
     }
     for (int suit = 0; suit < 4; ++suit) {
       const auto it = loose.find({0x434D444Cu, PortDreadSamus::FirstPersonCannon(suit)});  // 'CMDL'
