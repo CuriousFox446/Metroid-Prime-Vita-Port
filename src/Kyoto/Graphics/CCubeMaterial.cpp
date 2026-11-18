@@ -238,19 +238,7 @@ static uint HandleAnimatedUV(const uint* uvAnim, GXTexMtx texMtx, GXPTTexMtx ptT
         {0.f, 0.f, 0.5f, 0.f},
         {0.f, 0.f, 0.f, 1.f},
     };
-#ifdef TARGET_PC
-    // Echoes' cannon (PortSetCameraModelUv): the model as the camera holds it. Its shine is a
-    // sphere map; the world's 0.05 per unit scrolls it across, as it does Prime's own gun's
-    // reflection, so the cannon's mint shell came out mint or dark by where Samus stood.
-    const CTransform4f cameraMm =
-        CCubeMaterial::sPortCameraModelUv
-            ? CGraphics::GetViewMatrix().GetQuickInverse() * CGraphics::GetModelMatrix()
-            : CTransform4f::Identity();
-    const CTransform4f& mm =
-        CCubeMaterial::sPortCameraModelUv ? cameraMm : CGraphics::GetModelMatrix();
-#else
     const CTransform4f& mm = CGraphics::GetModelMatrix();
-#endif
     const CVector3f& rowX = mm.GetRow(kDX);
     const CVector3f& rowY = mm.GetRow(kDY);
     const CVector3f& rowZ = mm.GetRow(kDZ);
@@ -1030,17 +1018,6 @@ void CCubeMaterial::EnsureViewDepStateCached(const CCubeSurface* surface) {
 }
 
 void CCubeMaterial::KillCachedViewDepState() { sLastModelCached = NULL; }
-
-#ifdef TARGET_PC
-bool CCubeMaterial::sPortCameraModelUv = false;
-
-void CCubeMaterial::PortSetCameraModelUv(bool on) {
-  if (sPortCameraModelUv != on) {
-    sPortCameraModelUv = on;
-    ResetCachedMaterials();
-  }
-}
-#endif
 
 void CCubeMaterial::ResetCachedMaterials() {
   KillCachedViewDepState();

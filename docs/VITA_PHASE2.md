@@ -4204,3 +4204,32 @@ What to look for in test 27:
 - The Echoes cannon's front shell mint at rest, in any room, and the plates visibly mint as they
   pull back and open on a missile shot.
 - Prime's cannon (Echoes cannon setting off) as before.
+
+### Test 27 result
+
+The user sent two photos (Echoes on the tablet over the Vita, the video's rooms), at rest and in
+missile mode: "How can you not see the difference?"
+- Cropped to the cannon at one scale (the rings' width), the shapes match: the same closed shell
+  at rest; in missile mode the same crown, plates at the top and left over the rings, the same
+  size and the same 45° turn.
+- The colours do not: Echoes' open plates dark green with white edges and its body blue, the
+  Vita's plates flat cyan and its body grey-green. Materials 1, 2, 4, 6 and 7 of the cannon all
+  shine by mode 6 (the body's map is `7F202198`), so test 27's camera lookup tinted all of them.
+- **Echoes' mode 6 is Prime's.** Echoes' DOL holds the same post matrix
+  {0.5,0,0,0},{0,0,0.5,0},{0,0,0,1}, followed by mode 7's as in Prime's, and the code that loads it
+  (0x80304fc4) reads 0.05 from SDA2 right after: the model's world position x 0.05
+  (`~/tools/dolsearch.py`, `~/tools/dolref.py`). Echoes' own plates change from room to room
+  (pale mint in the Phendrana-time photos, dark green in this room), as the world lookup does.
+- Also checked: Echoes' generic missile anims carry no gill tracks, but each beam's open anim
+  ends with the gills at rest and its close anim starts there, so Echoes' missile mode has the
+  gills at rest as the port poses them (Prime's own generic missile anims set every gill to rest).
+  The first shot's kick (`Skeleton_Root` 20 cm back) is in Prime's missile anim too.
+
+## 0.46.0 test 28: Echoes' cannon shine back to the world lookup
+
+Test 27's `PortSetCameraModelUv` is gone (CCubeMaterial.hpp/.cpp and CGunWeapon.cpp as in test
+26): the Echoes cannon's mode-6 shine takes the world lookup again, as Echoes' own code does.
+
+What to look for in test 28:
+- The Echoes cannon without the even cyan cast: plates and body change with the place, dark
+  green in some and mint in others, like Echoes'.

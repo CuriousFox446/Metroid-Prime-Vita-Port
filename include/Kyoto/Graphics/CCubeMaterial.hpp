@@ -97,11 +97,6 @@ public:
   bool PortNeedsModelMatrix() const;
   // Port: how many TEV konst colours the material loads (0 without kStateFlag_KonstValues).
   uint PortKonstCount() const;
-  // Port: UV animation mode 6 by the model matrix relative to the camera, not the world, while
-  // set (CGunWeapon draws Echoes' cannon so: its shine is a sphere map, which the world's
-  // position term scrolls across). Changing it drops the cached material state.
-  static void PortSetCameraModelUv(bool on);
-  static bool sPortCameraModelUv;
 #endif
   uint GetTextureCount() const {
     return CBasics::SwapBytes(*reinterpret_cast< const uint* >(GetData() + 4));
