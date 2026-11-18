@@ -65,6 +65,15 @@ static void MyTHPGXRestore() {
 }
 
 static void MyTHPGXYuv2RgbSetup(bool field, bool deinterlace) {
+#ifdef TARGET_PC
+  // Port (0.46.0 test 23): every frame whole. Without `deinterlace` (the attract movies, most of the
+  // endings) the GameCube draws one field's lines a frame, an 8x4 pattern's alpha by screen position
+  // keeping every other line, and an interlaced TV shows the two fields as one picture. On a
+  // progressive screen the other lines stayed black: scanlines, uneven on the Vita's 544 lines and
+  // more so zoomed ("the main menu videos are supposed to have this effect ... but it looks kinda
+  // off"). The movies' frames are whole pictures (attract0.thp: 640x480, letterboxed like the title).
+  deinterlace = true;
+#endif
   GXVtxDescList attr[3] = {
       {GX_VA_POS, GX_DIRECT},
       {GX_VA_TEX0, GX_DIRECT},

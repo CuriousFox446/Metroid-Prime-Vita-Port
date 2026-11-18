@@ -97,21 +97,30 @@ bool FusionLinked() {
 // stretching)"). The menus' picture is a band letterboxed inside that frame, the title and file
 // select movies' and the frames over them, so the zoom cuts only black above and below it. It stops
 // at 4/3, where a 16:9 band (three quarters of the frame's height) meets the screen's top and
-// bottom, for screens wider still. The layout, and GXGetViewport, stay as they were.
+// bottom, for screens wider still. The layout, and GXGetViewport, stay as they were. The frame is
+// 640x480 units (the GameCube's 480 lines), so on the Vita (846x480) the zoom is about 1.32, and the
+// screen shows the frame's lines 58 to 422: the title movie's 16:9 band (0.46.0 test 23, its frames
+// from the user's disc).
+float PortMenuZoomFactor() {
+  if (!PortDebug::ZoomMenus() || PortDebug::AspectMode() == PortDebug::kAspect_4_3) {
+    return 1.f;
+  }
+  const auto& vp = CGraphics::GetViewport();
+  if (vp.mWidth <= 0 || vp.mHeight <= 0) {
+    return 1.f;
+  }
+  const float zoom = rstl::min_val(static_cast< float >(vp.mWidth) / 640.f, 4.f / 3.f);
+  return zoom > 1.01f ? zoom : 1.f;
+}
+
 class PortMenuZoom {
 public:
   PortMenuZoom() {
-    if (!PortDebug::ZoomMenus() || PortDebug::AspectMode() == PortDebug::kAspect_4_3) {
+    const float zoom = PortMenuZoomFactor();
+    if (zoom <= 1.f) {
       return;
     }
     const auto& vp = CGraphics::GetViewport();
-    if (vp.mWidth <= 0 || vp.mHeight <= 0) {
-      return;
-    }
-    const float zoom = rstl::min_val(static_cast< float >(vp.mWidth) / 640.f, 4.f / 3.f);
-    if (zoom <= 1.01f) {
-      return;
-    }
     GXPortSetViewportZoom(zoom, static_cast< float >(vp.mLeft) + 0.5f * static_cast< float >(vp.mWidth),
                           static_cast< float >(vp.mTop) + 0.5f * static_cast< float >(vp.mHeight));
     mOn = true;
@@ -2610,6 +2619,14 @@ CIOWin::EMessageReturn CFrontEndUI::Update(float dt, CArchitectureQueue& queue) 
 
       UpdateMovies(dt);
 
+#ifdef TARGET_PC
+      // Port (0.46.0 test 23): its texture's token was locked and tried once, at kP_LoadDeps. At a
+      // first boot it was still loading then, and TCachedToken::GetObject stays null until a try finds
+      // it loaded: the prompt never showed till the front end was made again ("the press start prompt
+      // don't appear ... only after you loaded a save and then restart back to the main menu").
+      x38_pressStart.TryCache();
+#endif
+
       // Press start pulsing
       if (x50_curScreen == kS_Title && x54_nextScreen == kS_Title &&
           x58_fadeBlackTimer < 30.f - gpTweakGame->GetPressStartDelay()) {
@@ -2938,8 +2955,22 @@ void CFrontEndUI::Draw() const {
     }
     const int w = static_cast< int >(static_cast< float >(width) * k);
     const int h = static_cast< int >(static_cast< float >(height) * k);
-    CGraphics::Render2D(*tex, vpW / 2 - w / 2,
-                        yOff + static_cast< int >(72.f * k) - h / 2, w, h, color);
+    // Its centre 72 units above the frame's bottom: line 408 of the 480, the title movie's band's
+    // last 4%, beside its copyright, with the black under the band below it on a 4:3 screen.
+    float centre = 72.f * k;
+#ifdef TARGET_PC
+    // Port (0.46.0 test 23): with the menus zoomed the band fills the screen, and that put the
+    // prompt on the screen's bottom edge ("it's sitting at the bottom of the screen"). There it sits
+    // as a 16:9 screen showing the band shows it: its centre 7.8% of the band's height above the
+    // band's bottom, line 394 (the PS4 port's picture the user sent).
+    const float zoom = PortMenuZoomFactor();
+    if (zoom > 1.f && vpH > 0) {
+      const float shown = static_cast< float >(vpH) / zoom;               // the band's lines on screen
+      const float under = 0.5f * (static_cast< float >(vpH) - shown);     // the frame cut off below them
+      centre = under + 0.078f * shown;
+    }
+#endif
+    CGraphics::Render2D(*tex, vpW / 2 - w / 2, yOff + static_cast< int >(centre) - h / 2, w, h, color);
   }
 
   if (GetHasAttractMovies()) {

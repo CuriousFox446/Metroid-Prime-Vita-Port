@@ -4007,3 +4007,42 @@ What to look for in test 22:
 - The menus filling the screen's width, the band whole: the "MAIN MENU" title and the bottom legends.
 - With the Echoes mod on: one ball with the Spider Ball. With it off: Prime's spider ball and its glass.
 - HUD and other I8 textures looking as before.
+
+### Test 22 result
+
+`~/logs/t046_22.log` (3e97914, 6 minutes): a clean exit.
+- **The menus run at 60 FPS**, the movie screens included: the render worker's textures took 2.0 ms
+  a present (test 21: 33; test 20: 17). The user's photos show 60 FPS and the zoomed title filling
+  the screen.
+- **Press Start missing at the first title**, there after a return to the menu. Its texture's token
+  (`TCachedToken`) was locked and tried once at `kP_LoadDeps`; at a first boot the texture was still
+  loading then, and `GetObject` stays null without another `TryCache`.
+- **Press Start "sitting at the bottom of the screen"**, against a PS4 port's picture the user sent.
+  The frame is 640x480 (the GameCube's 480 lines; the Vita's is 846x480, so the zoom is about 1.32).
+  The title movie (`Video/01_startloop.thp` from the user's disc, `~/tools/gcfst.py` and
+  `~/tools/thpframe.py`) is a 16:9 band on lines 58 to 422 of its 480. The prompt (`TXTR_PressStart`,
+  CMPR 192x32, `~/tools/pakfind.py`) is centred 72 above the frame's bottom, line 408: the band's last
+  4%, beside the copyright. On a 4:3 TV the black under the band sits below it; zoomed, the band fills
+  the screen and the prompt sits on its bottom edge. The PS4 port's is centred at 92% of the band.
+- **The attract movies' "effect"** ("it looks kinda off"): uneven horizontal lines. Movies made
+  without `deinterlace` (the attract movies, most endings) are drawn one field a frame, an 8x4 pattern
+  keeping every other line by screen position. On an interlaced TV the two fields make one picture;
+  on a progressive screen the other lines stay black, uneven on 544 lines and more so zoomed. The
+  movie frames themselves are whole (attract0.thp: 640x480, letterboxed like the title).
+
+## 0.46.0 test 23: Press Start at the first title and in the picture, movies whole
+
+**Press Start at a first boot** (`CFrontEndUI::Update`): its texture is tried each frame of the title
+(`x38_pressStart.TryCache()`), so it shows once it has loaded.
+
+**Press Start in the picture when zoomed** (`CFrontEndUI::Draw`). With the menus zoomed, the prompt's
+centre is 7.8% of the band's height above the band's bottom: line 394, as a 16:9 screen showing the
+band places it. Unzoomed, it is where the game puts it. `PortMenuZoomFactor` gives the zoom to both.
+
+**Every movie drawn whole** (`CCubeMoviePlayer.cpp`, `MyTHPGXYuv2RgbSetup`): the interlace pattern's
+stage is left out on the port, as for the deinterlaced menu movies.
+
+What to look for in test 23:
+- Press Start pulsing at the first title, without a game first.
+- Its place: inside the picture above the bottom, the copyright beside and below it.
+- The attract movies (leave the title alone for a while) without lines.
