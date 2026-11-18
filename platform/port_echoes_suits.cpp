@@ -21,6 +21,7 @@ constexpr uint32_t kCSKR = 0x43534B52;
 constexpr uint32_t kCINF = 0x43494E46;
 constexpr uint32_t kTXTR = 0x54585452;
 constexpr uint32_t kANCS = 0x414E4353;
+constexpr uint32_t kANIM = 0x414E494D;
 
 using port::Hex8;
 
@@ -695,6 +696,585 @@ bool PatchGunAncs(std::vector<uint8_t>& ancs, std::string* error) {
     Set32(ancs, found, Cannon(gun.cmdl));
     Set32(ancs, found + 4, Cannon(gun.cskr));
   }
+  return true;
+}
+
+namespace {
+
+void Put16(std::vector<uint8_t>& out, uint16_t value) {
+  out.push_back(uint8_t(value >> 8));
+  out.push_back(uint8_t(value));
+}
+
+void PutF32(std::vector<uint8_t>& out, float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, 4);
+  Put32(out, bits);
+}
+
+void PutString(std::vector<uint8_t>& out, const char* text) {
+  Append(out, reinterpret_cast<const uint8_t*>(text), std::strlen(text) + 1);
+}
+
+// An ANIM's key stream as CBitLevelLoader reads it: u32 words, big-endian, each from its low bit.
+struct BitReader {
+  Reader& r;
+  size_t at;
+  uint32_t word = 0;
+  int used = 32;
+
+  uint32_t Bits(int n) {
+    uint32_t out = 0;
+    int shift = 0;
+    while (n > 0) {
+      if (used == 32) {
+        word = r.U32(at);
+        at += 4;
+        used = 0;
+      }
+      const int take = std::min(n, 32 - used);
+      const uint32_t mask = take == 32 ? 0xFFFFFFFFu : (1u << take) - 1u;
+      out |= ((word >> used) & mask) << shift;
+      used += take;
+      shift += take;
+      n -= take;
+    }
+    return out;
+  }
+  int32_t Signed(int n) {
+    if (n == 0) return 0;
+    const uint32_t value = Bits(n);
+    return (value >> (n - 1)) & 1u ? int32_t(value | ~((1u << n) - 1u)) : int32_t(value);
+  }
+};
+
+struct BitWriter {
+  std::vector<uint32_t> words;
+  uint32_t word = 0;
+  int used = 0;
+
+  void Put(uint32_t value, int n) {
+    while (n > 0) {
+      const int take = std::min(n, 32 - used);
+      const uint32_t mask = take == 32 ? 0xFFFFFFFFu : (1u << take) - 1u;
+      word |= (value & mask) << used;
+      value = take == 32 ? 0 : value >> take;
+      used += take;
+      n -= take;
+      if (used == 32) {
+        words.push_back(word);
+        word = 0;
+        used = 0;
+      }
+    }
+  }
+  void Finish() {
+    if (used > 0) {
+      words.push_back(word);
+      word = 0;
+      used = 0;
+    }
+  }
+};
+
+// One track (rotation, offset or scale) of a compressed ANIM channel: its key count (0: none), and
+// per component the initial value and the bits of each key's step.
+struct AnimTrack {
+  uint16_t keys = 0;
+  int16_t init[3] = {};
+  uint8_t bits[3] = {};
+};
+
+}  // namespace
+
+bool ConvertGunAnim(const std::vector<uint8_t>& in, const std::vector<EchoesJoint>& from, const PortDread::PrimeSkeleton& to,
+                    uint32_t evnt, std::vector<uint8_t>& out, std::string* error) {
+  Reader r{in.data(), in.size()};
+  const auto u8 = [&r](size_t at) -> uint8_t { return r.Has(at, 1) ? r.data[at] : 0; };
+  if (r.U32(0) != 2 || r.U16(8) != 0x0101) {
+    return Fail(error, "not an Echoes compressed ANIM");
+  }
+  // Echoes' header after the size: 0x0101, duration, interval, root, looping, rotation divisor,
+  // offset multiplier, scale multiplier, channel count, a word Prime keeps too, frame count.
+  const float duration = r.F32(10);
+  const float interval = r.F32(14);
+  const uint32_t looping = r.U32(22);
+  const uint32_t rotDiv = r.U32(26);
+  const float offsetMult = r.F32(30);
+  const uint32_t channels = r.U32(38);
+  const uint32_t unk = r.U32(42);
+  const uint32_t frames = r.U32(46);
+  const size_t bitmapAt = 50;
+  const size_t bitmapWords = (size_t(frames) + 31) / 32;
+  if (r.bad || frames == 0 || frames > 0x10000 || channels == 0 || channels > 255 ||
+      !r.Has(bitmapAt, bitmapWords * 4 + 4)) {
+    return Fail(error, "ANIM header cut short");
+  }
+  uint32_t keys = 0;
+  for (uint32_t f = 0; f < frames; ++f) {
+    keys += (r.U32(bitmapAt + 4 * (f / 32)) >> (f % 32)) & 1u;
+  }
+  if (keys < 2 || (r.U32(bitmapAt) & 1u) == 0) {
+    return Fail(error, "ANIM without keys");
+  }
+  const uint16_t steps = uint16_t(keys - 1);
+  size_t at = bitmapAt + bitmapWords * 4 + 4;  // the key bitmap, then the channel count again
+  struct Channel {
+    uint32_t joint = 0;
+    AnimTrack rot, off;
+  };
+  std::vector<Channel> chans(channels);
+  for (Channel& c : chans) {
+    c.joint = u8(at++);
+    AnimTrack scale;
+    for (AnimTrack* t : {&c.rot, &c.off, &scale}) {
+      t->keys = r.U16(at);
+      at += 2;
+      if (t->keys == 0) continue;
+      for (int j = 0; j < 3; ++j) {
+        t->init[j] = int16_t(r.U16(at));
+        t->bits[j] = u8(at + 2);
+        at += 3;
+        if (t->bits[j] > 31) return Fail(error, "ANIM track too wide");
+      }
+      if (t->keys != steps) return Fail(error, "ANIM track with its own key count");
+    }
+    if (r.bad) return Fail(error, "ANIM channels cut short");
+    if (scale.keys != 0) return Fail(error, "ANIM with a scale track");
+  }
+  // Each step's sign bit and rotation steps, then its offset steps (Prime's order, scale aside).
+  std::vector<int32_t> deltas(size_t(steps) * channels * 7, 0);
+  BitReader bits{r, at};
+  for (uint32_t s = 0; s < steps; ++s) {
+    for (uint32_t c = 0; c < channels; ++c) {
+      int32_t* d = &deltas[(size_t(s) * channels + c) * 7];
+      if (chans[c].rot.keys) {
+        d[0] = int32_t(bits.Bits(1));
+        for (int j = 0; j < 3; ++j) d[1 + j] = bits.Signed(chans[c].rot.bits[j]);
+      }
+      if (chans[c].off.keys) {
+        for (int j = 0; j < 3; ++j) d[4 + j] = bits.Signed(chans[c].off.bits[j]);
+      }
+    }
+  }
+  if (r.bad) return Fail(error, "ANIM keys cut short");
+
+  std::map<uint32_t, const EchoesJoint*> byId;
+  for (const EchoesJoint& joint : from) byId[joint.id] = &joint;
+  struct Planned {
+    uint32_t channel, joint;
+  };
+  std::vector<Planned> plan;
+  bool root = false;
+  for (uint32_t c = 0; c < channels; ++c) {
+    if (chans[c].rot.keys == 0 && chans[c].off.keys == 0) continue;
+    const auto joint = byId.find(chans[c].joint);
+    const int found = joint != byId.end() ? to.Find(joint->second->name) : -1;
+    if (found < 0) {
+      return Fail(error, "joint " + (joint != byId.end() ? joint->second->name : std::to_string(chans[c].joint)) +
+                             " has no Prime namesake");
+    }
+    plan.push_back({c, to.joints[size_t(found)].id});
+    root = root || to.joints[size_t(found)].id == 3;
+  }
+  // CFBStreamedCompression measures the root's travel, by index among the channels.
+  if (!root) return Fail(error, "ANIM without the root joint");
+
+  std::vector<uint8_t> list;
+  Put32(list, uint32_t(plan.size()));
+  for (const Planned& p : plan) {
+    const Channel& c = chans[p.channel];
+    Put32(list, p.joint);
+    Put16(list, steps);
+    for (int j = 0; j < 3; ++j) {  // a still rotation where Echoes has none: no bits, all zero
+      Put16(list, uint16_t(c.rot.keys ? c.rot.init[j] : 0));
+      list.push_back(c.rot.keys ? c.rot.bits[j] : 0);
+    }
+    Put16(list, c.off.keys ? steps : 0);
+    if (c.off.keys) {
+      for (int j = 0; j < 3; ++j) {
+        Put16(list, uint16_t(c.off.init[j]));
+        list.push_back(c.off.bits[j]);
+      }
+    }
+  }
+  BitWriter w;
+  for (uint32_t s = 0; s < steps; ++s) {
+    for (const Planned& p : plan) {
+      const Channel& c = chans[p.channel];
+      const int32_t* d = &deltas[(size_t(s) * channels + p.channel) * 7];
+      w.Put(c.rot.keys ? uint32_t(d[0]) : 0u, 1);
+      if (c.rot.keys) {
+        for (int j = 0; j < 3; ++j) w.Put(uint32_t(d[1 + j]), c.rot.bits[j]);
+      }
+      if (c.off.keys) {
+        for (int j = 0; j < 3; ++j) w.Put(uint32_t(d[4 + j]), c.off.bits[j]);
+      }
+    }
+  }
+  w.Finish();
+
+  // CStandardMultiFormatHeader, then the key bitmap (CFBStreamedCompressionTimeHeader).
+  std::vector<uint8_t> head;
+  Put32(head, 1);
+  PutF32(head, duration);
+  PutF32(head, interval);
+  Put32(head, 3);  // CSegId::Root
+  Put32(head, looping);
+  Put32(head, rotDiv);
+  PutF32(head, offsetMult);
+  Put32(head, uint32_t(plan.size()));
+  Put32(head, unk);
+  Put32(head, frames);
+  Append(head, in.data() + bitmapAt, bitmapWords * 4);
+  // What CFBStreamedCompression::GetRotationsAndOffsets keeps: all but the word between the bitmap
+  // and the channel list.
+  const size_t memory = head.size() + list.size() + w.words.size() * 4;
+  out.clear();
+  Put32(out, 2);
+  Put32(out, uint32_t(memory));
+  Put32(out, evnt);
+  Append(out, head.data(), head.size());
+  Put32(out, uint32_t(plan.size()));
+  Append(out, list.data(), list.size());
+  for (const uint32_t word : w.words) Put32(out, word);
+  return true;
+}
+
+namespace {
+
+// Where the parts of a Prime ANCS are (CAnimCharacterSet: CCharacterSet, CAnimationSet).
+struct AncsLayout {
+  struct Character {
+    size_t start = 0, animInfoAt = 0, animInfoEnd = 0, animIdxAt = 0, animIdxEnd = 0, end = 0;
+    uint32_t animInfoCount = 0;
+    std::vector<uint32_t> animIdx;  // character anim -> animation set index
+  };
+  struct Animation {
+    uint32_t play = 0;  // the ANIM, when a play
+    std::string name;   // the play's ANIM name
+  };
+  struct Transition {
+    size_t start = 0, end = 0;
+    uint32_t id = 0, a = 0, b = 0;
+  };
+  std::vector<Character> chars;
+  size_t setStart = 0, animsAt = 0, animsEnd = 0, transEnd = 0, resAt = 0;
+  std::vector<Animation> anims;
+  std::vector<Transition> trans;
+  std::vector<std::pair<uint32_t, uint32_t>> res;  // (ANIM, EVNT), sorted by signed ANIM id
+};
+
+bool SkipString(Reader& r, size_t& at, std::string* text = nullptr) {
+  const void* end = at < r.size ? std::memchr(r.data + at, 0, r.size - at) : nullptr;
+  if (end == nullptr) {
+    r.bad = true;
+    return false;
+  }
+  const size_t stop = size_t(static_cast<const uint8_t*>(end) - r.data);
+  if (text != nullptr) text->assign(reinterpret_cast<const char*>(r.data + at), stop - at);
+  at = stop + 1;
+  return true;
+}
+
+bool SkipCount(Reader& r, size_t& at, uint32_t& n) {
+  n = r.U32(at);
+  at += 4;
+  if (r.bad || n > r.size) {
+    r.bad = true;
+    return false;
+  }
+  return true;
+}
+
+// CMetaAnimFactory: 0 play {ANIM, index, name, start time}, 1 blend and 2 phase blend {a, b, weight,
+// bool}, 3 random {n, {anim, chance}}, 4 sequence {n, anims}.
+bool SkipMetaAnim(Reader& r, size_t& at, int depth, AncsLayout::Animation* play) {
+  if (depth > 16) {
+    r.bad = true;
+    return false;
+  }
+  const uint32_t kind = r.U32(at);
+  at += 4;
+  uint32_t n = 0;
+  switch (kind) {
+  case 0:
+    if (play != nullptr) play->play = r.U32(at);
+    at += 8;
+    if (!SkipString(r, at, play != nullptr ? &play->name : nullptr)) return false;
+    at += 8;
+    return r.Has(at, 0);
+  case 1:
+  case 2:
+    if (!SkipMetaAnim(r, at, depth + 1, nullptr) || !SkipMetaAnim(r, at, depth + 1, nullptr)) return false;
+    at += 5;
+    return r.Has(at, 0);
+  case 3:
+    if (!SkipCount(r, at, n)) return false;
+    for (uint32_t i = 0; i < n; ++i) {
+      if (!SkipMetaAnim(r, at, depth + 1, nullptr)) return false;
+      at += 4;
+    }
+    return r.Has(at, 0);
+  case 4:
+    if (!SkipCount(r, at, n)) return false;
+    for (uint32_t i = 0; i < n; ++i) {
+      if (!SkipMetaAnim(r, at, depth + 1, nullptr)) return false;
+    }
+    return true;
+  default:
+    r.bad = true;
+    return false;
+  }
+}
+
+// CMetaTransFactory: 0 meta-anim, 1 trans and 2 phase trans {time, two bools, flags}, 3 snap.
+bool SkipMetaTrans(Reader& r, size_t& at) {
+  const uint32_t kind = r.U32(at);
+  at += 4;
+  switch (kind) {
+  case 0:
+    return SkipMetaAnim(r, at, 0, nullptr);
+  case 1:
+  case 2:
+    at += 14;
+    return r.Has(at, 0);
+  case 3:
+    return !r.bad;
+  default:
+    r.bad = true;
+    return false;
+  }
+}
+
+bool ParseGunAncs(const std::vector<uint8_t>& d, AncsLayout& out, std::string* error) {
+  Reader r{d.data(), d.size()};
+  out = AncsLayout();
+  size_t at = 4;  // version, the character set's table count
+  uint32_t n = 0;
+  uint32_t characters = 0;
+  if (!SkipCount(r, at, characters) || characters == 0 || characters > 16) {
+    return Fail(error, "ANCS characters cut short");
+  }
+  for (uint32_t c = 0; c < characters; ++c) {
+    // CCharacterInfo, after its id: tables, name, model, skin, skeleton, anim names (index and two
+    // strings), PAS database, particles, a word, AABBs, effects, overlay model and skin, anim index list.
+    AncsLayout::Character ch;
+    ch.start = at;
+    const uint16_t tables = r.U16(at + 4);
+    at += 6;
+    if (!SkipString(r, at)) return Fail(error, "ANCS character name cut short");
+    at += 12;
+    ch.animInfoAt = at;
+    if (!SkipCount(r, at, ch.animInfoCount)) return Fail(error, "ANCS anim names cut short");
+    for (uint32_t i = 0; i < ch.animInfoCount; ++i) {
+      at += 4;
+      if (!SkipString(r, at) || !SkipString(r, at)) return Fail(error, "ANCS anim names cut short");
+    }
+    ch.animInfoEnd = at;
+    const uint32_t states = r.U32(at + 4);
+    at += 12;
+    if (r.bad || states > 256) return Fail(error, "ANCS PAS database cut short");
+    for (uint32_t s = 0; s < states; ++s) {
+      const uint32_t parms = r.U32(at + 4);
+      const uint32_t anims = r.U32(at + 8);
+      at += 12;
+      if (r.bad || parms > 8 || anims > d.size()) return Fail(error, "ANCS PAS state cut short");
+      uint32_t types[8] = {};
+      for (uint32_t p = 0; p < parms; ++p) {
+        types[p] = r.U32(at);
+        at += 12;  // type, weight function, weight
+        at += types[p] == 3 ? 2 : types[p] <= 4 ? 8 : 0;  // a bool's range is two bytes
+      }
+      for (uint32_t a = 0; a < anims; ++a) {
+        at += 4;
+        for (uint32_t p = 0; p < parms; ++p) at += types[p] == 3 ? 1 : types[p] <= 4 ? 4 : 0;
+      }
+      if (!r.Has(at, 0)) return Fail(error, "ANCS PAS state cut short");
+    }
+    for (int v = 0; v < 3 + (tables > 5 ? 1 : 0); ++v) {
+      if (!SkipCount(r, at, n)) return Fail(error, "ANCS particles cut short");
+      at += size_t(n) * 4;
+    }
+    at += 4;
+    if (tables > 1) {
+      if (!SkipCount(r, at, n)) return Fail(error, "ANCS AABBs cut short");
+      for (uint32_t i = 0; i < n; ++i) {
+        if (!SkipString(r, at)) return Fail(error, "ANCS AABBs cut short");
+        at += 24;
+      }
+    }
+    if (tables > 2) {
+      if (!SkipCount(r, at, n)) return Fail(error, "ANCS effects cut short");
+      for (uint32_t i = 0; i < n; ++i) {
+        uint32_t m = 0;
+        if (!SkipString(r, at) || !SkipCount(r, at, m)) return Fail(error, "ANCS effects cut short");
+        for (uint32_t k = 0; k < m; ++k) {
+          if (!SkipString(r, at)) return Fail(error, "ANCS effects cut short");
+          at += 8;
+          if (!SkipString(r, at)) return Fail(error, "ANCS effects cut short");
+          at += 12;
+        }
+      }
+    }
+    if (tables > 3) at += 8;
+    if (tables <= 4) return Fail(error, "ANCS character without an anim index list");
+    ch.animIdxAt = at;
+    if (!SkipCount(r, at, n)) return Fail(error, "ANCS anim index list cut short");
+    for (uint32_t i = 0; i < n; ++i, at += 4) ch.animIdx.push_back(r.U32(at));
+    ch.animIdxEnd = at;
+    ch.end = at;
+    if (r.bad || at > d.size()) return Fail(error, "ANCS character cut short");
+    out.chars.push_back(std::move(ch));
+  }
+  // CAnimationSet: tables, animations (name, meta-anim), transitions, default transition, additive
+  // anims, half transitions, (ANIM, EVNT) list.
+  out.setStart = at;
+  const uint16_t tables = r.U16(at);
+  at += 2;
+  out.animsAt = at;
+  if (!SkipCount(r, at, n)) return Fail(error, "ANCS animations cut short");
+  for (uint32_t i = 0; i < n; ++i) {
+    AncsLayout::Animation anim;
+    if (!SkipString(r, at)) return Fail(error, "ANCS animations cut short");
+    const bool play = r.U32(at) == 0;
+    if (!SkipMetaAnim(r, at, 0, play ? &anim : nullptr)) return Fail(error, "ANCS meta-anim it does not know");
+    out.anims.push_back(std::move(anim));
+  }
+  out.animsEnd = at;
+  if (!SkipCount(r, at, n)) return Fail(error, "ANCS transitions cut short");
+  for (uint32_t i = 0; i < n; ++i) {
+    AncsLayout::Transition t;
+    t.start = at;
+    t.id = r.U32(at);
+    t.a = r.U32(at + 4);
+    t.b = r.U32(at + 8);
+    at += 12;
+    if (!SkipMetaTrans(r, at)) return Fail(error, "ANCS transition it does not know");
+    t.end = at;
+    out.trans.push_back(t);
+  }
+  out.transEnd = at;
+  if (!SkipMetaTrans(r, at)) return Fail(error, "ANCS default transition it does not know");
+  if (tables > 1) {
+    if (!SkipCount(r, at, n)) return Fail(error, "ANCS additive anims cut short");
+    at += size_t(n) * 12 + 8;
+  }
+  if (tables > 2) {
+    if (!SkipCount(r, at, n)) return Fail(error, "ANCS half transitions cut short");
+    for (uint32_t i = 0; i < n; ++i) {
+      at += 4;
+      if (!SkipMetaTrans(r, at)) return Fail(error, "ANCS half transition it does not know");
+    }
+  }
+  if (tables <= 3) return Fail(error, "ANCS without its (ANIM, EVNT) list");
+  out.resAt = at;
+  if (!SkipCount(r, at, n)) return Fail(error, "ANCS (ANIM, EVNT) list cut short");
+  for (uint32_t i = 0; i < n; ++i, at += 8) out.res.emplace_back(r.U32(at), r.U32(at + 4));
+  if (r.bad || at != d.size()) return Fail(error, "ANCS does not end where its parts do");
+  return true;
+}
+
+}  // namespace
+
+bool FindGunMissileAnims(const std::vector<uint8_t>& ancs, GunMissileAnims& out, std::string* error) {
+  out = GunMissileAnims();
+  AncsLayout layout;
+  if (!ParseGunAncs(ancs, layout, error)) return false;
+  const std::vector<uint32_t>& idx = layout.chars[0].animIdx;
+  if (idx.size() < 9) return true;
+  for (int i = 0; i < 4; ++i) {
+    const uint32_t set = idx[size_t(5 + i)];
+    // Retro's spelling: powerMissleAway, genericMissleShoot...
+    if (set >= layout.anims.size() || layout.anims[set].play == 0 ||
+        layout.anims[set].name.find("Missle") == std::string::npos) {
+      return true;
+    }
+    out.anim[i] = layout.anims[set].play;
+    for (const auto& [anim, evnt] : layout.res) {
+      if (anim == out.anim[i]) out.evnt[i] = evnt;
+    }
+  }
+  out.found = true;
+  return true;
+}
+
+bool AddGunMissileAnims(std::vector<uint8_t>& ancs, const GunMissileAnims& missiles, std::string* error) {
+  if (!missiles.found) return Fail(error, "no missile anims");
+  AncsLayout l;
+  if (!ParseGunAncs(ancs, l, error)) return false;
+  constexpr int kAdded = int(std::size(kMissileAnimNames));
+  static_assert(kAdded == 5, "the four missile anims, then the first shot");
+  const uint32_t ids[kAdded] = {Cannon(missiles.anim[0]), Cannon(missiles.anim[1]), Cannon(missiles.anim[2]),
+                                Cannon(missiles.anim[3]), Cannon(kFirstMissileShot)};
+  const uint32_t evnts[kAdded] = {missiles.evnt[0], missiles.evnt[1], missiles.evnt[2], missiles.evnt[3],
+                                  missiles.evnt[2]};
+  const uint32_t base = uint32_t(l.anims.size());
+  // Prime's missile anims' set indices -> Echoes', for their transitions.
+  std::map<uint32_t, uint32_t> mirror;
+  for (int i = 0; i < 4; ++i) mirror[l.chars[0].animIdx[size_t(5 + i)]] = base + uint32_t(i);
+
+  const std::vector<uint8_t>& d = ancs;
+  std::vector<uint8_t> out(d.begin(), d.begin() + std::ptrdiff_t(l.chars[0].start));
+  for (const AncsLayout::Character& c : l.chars) {
+    const uint32_t first = uint32_t(c.animIdx.size());
+    Append(out, d.data() + c.start, c.animInfoAt - c.start);
+    Put32(out, c.animInfoCount + uint32_t(kAdded));
+    Append(out, d.data() + c.animInfoAt + 4, c.animInfoEnd - c.animInfoAt - 4);
+    for (int i = 0; i < kAdded; ++i) {
+      Put32(out, first + uint32_t(i));
+      out.push_back(0);  // the first name is empty, as Prime's are
+      PutString(out, kMissileAnimNames[i]);
+    }
+    Append(out, d.data() + c.animInfoEnd, c.animIdxAt - c.animInfoEnd);
+    Put32(out, first + uint32_t(kAdded));
+    Append(out, d.data() + c.animIdxAt + 4, c.animIdxEnd - c.animIdxAt - 4);
+    for (int i = 0; i < kAdded; ++i) Put32(out, base + uint32_t(i));
+    Append(out, d.data() + c.animIdxEnd, c.end - c.animIdxEnd);
+  }
+  Append(out, d.data() + l.setStart, l.animsAt - l.setStart);
+  Put32(out, base + uint32_t(kAdded));
+  Append(out, d.data() + l.animsAt + 4, l.animsEnd - l.animsAt - 4);
+  for (int i = 0; i < kAdded; ++i) {
+    PutString(out, kMissileAnimNames[i]);
+    Put32(out, 0);  // play
+    Put32(out, ids[i]);
+    Put32(out, base + uint32_t(i));
+    PutString(out, kMissileAnimNames[i]);
+    PutF32(out, 0.f);  // start time, of CCharAnimTime's type 2 as Prime's plays
+    Put32(out, 2);
+  }
+  std::vector<std::vector<uint8_t>> added;
+  for (const AncsLayout::Transition& t : l.trans) {
+    const auto a = mirror.find(t.a);
+    const auto b = mirror.find(t.b);
+    if (a == mirror.end() && b == mirror.end()) continue;
+    std::vector<uint8_t> copy;
+    Put32(copy, t.id);
+    Put32(copy, a != mirror.end() ? a->second : t.a);
+    Put32(copy, b != mirror.end() ? b->second : t.b);
+    Append(copy, d.data() + t.start + 12, t.end - t.start - 12);
+    added.push_back(std::move(copy));
+  }
+  Put32(out, uint32_t(l.trans.size() + added.size()));
+  Append(out, d.data() + l.animsEnd + 4, l.transEnd - l.animsEnd - 4);
+  for (const auto& t : added) Append(out, t.data(), t.size());
+  Append(out, d.data() + l.transEnd, l.resAt - l.transEnd);
+  // CCharacterFactory finds an anim's EVNT by binary search over the signed ids.
+  std::vector<std::pair<uint32_t, uint32_t>> res = l.res;
+  for (int i = 0; i < kAdded; ++i) res.emplace_back(ids[i], evnts[i]);
+  std::sort(res.begin(), res.end(), [](const auto& x, const auto& y) { return int32_t(x.first) < int32_t(y.first); });
+  Put32(out, uint32_t(res.size()));
+  for (const auto& [anim, evnt] : res) {
+    Put32(out, anim);
+    Put32(out, evnt);
+  }
+  AncsLayout check;
+  std::string why;
+  if (!ParseGunAncs(out, check, &why) || check.anims.size() != size_t(base) + kAdded) {
+    return Fail(error, "the ANCS with Echoes' missile anims does not read back: " + why);
+  }
+  ancs = std::move(out);
   return true;
 }
 
@@ -1380,6 +1960,8 @@ bool Import(const Io& io, Result& result, std::string& error) {
       log("echoes: " + std::string(gun.what) + " -> " + Hex8(Cannon(gun.cmdl)) + ", " +
           std::to_string(gunTextures.size()) + " textures");
     }
+    // Echoes' missile anims, each converted once: the shots and the reload are every beam's.
+    std::set<uint32_t> missileAnims;
     for (const uint32_t id : kBeamAncs) {
       const uint32_t out = Cannon(id);
       std::vector<uint8_t> ancs;
@@ -1394,6 +1976,43 @@ bool Import(const Io& io, Result& result, std::string& error) {
       if (!PatchGunAncs(ancs, &why)) {
         error = "Prime's gun " + Hex8(id) + ": " + why;
         return false;
+      }
+      GunMissileAnims missiles;
+      if (!FindGunMissileAnims(ancs, missiles, &why)) {
+        error = "Prime's gun " + Hex8(id) + ": " + why;
+        return false;
+      }
+      if (missiles.found) {
+        const uint32_t sources[5] = {missiles.anim[0], missiles.anim[1], missiles.anim[2], missiles.anim[3],
+                                     kFirstMissileShot};
+        const uint32_t evnts[5] = {missiles.evnt[0], missiles.evnt[1], missiles.evnt[2], missiles.evnt[3],
+                                   missiles.evnt[2]};
+        for (int i = 0; i < 5; ++i) {
+          if (!missileAnims.insert(sources[i]).second) continue;
+          const uint32_t animOut = Cannon(sources[i]);
+          std::vector<uint8_t> anim, converted;
+          if (io.retailId(animOut)) {
+            error = "Gun anim " + Hex8(sources[i]) + ": output id " + Hex8(animOut) + " is a Prime resource.";
+            return false;
+          }
+          if (!io.echoes(kANIM, sources[i], anim)) {
+            error = "The Echoes disc has no gun anim " + Hex8(sources[i]) + ": is it Metroid Prime 2: Echoes (USA)?";
+            return false;
+          }
+          if (!ConvertGunAnim(anim, echoesCinf, primeCinf, evnts[i], converted, &why)) {
+            error = "Echoes gun anim " + Hex8(sources[i]) + ": " + why;
+            return false;
+          }
+          if (!write(Hex8(animOut) + ".ANIM", converted)) {
+            return false;
+          }
+          log("echoes: gun anim " + Hex8(sources[i]) + " -> " + Hex8(animOut) + ", " +
+              std::to_string(converted.size()) + " bytes");
+        }
+        if (!AddGunMissileAnims(ancs, missiles, &why)) {
+          error = "Prime's gun " + Hex8(id) + ": " + why;
+          return false;
+        }
       }
       if (!write(Hex8(out) + ".ANCS", ancs)) {
         return false;

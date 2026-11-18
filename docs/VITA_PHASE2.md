@@ -4087,3 +4087,53 @@ What to look for in test 24:
   7 s or firing the beam. Missiles as fast as before.
 - Super missiles and the other charge combos still play Prime's combo anims: say if those open
   the cannon too.
+
+### Test 24 result
+
+`~/logs/t046_24.log` (7ed9a9a): the stand-ins ran ("gun: Echoes' cannon plays anim 4 for Prime's
+missile anim 7 (0.63 s)", the reload's 0.70 s left out, the closing's 0.30 s as the rest pose). The
+user pointed at their Echoes disc: "I thought you needed the MP2 image so you can get the rocket
+animation from there".
+
+What the Echoes disc (G2ME01, `~/tools/mp2pak.py`) holds:
+- `SamusGun.pak` has each beam's gun ANCS under Prime's ids ("Power", "Ice", "Wave", "Plasma"; no
+  Phazon), pointing at ANIMs under Prime's ids too. Of the Power set's 18 anims, 14 pose every joint
+  as Prime's do (`~/tools/animcmp.py`); the four missile anims differ.
+- Prime's missile shot turns the four nozzle joints (`gNozTopRight_SDK`...) 55°: the barrel splits.
+  Echoes' never turns them: `nozzle_SDK` turns 45° about the barrel and slides out 10 cm. The open
+  (0.4 s in both) turns it to 45°; the shot (0.633 s in both) kicks back from there; the reload is a
+  revolver turn (Echoes 0.333 s, Prime 0.7 s); the close turns it back (Echoes 1.1 s, Prime 0.3 s).
+- Echoes adds `genericMissleFirstShoot` (B9A04995, 0.633 s): the shot from the beam's own pose,
+  turning into the missile pose. Its transitions are Prime's (the snaps into a missile shot).
+- Echoes' compressed ANIMs are Prime's layout one step on: 0x0101 where Prime has its EVNT id, u8
+  joint ids, a scale track per channel, and channels with no track at all. The gun CINFs have the
+  same 50 joints by name, parent and place (Echoes adds bind rotations, which its anims do not use:
+  a joint without a rotation track is unrotated in both games).
+
+## 0.46.0 test 25: Echoes' own missile anims for its cannon
+
+**The import (echoes-suits version 9, `port_echoes_suits.cpp`).** For each beam's ANCS variant:
+- `FindGunMissileAnims`: the ANIMs character 0 plays as anims 5-8 and their EVNTs.
+- `ConvertGunAnim`: Echoes' ANIM of the same id (and the first shot) in Prime's layout under
+  `Cannon(id)`. Joints are matched by name; channels with no track are left out; one with an offset
+  alone gets a still rotation (Prime reads one for every channel); the keys are re-packed bit for
+  bit; the EVNT is Prime's. Checked on the user's discs (`~/echoes_gun/check.cpp`, the Python
+  prototype `~/tools/echoesmissiles.py`): every key of every joint decodes to Echoes' pose exactly.
+- `AddGunMissileAnims`: `PortEchoes_FromMissile`, `_ToMissile`, `_MissileShoot`, `_MissileReload`
+  and `_MissileFirstShoot` added to both characters and the animation set. Prime's missile anims
+  stay; their transitions are mirrored onto Echoes'; the (ANIM, EVNT) list stays sorted (CCharacterFactory
+  binary-searches it).
+
+**The game (`CGunWeapon::PlayAnim`).** The Echoes cannon finds those anims by name (`LoadGunModels`)
+and plays them for Prime's missile anims: the first missile shot (`mPortMissilePose` false) as
+Echoes' first shot. The gun still waits Prime's anim's time (`PortAnimTimeRemaining`), so missiles
+fire and reload at Prime's pace. An older import (no such anims) keeps test 24's stand-ins.
+
+The mod has to be imported again (Mods > Echoes suits > Import, with the Echoes disc image in
+`ux0:data/MetroidPrime2`), or the 15 files version 9 adds (`~/echoes_gun/mkpatch.cpp`, same code)
+copied into `ux0:data/MetroidPrime/mods/echoes-suits` with the new stamp.
+
+What to look for in test 25:
+- Firing a missile from the beam: the nozzle kicks and turns into the missile pose, the barrel whole.
+- More missiles: the revolver-turn reload between shots; 7 s on, or a beam shot, the slow turn back.
+- Missiles as fast as before; each beam (Power, Ice, Wave, Plasma) its own open and close.

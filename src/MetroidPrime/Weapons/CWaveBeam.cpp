@@ -130,6 +130,7 @@ void CWaveBeam::Fire(const bool underwater, const float dt,
   animData.SetAnimation(CAnimPlaybackParms(skShootAnim[chargeState], -1, 1.f, true), false);
 #ifdef TARGET_PC
   PortEndAnimStandIn();
+  mPortMissilePose = false;
 #endif
 }
 

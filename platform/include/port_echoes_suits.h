@@ -171,6 +171,29 @@ inline constexpr Arm kArms[] = {
 // at the Cannon variants. False when one is not found exactly once.
 bool PatchGunAncs(std::vector<uint8_t>& ancs, std::string* error);
 
+// An Echoes compressed gun ANIM (version 2, 0x0101 where Prime has its EVNT id; u8 joint ids, a scale
+// track per channel) in Prime's layout (CFBStreamedCompression) for `to`, joints matched by name:
+// channels with no track left out (both games pose those unrotated at their skeleton place), a
+// still rotation for those with an offset alone (Prime reads one for every channel), the keys
+// re-packed bit for bit, `evnt` as its EVNT. False on a scale track or a joint `to` lacks.
+bool ConvertGunAnim(const std::vector<uint8_t>& in, const std::vector<EchoesJoint>& from, const PortDread::PrimeSkeleton& to,
+                    uint32_t evnt, std::vector<uint8_t>& out, std::string* error);
+
+// A Prime gun ANCS's missile anims: the ANIMs character 0 plays as anims 5-8 (CGunWeapon's
+// kGAT_FromMissile, ToMissile, MissileShoot, MissileReload) and their EVNTs. `found` is false for a
+// gun without them (Phazon's).
+struct GunMissileAnims {
+  bool found = false;
+  uint32_t anim[4] = {};
+  uint32_t evnt[4] = {};
+};
+bool FindGunMissileAnims(const std::vector<uint8_t>& ancs, GunMissileAnims& out, std::string* error);
+
+// The ANCS with kMissileAnimNames added to every character and the animation set: Cannon(anim[i])
+// for the four, then Cannon(kFirstMissileShot); Prime's transitions touching its missile anims
+// mirrored onto them (the snaps into a missile shot), and the (ANIM, EVNT) list kept sorted.
+bool AddGunMissileAnims(std::vector<uint8_t>& ancs, const GunMissileAnims& missiles, std::string* error);
+
 // `model` with only its material set `set`; `textures` gets that set's TXTR ids.
 bool KeepMaterialSet(PrimeCmdl& model, size_t set, std::vector<uint32_t>& textures, std::string* error);
 

@@ -157,8 +157,19 @@ void CGunWeapon::LoadGunModels(CStateManager& mgr) {
   const CAssetId ancsId = PortEchoesSuits::GunAncs(x214_ancsId);
   mPortEchoesCannon = ancsId != x214_ancsId;
   mPortAnimStandIn = -1.f;
+  mPortMissilePose = false;
   x10_solidModelData = CAnimRes(ancsId, 0, x4_scale, defaultAnim, false);
   x60_holoModelData = CAnimRes(ancsId, 1, x4_scale, defaultAnim, false);
+  // Echoes' missile anims, which the mod adds to the ANCS by name (none from an older import).
+  for (int i = 0; i < 5; ++i) {
+    mPortEchoesMissileAnims[i] =
+        mPortEchoesCannon ? x10_solidModelData->GetAnimationData()->GetCharacterInfo().GetAnimationIndex(
+                                rstl::string_l(PortEchoesSuits::kMissileAnimNames[i]))
+                          : -1;
+  }
+  for (int i = 1; i < 5; ++i) {
+    if (mPortEchoesMissileAnims[i] < 0) mPortEchoesMissileAnims[0] = -1;
+  }
 #else
   x10_solidModelData = CAnimRes(x214_ancsId, 0, x4_scale, defaultAnim, false);
   x60_holoModelData = CAnimRes(x214_ancsId, 1, x4_scale, defaultAnim, false);
@@ -230,6 +241,7 @@ bool CGunWeapon::PlayPasAnim(SamusGun::EAnimationState state, CStateManager& mgr
   case SamusGun::kAS_ComboFire:
 #ifdef TARGET_PC
     mPortAnimStandIn = -1.f;
+    mPortMissilePose = false;
 #endif
     x100_gunController->EnterComboFire(mgr, x200_beamId);
     break;
@@ -260,9 +272,43 @@ void CGunWeapon::PlayAnim(NWeaponTypes::EGunAnimType type, bool loop) {
 #ifdef TARGET_PC
   mPortAnimStandIn = -1.f;
   if (mPortEchoesCannon) {
-    // Echoes' cannon never opens for missiles (Prime 2): a missile shot kicks as a beam shot does,
-    // the reload leaves the pose be, and going to or from missiles is the rest pose. The gun still
-    // waits as long as Prime's anim would (PortAnimTimeRemaining).
+    // Echoes' cannon never opens for missiles (Prime 2): its nozzle turns. Its own anims (the mod's,
+    // kMissileAnimNames' order), the first shot from the beam's pose; the gun still waits as long as
+    // Prime's anim would (PortAnimTimeRemaining), so missiles fire and reload at Prime's pace.
+    int slot = -1;
+    switch (type) {
+    case NWeaponTypes::kGAT_FromMissile:
+      slot = 0;
+      break;
+    case NWeaponTypes::kGAT_ToMissile:
+      slot = 1;
+      break;
+    case NWeaponTypes::kGAT_MissileShoot:
+      slot = mPortMissilePose ? 2 : 4;
+      break;
+    case NWeaponTypes::kGAT_MissileReload:
+      slot = 3;
+      break;
+    default:
+      break;
+    }
+    if (slot >= 0 && mPortEchoesMissileAnims[0] >= 0) {
+      mPortAnimStandIn = animData.GetAnimationDuration(skAnimTypeList[type]);
+      static uint sLogged = 0;
+      if ((sLogged & (1u << slot)) == 0) {
+        sLogged |= 1u << slot;
+        PortLog::Write("gun: Echoes' cannon plays its %s (anim %d, %.2f s) for Prime's anim %d (%.2f s)\n",
+                       PortEchoesSuits::kMissileAnimNames[slot], mPortEchoesMissileAnims[slot],
+                       animData.GetAnimationDuration(mPortEchoesMissileAnims[slot]), skAnimTypeList[type],
+                       mPortAnimStandIn);
+      }
+      animData.EnableLooping(false);
+      animData.SetAnimation(CAnimPlaybackParms(mPortEchoesMissileAnims[slot], -1, 1.f, true), false);
+      mPortMissilePose = type != NWeaponTypes::kGAT_FromMissile;
+      return;
+    }
+    // From an import before Echoes' anims: a missile shot kicks as a beam shot does, the reload
+    // leaves the pose be, and going to or from missiles is the rest pose.
     int standIn = -2; // -2: Prime's anim; -1: none
     switch (type) {
     case NWeaponTypes::kGAT_MissileShoot:
@@ -298,6 +344,7 @@ void CGunWeapon::PlayAnim(NWeaponTypes::EGunAnimType type, bool loop) {
       return;
     }
   }
+  mPortMissilePose = false;
 #endif
   animData.EnableLooping(loop);
 
@@ -318,6 +365,7 @@ bool CGunWeapon::PortAnimTimeRemaining() const {
 void CGunWeapon::Reset(CStateManager& mgr) {
 #ifdef TARGET_PC
   mPortAnimStandIn = -1.f;
+  mPortMissilePose = false;
 #endif
   if (!x218_26_loaded)
     return;
@@ -889,12 +937,14 @@ void CGunWeapon::Fire(const bool underwater, const float dt,
   animData.SetAnimation(parms, false);
 #ifdef TARGET_PC
   mPortAnimStandIn = -1.f;
+  mPortMissilePose = false;
 #endif
 }
 
 void CGunWeapon::ReturnToDefault(CStateManager& mgr) {
 #ifdef TARGET_PC
   mPortAnimStandIn = -1.f;
+  mPortMissilePose = false;
 #endif
   x100_gunController->ReturnToDefault(mgr, 0.f, false);
 }
@@ -904,6 +954,7 @@ bool CGunWeapon::ComboFireOver() const { return x100_gunController->IsComboOver(
 void CGunWeapon::EnterFidget(CStateManager& mgr, SamusGun::EFidgetType type, int parm2) {
 #ifdef TARGET_PC
   mPortAnimStandIn = -1.f;
+  mPortMissilePose = false;
 #endif
   x100_gunController->EnterFidget(mgr, s32(type), s32(x200_beamId), parm2);
 }

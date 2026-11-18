@@ -21,7 +21,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 6: Dark Samus, one body per skeleton under DarkSamusId/DarkSamusSkinId (kDarkBodies).
 // 7: the Varia and Light balls also as the Varia and Phazon Spider Balls.
 // 8: Dark Samus's Morph Ball (kDarkBall).
-inline constexpr int kVersion = 8;
+// 9: Echoes' missile anims for the cannon, added to each beam's ANCS variant (kMissileAnimNames).
+inline constexpr int kVersion = 9;
 
 // The first-person arm cannon (CGunWeapon::LoadGunModels: characters 0 and 1 of each beam's ANCS).
 // Echoes' gun and hologram have Prime's ids and are skinned on its own CINF 46ED31E0, the same 50
@@ -46,6 +47,15 @@ inline constexpr uint32_t kGunSets[] = {0, 1, 3, 2, 4};
 inline constexpr uint32_t kBeamAncs[] = {0x41B63D84, 0xC1135EA3, 0x02B4357C, 0x6AB61E5E, 0x5E7FF762};
 inline constexpr int kCannonKey = 0x4D5032;  // "MP2"
 inline uint32_t Cannon(uint32_t id) { return PortModelVariant::Id(id, kCannonKey); }
+// Echoes' gun has its own missile anims under Prime's ids (the Power Beam's MissleOpen 29E9308B, the
+// beams' genericMissleShoot C317C67C...): the nozzle turns where Prime's barrel splits open. Each
+// beam's ANCS variant keeps Prime's (the gun's timing) and adds Echoes', converted under Cannon(id),
+// as these character anims: CGunWeapon's kGAT_FromMissile, ToMissile, MissileShoot and MissileReload,
+// then Echoes' first missile shot, fired from the beam's own pose (kFirstMissileShot).
+inline constexpr const char* kMissileAnimNames[] = {"PortEchoes_FromMissile", "PortEchoes_ToMissile",
+                                                    "PortEchoes_MissileShoot", "PortEchoes_MissileReload",
+                                                    "PortEchoes_MissileFirstShoot"};
+inline constexpr uint32_t kFirstMissileShot = 0xB9A04995;  // genericMissleFirstShoot
 // The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon(ancs) while the mod serves it
 // and the setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs.
 uint32_t GunAncs(uint32_t ancs);

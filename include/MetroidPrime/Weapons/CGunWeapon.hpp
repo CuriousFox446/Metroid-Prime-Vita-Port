@@ -283,11 +283,16 @@ protected:
   bool mPortDreadCannon = false;
 
   // Echoes' arm cannon (echoes-suits, PortEchoesSuits::GunAncs) is skinned to Prime's gun skeleton,
-  // whose missile anims open the barrel; Echoes' cannon never opens. For it PlayAnim plays the
-  // beam's shot or rest pose in their place, and mPortAnimStandIn keeps the time left of Prime's
-  // anim (< 0: none), so missiles keep Prime's timing (0.46.0 test 24).
+  // whose missile anims open the barrel; Echoes' cannon never opens. For it PlayAnim plays Echoes'
+  // own missile anims (mPortEchoesMissileAnims, character anims of the mod's ANCS by
+  // PortEchoesSuits::kMissileAnimNames; -1 from an older import, which gets the beam's shot or rest
+  // pose instead), and mPortAnimStandIn keeps the time left of Prime's anim (< 0: none), so
+  // missiles keep Prime's timing (0.46.0 tests 24, 25). mPortMissilePose: the last anim left the
+  // cannon in Echoes' missile pose, so a missile shot is not the first one.
   bool mPortEchoesCannon = false;
   float mPortAnimStandIn = -1.f;
+  int mPortEchoesMissileAnims[5] = {-1, -1, -1, -1, -1};
+  bool mPortMissilePose = false;
 #endif
 };
 CHECK_SIZEOF(CGunWeapon, 0x21c)
