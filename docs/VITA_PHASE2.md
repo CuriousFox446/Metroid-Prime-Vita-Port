@@ -4209,27 +4209,52 @@ What to look for in test 27:
 
 The user sent two photos (Echoes on the tablet over the Vita, the video's rooms), at rest and in
 missile mode: "How can you not see the difference?"
-- Cropped to the cannon at one scale (the rings' width), the shapes match: the same closed shell
+- Cropped to the cannon at one scale (the rings' width), the plates match: the same closed shell
   at rest; in missile mode the same crown, plates at the top and left over the rings, the same
   size and the same 45° turn.
 - The colours do not: Echoes' open plates dark green with white edges and its body blue, the
   Vita's plates flat cyan and its body grey-green. Materials 1, 2, 4, 6 and 7 of the cannon all
   shine by mode 6 (the body's map is `7F202198`), so test 27's camera lookup tinted all of them.
+- The user: "the difference is not color". It is the gills (the barrel's side panels). The Light
+  Beam spreads them at rest (the light centre strip shows between them, in both games' rest
+  photos). In Echoes' missile photo they are shut and the strip is covered; on the Vita they stay
+  spread and the strip shows. See the gill item below and test 28.
 - **Echoes' mode 6 is Prime's.** Echoes' DOL holds the same post matrix
   {0.5,0,0,0},{0,0,0.5,0},{0,0,0,1}, followed by mode 7's as in Prime's, and the code that loads it
   (0x80304fc4) reads 0.05 from SDA2 right after: the model's world position x 0.05
   (`~/tools/dolsearch.py`, `~/tools/dolref.py`). Echoes' own plates change from room to room
   (pale mint in the Phendrana-time photos, dark green in this room), as the world lookup does.
-- Also checked: Echoes' generic missile anims carry no gill tracks, but each beam's open anim
-  ends with the gills at rest and its close anim starts there, so Echoes' missile mode has the
-  gills at rest as the port poses them (Prime's own generic missile anims set every gill to rest).
-  The first shot's kick (`Skeleton_Root` 20 cm back) is in Prime's missile anim too.
+- **The gills.** Ice's, Wave's and Plasma's base poses (Echoes' Dark, Light and Annihilator)
+  move the gill joints (`g1`-`g12`, `gBase`, `gPanel`, `L_g*`): Dark up and down by up to 4.7 cm,
+  Light outward by up to 2.4 cm (and `g5` turned 20°), Annihilator forward by up to 9.4 cm.
+  Power's is the rest pose. Each beam's open anim ends with the gills at rest and its close anim
+  starts there; Echoes' generic shot, reload and first shot list the gill channels with no
+  tracks. Prime's own generic missile anims carry every gill at rest instead.
+- Prime's engine (`CAnimData::RecalcPoseBuilder`) inserts every segment's rotation each frame (a
+  missing one is the identity) but an offset only when the anim has one. Its pose builder
+  (`x2fc_poseBuilder`) persists, so a joint the anim leaves out keeps its last offset. Test 25's
+  conversion left the gill channels out, so on the Vita the beam's gill offsets stayed through the
+  missile anims: Light's gills spread, the Annihilator's forward over the rings (as in the user's
+  test 25 photo, where its rings do not show). Echoes shuts them.
+- The first shot's kick (`Skeleton_Root` 20 cm back) is in Prime's missile anim too; it plays
+  the same on both.
 
-## 0.46.0 test 28: Echoes' cannon shine back to the world lookup
+## 0.46.0 test 28: Echoes' gills shut for missiles, its shine back to the world lookup
 
-Test 27's `PortSetCameraModelUv` is gone (CCubeMaterial.hpp/.cpp and CGunWeapon.cpp as in test
-26): the Echoes cannon's mode-6 shine takes the world lookup again, as Echoes' own code does.
+- **echoes-suits version 11** (`ConvertGunAnim`, port_echoes_suits.cpp): every channel Echoes
+  lists is written. A missing rotation track becomes a still identity, a missing offset track a
+  still offset at Prime's skeleton place (head minus the parent's head, in offset steps). So the
+  generic missile anims hold the gills at rest, as Echoes does. Checked on the PC with the
+  import's code (`~/echoes_gun/check`): all four beams convert, 50 channels each; every joint
+  poses as Echoes' anim does. `animcmp.py` flags only the elbow, by its own fault: it takes a
+  missing offset as the joint's model-space head, and the shoulder is not at the origin. The new
+  offset is the one Prime's layout gives the elbow anyway.
+- Test 27's `PortSetCameraModelUv` is gone (CCubeMaterial.hpp/.cpp and CGunWeapon.cpp as in test
+  26): the Echoes cannon's mode-6 shine takes the world lookup again, as Echoes' own code does.
+- Needs the Echoes suits imported again (Mods menu; the image stays in `ux0:data/MetroidPrime2`).
 
 What to look for in test 28:
-- The Echoes cannon without the even cyan cast: plates and body change with the place, dark
-  green in some and mint in others, like Echoes'.
+- After the import, a missile with the Light Beam: the side panels close flush (the light centre
+  strip covered) and open again when the cannon leaves missile mode. With the Annihilator, the
+  gills pull back from the rings. With Dark, they settle level. Power as before.
+- The Echoes cannon's colours change with the place, as in Echoes (no even cyan cast).
