@@ -4137,3 +4137,34 @@ What to look for in test 25:
 - Firing a missile from the beam: the nozzle kicks and turns into the missile pose, the barrel whole.
 - More missiles: the revolver-turn reload between shots; 7 s on, or a beam shot, the slow turn back.
 - Missiles as fast as before; each beam (Power, Ice, Wave, Plasma) its own open and close.
+
+### Test 25 result
+
+`~/logs/t046_25.log` (4b2825c): the user imported again on the Vita (the Echoes image in
+`ux0:data/MetroidPrime2`). The 11 converted ANIMs came out byte for byte the size of the PC run's,
+and Echoes' anims played: the first shot (character anim 24), the reload, the close, then a later
+shot. The user's photos put Echoes (on a tablet) over the Vita, beam by beam, at rest and firing a
+missile: "two arm canon uses the wrong textures and something all three have in common when you
+shoot a rocket".
+- **The textures.** The cannon's five sets, decoded from the Echoes disc (`~/tools/gunsets.py`):
+  0 a grey-green body with a yellow glow (Power), 1 purple (Dark), 2 a blue body (Light), 3 an olive
+  body with white streaks (Annihilator), 4 blue with electric veins. The photos pair the Vita's
+  Ice with Echoes' Dark (right), Wave with Light and Plasma with Annihilator (by the HUD's selected
+  beam in each). Mod versions 5-9 (upstream's, from 0.42.0) dressed Wave in Annihilator's set and
+  Plasma in Light's. Echoes keeps Prime's gun ANCS slots for its beams (Dark the "Ice" slot, Light
+  "Wave", Annihilator "Plasma"), so the swap also split each cannon's set from its own anims.
+- **The missile shot.** The three photographed beams are the non-Power ones. Every other anim of
+  their ANCS matches Prime's (`~/tools/beamcmp.sh`: base poses, shots, charges, fidgets, holsters);
+  only the missile anims differ, as for Power, and the conversion gives Echoes' poses exactly. The
+  rotation axes agree with Prime's where both animate a joint (the shot's recoil), so the two games
+  read rotations alike. What "all three have in common" was not found from the photos alone: asked.
+
+## 0.46.0 test 26: the cannon's Light and Annihilator looks on the beams Echoes gives them
+
+**echoes-suits version 10** (`kGunSets`, port_echoes_suits_mod.h): Power, Ice, Wave, Plasma and
+Phazon wear Echoes' sets 0-4 in order: Ice Dark, Wave Light, Plasma Annihilator. Imported again
+from the Mods menu (the Echoes image stays in `ux0:data/MetroidPrime2`).
+
+What to look for in test 26:
+- After the import: Wave's cannon blue like Echoes' Light Beam, Plasma's olive with white streaks
+  like the Annihilator; Power and Ice as before.

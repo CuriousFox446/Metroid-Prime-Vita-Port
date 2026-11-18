@@ -22,7 +22,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 7: the Varia and Light balls also as the Varia and Phazon Spider Balls.
 // 8: Dark Samus's Morph Ball (kDarkBall).
 // 9: Echoes' missile anims for the cannon, added to each beam's ANCS variant (kMissileAnimNames).
-inline constexpr int kVersion = 9;
+// 10: the cannon's Light and Annihilator sets back on Wave and Plasma (kGunSets), as Echoes pairs them.
+inline constexpr int kVersion = 10;
 
 // The first-person arm cannon (CGunWeapon::LoadGunModels: characters 0 and 1 of each beam's ANCS).
 // Echoes' gun and hologram have Prime's ids and are skinned on its own CINF 46ED31E0, the same 50
@@ -39,9 +40,12 @@ inline constexpr Gun kGuns[] = {
     {"cannon hologram", 0xE6F4DEFC, 0x8DDB712A},
 };
 // The Echoes material set each Prime beam's gun wears, by CPlayerState::EBeamId (Power, Ice, Wave,
-// Plasma, Phazon). Echoes' sets are Power, Dark, Light, Annihilator, then the fifth: Ice wears
-// Dark, Wave Annihilator, Plasma Light.
-inline constexpr uint32_t kGunSets[] = {0, 1, 3, 2, 4};
+// Plasma, Phazon). Echoes' sets are Power, Dark, Light, Annihilator, then the fifth, and Echoes keeps
+// Prime's gun ANCS in the same slots ("Power", "Ice", "Wave", "Plasma"): its Dark Beam is the Ice
+// slot, Light the Wave slot, Annihilator the Plasma slot. So each beam wears the set of its own slot,
+// matching the ANCS (and missile anims) it brings: Ice wears Dark, Wave Light, Plasma Annihilator.
+// (Mod versions 5-9 had Wave and Plasma swapped; the user's side-by-side with Echoes, 0.46.0 test 25.)
+inline constexpr uint32_t kGunSets[] = {0, 1, 2, 3, 4};
 // The first-person gun's ANCS of each beam (CPlayerState::EBeamId order). The mod writes a variant
 // of each, Cannon(ancs), whose characters 0 (the gun) and 1 (its hologram) are Echoes'.
 inline constexpr uint32_t kBeamAncs[] = {0x41B63D84, 0xC1135EA3, 0x02B4357C, 0x6AB61E5E, 0x5E7FF762};

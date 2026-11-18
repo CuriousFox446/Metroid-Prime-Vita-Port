@@ -362,8 +362,9 @@ Power Suit stays Prime's.
   PAKs. Playing from a Trilogy disc, the page has no disc picker: Import reads the running disc.
 - From a terminal: `--import-echoes-suits <Echoes disc image>` (the Prime disc from `MP_DISC`).
 - The first-person arm cannon is Echoes' too, for every suit: Power, Ice, Wave, Plasma and Phazon
-  Beam take its Power, Dark, Annihilator, Light and fifth look, moved by Prime's gun animations
-  (the two guns share one skeleton). "Echoes arm cannon in first person"
+  Beam take its Power, Dark, Light, Annihilator and fifth look (Echoes' own beams sit in Prime's
+  gun slots in that order), moved by Prime's gun animations (the two guns share one skeleton),
+  with Echoes' own missile animations from mod version 9. "Echoes arm cannon in first person"
   (`echoes_first_person_cannon`, on by default; console `echoescannon 0|1`) switches it, from the
   next beam selected.
 - "Play as Dark Samus" (`echoes_dark_samus`, off by default; console `darksamus 0|1`) puts Echoes'
