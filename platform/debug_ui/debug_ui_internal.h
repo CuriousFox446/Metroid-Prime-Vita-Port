@@ -47,8 +47,22 @@ extern bool sSimAdaptive;
 extern bool sFrameLimitEnabled;
 extern int sFpsCap; // with the 60 FPS cap off; 0 = unlimited
 inline constexpr int kFpsCapMin = 30;
+#ifdef __vita__
+// The Vita's screen shows 60 frames a second at most (the user, 0.46.0 test 32): caps run 30 to 60,
+// and 60 is no cap (0), the screen's own pace; dynamic resolution's targets stop at 60 too.
+inline constexpr int kFpsCapMax = 60;
+inline int ClampFpsCap(int fps) { return fps <= 0 || fps >= kFpsCapMax ? 0 : std::max(fps, kFpsCapMin); }
+#else
 inline constexpr int kFpsCapMax = 500;
 inline int ClampFpsCap(int fps) { return fps <= 0 ? 0 : std::clamp(fps, kFpsCapMin, kFpsCapMax); }
+#endif
+// The simulation rates Sim Hz takes (60 the game's own); on the Vita no more than its screen's 60.
+inline constexpr unsigned kSimRateMin = 30;
+#ifdef __vita__
+inline constexpr unsigned kSimRateMax = 60;
+#else
+inline constexpr unsigned kSimRateMax = 480;
+#endif
 extern bool sTurbo;
 extern unsigned sTurboTicks;
 extern bool sTraceTiming;

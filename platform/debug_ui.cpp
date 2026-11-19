@@ -597,7 +597,7 @@ void EnsureInitialized() {
       sCutsceneSpeed = value;
     }
     const int rate = port::EnvInt("MP_SIM_RATE", 0);
-    if (rate >= 30 && rate <= 480) {
+    if (rate >= int(kSimRateMin) && rate <= int(kSimRateMax)) {
       sSimRate = static_cast< unsigned >(rate);
     }
   }

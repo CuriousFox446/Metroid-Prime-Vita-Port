@@ -133,7 +133,7 @@ unsigned SimRate() {
 
 void SetSimRate(unsigned hz) {
   EnsureInitialized();
-  if (hz < 30u || hz > 480u) {
+  if (hz < kSimRateMin || hz > kSimRateMax) {
     return;
   }
   sSimRate = hz;
@@ -427,6 +427,11 @@ float RenderScale() {
 
 void SetRenderScale(float scale) {
   EnsureInitialized();
+#ifdef __vita__
+  if (scale > 0.f) {
+    scale = std::clamp(scale, kVitaScaleMin, kVitaScaleMax);
+  }
+#endif
   if (sRenderScale == scale) {
     return;
   }

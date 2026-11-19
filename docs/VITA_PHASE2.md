@@ -4375,3 +4375,42 @@ What to look for in test 31:
   same for Wave (Prime's purple) and Plasma (Prime's orange-red). Back to the Echoes beam: Dark's,
   Light's, Annihilator's colours again.
 - The suit choices as above; Varia has none.
+
+### Test 31 result
+
+"looks good": the log has the version 14 import (321 resources), `echoes_cannon_looks` at
+`power,prime,prime,prime`, the suit choices tried and reloaded (Gravity Dark, Phazon Light, back to
+the colours, Power with the helmet). Three photos of F1 > Video: Quality and Frame rate at 1x, and
+Quality with the resolution scale above 1x (dynamic resolution off), where the menu's text is solid
+boxes and everything else in the menu draws right.
+
+## 0.46.0 test 32: the menu's text at any scale; the Vita's ranges
+
+The user: "change the resolution scale to 480p to 720p because realistically you can't play at
+higher resolution, the settings text do become unreadable when I increase the resolution above 544p
+to 720, you can probably fix that. change the fps cap scale to 30 t0 60 because there ain't no way
+game will run higher than 60 and the sim hz to 30 to 60".
+- **The text**: a frame drawn at another scale goes to the display through the copy program
+  (`draw_world_to_display`). Its `use_program` turns each unit's coordinate array off with
+  `glClientActiveTexture`, which leaves the client's unit at the last one; `glActiveTexture` went
+  back to 0 but the client's unit did not. ImGui's GL2 backend sets neither: its
+  `glTexCoordPointer` went to the last unit, and unit 0, where it binds the font, had no
+  coordinates. Every glyph read one texel of the atlas, its white corner: a solid box (the panels
+  and the check marks use that white texel anyway, so they looked right). At 1x the overlay
+  follows `draw_world`, which ends on unit 0 for both. `draw_world_to_display` now ends there too.
+  Below 1x it was the same (dynamic resolution's lowered frames too).
+- **Resolution scale** (Vita): 480 to 720 lines (`PortDebug::kVitaScaleMin`/`Max`, 480/544 to
+  720/544), a slider of 16-line steps (480, 496 ... 544 ... 720; one a D-pad press), labelled as
+  before ("1.00x (544p)"). `SetRenderScale` and the saved `render_scale` keep a fixed scale inside;
+  auto (0) stays the screen's. "Maximum resolution scale" (dynamic resolution, User) is the same
+  slider. The dynamic minimum keeps its range.
+- **FPS cap** (Vita): 30 to 60, where 60 is no cap (saved 0: the screen's pace, as "Unlimited" was);
+  `ClampFpsCap` makes a saved cap of 60 or more none. `kFpsCapMax` is 60 on the Vita, so dynamic
+  resolution's "Frame rate target" stops at 60 too.
+- **Sim Hz** (Vita): 30 to 60 (`kSimRateMin`/`kSimRateMax`; the saved `sim_rate` and `MP_SIM_RATE`
+  too). The game's 60 stays the default.
+
+What to look for in test 32:
+- F1 > Video > Quality, Resolution scale at 720p (1.32x): the menu's text reads; also at 480p.
+- The slider goes from 0.88x (480p) to 1.32x (720p), 16 lines a step; FPS cap 30 to 60 (60 the
+  top, no "Unlimited"); Sim Hz 30 to 60.

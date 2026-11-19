@@ -187,6 +187,17 @@ void SetRenderScale(float scale);
 // The highest fixed scale (3840 lines: a 4K display supersampled ~1.8x). Aurora fits the
 // EFB inside the device's texture size limit, so a wide window can draw a little less.
 constexpr float kRenderScaleMax = 8.f;
+#ifdef __vita__
+// The Vita's fixed scales, as the user set them out (0.46.0 test 32): 480 to 720 lines, as multiples
+// of its screen's 544 (1x), in steps of 16 lines; past 720 it is not playable. SetRenderScale and the
+// saved setting keep a fixed scale within them; auto (0) stays the screen's.
+constexpr int kVitaScreenLines = 544;
+constexpr int kVitaScaleMinLines = 480;
+constexpr int kVitaScaleMaxLines = 720;
+constexpr int kVitaScaleStepLines = 16;
+constexpr float kVitaScaleMin = static_cast< float >(kVitaScaleMinLines) / kVitaScreenLines;
+constexpr float kVitaScaleMax = static_cast< float >(kVitaScaleMaxLines) / kVitaScreenLines;
+#endif
 // Photo mode captures: the configured scale (auto: the scale the window's own size
 // is, as a multiple of what 1x draws), and a temporary override
 // (0 = none) that also holds dynamic resolution still.

@@ -84,7 +84,9 @@
   out in F1.
 - Resolution scale (F1 > Video > Quality, persisted as `render_scale`): 1x-8x of the GameCube's
   640x528 EFB, shown with the lines it draws (1x is 480p in NTSC), or the window's own size with
-  "Auto render scale". Above 2x it
+  "Auto render scale". On the PS Vita it is a multiple of its 960x544 screen from 480 to 720 lines,
+  in steps of 16 (a saved scale outside is brought inside), its FPS cap 30-60 (60 is no cap, the
+  screen's pace) and its Sim Hz 30-60. Above 2x it
   supersamples (4x at 16:9 is 3755x2112; with MSAA 4 the targets take
   several hundred MB, at 8x about 2 GB). The frame buffer is shrunk to fit the GPU's
   texture size limit (usually 8192 or 16384). "Dynamic
@@ -1765,7 +1767,7 @@ other `X:\Users\<name>`: `X:\Users\<user>`); the
   area, with a page list instead of tabs, larger hit targets, drag-to-scroll
   with fling for touches and a Close button.
 - `MP_VALIDATE_SAMPLES=1`: log MusyX sample-directory validation.
-- `MP_SIM_RATE=<hz>`: experimental simulation tick rate (30–480, default 60).
+- `MP_SIM_RATE=<hz>`: experimental simulation tick rate (30–480, on the PS Vita 30–60; default 60).
   60 is console-accurate; higher values step the game logic at the display rate
   instead of interpolating the camera. `MP_SIM_ADAPTIVE=1` instead takes one
   step per frame with `dt` = the measured frame time (clamped 30–480 Hz), so a

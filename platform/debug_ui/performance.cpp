@@ -41,8 +41,20 @@ void DrawPerformanceTab() {
     MarkDirty();
   }
   {
-    // One past the top is "Unlimited" (saved as 0).
     ImGui::BeginDisabled(sFrameLimitEnabled);
+#ifdef __vita__
+    // 30 to the screen's 60, where the top is no cap (saved as 0): the screen's own pace.
+    int cap = sFpsCap > 0 ? sFpsCap : kFpsCapMax;
+    if (ImGui::SliderInt("FPS cap", &cap, kFpsCapMin, kFpsCapMax, "%d FPS", ImGuiSliderFlags_AlwaysClamp)) {
+      sFpsCap = ClampFpsCap(cap);
+      ResetDynamicRes();
+      MarkDirty();
+    }
+    ImGui::EndDisabled();
+    ItemHelp("The most frames drawn a second with the 60 FPS cap off, from 30 to the screen's 60. At 30 "
+             "each frame stays up two refreshes, so they come evenly.");
+#else
+    // One past the top is "Unlimited" (saved as 0).
     int cap = sFpsCap > 0 ? sFpsCap : kFpsCapMax + 1;
     if (ImGui::SliderInt("FPS cap", &cap, kFpsCapMin, kFpsCapMax + 1, cap > kFpsCapMax ? "Unlimited" : "%d FPS",
                          ImGuiSliderFlags_AlwaysClamp)) {
@@ -53,6 +65,7 @@ void DrawPerformanceTab() {
     ImGui::EndDisabled();
     ItemHelp("The most frames drawn a second with the 60 FPS cap off. Vsync still limits it to the "
              "display's refresh rate.");
+#endif
   }
   // Both, because they answer different questions. Throughput is what the
   // machine produces once the pacing wait is excluded; presented is what
@@ -95,7 +108,8 @@ void DrawPerformanceTab() {
            "matched. Leave the FPS cap off.");
   ImGui::BeginDisabled(adaptive);
   int simRate = static_cast< int >(sSimRate);
-  if (ImGui::SliderInt("Sim Hz", &simRate, 30, 480)) {
+  if (ImGui::SliderInt("Sim Hz", &simRate, static_cast< int >(kSimRateMin), static_cast< int >(kSimRateMax), "%d",
+                       ImGuiSliderFlags_AlwaysClamp)) {
     PortDebug::SetSimRate(static_cast< unsigned >(simRate));
   }
   ImGui::EndDisabled();

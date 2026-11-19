@@ -611,9 +611,9 @@ void DrawVideoQuality() {
   // Dynamic resolution's mode is the two saved settings together: Auto draws up to the
   // window's own scale (auto render scale), User up to the resolution scale set.
 #ifdef __vita__
-  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), up to twice it
-  // (aurora's vita_gl::kMaxRenderScale): more is beyond its GPU and its video memory.
-  constexpr float kScaleMax = 2.f;
+  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), from 480 to 720 lines
+  // (PortDebug::kVitaScaleMinLines, kVitaScaleMaxLines): the user's range (0.46.0 test 32).
+  constexpr float kScaleMax = PortDebug::kVitaScaleMax;
 #else
   constexpr float kScaleMax = PortDebug::kRenderScaleMax;
 #endif
@@ -650,19 +650,32 @@ void DrawVideoQuality() {
     float scale = sPendingScale > 0.f ? sPendingScale : sRenderScale;
     char label[32];
     std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
-    if (ImGui::SliderFloat(dynMode == 2 ? "Maximum resolution scale" : "Resolution scale", &scale, 1.f, kScaleMax, label,
-                           ImGuiSliderFlags_AlwaysClamp)) {
+    const char* const scaleName = dynMode == 2 ? "Maximum resolution scale" : "Resolution scale";
+#ifdef __vita__
+    // In steps of 16 lines (480, 496 ... 544 ... 720): one a press of the D-pad.
+    {
+      constexpr int kSteps = (kVitaScaleMaxLines - kVitaScaleMinLines) / kVitaScaleStepLines;
+      int step = std::clamp(static_cast< int >(std::lround((scale * kVitaScreenLines - kVitaScaleMinLines) /
+                                                           kVitaScaleStepLines)),
+                            0, kSteps);
+      if (ImGui::SliderInt(scaleName, &step, 0, kSteps, label, ImGuiSliderFlags_AlwaysClamp)) {
+        sPendingScale = static_cast< float >(kVitaScaleMinLines + step * kVitaScaleStepLines) / kVitaScreenLines;
+      }
+    }
+#else
+    if (ImGui::SliderFloat(scaleName, &scale, 1.f, kScaleMax, label, ImGuiSliderFlags_AlwaysClamp)) {
       sPendingScale = scale;
     }
+#endif
     if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
       SetRenderScale(std::min(sPendingScale, kScaleMax));
       MarkDirty();
       sPendingScale = 0.f;
     }
 #ifdef __vita__
-    ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the Vita's screen (1x is\n"
-                          "its 960x544). Above 1x it supersamples: sharper edges, but each step costs\n"
-                          "much more GPU time and video memory.");
+    ImGui::SetItemTooltip("The resolution the game draws at, 480 to 720 lines (1x is the Vita's screen,\n"
+                          "960x544). Above 544 it supersamples: sharper edges, but each step costs much\n"
+                          "more GPU time. Below it the picture is softer and lighter on the GPU.");
 #else
     ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
                           "higher values use more GPU memory. Above 2x it supersamples, and each step\n"

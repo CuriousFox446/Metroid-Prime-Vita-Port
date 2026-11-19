@@ -3736,6 +3736,12 @@ void draw_world_to_display() noexcept {
     }
   }
   glUseProgram(0);
+  // Unit 0 the client's too, as draw_world leaves it: use_program left the last one so (turning each
+  // unit's coordinates off), and the overlay's backend (ImGui's GL2) gives its coordinates to the
+  // client's unit and samples its font on unit 0. Each glyph then read one texel of the font's atlas,
+  // the white corner: solid boxes for text at any scale but 1x (0.46.0 test 31).
+  glActiveTexture(GL_TEXTURE0);
+  glClientActiveTexture(GL_TEXTURE0);
   apply_state(RenderState{.depthTest = false}, current, true);
 }
 

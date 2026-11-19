@@ -600,7 +600,11 @@ const SettingKey kSettingKeys[] = {
      [](const std::string& value) {
        const float f = static_cast< float >(std::atof(value.c_str()));
        if (std::isfinite(f) && f >= 0.f && f <= PortDebug::kRenderScaleMax) {
+#ifdef __vita__
+         sRenderScale = f > 0.f ? std::clamp(f, PortDebug::kVitaScaleMin, PortDebug::kVitaScaleMax) : 0.f;
+#else
          sRenderScale = f;
+#endif
        }
      },
      [](std::ostream& out) { out << sRenderScale; }, false, "0.5", "2"},
@@ -638,7 +642,7 @@ const SettingKey kSettingKeys[] = {
     {"sim_rate",
      [](const std::string& value) {
        const long rate = std::strtol(value.c_str(), nullptr, 10);
-       if (rate >= 30 && rate <= 480) {
+       if (rate >= long(kSimRateMin) && rate <= long(kSimRateMax)) {
          sSimRate = static_cast< unsigned >(rate);
        }
      },
