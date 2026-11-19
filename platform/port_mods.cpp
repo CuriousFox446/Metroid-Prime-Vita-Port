@@ -96,10 +96,14 @@ std::set<uint32_t> sEchoesGuns;
 bool sDarkSamusServed = false;
 bool sPlayAsDarkSamus = false;  // the setting echoes_dark_samus
 // The setting echoes_suit_looks (PortEchoesSuits::SuitLook) and what the last load served of it. By
-// default the Varia is Echoes' and Gravity and Phazon wear it in their own colours.
-int sSuitLooks[PortEchoesSuits::kSuitLookSuits] = {PortEchoesSuits::kLookPrime, PortEchoesSuits::kLookColours,
+// default the Power Suit is Prime's with Echoes' helmet, the Varia is Echoes' and Gravity and Phazon
+// wear it in their own colours.
+int sSuitLooks[PortEchoesSuits::kSuitLookSuits] = {PortEchoesSuits::kLookHelmet, PortEchoesSuits::kLookColours,
                                                    PortEchoesSuits::kLookVaria, PortEchoesSuits::kLookColours};
 int sServedSuitLooks[PortEchoesSuits::kSuitLookSuits] = {};
+// The Prime body CMDLs it serves with Echoes' helmet on (PortEchoesSuits::HasOwnHelmet): Prime's
+// bodies still, so not in sEchoesBodies (their boots and parts stay), but with their own visor.
+std::set<uint32_t> sEchoesHelmetBodies;
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
 // envfx.bin: Remastered's EnvironmentFX textures (port_envfx_assets.h).
@@ -508,6 +512,9 @@ void PortEchoesSuits::SetSuitLook(int suit, int look) {
 int PortEchoesSuits::ServedSuitLook(int suit) {
   return suit >= 0 && suit < kSuitLookSuits ? PortMods::sServedSuitLooks[suit] : kLookPrime;
 }
+bool PortEchoesSuits::HasOwnHelmet(uint32_t bodyCmdl) {
+  return bodyCmdl != 0 && PortMods::sEchoesHelmetBodies.count(bodyCmdl) != 0;
+}
 void PortEchoesSuits::SetPlayAsDarkSamus(bool on) { PortMods::sPlayAsDarkSamus = on; }
 bool PortEchoesSuits::PlayAsDarkSamus() { return PortMods::sPlayAsDarkSamus; }
 bool PortEchoesSuits::DarkSamusServed() { return PortMods::sDarkSamusServed; }
@@ -705,6 +712,7 @@ void Initialize() {
   sEchoesGuns.clear();
   sDarkSamusServed = false;
   for (int& served : sServedSuitLooks) served = PortEchoesSuits::kLookPrime;
+  sEchoesHelmetBodies.clear();
   {
     std::lock_guard<std::mutex> lock(sEffectIdsMutex);
     sEffectIdMapPath.clear();
@@ -1022,9 +1030,33 @@ void Initialize() {
     const PortEchoesSuits::SuitResources& varia = PortEchoesSuits::kSuitResources[PortEchoesSuits::kVariaSuit];
     for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
       const int look = sSuitLooks[suit];
+      const PortEchoesSuits::SuitResources& mine = PortEchoesSuits::kSuitResources[suit];
+      if (look == PortEchoesSuits::kLookHelmet) {
+        // Prime's bodies with Echoes' helmet, under their own ids; the arms and balls stay Prime's.
+        size_t bodies = 0;
+        for (int kind = 0; kind < 3; ++kind) {
+          const LooseResource* cmdl = echoes(0x434D444Cu, PortEchoesSuits::HelmetId(mine.cmdl[kind]));  // 'CMDL'
+          const LooseResource* cskr = echoes(0x43534B52u, PortEchoesSuits::HelmetId(mine.cskr[kind]));  // 'CSKR'
+          if (cmdl == nullptr || cskr == nullptr) continue;
+          serve(cmdl, mine.cmdl[kind]);
+          serve(cskr, mine.cskr[kind]);
+          sEchoesHelmetBodies.insert(mine.cmdl[kind]);
+          if (kind == 0 && suit == PortEchoesSuits::kVariaSuit) serve(cskr, PortEchoesSuits::kVariaSkinCopy);
+          if (kind == 0 && suit == 3) {
+            serve(cmdl, PortEchoesSuits::kPhazonBodyCopy);
+            sEchoesHelmetBodies.insert(PortEchoesSuits::kPhazonBodyCopy);
+          }
+          ++bodies;
+        }
+        if (bodies != 0) {
+          sServedSuitLooks[suit] = look;
+          PortLog::Write("mods: %s: suit %d wears Prime's body with Echoes' helmet (%zu bodies)\n",
+                         PortEchoesSuits::kModName, suit, bodies);
+        }
+        continue;
+      }
       const int worn = PortEchoesSuits::WornFor(suit, look);
       if (worn < 0) continue;
-      const PortEchoesSuits::SuitResources& mine = PortEchoesSuits::kSuitResources[suit];
       size_t bodies = 0, arms = 0, balls = 0;
       for (int kind = 0; kind < PortEchoesSuits::kBodyKinds; ++kind) {
         const LooseResource* cmdl = echoes(0x434D444Cu, PortEchoesSuits::Wear(worn, varia.cmdl[kind]));  // 'CMDL'
@@ -1219,7 +1251,9 @@ void Initialize() {
     }
     ids.clear();
     for (const auto& [key, resource] : loose) {
-      if (key.first == 0x434D444C && resource.mod == PortEchoesSuits::kModName && PortEchoesSuits::IsBody(key.second)) {
+      // A helmet body (sEchoesHelmetBodies) is Prime's body still: its boots and parts are drawn.
+      if (key.first == 0x434D444C && resource.mod == PortEchoesSuits::kModName && PortEchoesSuits::IsBody(key.second) &&
+          (sEchoesHelmetBodies.count(key.second) == 0 || sDarkSamusBodies.count(key.second) != 0)) {
         sEchoesBodies.insert(key.second);
         char text[12];
         std::snprintf(text, sizeof(text), " %08X", key.second);

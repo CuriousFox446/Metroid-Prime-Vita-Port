@@ -355,12 +355,13 @@ balls are their Spider Balls too.
 
 Each of Prime's suits picks what it wears ("Power Suit" ... "Phazon Suit", `echoes_suit_looks`, in
 Power, Gravity, Varia, Phazon order; from the next mod reload): Prime's own, Echoes' Varia, Dark or
-Light Suit, or "Echoes Varia in its colours": Echoes' Varia recoloured the way Prime recolours its
-own Varia (Gravity's limbs and shoulder pads purple, its lights and visor cyan, the torso and helmet
-kept; Phazon dark with red lights and visor). By default Power stays Prime's, Varia is Echoes' Varia,
-and Gravity and Phazon wear it in their colours (`prime,colours,varia,colours`). From mod version 12
-the import writes each look once under its own ids, and the loader serves it over the suits that
-wear it.
+Light Suit, "Echoes Varia in its colours" (Echoes' Varia recoloured the way Prime recolours its own
+Varia: Gravity's limbs and shoulder pads purple, its lights and visor cyan, the torso and helmet
+kept; Phazon dark with red lights and visor), or "Prime's, Echoes helmet": Prime's own body with
+Echoes' Varia helmet (in the suit's colours), its arms and ball Prime's. By default the Power Suit
+is Prime's with Echoes' helmet, Varia is Echoes' Varia, and Gravity and Phazon wear it in their
+colours (`helmet,colours,varia,colours`). From mod version 12 the import writes each look once
+under its own ids, and the loader serves it over the suits that wear it; the helmet bodies from 13.
 
 - It is the mod `echoes-suits`. Its bodies carry their own arm cannon, so Prime's is not drawn on
   them. They are skinned onto Prime's skeleton: joints Prime lacks fold into their nearest parent

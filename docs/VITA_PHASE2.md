@@ -4283,11 +4283,24 @@ What to look for in test 29:
   the Power Beam's closed barrel and colours, while shooting its own shots (Wave's arcs, Ice's
   freezing shots...). Then try other mixes. Charge combos still fire.
 
-## 0.46.0 test 30: what each suit wears (echoes-suits 12)
+## 0.46.0 test 30: what each suit wears (echoes-suits 13)
 
 `echoes_suit_looks` (Mods > Echoes, "Power Suit" ... "Phazon Suit"; EPlayerSuit order, default
-`prime,colours,varia,colours`): Prime's own, Echoes' Varia, Dark or Light Suit, or "Echoes Varia in
-its colours".
+`helmet,colours,varia,colours`): Prime's own, Echoes' Varia, Dark or Light Suit, "Echoes Varia in
+its colours", or "Prime's, Echoes helmet". (Built first as mod version 12 without the helmet; that
+build was not staged, so one re-import covers both.)
+- **The helmet** (`SwapHead`): each suit's Prime cutscene, in-game and doll body (`ReadCmdl` reads
+  the retail CMDL) with every triangle that has a vertex weighing most on Head_1 or a joint under it
+  (eyes, lids, brows, Visor_LCTR) dropped, and the Echoes Varia's (in the suit's colours) that have
+  one merged in (`KeepTriangles` keeps triangles by position index, wound as drawn; `MergeCmdl`;
+  the skins' groups one after the other, a one-vertex group over the body's padding vertex
+  between). Then `CompactSkinned` keeps only the positions and normals the lists draw (the donor's
+  whole body came in): the cutscene helmet body has 4976 vertices to Prime's 5029. Under
+  `HelmetId` of Prime's ids; the loader serves them over the suit and counts them apart
+  (`HasOwnHelmet`): the doll draws Prime's boots and parts but not its visor model
+  (CMDL_InvVisor), which the Echoes helmet replaces with its own glass. Prototyped in Python
+  (`~/tools/helmetswap.py`, back-face culled renders) before the C++: the swap is clean at the neck
+  with "any vertex on the head" both ways.
 - **The import writes each look once under its own ids**, `Wear(worn, Varia's id)` (WornLook:
   Varia, Dark, Light, and the Varia in Gravity's and Phazon's colours): cutscene, in-game, doll and
   grapple-arm bodies with their skins, the right arm, and the balls fit to each Prime ball ANCS
@@ -4313,7 +4326,9 @@ its colours".
 - Needs the Echoes suits imported again.
 
 What to look for in test 30:
-- After the import (the mods reload): Varia is Echoes' Varia; Gravity and Phazon wear it in their
-  colours (pause screen doll, cutscenes, the morph transition, first-person arms, the ball).
+- After the import (the mods reload): the Power Suit is Prime's with Echoes' Varia helmet; Varia
+  is Echoes' Varia; Gravity and Phazon wear it in their colours (pause screen doll, cutscenes, the
+  morph transition, first-person arms, the ball).
+- The pause screen doll with the Power Suit: Echoes' helmet with its own visor, no second visor,
+  Prime's boots and legs.
 - Mods > Echoes: change a suit's look (say Gravity to Echoes Dark Suit), reload the mods, check it.
-- Power stays Prime's for now (its Echoes helmet comes next).

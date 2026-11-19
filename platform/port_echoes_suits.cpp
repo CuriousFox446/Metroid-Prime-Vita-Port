@@ -2057,6 +2057,320 @@ std::vector<uint8_t> EncodeCmpr(int width, int height, const std::vector<uint8_t
   return out;
 }
 
+bool ReadCmdl(const std::vector<uint8_t>& in, PrimeCmdl& model, std::string* error) {
+  Reader r{in.data(), in.size()};
+  if (r.U32(0) != 0xDEADBABE || r.U32(4) != 2) {
+    return Fail(error, "not a Prime CMDL");
+  }
+  const uint32_t flags = r.U32(8);
+  const uint32_t nsec = r.U32(0x24);
+  const uint32_t nms = r.U32(0x28);
+  if (r.bad || nsec > in.size() / 4) {
+    return Fail(error, "CMDL header cut short");
+  }
+  std::vector<std::pair<size_t, size_t>> sections(nsec);
+  size_t at = (0x2C + size_t(nsec) * 4 + 31) & ~size_t(31);
+  for (uint32_t i = 0; i < nsec; ++i) {
+    const size_t length = r.U32(0x2C + i * 4);
+    if (!r.Has(at, length)) {
+      return Fail(error, "CMDL section " + std::to_string(i) + " cut short");
+    }
+    sections[i] = {at, length};
+    at += length;
+  }
+  const uint32_t arrays = (flags & 0x4) ? 5 : 4;
+  const size_t surfaceHeader = size_t(nms) + arrays;
+  if (surfaceHeader >= nsec) {
+    return Fail(error, "CMDL has no surfaces");
+  }
+  const uint32_t nsurf = r.U32(sections[surfaceHeader].first);
+  if (surfaceHeader + 1 + size_t(nsurf) != nsec) {
+    return Fail(error, "CMDL section count does not match its surfaces");
+  }
+  const auto take = [&in](const std::pair<size_t, size_t>& s) {
+    return std::vector<uint8_t>(in.begin() + std::ptrdiff_t(s.first), in.begin() + std::ptrdiff_t(s.first + s.second));
+  };
+  model = PrimeCmdl{};
+  model.header.assign(in.begin(), in.begin() + 0x2C);
+  for (uint32_t i = 0; i < nms; ++i) model.materialSets.push_back(take(sections[i]));
+  for (uint32_t i = 0; i < arrays; ++i) model.arrays.push_back(take(sections[nms + i]));
+  for (uint32_t i = 0; i < nsurf; ++i) model.surfaces.push_back(take(sections[surfaceHeader + 1 + i]));
+  return true;
+}
+
+namespace {
+
+// Each surface's lists rebuilt as triangle lists of the triangles `keep` passes (by their position
+// indices), wound as drawn (a strip's odd triangles turned back); a surface left with none goes.
+bool KeepTriangles(PrimeCmdl& model, const std::function<bool(uint32_t, uint32_t, uint32_t)>& keep,
+                   std::string* error) {
+  MaterialSet set;
+  if (model.materialSets.empty() || !ParseSet(model.materialSets[0], set, error)) {
+    return Fail(error, "model has no material set");
+  }
+  std::vector<std::vector<uint8_t>> kept;
+  for (auto& surface : model.surfaces) {
+    uint32_t vaf;
+    if (!SurfaceFlags(surface, set, vaf, error)) return false;
+    if (vaf >> 24) return Fail(error, "matrix indices in a display list");
+    Reader r{surface.data(), surface.size()};
+    const uint32_t sizeWord = r.U32(0x10);
+    const size_t start = (0x2C + size_t(r.U32(0x1C)) + 31) & ~size_t(31);
+    if (r.bad || start > surface.size()) return Fail(error, "surface header cut short");
+    size_t vertexSize = 0;
+    for (int i = 0; i < 11; ++i) {
+      const uint32_t mode = (vaf >> (2 * i)) & 3;
+      if (mode == 1) return Fail(error, "direct vertex attribute");
+      vertexSize += mode == 0 ? 0 : mode - 1;
+    }
+    const uint32_t positionMode = vaf & 3;  // the position comes first
+    if (positionMode == 0) return Fail(error, "vertex without a position");
+    std::map<uint8_t, std::vector<uint8_t>> lists;  // kept triangles' vertex bytes by vertex format
+    size_t at = start;
+    while (at < surface.size() && surface[at] != 0) {
+      const uint8_t command = surface[at];
+      const uint16_t count = r.U16(at + 1);
+      if (r.bad || !r.Has(at + 3, size_t(count) * vertexSize)) return Fail(error, "display list cut short");
+      const uint8_t* verts = surface.data() + at + 3;
+      at += 3 + size_t(count) * vertexSize;
+      const auto position = [&](int v) -> uint32_t {
+        const uint8_t* p = verts + size_t(v) * vertexSize;
+        return positionMode == 2 ? p[0] : uint32_t(p[0] << 8 | p[1]);
+      };
+      const auto add = [&](int a, int b, int c) {
+        if (!keep(position(a), position(b), position(c))) return;
+        auto& list = lists[command & 7];
+        for (const int v : {a, b, c}) Append(list, verts + size_t(v) * vertexSize, vertexSize);
+      };
+      switch (command & 0xF8) {
+      case 0x90:
+        for (int i = 0; i + 2 < count; i += 3) add(i, i + 1, i + 2);
+        break;
+      case 0x98:
+        for (int i = 0; i + 2 < count; ++i) {
+          if (i % 2 == 0) {
+            add(i, i + 1, i + 2);
+          } else {
+            add(i + 1, i, i + 2);
+          }
+        }
+        break;
+      case 0xA0:
+        for (int i = 1; i + 1 < count; ++i) add(0, i, i + 1);
+        break;
+      default:
+        return Fail(error, "primitive " + std::to_string(command & 0xF8) + " not supported here");
+      }
+    }
+    std::vector<uint8_t> list;
+    for (const auto& [format, bytes] : lists) {
+      const size_t triangles = bytes.size() / (vertexSize * 3);
+      for (size_t t = 0; t < triangles; t += 21845) {  // at most 65535 vertices a primitive
+        const size_t n = std::min<size_t>(21845, triangles - t);
+        list.push_back(uint8_t(0x90 | format));
+        Put16(list, uint16_t(n * 3));
+        Append(list, bytes.data() + t * 3 * vertexSize, n * 3 * vertexSize);
+      }
+    }
+    if (list.empty()) continue;
+    list.push_back(0);
+    Pad32(list);
+    surface.resize(start);
+    Append(surface, list.data(), list.size());
+    Set32(surface, 0x10, (sizeWord & 0xFFFF0000) | uint32_t(list.size()));
+    kept.push_back(std::move(surface));
+  }
+  model.surfaces = std::move(kept);
+  return true;
+}
+
+// A skinned model's positions and normals cut to the ones its lists draw, renumbered in order, and
+// its skin's runs cut to match: CSkinRules skins every vertex each frame. Positions and normals go
+// together (a skinned list indexes both alike; anything else is left as it is).
+bool CompactSkinned(PrimeCmdl& model, std::vector<uint8_t>& skin, std::string* error) {
+  MaterialSet set;
+  if (model.materialSets.empty() || model.arrays.size() < 2 || !ParseSet(model.materialSets[0], set, error)) {
+    return Fail(error, "model has no material set");
+  }
+  Reader h{model.header.data(), model.header.size()};
+  if (h.U32(8) & 0x2) return Fail(error, "short normals");
+  const size_t vertices = model.arrays[0].size() / 12;
+  std::vector<int32_t> remap(vertices, -1);
+  bool parallel = true;
+  for (auto surface : model.surfaces) {
+    uint32_t vaf;
+    if (!SurfaceFlags(surface, set, vaf, error)) return false;
+    uint32_t position = 0;
+    if (!RewriteList(
+            surface, vaf, false, [](uint8_t&) { return true; },
+            [&](int attr, uint32_t& value) {
+              if (attr == 0) {
+                position = value;
+                if (value >= vertices) return false;
+                remap[value] = 0;
+              } else if (attr == 1 && value != position) {
+                parallel = false;
+              }
+              return true;
+            },
+            error)) {
+      return false;
+    }
+  }
+  if (!parallel) return true;
+  int32_t next = 0;
+  for (int32_t& slot : remap) {
+    if (slot == 0) slot = next++;
+  }
+  // The skin's per-vertex weights (as each group's bytes), kept vertices' runs merged again.
+  Reader r{skin.data(), skin.size()};
+  const uint32_t groups = r.U32(0);
+  std::vector<std::pair<size_t, size_t>> weightsOf;  // per vertex: its group's weight bytes
+  size_t at = 4;
+  for (uint32_t g = 0; g < groups; ++g) {
+    const uint32_t n = r.U32(at);
+    if (r.bad || !r.Has(at + 4, size_t(n) * 8 + 4)) return Fail(error, "CSKR group cut short");
+    const uint32_t count = r.U32(at + 4 + size_t(n) * 8);
+    weightsOf.insert(weightsOf.end(), count, {at, 4 + size_t(n) * 8});
+    at += 8 + size_t(n) * 8;
+  }
+  if (weightsOf.size() < size_t(next)) weightsOf.resize(vertices, weightsOf.empty() ? std::pair<size_t, size_t>{0, 0} : weightsOf.back());
+  std::vector<uint8_t> out;
+  Put32(out, 0);
+  uint32_t runs = 0, covered = 0;
+  std::pair<size_t, size_t> current{0, 0};
+  uint32_t length = 0;
+  const auto flush = [&]() {
+    if (length == 0) return;
+    Append(out, skin.data() + current.first, current.second);
+    Put32(out, length);
+    ++runs;
+    covered += length;
+    length = 0;
+  };
+  for (size_t v = 0; v < vertices && v < weightsOf.size(); ++v) {
+    if (remap[v] < 0) continue;
+    const auto& w = weightsOf[v];
+    const bool same = length != 0 && w.second == current.second &&
+                      std::equal(skin.begin() + std::ptrdiff_t(w.first), skin.begin() + std::ptrdiff_t(w.first + w.second),
+                                 skin.begin() + std::ptrdiff_t(current.first));
+    if (!same) {
+      flush();
+      current = w;
+    }
+    ++length;
+  }
+  flush();
+  Set32(out, 0, runs);
+  Put32(out, 0xFFFFFFFF);
+  Put32(out, covered);
+  Put32(out, 0xFFFFFFFF);
+  Put32(out, covered);
+  if (covered != uint32_t(next)) return Fail(error, "the skin does not cover the drawn vertices");
+  for (auto& surface : model.surfaces) {
+    uint32_t vaf;
+    SurfaceFlags(surface, set, vaf, error);
+    if (!RewriteList(
+            surface, vaf, false, [](uint8_t&) { return true; },
+            [&remap](int attr, uint32_t& value) {
+              if (attr == 0 || attr == 1) value = uint32_t(remap[value]);
+              return true;
+            },
+            error)) {
+      return false;
+    }
+  }
+  for (int k = 0; k < 2; ++k) {
+    std::vector<uint8_t> kept;
+    for (size_t v = 0; v < vertices; ++v) {
+      if (remap[v] >= 0) Append(kept, model.arrays[k].data() + v * 12, 12);
+    }
+    Pad32(kept);
+    model.arrays[k] = std::move(kept);
+  }
+  skin = std::move(out);
+  return true;
+}
+
+// A Prime CSKR's groups as bytes (without the count and the footer), their count and the vertices
+// they cover.
+bool SkinGroups(const std::vector<uint8_t>& cskr, std::vector<uint8_t>& bytes, uint32_t& count, uint32_t& vertices,
+                std::string* error) {
+  Reader r{cskr.data(), cskr.size()};
+  count = r.U32(0);
+  if (r.bad || count > cskr.size() / 8) return Fail(error, "CSKR cut short");
+  size_t at = 4;
+  vertices = 0;
+  for (uint32_t g = 0; g < count; ++g) {
+    const uint32_t n = r.U32(at);
+    if (r.bad || !r.Has(at + 4, size_t(n) * 8 + 4)) return Fail(error, "CSKR group cut short");
+    vertices += r.U32(at + 4 + size_t(n) * 8);
+    at += 8 + size_t(n) * 8;
+  }
+  bytes.assign(cskr.begin() + 4, cskr.begin() + std::ptrdiff_t(at));
+  return true;
+}
+
+}  // namespace
+
+bool SwapHead(PrimeCmdl& body, std::vector<uint8_t>& skin, const PrimeCmdl& donor,
+              const std::vector<uint8_t>& donorSkin, const std::vector<uint32_t>& head, std::string* error) {
+  std::vector<uint32_t> bodyJoints, donorJoints;
+  if (!MainJoints(skin, bodyJoints, error) || !MainJoints(donorSkin, donorJoints, error)) return false;
+  if (body.arrays.size() < 2 || donor.arrays.size() < 2) return Fail(error, "model has no arrays");
+  const auto onHead = [&head](const std::vector<uint32_t>& joints, uint32_t p) {
+    return p < joints.size() && std::find(head.begin(), head.end(), joints[p]) != head.end();
+  };
+  PrimeCmdl donorHead = donor;
+  if (!FloatNormals(body, error) || !FloatNormals(donorHead, error) ||
+      !KeepTriangles(
+          body,
+          [&](uint32_t a, uint32_t b, uint32_t c) {
+            return !onHead(bodyJoints, a) && !onHead(bodyJoints, b) && !onHead(bodyJoints, c);
+          },
+          error) ||
+      !KeepTriangles(
+          donorHead,
+          [&](uint32_t a, uint32_t b, uint32_t c) {
+            return onHead(donorJoints, a) || onHead(donorJoints, b) || onHead(donorJoints, c);
+          },
+          error)) {
+    return false;
+  }
+  // The body's vertices as MergeCmdl counts them (whole positions of its padded array): its skin's
+  // groups cover the real ones, a group of its own the padding, so the donor's groups land on the
+  // donor's vertices. Skinning runs each group over positions and normals alike.
+  const size_t bodyVertices = body.arrays[0].size() / 12;
+  if (body.arrays[1].size() / 12 != bodyVertices) return Fail(error, "the body's positions and normals differ in count");
+  std::vector<uint8_t> bodyGroups, donorGroups;
+  uint32_t bodyCount, bodyCovered, donorCount, donorCovered;
+  if (!SkinGroups(skin, bodyGroups, bodyCount, bodyCovered, error) ||
+      !SkinGroups(donorSkin, donorGroups, donorCount, donorCovered, error)) {
+    return false;
+  }
+  if (bodyCovered > bodyVertices || bodyJoints.empty()) return Fail(error, "the body's skin does not fit it");
+  if (!MergeCmdl(body, donorHead, error)) return false;
+  const uint32_t pad = uint32_t(bodyVertices - bodyCovered);
+  std::vector<uint8_t> out;
+  Put32(out, bodyCount + (pad != 0 ? 1 : 0) + donorCount);
+  Append(out, bodyGroups.data(), bodyGroups.size());
+  if (pad != 0) {
+    Put32(out, 1);
+    Put32(out, bodyJoints.front());
+    Put32(out, 0x3F800000);  // weight 1
+    Put32(out, pad);
+  }
+  Append(out, donorGroups.data(), donorGroups.size());
+  const uint32_t total = uint32_t(bodyVertices) + donorCovered;
+  Put32(out, 0xFFFFFFFF);
+  Put32(out, total);
+  Put32(out, 0xFFFFFFFF);
+  Put32(out, total);
+  skin = std::move(out);
+  // Only the vertices the lists draw: the donor's whole body came in for its head.
+  return CompactSkinned(body, skin, error);
+}
+
 bool Import(const Io& io, Result& result, std::string& error) {
   const auto log = [&io](const std::string& line) {
     if (io.log) io.log(line);
@@ -2517,6 +2831,61 @@ bool Import(const Io& io, Result& result, std::string& error) {
       }
       log(std::string("echoes: Echoes Varia in ") + colours + " colours: " + std::to_string(remaps[worn].size()) +
           " textures recoloured");
+    }
+    // Prime's bodies with Echoes' Varia helmet (kLookHelmet): each suit's cutscene, in-game and doll
+    // body, its head (Head_1 and the face joints under it) swapped for the Varia's of the suit's
+    // colours, under HelmetId of Prime's ids.
+    for (int suit = 0; suit < kSuitLookSuits; ++suit) {
+      const int worn = WornFor(suit, kLookColours);
+      const SuitResources& mine = kSuitResources[suit];
+      for (int kind = 0; kind < 3; ++kind) {
+        const auto found = variaBodies.find(kind);
+        if (found == variaBodies.end()) continue;
+        const std::string what = "Prime's suit " + std::to_string(suit) + " body " + Hex8(mine.cmdl[kind]) +
+                                 " with Echoes' helmet";
+        std::vector<uint8_t> cmdl, cskr;
+        PrimeCmdl body;
+        if (!io.retail(kCMDL, mine.cmdl[kind], cmdl) || !io.retail(kCSKR, mine.cskr[kind], cskr) ||
+            !ReadCmdl(cmdl, body, &why)) {
+          error = what + ": Prime's body is missing or unreadable" + (why.empty() ? "" : ": " + why);
+          return false;
+        }
+        PrimeCmdl donor = found->second.model;
+        if (worn != kWornVaria && !remapTextures(donor, remaps[worn], &why)) {
+          error = what + ": " + why;
+          return false;
+        }
+        std::vector<uint32_t> head;
+        const auto& joints = primeCinfs[found->second.cinf].joints;
+        for (const auto& j : joints) {
+          if (j.name == "Head_1") head.push_back(j.id);
+        }
+        for (bool grew = !head.empty(); grew;) {
+          grew = false;
+          for (const auto& j : joints) {
+            if (std::find(head.begin(), head.end(), j.id) == head.end() &&
+                std::find(head.begin(), head.end(), j.parent) != head.end()) {
+              head.push_back(j.id);
+              grew = true;
+            }
+          }
+        }
+        if (head.empty() || !SwapHead(body, cskr, donor, found->second.cskr, head, &why)) {
+          error = what + ": " + (head.empty() ? std::string("no Head_1 joint") : why);
+          return false;
+        }
+        const uint32_t cmdlId = HelmetId(mine.cmdl[kind]);
+        const uint32_t cskrId = HelmetId(mine.cskr[kind]);
+        if (io.retailId(cmdlId) || io.retailId(cskrId)) {
+          error = what + ": output id is a Prime resource.";
+          return false;
+        }
+        if (!write(Hex8(cmdlId) + ".CMDL", WriteCmdl(body)) || !write(Hex8(cskrId) + ".CSKR", cskr)) {
+          return false;
+        }
+        log("echoes: " + what + " -> " + Hex8(cmdlId) + " (" + std::to_string(head.size()) + " head joints)");
+        ++result.converted;
+      }
     }
   }
   {

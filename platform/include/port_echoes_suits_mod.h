@@ -26,7 +26,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 11: the missile anims pose every joint Echoes lists (the gills close for missiles, as in Echoes).
 // 12: each look written once under its own ids (Wear), served over whichever suit wears it
 //     (echoes_suit_looks); Echoes' Varia also in Prime's Gravity and Phazon colours.
-inline constexpr int kVersion = 12;
+// 13: Prime's bodies with Echoes' Varia helmet (kLookHelmet, HelmetId).
+inline constexpr int kVersion = 13;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
@@ -40,12 +41,23 @@ enum SuitLookKind : int {
   // Phazon (Gravity's limbs purple and visor cyan; Phazon dark with a red visor). Varia and Power
   // have no colours of their own: the Varia itself.
   kLookColours,
+  // Prime's own body with Echoes' Varia helmet (the helmet of the suit's colours, as kLookColours
+  // gives it: Gravity's cyan visor, Phazon's dark helmet); its arms and balls stay Prime's.
+  kLookHelmet,
   kLookCount,
 };
 inline constexpr int kSuitLookSuits = 4;
-inline constexpr const char* kSuitLookKeys[kLookCount] = {"prime", "varia", "dark", "light", "colours"};
-inline constexpr const char* kSuitLookNames[kLookCount] = {"Prime's own", "Echoes Varia Suit", "Echoes Dark Suit",
-                                                           "Echoes Light Suit", "Echoes Varia in its colours"};
+inline constexpr const char* kSuitLookKeys[kLookCount] = {"prime", "varia", "dark", "light", "colours", "helmet"};
+inline constexpr const char* kSuitLookNames[kLookCount] = {"Prime's own",        "Echoes Varia Suit",
+                                                           "Echoes Dark Suit",   "Echoes Light Suit",
+                                                           "Echoes Varia in its colours", "Prime's, Echoes helmet"};
+// The helmet bodies (kLookHelmet): each suit's Prime body of kinds 0-2 (cutscene, in-game, doll) with
+// its head swapped for Echoes' Varia's (SwapHead), under HelmetId of Prime's body and skin ids.
+inline constexpr int kHelmetKey = 0x454848;  // "EHH"
+constexpr uint32_t HelmetId(uint32_t id) { return PortModelVariant::Id(id, kHelmetKey); }
+// Whether the loaded mods serve a helmet body under this Prime body id: it draws its own visor (the
+// pause screen's doll leaves out CMDL_InvVisor) while keeping Prime's boots and other parts.
+bool HasOwnHelmet(uint32_t bodyCmdl);
 int SuitLook(int suit);
 void SetSuitLook(int suit, int look);
 // The look the loaded mods serve for the suit (kLookPrime when none): a reload applies SuitLook.

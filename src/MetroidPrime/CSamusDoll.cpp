@@ -16,6 +16,7 @@
 #include "Kyoto/Graphics/CCubeModel.hpp"
 #ifdef TARGET_PC
 #include "port_dread_samus_mod.h"
+#include "port_echoes_suits_mod.h"
 #endif
 #include "rstl/math.hpp"
 #include "MetroidPrime/CAnimRes.hpp"
@@ -502,7 +503,8 @@ void CSamusDoll::Draw(const CStateManager& mgr, float alpha) {
                    .DepthCompareUpdate(true, false));
 #ifdef TARGET_PC
     }
-    if (!portDread) {
+    // A body with Echoes' helmet on (echoes-suits) has its own visor glass: Prime's would cross it.
+    if (!portDread && !PortEchoesSuits::HasOwnHelmet(PortDreadSamus::DollBody(x44_suit))) {
 #endif
 
     CGraphics::SetModelMatrix(visorXf);

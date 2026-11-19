@@ -181,6 +181,14 @@ inline constexpr Arm kArms[] = {
 bool RecolourVaria(int worn, std::vector<uint8_t>& rgba, const std::vector<uint8_t>& limb);
 // Whether a Prime joint name is a limb's in that sense.
 bool IsLimbJoint(const std::string& name);
+// A Prime CMDL (version 2) in parts.
+bool ReadCmdl(const std::vector<uint8_t>& in, PrimeCmdl& model, std::string* error);
+// Prime's `body` (skinned by `skin`) with its head swapped for `donor`'s, both on one Prime skeleton
+// (`donorSkin`): the body's triangles with any vertex weighing most on a joint of `head` dropped, the
+// donor's with one kept and merged in after them (MergeCmdl), the skins' groups one after the other
+// (a group over the body's padding vertices between them, as MergeCmdl counts its arrays).
+bool SwapHead(PrimeCmdl& body, std::vector<uint8_t>& skin, const PrimeCmdl& donor,
+              const std::vector<uint8_t>& donorSkin, const std::vector<uint32_t>& head, std::string* error);
 // A CMPR TXTR's top level as RGBA (false for another format), and RGBA as a mipmapped CMPR TXTR.
 bool DecodeCmpr(const std::vector<uint8_t>& txtr, int& width, int& height, std::vector<uint8_t>& rgba);
 std::vector<uint8_t> EncodeCmpr(int width, int height, const std::vector<uint8_t>& rgba, int mips);
