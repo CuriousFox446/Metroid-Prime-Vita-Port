@@ -10,6 +10,8 @@
 // vitaGL is not thread-safe: after initialize (game thread) every GL call is made on Aurora's
 // render worker, where frames are presented.
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -32,6 +34,37 @@ struct ScreenRect {
   int16_t height = kScreenHeight;
   bool operator==(const ScreenRect&) const = default;
 };
+
+// Where GX's framebuffer (fbWidth x fbHeight, the render mode's) is drawn on the screen: pixels, origin
+// at the top left. One of the screen's own shape, near enough (within 1%: the "follow window" and
+// 16:9 framebuffers), fills it. One of another shape (4:3, the aspect setting's) keeps its shape, as
+// large as fits, centred on whole pixels, black beside it (pillarboxed), as Aurora presents a
+// framebuffer in a PC window (webgpu::calculate_present_viewport). Until 0.46.0 test 33 every
+// framebuffer was stretched over the whole screen, so 4:3 looked like 16:9 widened.
+struct ScreenFit {
+  float left = 0.f;
+  float top = 0.f;
+  float width = static_cast<float>(kScreenWidth);
+  float height = static_cast<float>(kScreenHeight);
+};
+inline ScreenFit fit_to_screen(uint32_t fbWidth, uint32_t fbHeight) noexcept {
+  constexpr float kW = static_cast<float>(kScreenWidth);
+  constexpr float kH = static_cast<float>(kScreenHeight);
+  if (fbWidth == 0 || fbHeight == 0) {
+    return {};
+  }
+  const float fw = static_cast<float>(fbWidth);
+  const float fh = static_cast<float>(fbHeight);
+  float w = kW;
+  float h = std::min(kH, std::max(1.f, std::round(w * fh / fw)));
+  if (h == kH) {
+    w = std::min(kW, std::max(1.f, std::round(h * fw / fh)));
+  }
+  if (w >= kW * 0.99f && h >= kH * 0.99f) {
+    return {};
+  }
+  return {std::floor((kW - w) / 2.f), std::floor((kH - h) / 2.f), w, h};
+}
 
 // The texture units a fixed-function draw can use: vitaGL's fixed-function pipeline has two
 // texture coordinate sets, each with its own texture matrix.

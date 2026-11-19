@@ -211,6 +211,10 @@ void GXPortSetSwapInterval(u32 vblanks);
 // PS Vita (0.46.0 test 14): the GPU cost test, from the next frame: each kind of draw left out in
 // turn for a second or so, and the GPU's busy time a frame without it logged. Nothing elsewhere.
 void GXPortRunGpuCostTest(void);
+// PS Vita (0.46.0 test 33): where a framebuffer of fbWidth x fbHeight is drawn on the screen, as
+// fractions of the screen (origin top left): the whole screen, or for one of another shape (4:3) its
+// own shape, centred, black beside it. False elsewhere, where Aurora's present fits it to the window.
+GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, float* width, float* height);
 // Port (0.46.0 test 22): every viewport GX is given from now on, and the one in force, scaled by
 // `zoom` about (centerX, centerY), in the viewport's units: what is drawn grows about that point,
 // the outside cut off by the scissor. 1 turns it off. GXGetViewport still gives the viewport as set.

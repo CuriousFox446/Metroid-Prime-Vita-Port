@@ -1200,10 +1200,23 @@ u32 GXPortGetGpuTimes(GXPortGpuTime*, u32, float* totalMs, float* spanMs) {
 void GXPortSetSwapInterval(u32 vblanks) { aurora::vita_gl::set_swap_interval(vblanks); }
 
 void GXPortRunGpuCostTest(void) { aurora::vita_gl::start_gpu_cost_test(); }
+
+GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, float* width, float* height) {
+  const aurora::vita_gl::ScreenFit fit = aurora::vita_gl::fit_to_screen(fbWidth, fbHeight);
+  constexpr float kW = static_cast<float>(aurora::vita_gl::kScreenWidth);
+  constexpr float kH = static_cast<float>(aurora::vita_gl::kScreenHeight);
+  *left = fit.left / kW;
+  *top = fit.top / kH;
+  *width = fit.width / kW;
+  *height = fit.height / kH;
+  return GX_TRUE;
+}
 #else
 void GXPortSetSwapInterval(u32) {}
 
 void GXPortRunGpuCostTest(void) {}
+
+GXBool GXPortGetScreenFit(u32, u32, float*, float*, float*, float*) { return GX_FALSE; }
 
 void GXPortSetGpuTimes(GXBool on) { aurora::webgpu::gpu_prof::set_enabled(on != GX_FALSE); }
 

@@ -1964,9 +1964,23 @@ const Material& current_material() noexcept {
   return material;
 }
 
+// Where GX's logical framebuffer is drawn on the screen (vita_gl::fit_to_screen: all of it, or a
+// 4:3 one pillarboxed), worked out again only when its size changes.
+const vita_gl::ScreenFit& framebuffer_fit(u32 fbWidth, u32 fbHeight) noexcept {
+  static u32 sSize[2] = {};
+  static vita_gl::ScreenFit sFit;
+  if (sSize[0] != fbWidth || sSize[1] != fbHeight) {
+    sFit = vita_gl::fit_to_screen(fbWidth, fbHeight);
+    sSize[0] = fbWidth;
+    sSize[1] = fbHeight;
+  }
+  return sFit;
+}
+
 // A rectangle of GX's logical framebuffer (the viewport's and scissor's, an EFB copy's source;
-// origin top left) on the Vita's screen, as GL takes it (origin bottom left). `clamp` keeps it on
-// the screen (a scissor's or a clear's; a viewport may reach past it).
+// origin top left) on the Vita's screen, as GL takes it (origin bottom left), where the framebuffer
+// is drawn (framebuffer_fit). `clamp` keeps it on the framebuffer's place (a scissor's or a clear's,
+// so nothing reaches the bars beside a 4:3 one; a viewport may reach past it).
 vita_gl::ScreenRect screen_rect(float left, float top, float width, float height, bool clamp) noexcept {
   const auto [fbWidth, fbHeight] = logical_fb_size();
   // The last one of each kind (a viewport's; a scissor's or a clear's), by what it was worked out
@@ -1985,17 +1999,22 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
     return memo.out;
   }
   memo.valid = false;
-  const float sx = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
-  const float sy = fbHeight != 0 ? static_cast<float>(vita_gl::kScreenHeight) / static_cast<float>(fbHeight) : 1.f;
-  long x0 = std::lround(left * sx);
-  long x1 = std::lround((left + width) * sx);
-  long y0 = std::lround(top * sy);
-  long y1 = std::lround((top + height) * sy);
+  const vita_gl::ScreenFit& fit = framebuffer_fit(fbWidth, fbHeight);
+  const float sx = fbWidth != 0 ? fit.width / static_cast<float>(fbWidth) : 1.f;
+  const float sy = fbHeight != 0 ? fit.height / static_cast<float>(fbHeight) : 1.f;
+  long x0 = std::lround(fit.left + left * sx);
+  long x1 = std::lround(fit.left + (left + width) * sx);
+  long y0 = std::lround(fit.top + top * sy);
+  long y1 = std::lround(fit.top + (top + height) * sy);
   if (clamp) {
-    x0 = std::clamp<long>(x0, 0, vita_gl::kScreenWidth);
-    x1 = std::clamp<long>(x1, x0, vita_gl::kScreenWidth);
-    y0 = std::clamp<long>(y0, 0, vita_gl::kScreenHeight);
-    y1 = std::clamp<long>(y1, y0, vita_gl::kScreenHeight);
+    const long fitX0 = std::lround(fit.left);
+    const long fitX1 = std::lround(fit.left + fit.width);
+    const long fitY0 = std::lround(fit.top);
+    const long fitY1 = std::lround(fit.top + fit.height);
+    x0 = std::clamp<long>(x0, fitX0, fitX1);
+    x1 = std::clamp<long>(x1, x0, fitX1);
+    y0 = std::clamp<long>(y0, fitY0, fitY1);
+    y1 = std::clamp<long>(y1, y0, fitY1);
   }
   const vita_gl::ScreenRect rect{static_cast<int16_t>(x0), static_cast<int16_t>(vita_gl::kScreenHeight - y1),
                                  static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
@@ -2007,7 +2026,7 @@ vita_gl::ScreenRect screen_rect(float left, float top, float width, float height
 // as GXM takes them (1 to 16).
 u8 screen_width(u8 sixths) noexcept {
   const auto [fbWidth, fbHeight] = logical_fb_size();
-  const float scale = fbWidth != 0 ? static_cast<float>(vita_gl::kScreenWidth) / static_cast<float>(fbWidth) : 1.f;
+  const float scale = fbWidth != 0 ? framebuffer_fit(fbWidth, fbHeight).width / static_cast<float>(fbWidth) : 1.f;
   return static_cast<u8>(std::clamp<long>(std::lround(static_cast<float>(sixths) / 6.f * scale), 1, 16));
 }
 

@@ -74,6 +74,13 @@ bool GetLayout(Layout& out) {
   out.efbW = static_cast< float >(mode.fbWidth);
   out.efbH = static_cast< float >(mode.efbHeight);
   out.present = PortPointerMath::PresentViewport(out.pixelsW, out.pixelsH, out.efbW, out.efbH);
+  // The Vita draws the framebuffer where its renderer fits it on the screen (the window): whole, or a
+  // 4:3 one pillarboxed (aurora's vita_gl::fit_to_screen, which keeps one within 1% of the screen's
+  // shape whole where the PC's fit would leave a bar of a pixel or two).
+  float fit[4];
+  if (GXPortGetScreenFit(mode.fbWidth, mode.efbHeight, &fit[0], &fit[1], &fit[2], &fit[3])) {
+    out.present = {fit[0] * out.pixelsW, fit[1] * out.pixelsH, fit[2] * out.pixelsW, fit[3] * out.pixelsH};
+  }
   return out.present.width > 0.f;
 }
 

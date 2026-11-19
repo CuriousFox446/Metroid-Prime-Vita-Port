@@ -4414,3 +4414,31 @@ What to look for in test 32:
 - F1 > Video > Quality, Resolution scale at 720p (1.32x): the menu's text reads; also at 480p.
 - The slider goes from 0.88x (480p) to 1.32x (720p), 16 lines a step; FPS cap 30 to 60 (60 the
   top, no "Unlimited"); Sim Hz 30 to 60.
+
+## 0.46.0 test 33: 4:3 pillarboxed
+
+The user: "the 4:3 aspect ratio is not working". `ApplyAspectMode` narrows GX's framebuffer to 4:3
+(`fbWidth` = `efbHeight` x 4/3, 640x480) and the cameras follow, as on the PC, where Aurora presents
+the framebuffer in the window at its own shape. The Vita's renderer stretched any framebuffer over
+the whole screen instead (`screen_rect`: x by 960/fbWidth, y by 544/efbHeight), so 4:3 came out as
+the 16:9 screen with everything widened a third.
+- `vita_gl::fit_to_screen` (vita_gl.hpp): where a framebuffer is drawn. One within 1% of the
+  screen's shape fills it as before (the default "follow window" framebuffer is 790x480 or so, 16:9's
+  852x480: 1.76 and 1.78 to the screen's 1.765). Another keeps its shape, as large as fits, centred
+  on whole pixels, as Aurora's PC present fits it: 4:3 is 725x544 at x 117, black beside it.
+- `screen_rect` maps GX's rectangles (viewports, scissors, copies' sources, clears) into that place
+  and clamps scissors and clears to it, so nothing draws into the bars; the frame's clear leaves them
+  black. Line and point widths scale by it (`screen_width`). It is worked out once a framebuffer size
+  (`framebuffer_fit`). Copies read the picture's own pixels, so the visors, the pause screen and the
+  reflections take the 4:3 picture.
+- Touch: `PortPointer`'s layout (menus, the map's taps) already fitted the framebuffer to the window
+  at its own shape, as the PC presents it, so it took 4:3 as pillarboxed while the picture was not.
+  On the Vita it now asks the renderer's own fit (`GXPortGetScreenFit`, in fractions of the screen),
+  so the two cannot drift (16:9 included, which the PC's fit would bar by two pixels).
+- Nothing changes for "Follow window" (the default) or 16:9.
+
+What to look for in test 33:
+- F1 > Video > Display, Aspect ratio 4:3: the game in a 4:3 picture, black at both sides, in
+  proportion (round things round); the menus, the pause screen and the visors inside it.
+- Touch in the menus and on the map under 4:3: taps land where they are drawn.
+- Back to "Follow window": the whole screen again.
