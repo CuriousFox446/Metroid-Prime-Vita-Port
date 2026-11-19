@@ -1910,20 +1910,37 @@ void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, st
   const auto at = [w, h](int x, int y) {
     return size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w);
   };
-  // 0: not the panel's; 1: yellow where the panel may be; 2: that, where it surely is.
+  // The lines Echoes draws (dark brown or black: value below 0.45), and the bright red one between
+  // the panel and a plate.
+  std::vector<uint8_t> dark(count, 0), red(count, 0);
+  for (size_t k = 0; k < count; ++k) {
+    const uint8_t top = std::max({rgba[k * 4], rgba[k * 4 + 1], rgba[k * 4 + 2]});
+    dark[k] = top < 115 ? 1 : 0;
+    double hue, sat, val;
+    RgbToHsv(&rgba[k * 4], hue, sat, val);
+    red[k] = dark[k] == 0 && sat > 0.5 && (hue < 20.0 || hue >= 330.0) ? 1 : 0;
+  }
+  // 0: not the panel's; 1: yellow, or a line drawn on the thigh (not the gaps between the texture's
+  // pieces, which no triangle covers), where the panel may be; 2: that, where it surely is (a drawn
+  // line only passes the panel on: grow starts from yellow).
   std::vector<uint8_t> yellow(count, 0);
   std::vector<size_t> grow;
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
       const size_t k = size_t(y) * size_t(w) + size_t(x);
       if (limb[k] == 0) continue;
+      const bool covered = votes.limb[k] + votes.other[k] != 0;
       uint8_t side = votes.panelSide[k];
-      if (side == 0 && votes.limb[k] + votes.other[k] == 0) {
+      if (side == 0 && !covered) {
         for (int dy = -2; dy <= 2; ++dy) {
           for (int dx = -2; dx <= 2; ++dx) side = std::max(side, votes.panelSide[at(x + dx, y + dy)]);
         }
       }
       if (side == 0) continue;
+      if (dark[k] != 0) {
+        if (covered) yellow[k] = side;
+        continue;
+      }
       int sum = 0;
       for (int dy = -2; dy <= 2; ++dy) {
         for (int dx = -2; dx <= 2; ++dx) sum += tone[at(x + dx, y + dy)];
@@ -1933,8 +1950,12 @@ void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, st
       if (side == 2) grow.push_back(k);
     }
   }
-  // From where the panel surely is, through yellow side by side.
-  for (const size_t k : grow) limb[k] = 0;
+  // From where the panel surely is, through yellow and the lines drawn on it, side by side.
+  std::vector<uint8_t> panel(count, 0);
+  for (const size_t k : grow) {
+    limb[k] = 0;
+    panel[k] = 1;
+  }
   while (!grow.empty()) {
     const size_t k = grow.back();
     grow.pop_back();
@@ -1943,8 +1964,100 @@ void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, st
       const size_t n = at(x + dx, y + dy);
       if (yellow[n] != 0 && limb[n] != 0) {
         limb[n] = 0;
+        panel[n] = 1;
         grow.push_back(n);
       }
+    }
+  }
+  std::vector<uint8_t> near(count, 0);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      uint8_t side = 0;
+      for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) side = std::max(side, votes.panelSide[at(x + dx, y + dy)]);
+      }
+      near[size_t(y) * size_t(w) + size_t(x)] = side;
+    }
+  }
+  // A piece of the texture that is all panel goes whole: the texels triangles cover, side by side,
+  // bounded by the red line and the gaps between pieces, holding some where the panel surely is, and
+  // of the panel's shades (warm, 36 degrees and up) for 80% of their warm texels. Echoes shades the
+  // panel's borders a deeper yellow (36 to 37 degrees, as some of a plate's orange), which the
+  // texel-by-texel growth went round: purple along the bottom of the inner thigh's piece and by the
+  // line down the leg (the user's circles, after test 36's first version). A piece holding a plate
+  // too, beside a strip of the panel, keeps the growth's texel-by-texel line.
+  {
+    std::vector<int32_t> piece(count, -1);
+    std::vector<size_t> stack;
+    int32_t pieces = 0;
+    for (size_t start = 0; start < count; ++start) {
+      if (piece[start] >= 0 || votes.limb[start] + votes.other[start] == 0 || red[start] != 0) continue;
+      const int32_t id = pieces++;
+      piece[start] = id;
+      stack.push_back(start);
+      size_t warm = 0, shaded = 0;
+      bool sure = false;
+      std::vector<size_t> members;
+      while (!stack.empty()) {
+        const size_t k = stack.back();
+        stack.pop_back();
+        members.push_back(k);
+        double hue, sat, val;
+        RgbToHsv(&rgba[k * 4], hue, sat, val);
+        if (sat > 0.25 && val > 0.25 && (hue < 70.0 || hue >= 330.0)) {
+          ++warm;
+          shaded += hue >= 36.0 && hue < 70.0 ? 1 : 0;
+        }
+        sure = sure || votes.panelSide[k] == 2;
+        const int x = int(k % size_t(w)), y = int(k / size_t(w));
+        for (const auto& [dx, dy] : {std::pair{1, 0}, std::pair{-1, 0}, std::pair{0, 1}, std::pair{0, -1}}) {
+          const size_t n = at(x + dx, y + dy);
+          if (piece[n] < 0 && votes.limb[n] + votes.other[n] != 0 && red[n] == 0) {
+            piece[n] = id;
+            stack.push_back(n);
+          }
+        }
+      }
+      if (!sure || warm < 20 || shaded * 5 < warm * 4) continue;
+      for (const size_t k : members) {
+        if (limb[k] != 0 && near[k] != 0) {
+          limb[k] = 0;
+          panel[k] = 1;
+        }
+      }
+    }
+  }
+  // What the yellow leaves round the lines drawn on the panel (the lines themselves at its edge, the
+  // darker orange either side of them where the line blends into the yellow, a shade) goes with the
+  // panel where it surrounds it more than a plate does: left a limb, it came out as purple bits along
+  // the curve round the back of the inner thigh and the line down the leg in Gravity's colours,
+  // darker in Phazon's (the user's circles, after test 36's first version). Not the bright red line
+  // between the panel and a plate, which stays the plate's; a plate's own lines and shades, among its
+  // orange, stay with it.
+  for (int pass = 0; pass < 3; ++pass) {
+    std::vector<size_t> take;
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const size_t k = size_t(y) * size_t(w) + size_t(x);
+        if (limb[k] == 0 || near[k] == 0 || tone[k] > 0 || red[k] != 0) continue;
+        int panelNear = 0, plateNear = 0;
+        for (int dy = -2; dy <= 2; ++dy) {
+          for (int dx = -2; dx <= 2; ++dx) {
+            const size_t n = at(x + dx, y + dy);
+            if (panel[n] != 0) {
+              ++panelNear;
+            } else if (limb[n] != 0 && dark[n] == 0 && tone[n] != 0) {
+              ++plateNear;
+            }
+          }
+        }
+        if (panelNear > plateNear) take.push_back(k);
+      }
+    }
+    if (take.empty()) break;
+    for (const size_t k : take) {
+      limb[k] = 0;
+      panel[k] = 1;
     }
   }
 }

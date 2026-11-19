@@ -4540,6 +4540,25 @@ texture made it ragged. Echoes' own Varia, not recoloured, shows the line as dra
   the user approved); at the circled spots the strip is yellow to the line (Varia's yellow painted
   purple there: 5502 to 3689 pixels on the doll, 3551 to 1181 in-game, the rest the plates' light
   patches, rightly purple); no wedges; the side's outer plates whole.
+- Then, on that version's render: "they are quite small to notice but noticeable for people who
+  likes to pay attention to small details", circling the back of the inner thigh round the curve
+  Echoes draws there: purple bits along the curve and the line down the leg, and at the crotch
+  piece. Traced to their texels (237 in the circled box on the doll): the panel's borders, which
+  Echoes shades a deeper yellow (36 to 37 degrees, as some of a plate's orange), and the darker
+  orange either side of its drawn lines, neither yellow enough to grow through. Two more steps:
+  - a piece of the texture all panel goes whole: covered texels side by side, bounded by the red
+    line and the gaps between pieces, holding some where the panel surely is and of the panel's
+    shades (warm, 36 degrees and up) for 80% of their warm texels. A piece holding a plate too keeps
+    the texel-by-texel growth.
+  - what is left round the lines drawn on the panel (lines, the orange either side, shades; not the
+    bright red line, which stays the plate's) goes with the panel where the panel surrounds it more
+    than solid plate does (three rounds). The growth also passes the dark lines drawn on the thigh,
+    though not the uncovered gaps between the texture's pieces.
+  Seven texels left in the box, five of them a near-black blue the same in both colours. The front
+  and side renders of the doll are unchanged pixel for pixel; every changed pixel elsewhere is on
+  the panel (purple to its yellow) or a CMPR block's shift within it.
+- Known, from before test 34: a sliver of the red line, a few texels, stays red where it meets the
+  cables at the top of each thigh plate at the back (texels the pelvis's triangles hold).
 - Needs the Echoes suits imported again (version 17).
 
 What to look for in test 36:
