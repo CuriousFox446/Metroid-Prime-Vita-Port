@@ -350,15 +350,17 @@ Under F1 > Mods > Built-in mods > Metroid Prime 2: Echoes: the Varia, Dark and L
 from your own Echoes GameCube disc image (tested with USA `G2ME01`), in cutscenes, the Morph Ball
 transitions, the third-person camera and the pause screen's doll and the first-person arms (right,
 and the left grapple arm); and their Morph Balls, with the Dark Spider Ball as its Spider Ball.
-Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball), so those suits'
-balls are their Spider Balls too.
+Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball), so those looks,
+and the Varia in Gravity's and Phazon's colours, keep Prime's own Spider Balls, each in its suit's
+colours (mod version 15; before, their plain balls stood in for it).
 
 The Varia Suit is Echoes' Varia. The others each pick one of two looks ("Power Suit", "Gravity
 Suit", "Phazon Suit"; `echoes_suit_looks` in Power, Gravity, Varia, Phazon order; from the next mod
 reload): the Power Suit Prime's own, or Prime's own body with Echoes' Varia helmet (its arms and ball
 Prime's); Gravity and Phazon Echoes' Dark and Light Suits, or "Echoes Varia in its colours": Echoes'
 Varia recoloured the way Prime recolours its own Varia (Gravity's limbs and shoulder pads purple, its
-lights and visor cyan, the torso and helmet kept; Phazon dark with red lights and visor). By default
+lights and visor cyan, the torso and helmet kept, and the inner thighs' undersuit as the abdomen's;
+Phazon dark with red lights and visor). By default
 the Power Suit wears Echoes' helmet and Gravity and Phazon the Varia in their colours
 (`helmet,colours,varia,colours`). From mod version 12 the import writes each look once under its own
 ids, and the loader serves it over the suits that wear it; the helmet bodies from 13.

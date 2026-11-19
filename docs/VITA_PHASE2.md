@@ -4442,3 +4442,39 @@ What to look for in test 33:
   proportion (round things round); the menus, the pause screen and the visors inside it.
 - Touch in the menus and on the map under 4:3: taps land where they are drawn.
 - Back to "Follow window": the whole screen again.
+
+## 0.46.0 test 34: the inner thighs as the abdomen; Prime's Spider Balls back (echoes-suits 15)
+
+The user, with the earlier render of the Varia in Gravity's and Phazon's colours marked and photos of
+Prime's own Gravity and Phazon Suits on the pause screen: "the color of the Echoes' varia suit's inner
+thigh part (I've marked it) does not match the lower torso color, and bring back the spiderball
+instead being recolors of the echoes morphball, don't need to change the color of the spiderball
+since it already has the color based on all 3 Varia, Gravity, & Phazon suits", then "we just need to
+revert the Echoes' morphball model from overwriting the MP1's spiderball models".
+- **The thighs.** Echoes' Varia has a yellow undersuit panel on each inner thigh, the abdomen's
+  yellow, between the orange plates. The recolour (`RecolourVaria`) votes each texel limb or torso
+  by the joints its triangles weigh on, so the panel (all on the hips) was limb: purple in Gravity's
+  colours, darker than the abdomen in Phazon's. Prime's own Gravity Suit keeps it yellow between
+  purple plates (its thighs: 153 purple triangles, 105 of the undersuit's yellow-orange), its Phazon
+  Suit as dark as the abdomen. Now a hip triangle votes with the torso when it shows the undersuit
+  (`ShowsUndersuit`: the mean of its texels 36 to 70 degrees; measured per triangle, the armour's
+  orange is 12 to 34, the abdomen 36 to 54) and does not face out (`FacingMiddle` at least -0.1:
+  the in-game body's plates have lighter patches of the same hue, and there is yellow behind the
+  outer plates, both purple in Prime's). Within such a triangle, a texel of the armour's red-orange
+  (below 25 degrees) still votes limb (`VoteUndersuit`), or the in-game body's small texture left
+  orange specks at the panel's edge. `ForEachUvTriangle` now winds a strip's odd triangles back.
+  Checked on the PC with both discs: the cutscene, doll and in-game bodies rendered per pixel
+  (`~/tools/bodyrender.py` legs, legs3q, legsback, legsside views) from the front, three-quarter,
+  behind and the side; the shoulder pads, knees and arms are as before.
+- **The Spider Balls.** Echoes has a Spider Ball for the Dark Suit only; the Varia and Light looks,
+  and the Varia in Gravity's and Phazon's colours, had their plain Morph Ball written over Prime's
+  Spider Balls (F37654A2, and Phazon's D7F7C8EC), since mod version 7. `kBalls` keeps the Dark Spider
+  Ball alone, so the loader, serving only what the import wrote, leaves Prime's own (each suit's
+  colours, and the spider glass around it). 293 files where version 14 wrote 321.
+- Needs the Echoes suits imported again (version 15).
+
+What to look for in test 34:
+- After the import, Gravity in the Varia's colours (the default) on the pause screen: the inner
+  thighs yellow as the lower torso, the plates purple; Phazon's inner thighs the abdomen's dark grey.
+- The Spider Ball with Varia, Gravity and Phazon in the Varia looks: Prime's own, in each suit's
+  colours. Gravity with the Dark Suit: Echoes' Dark Spider Ball still.

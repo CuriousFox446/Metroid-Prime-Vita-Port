@@ -1697,7 +1697,8 @@ void HsvToRgb(double h, double s, double v, uint8_t* c) {
 }
 
 // A model's triangles (set 0) through `fn`: the textures of the triangle's material, then its three
-// vertices' UVs (texture 0's, from the float UV array) and position indices.
+// vertices' UVs (texture 0's, from the float UV array) and position indices, wound as drawn (a
+// strip's odd triangles turned back).
 using UvTriangleFn = std::function<void(const std::vector<uint32_t>&, const float (&)[3][2], const uint32_t (&)[3])>;
 bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::string* error) {
   MaterialSet set;
@@ -1760,7 +1761,13 @@ bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::stri
         for (int i = 0; i + 2 < count; i += 3) emit(i, i + 1, i + 2);
         break;
       case 0x98:
-        for (int i = 0; i + 2 < count; ++i) emit(i, i + 1, i + 2);
+        for (int i = 0; i + 2 < count; ++i) {
+          if (i % 2 == 0) {
+            emit(i, i + 1, i + 2);
+          } else {
+            emit(i + 1, i, i + 2);
+          }
+        }
         break;
       case 0xA0:
         for (int i = 1; i + 1 < count; ++i) emit(0, i, i + 1);
@@ -1771,6 +1778,25 @@ bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::stri
     }
   }
   return true;
+}
+
+// How far a triangle of `model` (its position indices, wound as drawn) faces the body's middle, the
+// plane x = 0 (Prime's bodies stand facing +y): 1 straight at it, -1 straight away from it.
+double FacingMiddle(const PrimeCmdl& model, const uint32_t (&pos)[3]) {
+  if (model.arrays.empty()) return 0.0;
+  Reader r{model.arrays[0].data(), model.arrays[0].size()};
+  double p[3][3];
+  for (int v = 0; v < 3; ++v) {
+    for (int c = 0; c < 3; ++c) p[v][c] = r.F32(size_t(pos[v]) * 12 + size_t(c) * 4);
+  }
+  if (r.bad) return 0.0;
+  const double e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+  const double e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+  const double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+  const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+  const double x = (p[0][0] + p[1][0] + p[2][0]) / 3.0;
+  if (length <= 0.0 || x == 0.0) return 0.0;
+  return -n[0] / length * (x > 0.0 ? 1.0 : -1.0);
 }
 
 // The joint each vertex of a Prime CSKR weighs most on, in vertex order.
@@ -1805,8 +1831,10 @@ struct TexelVotes {
   std::vector<uint16_t> limb, other;
 };
 
-void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
-  const int w = votes.width, h = votes.height;
+// The texels of a w x h texture a triangle covers (its UVs; the edges a little generous, so seams
+// close), wrapped into the texture, each through fn(index); none for one wrapping the whole texture.
+template <typename Fn>
+void ForEachTexel(int w, int h, const float (&uv)[3][2], const Fn& fn) {
   double xs[3], ys[3];
   for (int i = 0; i < 3; ++i) {
     xs[i] = double(uv[i][0]) * w;
@@ -1816,7 +1844,6 @@ void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
   const int y0 = int(std::floor(std::min({ys[0], ys[1], ys[2]}))), y1 = int(std::ceil(std::max({ys[0], ys[1], ys[2]})));
   if (double(x1 - x0) * double(y1 - y0) > double(w) * h) return;  // a triangle wrapping the whole texture
   const double den = (ys[1] - ys[2]) * (xs[0] - xs[2]) + (xs[2] - xs[1]) * (ys[0] - ys[2]);
-  auto& grid = limb ? votes.limb : votes.other;
   for (int y = y0; y <= y1; ++y) {
     for (int x = x0; x <= x1; ++x) {
       bool inside = true;
@@ -1827,10 +1854,47 @@ void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
         inside = w0 >= -0.02 && w1 >= -0.02 && 1.0 - w0 - w1 >= -0.02;
       }
       if (!inside) continue;
-      const size_t k = size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w);
-      if (grid[k] < 0xFFFF) ++grid[k];
+      fn(size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w));
     }
   }
+}
+
+void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
+  auto& grid = limb ? votes.limb : votes.other;
+  ForEachTexel(votes.width, votes.height, uv, [&grid](size_t k) {
+    if (grid[k] < 0xFFFF) ++grid[k];
+  });
+}
+
+// An undersuit triangle's vote (ShowsUndersuit), its texels in `rgba` (the votes' texture): with the
+// torso, but for the armour's red-orange ones (warm, below 25 degrees), with the limbs: a plate's edge
+// such a triangle overlaps in a small texture (the in-game body's) would stay orange among the purple.
+void VoteUndersuit(TexelVotes& votes, const std::vector<uint8_t>& rgba, const float (&uv)[3][2]) {
+  ForEachTexel(votes.width, votes.height, uv, [&](size_t k) {
+    double h, s, v;
+    RgbToHsv(&rgba[k * 4], h, s, v);
+    auto& grid = (h < 25.0 || h >= 330.0) && s > 0.18 && v > 0.10 ? votes.limb : votes.other;
+    if (grid[k] < 0xFFFF) ++grid[k];
+  });
+}
+
+// Whether a triangle shows the Varia's undersuit, the yellow under its armour (its abdomen's): the
+// mean of the texels it covers in `rgba` 36 to 70 degrees, neither grey nor dark. Measured per
+// triangle on Echoes' Varia: its armour's orange 12 to 34 degrees (thighs, knees, arms, shoulder
+// pads), its abdomen 36 to 54, and some hundred triangles a thigh 36 to 44 (the inner thighs).
+bool ShowsUndersuit(int w, int h, const std::vector<uint8_t>& rgba, const float (&uv)[3][2]) {
+  double sum[3] = {0.0, 0.0, 0.0};
+  size_t count = 0;
+  ForEachTexel(w, h, uv, [&](size_t k) {
+    for (int c = 0; c < 3; ++c) sum[c] += rgba[k * 4 + size_t(c)];
+    ++count;
+  });
+  if (count == 0) return false;
+  const uint8_t mean[3] = {uint8_t(std::lround(sum[0] / double(count))), uint8_t(std::lround(sum[1] / double(count))),
+                           uint8_t(std::lround(sum[2] / double(count)))};
+  double hue, sat, val;
+  RgbToHsv(mean, hue, sat, val);
+  return hue >= 36.0 && hue < 70.0 && sat > 0.25 && val > 0.25;
 }
 
 // Per texel, 1 where limbs voted more than the rest; texels no triangle covers take their
@@ -2813,19 +2877,42 @@ bool Import(const Io& io, Result& result, std::string& error) {
         return false;
       }
       std::map<uint32_t, bool> limbJoint;
-      for (const auto& j : primeCinfs[body.cinf].joints) limbJoint[j.id] = IsLimbJoint(j.name);
+      std::set<uint32_t> hipJoints;
+      for (const auto& j : primeCinfs[body.cinf].joints) {
+        limbJoint[j.id] = IsLimbJoint(j.name);
+        if (j.name == "L_hip" || j.name == "R_hip") hipJoints.insert(j.id);
+      }
       const bool ok = ForEachUvTriangle(
           body.model,
           [&](const std::vector<uint32_t>& ids, const float (&uv)[3][2], const uint32_t (&pos)[3]) {
-            int limbs = 0;
+            int limbs = 0, hips = 0;
             for (const uint32_t p : pos) {
               if (p < joints.size()) {
                 const auto found = limbJoint.find(joints[p]);
                 limbs += found != limbJoint.end() && found->second ? 1 : 0;
+                hips += hipJoints.count(joints[p]) != 0 ? 1 : 0;
               }
             }
+            bool limb = limbs >= 2;
+            // The inner thighs' undersuit votes with the torso, the armour with the limbs: Prime's
+            // Gravity Suit keeps it yellow between the purple thigh plates, as its abdomen, and its
+            // Phazon Suit as dark as its abdomen. Painted as a limb, the inner thighs came out purple
+            // and darker than the lower torso (the user, after 0.46.0 test 33). Only where the thigh
+            // does not face out: the plates' lighter patches (the in-game body's) and the yellow
+            // behind the outer plates are of the undersuit's colour too, and Prime paints them purple.
+            bool undersuit = false;
+            if (limb && hips >= 2 && !ids.empty() && FacingMiddle(body.model, pos) >= -0.1) {
+              const Map* map = use(ids[0]);
+              undersuit = map != nullptr && ShowsUndersuit(map->width, map->height, map->rgba, uv);
+            }
             for (const uint32_t id : ids) {
-              if (Map* map = use(id)) VoteTriangle(map->votes, uv, limbs >= 2);
+              Map* map = use(id);
+              if (map == nullptr) continue;
+              if (undersuit) {
+                VoteUndersuit(map->votes, map->rgba, uv);
+              } else {
+                VoteTriangle(map->votes, uv, limb);
+              }
             }
           },
           &why);

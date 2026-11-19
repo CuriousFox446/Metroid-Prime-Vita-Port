@@ -28,7 +28,9 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     (echoes_suit_looks); Echoes' Varia also in Prime's Gravity and Phazon colours.
 // 13: Prime's bodies with Echoes' Varia helmet (kLookHelmet, HelmetId).
 // 14: the cannon's sets 5-7, Prime's original Ice, Wave and Plasma looks (kOriginalSets).
-inline constexpr int kVersion = 14;
+// 15: the Varia in colours keeps its thighs' undersuit as its abdomen's (ShowsUndersuit); no Spider
+//     Ball but the Dark Suit's, so the other looks keep Prime's own (kBalls).
+inline constexpr int kVersion = 15;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
