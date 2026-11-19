@@ -1829,10 +1829,12 @@ bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints,
   return true;
 }
 
-// Limb and other votes over a texture's texels (LimbTexels).
+// Limb and other votes over a texture's texels (LimbTexels), and where a thigh triangle facing the
+// panel's way lies (MarkPanelSide, KeepUndersuit).
 struct TexelVotes {
   int width = 0, height = 0;
   std::vector<uint16_t> limb, other;
+  std::vector<uint8_t> panelSide;
 };
 
 // The texels of a w x h texture a triangle covers (its UVs; the edges a little generous, so seams
@@ -1870,35 +1872,55 @@ void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
   });
 }
 
-// An undersuit triangle's vote (ShowsUndersuit), its texels in `rgba` (the votes' texture): with the
-// torso, but for the armour's red-orange ones (warm, below 25 degrees), with the limbs: a plate's edge
-// such a triangle overlaps in a small texture (the in-game body's) would stay orange among the purple.
-void VoteUndersuit(TexelVotes& votes, const std::vector<uint8_t>& rgba, const float (&uv)[3][2]) {
-  ForEachTexel(votes.width, votes.height, uv, [&](size_t k) {
-    double h, s, v;
-    RgbToHsv(&rgba[k * 4], h, s, v);
-    auto& grid = (h < 25.0 || h >= 330.0) && s > 0.18 && v > 0.10 ? votes.limb : votes.other;
-    if (grid[k] < 0xFFFF) ++grid[k];
-  });
+// The texels of a thigh triangle facing the panel's way (KeepUndersuit).
+void MarkPanelSide(TexelVotes& votes, const float (&uv)[3][2]) {
+  ForEachTexel(votes.width, votes.height, uv, [&votes](size_t k) { votes.panelSide[k] = 1; });
 }
 
-// Whether a triangle shows the Varia's undersuit, the yellow under its armour (its abdomen's): the
-// mean of the texels it covers in `rgba` 36 to 70 degrees, neither grey nor dark. Measured per
-// triangle on Echoes' Varia: its armour's orange 12 to 34 degrees (thighs, knees, arms, shoulder
-// pads), its abdomen 36 to 54, and some hundred triangles a thigh 36 to 44 (the inner thighs).
-bool ShowsUndersuit(int w, int h, const std::vector<uint8_t>& rgba, const float (&uv)[3][2]) {
-  double sum[3] = {0.0, 0.0, 0.0};
-  size_t count = 0;
-  ForEachTexel(w, h, uv, [&](size_t k) {
-    for (int c = 0; c < 3; ++c) sum[c] += rgba[k * 4 + size_t(c)];
-    ++count;
-  });
-  if (count == 0) return false;
-  const uint8_t mean[3] = {uint8_t(std::lround(sum[0] / double(count))), uint8_t(std::lround(sum[1] / double(count))),
-                           uint8_t(std::lround(sum[2] / double(count)))};
-  double hue, sat, val;
-  RgbToHsv(mean, hue, sat, val);
-  return hue >= 36.0 && hue < 70.0 && sat > 0.25 && val > 0.25;
+// The thighs' undersuit panel, texel by texel, out of the limbs `limb` (LimbTexels) of the texture
+// `rgba`. Where a thigh triangle facing the panel's way lies (`panelSide`; and the texels no triangle
+// covers two round it, as LimbTexels fills them), a texel of the undersuit's yellow (38 to 70
+// degrees) is the panel's when its 5x5 neighbourhood holds more of that yellow than of the plates'
+// orange (warm, below 38), and any other texel (orange, the line between, a shade) when it lies
+// deep in the yellow (ten more of it than of orange round it): it goes with the torso. Measured
+// texel by texel on Echoes' Varia, the panel is 39 degrees and up, the plates 36 and down, the
+// abdomen 36 to 54. So the panel ends where the texture's colour turns, along the line Echoes draws
+// between it and a plate (that line stays the plate's), and a plate's highlight or a shade in the
+// panel, smaller than the window, stays with its side. (Whole triangles took one side or the other
+// till 0.46.0 test 35: a triangle across that line left a sliver of the wrong colour, and the
+// low-poly in-game body's edges were ragged.)
+void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& limb) {
+  const int w = votes.width, h = votes.height;
+  const size_t count = size_t(w) * size_t(h);
+  if (votes.panelSide.size() != count || rgba.size() < count * 4 || limb.size() != count) return;
+  std::vector<int8_t> tone(count, 0);
+  for (size_t k = 0; k < count; ++k) {
+    double hue, sat, val;
+    RgbToHsv(&rgba[k * 4], hue, sat, val);
+    if (sat <= 0.25 || val <= 0.25 || !(hue < 70.0 || hue >= 330.0)) continue;
+    tone[k] = hue >= 38.0 && hue < 70.0 ? 1 : -1;
+  }
+  const auto at = [w, h](int x, int y) {
+    return size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w);
+  };
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const size_t k = size_t(y) * size_t(w) + size_t(x);
+      if (limb[k] == 0) continue;
+      bool panel = votes.panelSide[k] != 0;
+      if (!panel && votes.limb[k] + votes.other[k] == 0) {
+        for (int dy = -2; dy <= 2 && !panel; ++dy) {
+          for (int dx = -2; dx <= 2 && !panel; ++dx) panel = votes.panelSide[at(x + dx, y + dy)] != 0;
+        }
+      }
+      if (!panel) continue;
+      int sum = 0;
+      for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) sum += tone[at(x + dx, y + dy)];
+      }
+      if (tone[k] > 0 ? sum > 0 : sum >= 10) limb[k] = 0;
+    }
+  }
 }
 
 // Per texel, 1 where limbs voted more than the rest; texels no triangle covers take their
@@ -2872,6 +2894,7 @@ bool Import(const Io& io, Result& result, std::string& error) {
       map.votes.height = map.height;
       map.votes.limb.assign(size_t(map.width) * map.height, 0);
       map.votes.other = map.votes.limb;
+      map.votes.panelSide.assign(size_t(map.width) * map.height, 0);
       return &maps.emplace(id, std::move(map)).first->second;
     };
     for (const auto& [kind, body] : variaBodies) {
@@ -2897,32 +2920,28 @@ bool Import(const Io& io, Result& result, std::string& error) {
                 hips += hipJoints.count(joints[p]) != 0 ? 1 : 0;
               }
             }
-            bool limb = limbs >= 2;
-            // The inner thighs' undersuit votes with the torso, the armour with the limbs: Prime's
-            // Gravity Suit keeps it yellow between the purple thigh plates, as its abdomen, and its
-            // Phazon Suit as dark as its abdomen. Painted as a limb, the inner thighs came out purple
-            // and darker than the lower torso (the user, after 0.46.0 test 33). Only where the thigh
-            // faces in or across (to -0.1): the plates' lighter patches (the in-game body's, facing
-            // well out) and the yellow behind the outer plates are of the undersuit's colour too, and
-            // Prime paints them purple. The panel's front leans a little out, so a triangle facing out
-            // by up to half (-0.5) is the panel's too when it faces forward; cut at -0.1 throughout,
-            // the front went purple, short of the look the user wanted. Facing back, that lean is the
-            // plates' lighter wedges at the back of the thighs (the user's photos of test 34).
-            bool undersuit = false;
-            const Facing facing = FacingOf(body.model, pos);
-            const bool panelSide = facing.middle >= -0.1 || (facing.middle >= -0.5 && facing.front > 0.0);
-            if (limb && hips >= 2 && !ids.empty() && panelSide) {
-              const Map* map = use(ids[0]);
-              undersuit = map != nullptr && ShowsUndersuit(map->width, map->height, map->rgba, uv);
+            const bool limb = limbs >= 2;
+            // The inner thighs' undersuit goes with the torso, the plates with the limbs (KeepUndersuit,
+            // texel by texel): Prime's Gravity Suit keeps it yellow between the purple thigh plates, as
+            // its abdomen, and its Phazon Suit as dark as its abdomen. Painted as a limb, the inner
+            // thighs came out purple and darker than the lower torso (the user, after 0.46.0 test 33).
+            // Only where the thigh faces in or across (to -0.1): the plates' lighter patches (the
+            // in-game body's, facing well out) and the yellow behind the outer plates are of the
+            // undersuit's colour too, and Prime paints them purple. The panel's front leans a little
+            // out, so a triangle facing out by up to half (-0.5) is the panel's side too when it faces
+            // forward; cut at -0.1 throughout, the front went purple, short of the look the user
+            // wanted. Facing back, that lean is the plates' lighter wedges at the back of the thighs
+            // (the user's photos of test 34).
+            bool panelSide = false;
+            if (limb && hips >= 2) {
+              const Facing facing = FacingOf(body.model, pos);
+              panelSide = facing.middle >= -0.1 || (facing.middle >= -0.5 && facing.front > 0.0);
             }
             for (const uint32_t id : ids) {
               Map* map = use(id);
               if (map == nullptr) continue;
-              if (undersuit) {
-                VoteUndersuit(map->votes, map->rgba, uv);
-              } else {
-                VoteTriangle(map->votes, uv, limb);
-              }
+              VoteTriangle(map->votes, uv, limb);
+              if (panelSide) MarkPanelSide(map->votes, uv);
             }
           },
           &why);
@@ -2955,7 +2974,8 @@ bool Import(const Io& io, Result& result, std::string& error) {
     }
     std::map<uint32_t, uint32_t> remaps[kWornCount];
     for (auto& [id, map] : maps) {
-      const std::vector<uint8_t> limb = LimbTexels(map.votes);
+      std::vector<uint8_t> limb = LimbTexels(map.votes);
+      KeepUndersuit(map.votes, map.rgba, limb);
       for (const int worn : {int(kWornGravity), int(kWornPhazon)}) {
         std::vector<uint8_t> rgba = map.rgba;
         if (!RecolourVaria(worn, rgba, limb)) continue;

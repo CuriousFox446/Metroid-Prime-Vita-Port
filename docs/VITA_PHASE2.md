@@ -4503,3 +4503,35 @@ lighter patches) and face out by less than half (-0.5), as the panel's front doe
 What to look for in test 35:
 - After the import, the doll from behind in Gravity's and Phazon's colours: the plates whole at the
   back of the thighs; from the front, as test 34.
+
+### Test 35 result
+
+The wedges were gone, but "you sorta fixed it but made another tiny mistake and that's what puzzles
+me because the default Echoes Varia suit has no problem with this": slivers along the panel's edge
+at the back (circled on the PC render), with a photo of Echoes' own Varia from behind, its panel and
+plates parted by a clean red line. Then "The low poly models need to be fix too", with photos of the
+in-game body (Gravity's and Phazon's colours beside Echoes' Varia on a PC): ragged panel edges.
+
+The cause: whole triangles took one side or the other. Echoes draws the panel's edge as a line
+across triangles, so a triangle over it came out all panel (the plate's orange left beside the
+purple) or all plate (purple into the yellow); the in-game body's few big triangles over a small
+texture made it ragged. Echoes' own Varia, not recoloured, shows the line as drawn.
+
+## 0.46.0 test 36: the thighs' panel texel by texel (echoes-suits 17)
+
+- `KeepUndersuit`: the thigh triangles facing the panel's way (`FacingOf`, as test 35) mark where
+  the panel may be (`MarkPanelSide`; they vote limb as any limb triangle); after the votes, each
+  texel there is decided by its own colour. Measured texel by texel, the panel is 39 degrees and up,
+  the plates 36 and down (doll: 88% of each on its side; in-game alike). A yellow texel (38 to 70)
+  is the panel's when its 5x5 neighbourhood holds more yellow than orange (a plate's highlight
+  stays purple); any other texel (orange, the line, a shade) only deep in yellow (ten more of it
+  round it), so the line Echoes draws stays the plate's and the edge does not creep across it.
+  The panel ends where the texture's colour turns, on every body.
+- Checked on the PC with both discs: the doll and the in-game body from the front and behind, in
+  both colours, against Echoes' Varia: the edges follow its red lines; the changed pixels between
+  the 5x5 majority alone and the final rule all lie on the edge.
+- Needs the Echoes suits imported again (version 17).
+
+What to look for in test 36:
+- After the import, the doll from behind and the in-game body up close, in Gravity's and Phazon's
+  colours: the panel's edges where Echoes' Varia has its red lines, no slivers or ragged bits.

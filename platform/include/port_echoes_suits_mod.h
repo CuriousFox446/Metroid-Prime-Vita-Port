@@ -32,7 +32,9 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     Ball but the Dark Suit's, so the other looks keep Prime's own (kBalls).
 // 16: the plates' lighter wedges at the back of the thighs purple again (FacingOf: the panel's
 //     outward lean counts only facing forward).
-inline constexpr int kVersion = 16;
+// 17: the thighs' panel decided texel by texel by its own colour (KeepUndersuit), so its edges
+//     follow the texture's line, on the low-poly in-game body too.
+inline constexpr int kVersion = 17;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
