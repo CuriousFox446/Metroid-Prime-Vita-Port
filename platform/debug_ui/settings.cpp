@@ -548,6 +548,27 @@ const SettingKey kSettingKeys[] = {
        }
      },
      false, "power,dark,light,annihilator", "light,light,power,dark"},
+    {"echoes_suit_looks",
+     [](const std::string& value) {
+       // Power's, Gravity's, Varia's and Phazon's, comma-separated: prime, varia, dark, light or colours.
+       size_t at = 0;
+       for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits && at <= value.size(); ++suit) {
+         const size_t end = std::min(value.find(',', at), value.size());
+         const std::string key = value.substr(at, end - at);
+         for (int look = 0; look < PortEchoesSuits::kLookCount; ++look) {
+           if (SDL_strcasecmp(key.c_str(), PortEchoesSuits::kSuitLookKeys[look]) == 0) {
+             PortEchoesSuits::SetSuitLook(suit, look);
+           }
+         }
+         at = end + 1;
+       }
+     },
+     [](std::ostream& out) {
+       for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
+         out << (suit != 0 ? "," : "") << PortEchoesSuits::kSuitLookKeys[PortEchoesSuits::SuitLook(suit)];
+       }
+     },
+     false, "prime,colours,varia,colours", "varia,dark,varia,light"},
     {"echoes_dark_samus", [](const std::string& value) { PortEchoesSuits::SetPlayAsDarkSamus(ParseBool(value)); },
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::PlayAsDarkSamus()); }, false, "0", "1"},
     BoolKey< &sVsyncEnabled >("vsync"),

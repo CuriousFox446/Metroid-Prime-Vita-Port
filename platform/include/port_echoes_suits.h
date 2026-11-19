@@ -87,32 +87,45 @@ bool ConvertCskr(const std::vector<uint8_t>& in, const std::vector<EchoesJoint>&
                  const PortDread::PrimeSkeleton& to, std::vector<uint8_t>& out, std::vector<std::string>* folded,
                  std::string* error);
 
-// One body: Echoes' CMDL and CSKR on its CINF, written over Prime's on Prime's CINF.
+// One body: Echoes' CMDL and CSKR on its CINF, converted onto Prime's CINF and written as `cmdl`
+// and `cskr`: for a worn look (port_echoes_suits_mod.h), Wear of the Varia's body of that kind
+// (kind 0-3 of SuitResources), which PortMods serves over the bodies of the suits that wear it.
 struct Target {
   const char* suit;      // Echoes' suit, for the log
   const char* skeleton;  // "cine50", "game20", "doll49" or "grapple"
   uint32_t echoesCmdl, echoesCskr, echoesCinf;
   uint32_t cmdl, cskr, cinf;
+  int worn = -1;  // WornLook, or -1 (Dark Samus)
+  int kind = -1;  // the SuitResources kind
 };
-// Power stays Prime's. Varia is Echoes' Varia, Gravity its Dark Suit (the Dark+Gravity body),
-// Phazon its Light Suit. Cutscene bodies on Echoes' A27AFE83 / Prime's 19C53902; in-game ones on F86193FE /
-// A496DA02 (BallTransitionsANCS); the pause screen's doll bodies (ANCS_ItemScreenSamus, CINF
-// F76E70A6, the cutscene skeleton in all but a locator) from the cutscene ones.
+constexpr Target WornTarget(const char* suit, int kind, uint32_t echoesCmdl, uint32_t echoesCskr, uint32_t echoesCinf,
+                            uint32_t cinf, int worn) {
+  const SuitResources& varia = kSuitResources[kVariaSuit];
+  return {suit,       kind == 0 ? "cine50" : kind == 1 ? "game20" : kind == 2 ? "doll49" : "grapple",
+          echoesCmdl, echoesCskr,
+          echoesCinf, Wear(worn, varia.cmdl[kind]),
+          Wear(worn, varia.cskr[kind]), cinf,
+          worn,       kind};
+}
+// Cutscene bodies on Echoes' A27AFE83 / Prime's 19C53902; in-game ones on F86193FE / A496DA02
+// (BallTransitionsANCS); the pause screen's doll bodies (ANCS_ItemScreenSamus, CINF F76E70A6, the
+// cutscene skeleton in all but a locator) from the cutscene ones. The Dark Suit is Echoes'
+// Dark+Gravity body.
 inline constexpr Target kTargets[] = {
-    {"Varia", "cine50", 0xCDF1C541, 0xA6DE6A97, 0xA27AFE83, 0x776C1A96, 0x1C43B540, 0x19C53902},
-    {"Dark", "cine50", 0x3A93B6F2, 0x51BC1924, 0xA27AFE83, 0x57F5C930, 0x3CDA66E6, 0x19C53902},
-    {"Light", "cine50", 0x726FB01A, 0x19401FCC, 0xA27AFE83, 0x2782648E, 0x4CADCB58, 0x19C53902},
-    {"Varia", "game20", 0xE31FD3AD, 0x88307C7B, 0xF86193FE, 0xE449874A, 0x8F66289C, 0xA496DA02},
-    {"Dark", "game20", 0xC8146EFF, 0xA33BC129, 0xF86193FE, 0x57489AD3, 0x3C673505, 0xA496DA02},
-    {"Light", "game20", 0xACDFD2CA, 0xC7F07D1C, 0xF86193FE, 0x891E00FD, 0xE231AF2B, 0xA496DA02},
-    {"Varia", "doll49", 0xCDF1C541, 0xA6DE6A97, 0xA27AFE83, 0xA602C954, 0xCD2D6682, 0xF76E70A6},
-    {"Dark", "doll49", 0x3A93B6F2, 0x51BC1924, 0xA27AFE83, 0x11A5BC8A, 0x7A8A135C, 0xF76E70A6},
-    {"Light", "doll49", 0x726FB01A, 0x19401FCC, 0xA27AFE83, 0x5644E7A1, 0x3D6B4877, 0xF76E70A6},
+    WornTarget("Varia", 0, 0xCDF1C541, 0xA6DE6A97, 0xA27AFE83, 0x19C53902, kWornVaria),
+    WornTarget("Dark", 0, 0x3A93B6F2, 0x51BC1924, 0xA27AFE83, 0x19C53902, kWornDark),
+    WornTarget("Light", 0, 0x726FB01A, 0x19401FCC, 0xA27AFE83, 0x19C53902, kWornLight),
+    WornTarget("Varia", 1, 0xE31FD3AD, 0x88307C7B, 0xF86193FE, 0xA496DA02, kWornVaria),
+    WornTarget("Dark", 1, 0xC8146EFF, 0xA33BC129, 0xF86193FE, 0xA496DA02, kWornDark),
+    WornTarget("Light", 1, 0xACDFD2CA, 0xC7F07D1C, 0xF86193FE, 0xA496DA02, kWornLight),
+    WornTarget("Varia", 2, 0xCDF1C541, 0xA6DE6A97, 0xA27AFE83, 0xF76E70A6, kWornVaria),
+    WornTarget("Dark", 2, 0x3A93B6F2, 0x51BC1924, 0xA27AFE83, 0xF76E70A6, kWornDark),
+    WornTarget("Light", 2, 0x726FB01A, 0x19401FCC, 0xA27AFE83, 0xF76E70A6, kWornLight),
     // The first-person left (grapple) arm, characters of Prime's ANCS 5808EB6A on CINF 516F4445;
     // Echoes' ANCS 670ABE2A gives every suit CINF D07D1BD9, the same 23 joints plus LGBeamLight.
-    {"Varia", "grapple", 0x463D7A4E, 0x2D12D598, 0xD07D1BD9, 0x00A6EC53, 0x6B894385, 0x516F4445},
-    {"Dark", "grapple", 0x078B71CB, 0x6CA4DE1D, 0xD07D1BD9, 0xCBFA3FF6, 0xA0D59020, 0x516F4445},
-    {"Light", "grapple", 0xBACC46C8, 0xD1E3E91E, 0xD07D1BD9, 0xD6FF0F4E, 0xBDD0A098, 0x516F4445},
+    WornTarget("Varia", 3, 0x463D7A4E, 0x2D12D598, 0xD07D1BD9, 0x516F4445, kWornVaria),
+    WornTarget("Dark", 3, 0x078B71CB, 0x6CA4DE1D, 0xD07D1BD9, 0x516F4445, kWornDark),
+    WornTarget("Light", 3, 0xBACC46C8, 0xD1E3E91E, 0xD07D1BD9, 0x516F4445, kWornLight),
     // Dark Samus (kDarkBodies): ANCS 2B513FD9's Dark_Samus on CINF 4ABC8A50, Echoes Samus's
     // joints and bind pose less the face and GRAPPLE_LCTR.
     {"Dark Samus", "cine50", 0xD2C3805B, 0xB9EC2F8D, 0x4ABC8A50, DarkSamusId(0x19C53902), DarkSamusSkinId(0x19C53902),
@@ -122,50 +135,55 @@ inline constexpr Target kTargets[] = {
     {"Dark Samus", "doll49", 0xD2C3805B, 0xB9EC2F8D, 0x4ABC8A50, DarkSamusId(0xF76E70A6), DarkSamusSkinId(0xF76E70A6),
      0xF76E70A6},
 };
-// Copies the mod also serves (port_dread_samus.h): the cutscene Varia skin under ANCS 863C1B6A's
-// 8C72FDAC, and the cutscene Phazon body under Tallon ANCS BAD39B59's B333E1D7.
-struct Copy {
-  uint32_t type;
-  uint32_t from, to;
-};
-inline constexpr Copy kCopies[] = {
-    {0x43534B52, 0x1C43B540, 0x8C72FDAC},  // 'CSKR'
-    {0x434D444C, 0x2782648E, 0xB333E1D7},  // 'CMDL'
-};
-
-// One Morph Ball: Echoes' ball model (static there; `caps`, if not 0, merged into it) as a suit's
-// ball by PortDreadSamus::kBallTargets' variant ids: a copy of Prime's ANCS whose character 0 takes
-// the model skinned rigidly on the joint Prime's ball skin weights most, and the model unskinned
-// as the low-poly ball. Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's
-// ball), so those suits' plain balls are their Spider Balls too, rather than Prime's spider balls.
+// One look's Morph Ball: Echoes' ball model (static there; `caps`, if not 0, merged into it), fit to
+// each Prime ball ANCS of PortDreadSamus::kBallTargets whose `spider` matches (the plain ball's,
+// the Spider Ball's, Phazon's hyper Spider Ball's): a copy of that ANCS whose character 0 takes the
+// model skinned rigidly on the joint Prime's ball skin weights most, and the model unskinned as the
+// low-poly ball, all under Wear(worn, Prime's ids). Echoes has no Varia or Light Spider Ball (its
+// Spider Ball keeps the suit's ball), so those plain balls are their Spider Balls too.
 struct Ball {
   const char* suit;  // Echoes' ball, for the log
-  int primeSuit;     // CPlayerState::EPlayerSuit
+  int worn;          // WornLook
   bool spider;
   uint32_t echoesCmdl, caps;
 };
 inline constexpr Ball kBalls[] = {
-    {"Varia", 2, false, 0xF57D2B74, 0},
-    {"Dark", 1, false, 0x07C3C0E0, 0},
-    {"Light", 3, false, 0x9BE5CFAD, 0},
-    {"Varia", 2, true, 0xF57D2B74, 0},
-    {"Dark", 1, true, 0x6AA79226, 0x5A5C0FEC},
-    {"Light", 3, true, 0x9BE5CFAD, 0},
+    {"Varia", kWornVaria, false, 0xF57D2B74, 0},
+    {"Dark", kWornDark, false, 0x07C3C0E0, 0},
+    {"Light", kWornLight, false, 0x9BE5CFAD, 0},
+    {"Varia", kWornVaria, true, 0xF57D2B74, 0},
+    {"Dark", kWornDark, true, 0x6AA79226, 0x5A5C0FEC},
+    {"Light", kWornLight, true, 0x9BE5CFAD, 0},
 };
 
 // The first-person right arm (CGunWeapon::LoadSuitArm, a static model at the gun's elbow): Echoes
-// has one, VariaArm, with a material set per suit; each set alone over Prime's arm of that suit.
+// has one, VariaArm, with a material set per suit; each set alone, as Wear(worn) of Prime's Varia arm.
 inline constexpr uint32_t kEchoesArm = 0x4AD9BBAC;
 struct Arm {
   const char* suit;  // Echoes' suit, for the log
   uint32_t set;      // kEchoesArm's material set
-  uint32_t cmdl;     // Prime's arm
+  uint32_t cmdl;     // where it is written
+  int worn;
 };
 inline constexpr Arm kArms[] = {
-    {"Varia", 0, 0x4AD9BBAC},
-    {"Dark", 1, 0x81856809},
-    {"Light", 2, 0x57DC8B14},
+    {"Varia", 0, Wear(kWornVaria, kSuitResources[kVariaSuit].arm), kWornVaria},
+    {"Dark", 1, Wear(kWornDark, kSuitResources[kVariaSuit].arm), kWornDark},
+    {"Light", 2, Wear(kWornLight, kSuitResources[kVariaSuit].arm), kWornLight},
 };
+
+// Echoes' Varia in Prime's Gravity or Phazon colours (kWornGravity, kWornPhazon), as Prime
+// recolours its own Varia: each texture the Varia's bodies, arms and ball draw, recoloured by
+// whether its texels lie on a limb (the joints Prime's Gravity Suit paints purple: shoulder pads,
+// arms, hands, legs and feet; the arms and ball are all limb). Gravity: limbs' warm texels purple,
+// greens (lights, visor) cyan, the torso and helmet as they are. Phazon: warm texels near black (the
+// torso and helmet a dark grey), greens red, the rest darker. `limb` per texel; returns whether it
+// changed anything.
+bool RecolourVaria(int worn, std::vector<uint8_t>& rgba, const std::vector<uint8_t>& limb);
+// Whether a Prime joint name is a limb's in that sense.
+bool IsLimbJoint(const std::string& name);
+// A CMPR TXTR's top level as RGBA (false for another format), and RGBA as a mipmapped CMPR TXTR.
+bool DecodeCmpr(const std::vector<uint8_t>& txtr, int& width, int& height, std::vector<uint8_t>& rgba);
+std::vector<uint8_t> EncodeCmpr(int width, int height, const std::vector<uint8_t>& rgba, int mips);
 
 // A beam's ANCS with each kGuns character (the 12 bytes model, skin, skeleton, found once) pointed
 // at the Cannon variants. False when one is not found exactly once.

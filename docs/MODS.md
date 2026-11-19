@@ -347,12 +347,20 @@ See [`docs/DREAD_SAMUS.md`](DREAD_SAMUS.md) for the import and its limits.
 ### Metroid Prime 2: Echoes suits
 
 Under F1 > Mods > Built-in mods > Metroid Prime 2: Echoes: the Varia, Dark and Light Suit bodies
-from your own Echoes GameCube disc image (tested with USA `G2ME01`), as Prime's Varia, Gravity and Phazon
-Suits, in cutscenes, the Morph Ball transitions, the third-person camera and the pause screen's
-doll and the first-person arms (right, and the left grapple arm); and their Morph Balls, with the
-Dark Spider Ball as Gravity's Spider Ball. Echoes has no Varia or Light Spider Ball (its Spider
-Ball keeps the suit's ball), so the Varia and Phazon Spider Balls are the Varia and Light balls. The
-Power Suit stays Prime's.
+from your own Echoes GameCube disc image (tested with USA `G2ME01`), in cutscenes, the Morph Ball
+transitions, the third-person camera and the pause screen's doll and the first-person arms (right,
+and the left grapple arm); and their Morph Balls, with the Dark Spider Ball as its Spider Ball.
+Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball), so those suits'
+balls are their Spider Balls too.
+
+Each of Prime's suits picks what it wears ("Power Suit" ... "Phazon Suit", `echoes_suit_looks`, in
+Power, Gravity, Varia, Phazon order; from the next mod reload): Prime's own, Echoes' Varia, Dark or
+Light Suit, or "Echoes Varia in its colours": Echoes' Varia recoloured the way Prime recolours its
+own Varia (Gravity's limbs and shoulder pads purple, its lights and visor cyan, the torso and helmet
+kept; Phazon dark with red lights and visor). By default Power stays Prime's, Varia is Echoes' Varia,
+and Gravity and Phazon wear it in their colours (`prime,colours,varia,colours`). From mod version 12
+the import writes each look once under its own ids, and the loader serves it over the suits that
+wear it.
 
 - It is the mod `echoes-suits`. Its bodies carry their own arm cannon, so Prime's is not drawn on
   them. They are skinned onto Prime's skeleton: joints Prime lacks fold into their nearest parent

@@ -6,6 +6,7 @@
 #include "port_strings.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -1639,6 +1640,423 @@ bool ConvertCskr(const std::vector<uint8_t>& in, const std::vector<EchoesJoint>&
   return true;
 }
 
+bool IsLimbJoint(const std::string& name) {
+  static const char* const kLimbs[] = {"L_varia_SDK", "R_varia_SDK", "L_varias2_SDK", "R_varias2_SDK", "L_shoulder",
+                                       "R_shoulder",  "L_elbow",     "R_elbow",       "L_wrist",       "R_wrist",
+                                       "L_hip",       "R_hip",       "L_knee",        "R_knee",        "L_ankle",
+                                       "R_ankle",     "L_ball",      "R_ball"};
+  for (const char* limb : kLimbs) {
+    if (name == limb) return true;
+  }
+  // The fingers.
+  for (const char* finger : {"thumb", "Index", "middle", "Ring", "Pinky"}) {
+    if (name.size() > 2 && (name[0] == 'L' || name[0] == 'R') && name[1] == '_' &&
+        name.compare(2, std::strlen(finger), finger) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+namespace {
+
+void RgbToHsv(const uint8_t* c, double& h, double& s, double& v) {
+  const double r = c[0] / 255.0, g = c[1] / 255.0, b = c[2] / 255.0;
+  const double hi = std::max({r, g, b}), lo = std::min({r, g, b}), d = hi - lo;
+  v = hi;
+  s = hi > 0.0 ? d / hi : 0.0;
+  if (d <= 0.0) {
+    h = 0.0;
+  } else if (hi == r) {
+    h = 60.0 * std::fmod((g - b) / d + 6.0, 6.0);
+  } else if (hi == g) {
+    h = 60.0 * ((b - r) / d + 2.0);
+  } else {
+    h = 60.0 * ((r - g) / d + 4.0);
+  }
+}
+
+void HsvToRgb(double h, double s, double v, uint8_t* c) {
+  h = std::fmod(std::fmod(h, 360.0) + 360.0, 360.0);
+  s = std::clamp(s, 0.0, 1.0);
+  v = std::clamp(v, 0.0, 1.0);
+  const double k = h / 60.0, f = k - std::floor(k);
+  const double p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+  double r, g, b;
+  switch (int(k) % 6) {
+  case 0: r = v, g = t, b = p; break;
+  case 1: r = q, g = v, b = p; break;
+  case 2: r = p, g = v, b = t; break;
+  case 3: r = p, g = q, b = v; break;
+  case 4: r = t, g = p, b = v; break;
+  default: r = v, g = p, b = q; break;
+  }
+  c[0] = uint8_t(std::lround(r * 255.0));
+  c[1] = uint8_t(std::lround(g * 255.0));
+  c[2] = uint8_t(std::lround(b * 255.0));
+}
+
+// A model's triangles (set 0) through `fn`: the textures of the triangle's material, then its three
+// vertices' UVs (texture 0's, from the float UV array) and position indices.
+using UvTriangleFn = std::function<void(const std::vector<uint32_t>&, const float (&)[3][2], const uint32_t (&)[3])>;
+bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::string* error) {
+  MaterialSet set;
+  if (model.materialSets.empty() || model.arrays.size() < 4 || !ParseSet(model.materialSets[0], set, error)) {
+    return Fail(error, "model has no material set or UVs");
+  }
+  const std::vector<uint8_t>& uvs = model.arrays[3];
+  Reader u{uvs.data(), uvs.size()};
+  for (const auto& surface : model.surfaces) {
+    uint32_t vaf;
+    if (!SurfaceFlags(surface, set, vaf, error)) return false;
+    Reader r{surface.data(), surface.size()};
+    const uint32_t material = r.U32(0x0C);
+    std::vector<uint32_t> textures;
+    {
+      const auto& m = set.materials[material];
+      Reader mr{m.data(), m.size()};
+      const uint32_t ntex = mr.U32(4);
+      for (uint32_t i = 0; i < ntex && !mr.bad; ++i) {
+        const uint32_t index = mr.U32(8 + i * 4);
+        if (index < set.textures.size()) textures.push_back(set.textures[index]);
+      }
+    }
+    if (textures.empty() || ((vaf >> 8) & 3) == 0) continue;  // no texture 0 coordinates
+    const size_t start = (0x2C + size_t(r.U32(0x1C)) + 31) & ~size_t(31);
+    size_t vertexSize = 0;
+    for (int i = 0; i < 11; ++i) {
+      const uint32_t mode = (vaf >> (2 * i)) & 3;
+      vertexSize += mode == 0 ? 0 : mode - 1;
+    }
+    size_t at = start;
+    while (at < surface.size() && surface[at] != 0) {
+      const uint8_t command = surface[at];
+      const uint16_t count = r.U16(at + 1);
+      if (r.bad || !r.Has(at + 3, size_t(count) * vertexSize)) return Fail(error, "display list cut short");
+      at += 3;
+      std::vector<std::array<float, 2>> verts(count);
+      std::vector<uint32_t> positions(count, 0);
+      for (uint16_t v = 0; v < count; ++v) {
+        for (int i = 0; i < 11; ++i) {
+          const uint32_t mode = (vaf >> (2 * i)) & 3;
+          if (mode == 0) continue;
+          const uint32_t value = mode == 2 ? surface[at] : r.U16(at);
+          at += mode - 1;
+          if (i == 0) {
+            positions[v] = value;
+          } else if (i == 4) {  // texture 0
+            verts[v] = {u.F32(size_t(value) * 8), u.F32(size_t(value) * 8 + 4)};
+          }
+        }
+      }
+      if (u.bad) return Fail(error, "UV index out of range");
+      const auto emit = [&](int a, int b, int c) {
+        const float tri[3][2] = {{verts[a][0], verts[a][1]}, {verts[b][0], verts[b][1]}, {verts[c][0], verts[c][1]}};
+        const uint32_t pos[3] = {positions[a], positions[b], positions[c]};
+        fn(textures, tri, pos);
+      };
+      switch (command & 0xF8) {
+      case 0x90:
+        for (int i = 0; i + 2 < count; i += 3) emit(i, i + 1, i + 2);
+        break;
+      case 0x98:
+        for (int i = 0; i + 2 < count; ++i) emit(i, i + 1, i + 2);
+        break;
+      case 0xA0:
+        for (int i = 1; i + 1 < count; ++i) emit(0, i, i + 1);
+        break;
+      default:
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+// The joint each vertex of a Prime CSKR weighs most on, in vertex order.
+bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints, std::string* error) {
+  Reader r{cskr.data(), cskr.size()};
+  const uint32_t groups = r.U32(0);
+  if (r.bad || groups > cskr.size() / 8) return Fail(error, "CSKR cut short");
+  joints.clear();
+  size_t at = 4;
+  for (uint32_t g = 0; g < groups; ++g) {
+    const uint32_t n = r.U32(at);
+    if (r.bad || !r.Has(at + 4, size_t(n) * 8 + 4)) return Fail(error, "CSKR group cut short");
+    uint32_t best = 0;
+    float weight = -1.f;
+    for (uint32_t i = 0; i < n; ++i) {
+      const float w = r.F32(at + 8 + i * 8);
+      if (w > weight) {
+        weight = w;
+        best = r.U32(at + 4 + i * 8);
+      }
+    }
+    const uint32_t vertices = r.U32(at + 4 + size_t(n) * 8);
+    joints.insert(joints.end(), vertices, best);
+    at += 8 + size_t(n) * 8;
+  }
+  return true;
+}
+
+// Limb and other votes over a texture's texels (LimbTexels).
+struct TexelVotes {
+  int width = 0, height = 0;
+  std::vector<uint16_t> limb, other;
+};
+
+void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
+  const int w = votes.width, h = votes.height;
+  double xs[3], ys[3];
+  for (int i = 0; i < 3; ++i) {
+    xs[i] = double(uv[i][0]) * w;
+    ys[i] = double(uv[i][1]) * h;
+  }
+  const int x0 = int(std::floor(std::min({xs[0], xs[1], xs[2]}))), x1 = int(std::ceil(std::max({xs[0], xs[1], xs[2]})));
+  const int y0 = int(std::floor(std::min({ys[0], ys[1], ys[2]}))), y1 = int(std::ceil(std::max({ys[0], ys[1], ys[2]})));
+  if (double(x1 - x0) * double(y1 - y0) > double(w) * h) return;  // a triangle wrapping the whole texture
+  const double den = (ys[1] - ys[2]) * (xs[0] - xs[2]) + (xs[2] - xs[1]) * (ys[0] - ys[2]);
+  auto& grid = limb ? votes.limb : votes.other;
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      bool inside = true;
+      if (std::abs(den) > 1e-12) {
+        const double px = x + 0.5, py = y + 0.5;
+        const double w0 = ((ys[1] - ys[2]) * (px - xs[2]) + (xs[2] - xs[1]) * (py - ys[2])) / den;
+        const double w1 = ((ys[2] - ys[0]) * (px - xs[2]) + (xs[0] - xs[2]) * (py - ys[2])) / den;
+        inside = w0 >= -0.02 && w1 >= -0.02 && 1.0 - w0 - w1 >= -0.02;
+      }
+      if (!inside) continue;
+      const size_t k = size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w);
+      if (grid[k] < 0xFFFF) ++grid[k];
+    }
+  }
+}
+
+// Per texel, 1 where limbs voted more than the rest; texels no triangle covers take their
+// neighbours' (two texels round), so seams and the encoder's blocks stay on one side.
+std::vector<uint8_t> LimbTexels(const TexelVotes& votes) {
+  const int w = votes.width, h = votes.height;
+  std::vector<uint8_t> out(size_t(w) * h, 0);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const size_t k = size_t(y) * w + x;
+      int limb = votes.limb[k], other = votes.other[k];
+      if (limb + other == 0) {
+        for (int dy = -2; dy <= 2; ++dy) {
+          for (int dx = -2; dx <= 2; ++dx) {
+            const size_t n = size_t(((y + dy) % h + h) % h) * w + size_t(((x + dx) % w + w) % w);
+            limb += votes.limb[n];
+            other += votes.other[n];
+          }
+        }
+      }
+      out[k] = limb > other ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+bool RecolourVaria(int worn, std::vector<uint8_t>& rgba, const std::vector<uint8_t>& limb) {
+  bool changed = false;
+  for (size_t k = 0; k * 4 + 3 < rgba.size(); ++k) {
+    uint8_t* c = &rgba[k * 4];
+    double h, s, v;
+    RgbToHsv(c, h, s, v);
+    const bool warm = (h < 70.0 || h >= 330.0) && s > 0.18 && v > 0.10;
+    const bool green = h >= 70.0 && h < 170.0 && s > 0.25 && v > 0.15;
+    const bool onLimb = k < limb.size() && limb[k] != 0;
+    uint8_t next[3] = {c[0], c[1], c[2]};
+    if (worn == kWornGravity) {
+      // Prime's Gravity Suit over its Varia: purple limbs (its median 246.4 deg, saturation and
+      // value against the Varia's orange 0.356 / 0.866, 0.482 / 0.969), cyan lights and visor.
+      if (green) {
+        HsvToRgb(h + 75.0, s, v, next);
+      } else if (warm && onLimb) {
+        const double d = h >= 180.0 ? h - 360.0 : h;
+        HsvToRgb(246.4 + 0.35 * (d - 33.7), s * 0.41, v * 0.50, next);
+      }
+    } else if (worn == kWornPhazon) {
+      // Prime's Phazon Suit: near-black armour, the torso and helmet a dark grey; red lights and visor.
+      if (green) {
+        HsvToRgb(12.0, std::max(s, 0.85), v, next);
+      } else if (warm) {
+        HsvToRgb(h, s * 0.15, v * (onLimb ? 0.16 : 0.30), next);
+      } else {
+        HsvToRgb(h, s, v * 0.6, next);
+      }
+    }
+    if (next[0] != c[0] || next[1] != c[1] || next[2] != c[2]) {
+      c[0] = next[0];
+      c[1] = next[1];
+      c[2] = next[2];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+bool DecodeCmpr(const std::vector<uint8_t>& txtr, int& width, int& height, std::vector<uint8_t>& rgba) {
+  Reader r{txtr.data(), txtr.size()};
+  if (r.U32(0) != 10) return false;
+  width = r.U16(4);
+  height = r.U16(6);
+  if (r.bad || width <= 0 || height <= 0) return false;
+  rgba.assign(size_t(width) * height * 4, 0);
+  const auto expand = [](uint16_t c, uint8_t* out) {
+    out[0] = uint8_t(((c >> 11) & 31) * 255 / 31);
+    out[1] = uint8_t(((c >> 5) & 63) * 255 / 63);
+    out[2] = uint8_t((c & 31) * 255 / 31);
+    out[3] = 255;
+  };
+  size_t at = 12;
+  for (int ty = 0; ty < height; ty += 8) {
+    for (int tx = 0; tx < width; tx += 8) {
+      for (int sub = 0; sub < 4; ++sub) {
+        const uint16_t c0 = r.U16(at), c1 = r.U16(at + 2);
+        const uint32_t bits = r.U32(at + 4);
+        at += 8;
+        if (r.bad) return false;
+        uint8_t pal[4][4];
+        expand(c0, pal[0]);
+        expand(c1, pal[1]);
+        for (int i = 0; i < 4; ++i) {
+          if (c0 > c1) {
+            pal[2][i] = uint8_t((2 * pal[0][i] + pal[1][i]) / 3);
+            pal[3][i] = uint8_t((pal[0][i] + 2 * pal[1][i]) / 3);
+          } else {
+            pal[2][i] = uint8_t((pal[0][i] + pal[1][i]) / 2);
+            pal[3][i] = 0;
+          }
+        }
+        if (c0 <= c1) pal[2][3] = 255;
+        const int bx = tx + (sub & 1) * 4, by = ty + (sub >> 1) * 4;
+        for (int y = 0; y < 4; ++y) {
+          for (int x = 0; x < 4; ++x) {
+            const int px = bx + x, py = by + y;
+            const uint32_t index = (bits >> (30 - 2 * (y * 4 + x))) & 3;
+            if (px < width && py < height) std::memcpy(&rgba[(size_t(py) * width + px) * 4], pal[index], 4);
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+std::vector<uint8_t> EncodeCmpr(int width, int height, const std::vector<uint8_t>& rgba, int mips) {
+  std::vector<uint8_t> out;
+  Put32(out, 10);
+  Put16(out, uint16_t(width));
+  Put16(out, uint16_t(height));
+  Put32(out, uint32_t(std::max(mips, 1)));
+  std::vector<uint8_t> level = rgba;
+  int w = width, h = height;
+  const auto pack = [](const uint8_t* c) {
+    return uint16_t(((c[0] * 31 + 127) / 255) << 11 | ((c[1] * 63 + 127) / 255) << 5 | ((c[2] * 31 + 127) / 255));
+  };
+  for (int m = 0; m < std::max(mips, 1); ++m) {
+    for (int ty = 0; ty < h; ty += 8) {
+      for (int tx = 0; tx < w; tx += 8) {
+        for (int sub = 0; sub < 4; ++sub) {
+          const int bx = tx + (sub & 1) * 4, by = ty + (sub >> 1) * 4;
+          uint8_t block[16][4];
+          bool cut = false;
+          for (int i = 0; i < 16; ++i) {
+            const int px = std::min(bx + (i & 3), w - 1), py = std::min(by + (i >> 2), h - 1);
+            std::memcpy(block[i], &level[(size_t(py) * w + px) * 4], 4);
+            cut = cut || block[i][3] < 128;
+          }
+          // The ends: the opaque texels' darkest and brightest by luma, then each texel the nearest
+          // of the palette (three colours and transparent when the block has cut-out texels).
+          int lo = -1, hi = -1;
+          int loLuma = 1 << 30, hiLuma = -1;
+          for (int i = 0; i < 16; ++i) {
+            if (block[i][3] < 128) continue;
+            const int luma = block[i][0] * 299 + block[i][1] * 587 + block[i][2] * 114;
+            if (luma < loLuma) loLuma = luma, lo = i;
+            if (luma > hiLuma) hiLuma = luma, hi = i;
+          }
+          uint16_t c0 = 0, c1 = 0;
+          if (lo >= 0) {
+            c0 = pack(block[hi]);
+            c1 = pack(block[lo]);
+          }
+          // Four-colour mode needs c0 > c1, three-colour (with transparent) c0 <= c1.
+          if (cut ? c0 > c1 : c0 < c1) std::swap(c0, c1);
+          if (!cut && c0 == c1) {
+            if (c0 > 0) {
+              c1 = uint16_t(c0 - 1);
+            } else {
+              c0 = 1;
+            }
+          }
+          uint8_t pal[4][4];
+          const auto expand = [](uint16_t c, uint8_t* o) {
+            o[0] = uint8_t(((c >> 11) & 31) * 255 / 31);
+            o[1] = uint8_t(((c >> 5) & 63) * 255 / 63);
+            o[2] = uint8_t((c & 31) * 255 / 31);
+            o[3] = 255;
+          };
+          expand(c0, pal[0]);
+          expand(c1, pal[1]);
+          for (int i = 0; i < 3; ++i) {
+            if (c0 > c1) {
+              pal[2][i] = uint8_t((2 * pal[0][i] + pal[1][i]) / 3);
+              pal[3][i] = uint8_t((pal[0][i] + 2 * pal[1][i]) / 3);
+            } else {
+              pal[2][i] = uint8_t((pal[0][i] + pal[1][i]) / 2);
+              pal[3][i] = 0;
+            }
+          }
+          uint32_t bits = 0;
+          for (int i = 0; i < 16; ++i) {
+            uint32_t index = 0;
+            if (cut && block[i][3] < 128) {
+              index = 3;
+            } else {
+              int best = 1 << 30;
+              for (uint32_t p = 0; p < (c0 > c1 ? 4u : 3u); ++p) {
+                const int dr = block[i][0] - pal[p][0], dg = block[i][1] - pal[p][1], db = block[i][2] - pal[p][2];
+                const int d = dr * dr * 3 + dg * dg * 6 + db * db;
+                if (d < best) best = d, index = p;
+              }
+            }
+            bits |= index << (30 - 2 * i);
+          }
+          Put16(out, c0);
+          Put16(out, c1);
+          Put32(out, bits);
+        }
+      }
+    }
+    if (w == 1 && h == 1) break;
+    // The next level: each 2x2 averaged (the cut-out kept where most of them are).
+    const int nw = std::max(w / 2, 1), nh = std::max(h / 2, 1);
+    std::vector<uint8_t> next(size_t(nw) * nh * 4);
+    for (int y = 0; y < nh; ++y) {
+      for (int x = 0; x < nw; ++x) {
+        int sum[4] = {0, 0, 0, 0}, n = 0;
+        for (int dy = 0; dy < 2; ++dy) {
+          for (int dx = 0; dx < 2; ++dx) {
+            const int sx = std::min(x * 2 + dx, w - 1), sy = std::min(y * 2 + dy, h - 1);
+            const uint8_t* c = &level[(size_t(sy) * w + sx) * 4];
+            for (int i = 0; i < 4; ++i) sum[i] += c[i];
+            ++n;
+          }
+        }
+        for (int i = 0; i < 4; ++i) next[(size_t(y) * nw + x) * 4 + i] = uint8_t(sum[i] / n);
+      }
+    }
+    level = std::move(next);
+    w = nw;
+    h = nh;
+  }
+  return out;
+}
+
 bool Import(const Io& io, Result& result, std::string& error) {
   const auto log = [&io](const std::string& line) {
     if (io.log) io.log(line);
@@ -1676,9 +2094,30 @@ bool Import(const Io& io, Result& result, std::string& error) {
   std::map<uint32_t, std::vector<EchoesJoint>> echoesCinfs;
   std::map<uint32_t, PortDread::PrimeSkeleton> primeCinfs;
   std::set<uint32_t> textures;
-  std::map<uint32_t, std::vector<uint8_t>> written;  // CMDL/CSKR by Prime id, for kCopies
-  // + Dark Samus's ball, the gun
-  const size_t total = std::size(kTargets) + std::size(kBalls) + 1 + std::size(kArms) + 1;
+  // Echoes' Varia as converted, for its recolours: each body kind's model, skin and Prime skeleton,
+  // the right arm, and the textures of its ball.
+  struct VariaBody {
+    PrimeCmdl model;
+    std::vector<uint8_t> cskr;
+    uint32_t cinf = 0;
+  };
+  std::map<int, VariaBody> variaBodies;
+  PrimeCmdl variaArm;
+  std::set<uint32_t> variaBallTextures;
+  const auto remapTextures = [](PrimeCmdl& model, const std::map<uint32_t, uint32_t>& remap, std::string* why) {
+    for (auto& setBytes : model.materialSets) {
+      MaterialSet set;
+      if (!ParseSet(setBytes, set, why)) return false;
+      for (uint32_t& id : set.textures) {
+        const auto found = remap.find(id);
+        if (found != remap.end()) id = found->second;
+      }
+      setBytes = WriteSet(set);
+    }
+    return true;
+  };
+  // + Dark Samus's ball, the Varia's recolours, the gun
+  const size_t total = std::size(kTargets) + std::size(kBalls) + 1 + std::size(kArms) + 1 + 1;
   for (size_t i = 0; i < std::size(kTargets); ++i) {
     const Target& t = kTargets[i];
     if (cancelled()) {
@@ -1713,16 +2152,23 @@ bool Import(const Io& io, Result& result, std::string& error) {
               "Echoes (USA)?";
       return false;
     }
-    std::vector<uint8_t> outCmdl, outCskr;
+    std::vector<uint8_t> outCskr;
     std::vector<uint32_t> cmdlTextures;
     std::vector<std::string> folded;
-    if (!ConvertCmdl(cmdl, outCmdl, cmdlTextures, &why)) {
+    PrimeCmdl model;
+    if (!ConvertCmdl(cmdl, model, cmdlTextures, &why)) {
       error = what + " model " + Hex8(t.echoesCmdl) + ": " + why;
       return false;
     }
     if (!ConvertCskr(cskr, echoesCinfs[t.echoesCinf], primeCinfs[t.cinf], outCskr, &folded, &why)) {
       error = what + " skin " + Hex8(t.echoesCskr) + ": " + why;
       return false;
+    }
+    for (const uint32_t id : {t.cmdl, t.cskr}) {
+      if (io.retailId(id)) {
+        error = what + ": output id " + Hex8(id) + " is a Prime resource.";
+        return false;
+      }
     }
     textures.insert(cmdlTextures.begin(), cmdlTextures.end());
     std::string line = "echoes: " + what + " -> " + Hex8(t.cmdl) + ", " + std::to_string(cmdlTextures.size()) +
@@ -1732,23 +2178,95 @@ bool Import(const Io& io, Result& result, std::string& error) {
       for (const std::string& f : folded) line += " " + f;
     }
     log(line);
-    if (!write(Hex8(t.cmdl) + ".CMDL", outCmdl) || !write(Hex8(t.cskr) + ".CSKR", outCskr)) {
+    if (!write(Hex8(t.cmdl) + ".CMDL", WriteCmdl(model)) || !write(Hex8(t.cskr) + ".CSKR", outCskr)) {
       return false;
     }
-    written[t.cmdl] = std::move(outCmdl);
-    written[t.cskr] = std::move(outCskr);
+    if (t.worn == kWornVaria) {
+      variaBodies[t.kind] = VariaBody{std::move(model), std::move(outCskr), t.cinf};
+    }
     ++result.converted;
   }
-  for (const Copy& copy : kCopies) {
-    const auto found = written.find(copy.from);
-    if (found == written.end()) {
-      error = "Internal error: copy of " + Hex8(copy.from) + " has no source.";
+  // One look's ball (kBalls' kind of row), its textures through `remap`, fit to every Prime ball ANCS
+  // of its spider-ness and written under Wear(worn, ...).
+  const auto writeBall = [&](const char* suit, int worn, bool spider, uint32_t echoesCmdl, uint32_t capsId,
+                             const std::map<uint32_t, uint32_t>& remap) {
+    const std::string what = std::string(suit) +
+                             (worn == kWornGravity  ? " (Gravity colours)"
+                              : worn == kWornPhazon ? " (Phazon colours)"
+                                                    : "") +
+                             (spider ? " Spider Ball" : " Morph Ball");
+    std::string why;
+    PrimeCmdl model;
+    std::vector<uint32_t> ballTextures;
+    std::vector<uint8_t> cmdl;
+    if (!io.echoes(kCMDL, echoesCmdl, cmdl)) {
+      error = "The Echoes disc has no " + what + " (" + Hex8(echoesCmdl) + "): is it Metroid Prime 2: Echoes (USA)?";
       return false;
     }
-    if (!write(Hex8(copy.to) + (copy.type == kCSKR ? ".CSKR" : ".CMDL"), found->second)) {
+    if (!ConvertCmdl(cmdl, model, ballTextures, &why)) {
+      error = what + " model " + Hex8(echoesCmdl) + ": " + why;
       return false;
     }
-  }
+    if (capsId != 0) {
+      PrimeCmdl caps;
+      if (!io.echoes(kCMDL, capsId, cmdl)) {
+        error = "The Echoes disc has no " + what + " caps (" + Hex8(capsId) + ").";
+        return false;
+      }
+      if (!ConvertCmdl(cmdl, caps, ballTextures, &why) || !MergeCmdl(model, caps, &why)) {
+        error = what + " caps " + Hex8(capsId) + ": " + why;
+        return false;
+      }
+    }
+    textures.insert(ballTextures.begin(), ballTextures.end());
+    if (worn == kWornVaria) variaBallTextures.insert(ballTextures.begin(), ballTextures.end());
+    if (!remapTextures(model, remap, &why)) {
+      error = what + ": " + why;
+      return false;
+    }
+    const std::vector<uint8_t> low = WriteCmdl(model);
+    if (!FloatNormals(model, &why)) {
+      error = what + ": " + why;
+      return false;
+    }
+    std::set<uint32_t> ancsDone, lowDone;
+    for (const auto& t : PortDreadSamus::kBallTargets) {
+      if (t.spider != spider || !ancsDone.insert(t.ancs).second) continue;
+      std::vector<uint8_t> ancs, retailSkin, cskr;
+      size_t at;
+      uint32_t skin, joint;
+      if (!primeBall(t, ancs, at, skin, retailSkin)) {
+        return false;
+      }
+      const uint32_t modelId = Wear(worn, t.cmdl);
+      const uint32_t skinId = Wear(worn, skin);
+      const uint32_t ancsId = Wear(worn, t.ancs);
+      const uint32_t lowId = Wear(worn, t.low);
+      for (const uint32_t id : {modelId, skinId, ancsId, lowId}) {
+        if (id == 0 || io.retailId(id)) {
+          error = what + ": output id " + Hex8(id) + " is a Prime resource.";
+          return false;
+        }
+      }
+      PrimeCmdl fitted = model;
+      if (!MainJoint(retailSkin, joint, &why) || !RigidSkin(fitted, joint, cskr, &why)) {
+        error = what + " on " + Hex8(t.ancs) + ": " + why;
+        return false;
+      }
+      Set32(ancs, at, modelId);
+      Set32(ancs, at + 4, skinId);
+      if (!write(Hex8(modelId) + ".CMDL", WriteCmdl(fitted)) || !write(Hex8(skinId) + ".CSKR", cskr) ||
+          !write(Hex8(ancsId) + ".ANCS", ancs) ||
+          (lowDone.insert(t.low).second && !write(Hex8(lowId) + ".CMDL", low))) {
+        return false;
+      }
+      log("echoes: " + what + " on " + Hex8(t.ancs) + " -> " + Hex8(modelId) + " (rigid joint " +
+          std::to_string(joint) + "), " + std::to_string(ballTextures.size()) + " textures");
+      ++result.balls;
+    }
+    return true;
+  };
+  const std::map<uint32_t, uint32_t> sameTextures;
   for (size_t i = 0; i < std::size(kBalls); ++i) {
     const Ball& ball = kBalls[i];
     if (cancelled()) {
@@ -1756,71 +2274,9 @@ bool Import(const Io& io, Result& result, std::string& error) {
       return false;
     }
     if (io.progress) io.progress(std::size(kTargets) + i, total);
-    const std::string what = std::string(ball.suit) + (ball.spider ? " Spider Ball" : " Morph Ball");
-    const PortDreadSamus::BallTarget* target = nullptr;
-    for (const auto& t : PortDreadSamus::kBallTargets) {
-      if (t.suit == ball.primeSuit && t.spider == ball.spider) target = &t;
-    }
-    if (target == nullptr) {
-      error = "Internal error: " + what + " has no Prime ball.";
+    if (!writeBall(ball.suit, ball.worn, ball.spider, ball.echoesCmdl, ball.caps, sameTextures)) {
       return false;
     }
-    std::vector<uint8_t> ancs, retailSkin;
-    size_t at;
-    uint32_t skin;
-    if (!primeBall(*target, ancs, at, skin, retailSkin)) {
-      return false;
-    }
-    const uint32_t modelId = PortModelVariant::Id(target->cmdl, ball.primeSuit);
-    const uint32_t skinId = PortModelVariant::Id(skin, ball.primeSuit);
-    const uint32_t ancsId = PortModelVariant::Id(target->ancs, ball.primeSuit);
-    const uint32_t lowId = PortModelVariant::Id(target->low, ball.primeSuit);
-    for (const uint32_t id : {modelId, skinId, ancsId, lowId}) {
-      if (id == 0 || io.retailId(id)) {
-        error = what + ": output id " + Hex8(id) + " is a Prime resource.";
-        return false;
-      }
-    }
-    std::string why;
-    PrimeCmdl model;
-    std::vector<uint32_t> ballTextures;
-    std::vector<uint8_t> cmdl, cskr;
-    if (!io.echoes(kCMDL, ball.echoesCmdl, cmdl)) {
-      error = "The Echoes disc has no " + what + " (" + Hex8(ball.echoesCmdl) + "): is it Metroid Prime 2: "
-              "Echoes (USA)?";
-      return false;
-    }
-    if (!ConvertCmdl(cmdl, model, ballTextures, &why)) {
-      error = what + " model " + Hex8(ball.echoesCmdl) + ": " + why;
-      return false;
-    }
-    if (ball.caps != 0) {
-      PrimeCmdl caps;
-      if (!io.echoes(kCMDL, ball.caps, cmdl)) {
-        error = "The Echoes disc has no " + what + " caps (" + Hex8(ball.caps) + ").";
-        return false;
-      }
-      if (!ConvertCmdl(cmdl, caps, ballTextures, &why) || !MergeCmdl(model, caps, &why)) {
-        error = what + " caps " + Hex8(ball.caps) + ": " + why;
-        return false;
-      }
-    }
-    const std::vector<uint8_t> low = WriteCmdl(model);
-    uint32_t joint;
-    if (!MainJoint(retailSkin, joint, &why) || !FloatNormals(model, &why) || !RigidSkin(model, joint, cskr, &why)) {
-      error = what + ": " + why;
-      return false;
-    }
-    Set32(ancs, at, modelId);
-    Set32(ancs, at + 4, skinId);
-    if (!write(Hex8(modelId) + ".CMDL", WriteCmdl(model)) || !write(Hex8(skinId) + ".CSKR", cskr) ||
-        !write(Hex8(lowId) + ".CMDL", low) || !write(Hex8(ancsId) + ".ANCS", ancs)) {
-      return false;
-    }
-    textures.insert(ballTextures.begin(), ballTextures.end());
-    log("echoes: " + what + " -> " + Hex8(modelId) + " (rigid joint " +
-        std::to_string(joint) + "), " + std::to_string(ballTextures.size()) + " textures");
-    ++result.balls;
   }
   // Dark Samus's ball: skinned in Echoes, but on one joint at full weight, so unskinned it is the
   // static model the other balls are, fit the same way to each Prime ball it stands in for.
@@ -1907,12 +2363,161 @@ bool Import(const Io& io, Result& result, std::string& error) {
       error = what + " " + Hex8(kEchoesArm) + ": " + why;
       return false;
     }
+    if (io.retailId(a.cmdl)) {
+      error = what + ": output id " + Hex8(a.cmdl) + " is a Prime resource.";
+      return false;
+    }
     if (!write(Hex8(a.cmdl) + ".CMDL", WriteCmdl(model))) {
       return false;
     }
     textures.insert(armTextures.begin(), armTextures.end());
     log("echoes: " + what + " -> " + Hex8(a.cmdl) + ", " + std::to_string(armTextures.size()) + " textures");
+    if (a.worn == kWornVaria) variaArm = std::move(model);
     ++result.arms;
+  }
+  // Echoes' Varia in Prime's Gravity and Phazon colours (RecolourVaria): each texture its bodies, arm
+  // and ball draw, decoded, its texels voted limb or not by the triangles over them (a body's by the
+  // joints its vertices weigh most on; the arm's and the ball's all limb), recoloured both ways and
+  // written under Wear(worn, id); then the Varia's bodies, arm and balls again over those textures.
+  {
+    if (cancelled()) {
+      error = "Cancelled.";
+      return false;
+    }
+    if (io.progress) io.progress(std::size(kTargets) + std::size(kBalls) + 1 + std::size(kArms), total);
+    std::string why;
+    struct Map {
+      int width = 0, height = 0, mips = 1;
+      std::vector<uint8_t> rgba;
+      TexelVotes votes;
+    };
+    std::map<uint32_t, Map> maps;
+    std::set<uint32_t> notCmpr;
+    const auto use = [&](uint32_t id) -> Map* {
+      if (notCmpr.count(id)) return nullptr;
+      const auto found = maps.find(id);
+      if (found != maps.end()) return &found->second;
+      std::vector<uint8_t> data;
+      Map map;
+      if (!io.echoes(kTXTR, id, data) || !DecodeCmpr(data, map.width, map.height, map.rgba)) {
+        notCmpr.insert(id);  // left as it is
+        return nullptr;
+      }
+      map.mips = int(Reader{data.data(), data.size()}.U32(8));
+      map.votes.width = map.width;
+      map.votes.height = map.height;
+      map.votes.limb.assign(size_t(map.width) * map.height, 0);
+      map.votes.other = map.votes.limb;
+      return &maps.emplace(id, std::move(map)).first->second;
+    };
+    for (const auto& [kind, body] : variaBodies) {
+      std::vector<uint32_t> joints;
+      if (!MainJoints(body.cskr, joints, &why)) {
+        error = "Echoes Varia (" + std::to_string(kind) + "): " + why;
+        return false;
+      }
+      std::map<uint32_t, bool> limbJoint;
+      for (const auto& j : primeCinfs[body.cinf].joints) limbJoint[j.id] = IsLimbJoint(j.name);
+      const bool ok = ForEachUvTriangle(
+          body.model,
+          [&](const std::vector<uint32_t>& ids, const float (&uv)[3][2], const uint32_t (&pos)[3]) {
+            int limbs = 0;
+            for (const uint32_t p : pos) {
+              if (p < joints.size()) {
+                const auto found = limbJoint.find(joints[p]);
+                limbs += found != limbJoint.end() && found->second ? 1 : 0;
+              }
+            }
+            for (const uint32_t id : ids) {
+              if (Map* map = use(id)) VoteTriangle(map->votes, uv, limbs >= 2);
+            }
+          },
+          &why);
+      if (!ok) {
+        error = "Echoes Varia (" + std::to_string(kind) + "): " + why;
+        return false;
+      }
+    }
+    if (!variaArm.materialSets.empty() &&
+        !ForEachUvTriangle(
+            variaArm,
+            [&](const std::vector<uint32_t>& ids, const float (&uv)[3][2], const uint32_t (&)[3]) {
+              for (const uint32_t id : ids) {
+                if (Map* map = use(id)) VoteTriangle(map->votes, uv, true);
+              }
+            },
+            &why)) {
+      error = "Echoes Varia arm: " + why;
+      return false;
+    }
+    // The ball's textures are all limb where nothing else drew them.
+    for (const uint32_t id : variaBallTextures) {
+      if (Map* map = use(id)) {
+        bool covered = false;
+        for (size_t k = 0; k < map->votes.limb.size() && !covered; ++k) {
+          covered = map->votes.limb[k] + map->votes.other[k] != 0;
+        }
+        if (!covered) std::fill(map->votes.limb.begin(), map->votes.limb.end(), uint16_t(1));
+      }
+    }
+    std::map<uint32_t, uint32_t> remaps[kWornCount];
+    for (auto& [id, map] : maps) {
+      const std::vector<uint8_t> limb = LimbTexels(map.votes);
+      for (const int worn : {int(kWornGravity), int(kWornPhazon)}) {
+        std::vector<uint8_t> rgba = map.rgba;
+        if (!RecolourVaria(worn, rgba, limb)) continue;
+        const uint32_t out = Wear(worn, id);
+        if (io.retailId(out)) {
+          error = "Recoloured texture " + Hex8(id) + ": output id " + Hex8(out) + " is a Prime resource.";
+          return false;
+        }
+        if (!write(Hex8(out) + ".TXTR", EncodeCmpr(map.width, map.height, rgba, map.mips))) {
+          return false;
+        }
+        remaps[worn][id] = out;
+      }
+    }
+    const SuitResources& varia = kSuitResources[kVariaSuit];
+    for (const int worn : {int(kWornGravity), int(kWornPhazon)}) {
+      const char* colours = worn == kWornGravity ? "Gravity" : "Phazon";
+      for (const auto& [kind, body] : variaBodies) {
+        PrimeCmdl model = body.model;
+        if (!remapTextures(model, remaps[worn], &why)) {
+          error = std::string("Echoes Varia in ") + colours + " colours: " + why;
+          return false;
+        }
+        const uint32_t cmdlId = Wear(worn, varia.cmdl[kind]);
+        const uint32_t cskrId = Wear(worn, varia.cskr[kind]);
+        if (io.retailId(cmdlId) || io.retailId(cskrId)) {
+          error = std::string("Echoes Varia in ") + colours + " colours: output id is a Prime resource.";
+          return false;
+        }
+        if (!write(Hex8(cmdlId) + ".CMDL", WriteCmdl(model)) || !write(Hex8(cskrId) + ".CSKR", body.cskr)) {
+          return false;
+        }
+        ++result.converted;
+      }
+      if (!variaArm.materialSets.empty()) {
+        PrimeCmdl model = variaArm;
+        const uint32_t armId = Wear(worn, varia.arm);
+        if (!remapTextures(model, remaps[worn], &why) || io.retailId(armId)) {
+          error = std::string("Echoes Varia arm in ") + colours + " colours: " + (why.empty() ? "output id taken" : why);
+          return false;
+        }
+        if (!write(Hex8(armId) + ".CMDL", WriteCmdl(model))) {
+          return false;
+        }
+        ++result.arms;
+      }
+      for (const Ball& ball : kBalls) {
+        if (ball.worn != kWornVaria) continue;
+        if (!writeBall(ball.suit, worn, ball.spider, ball.echoesCmdl, ball.caps, remaps[worn])) {
+          return false;
+        }
+      }
+      log(std::string("echoes: Echoes Varia in ") + colours + " colours: " + std::to_string(remaps[worn].size()) +
+          " textures recoloured");
+    }
   }
   {
     if (io.progress) io.progress(total - 1, total);

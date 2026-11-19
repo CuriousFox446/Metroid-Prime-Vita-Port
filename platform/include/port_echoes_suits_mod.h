@@ -24,7 +24,69 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 9: Echoes' missile anims for the cannon, added to each beam's ANCS variant (kMissileAnimNames).
 // 10: the cannon's Light and Annihilator sets back on Wave and Plasma (kGunSets), as Echoes pairs them.
 // 11: the missile anims pose every joint Echoes lists (the gills close for missiles, as in Echoes).
-inline constexpr int kVersion = 11;
+// 12: each look written once under its own ids (Wear), served over whichever suit wears it
+//     (echoes_suit_looks); Echoes' Varia also in Prime's Gravity and Phazon colours.
+inline constexpr int kVersion = 12;
+
+// What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
+// change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
+// cutscene, in-game and pause screen bodies, its first-person arms and its Morph and Spider Balls.
+enum SuitLookKind : int {
+  kLookPrime = 0,  // Prime's own
+  kLookVaria,      // Echoes' Varia Suit
+  kLookDark,       // Echoes' Dark Suit
+  kLookLight,      // Echoes' Light Suit
+  // Echoes' Varia in the suit's own Prime colours, as Prime recolours its Varia into Gravity and
+  // Phazon (Gravity's limbs purple and visor cyan; Phazon dark with a red visor). Varia and Power
+  // have no colours of their own: the Varia itself.
+  kLookColours,
+  kLookCount,
+};
+inline constexpr int kSuitLookSuits = 4;
+inline constexpr const char* kSuitLookKeys[kLookCount] = {"prime", "varia", "dark", "light", "colours"};
+inline constexpr const char* kSuitLookNames[kLookCount] = {"Prime's own", "Echoes Varia Suit", "Echoes Dark Suit",
+                                                           "Echoes Light Suit", "Echoes Varia in its colours"};
+int SuitLook(int suit);
+void SetSuitLook(int suit, int look);
+// The look the loaded mods serve for the suit (kLookPrime when none): a reload applies SuitLook.
+int ServedSuitLook(int suit);
+
+// What the import writes, once per look, under variant ids of Prime's Varia resources (Wear):
+// Echoes' three suits, and its Varia in Gravity's and Phazon's colours (its recoloured textures
+// under Wear of their own ids too).
+enum WornLook : int { kWornVaria, kWornDark, kWornLight, kWornGravity, kWornPhazon, kWornCount };
+inline constexpr int kWornKeys[kWornCount] = {0x455656, 0x455644, 0x45564C, 0x455647, 0x455650};  // "EVV".."EVP"
+constexpr uint32_t Wear(int worn, uint32_t id) { return PortModelVariant::Id(id, kWornKeys[worn]); }
+// The worn look a suit's look stands for; -1 for Prime's own.
+constexpr int WornFor(int suit, int look) {
+  return look == kLookVaria   ? kWornVaria
+         : look == kLookDark  ? kWornDark
+         : look == kLookLight ? kWornLight
+         : look == kLookColours ? (suit == 1 ? kWornGravity : suit == 3 ? kWornPhazon : kWornVaria)
+                                : -1;
+}
+
+// The resources of each suit a look stands in for (CPlayerState::EPlayerSuit order): its bodies by
+// kind (the cutscene body on CINF 19C53902, the in-game one on A496DA02, the pause screen's doll on
+// F76E70A6, and the first-person left arm, ANCS 5808EB6A's character on 516F4445), as CMDL and
+// CSKR, and its first-person right arm (CGunWeapon::skSuitArmNames). The import writes each look
+// under Wear of the Varia's.
+inline constexpr int kBodyKinds = 4;
+struct SuitResources {
+  uint32_t cmdl[kBodyKinds], cskr[kBodyKinds];
+  uint32_t arm;
+};
+inline constexpr SuitResources kSuitResources[kSuitLookSuits] = {
+    {{0xF39476F2, 0x4A1A8FD3, 0xCC25E002, 0xBF05B77E}, {0x98BBD924, 0x21352005, 0xA70A4FD4, 0xD42A18A8}, 0x07111AA7},
+    {{0x57F5C930, 0x57489AD3, 0x11A5BC8A, 0xCBFA3FF6}, {0x3CDA66E6, 0x3C673505, 0x7A8A135C, 0xA0D59020}, 0x81856809},
+    {{0x776C1A96, 0xE449874A, 0xA602C954, 0x00A6EC53}, {0x1C43B540, 0x8F66289C, 0xCD2D6682, 0x6B894385}, 0x4AD9BBAC},
+    {{0x2782648E, 0x891E00FD, 0x5644E7A1, 0xD6FF0F4E}, {0x4CADCB58, 0xE231AF2B, 0x3D6B4877, 0xBDD0A098}, 0x57DC8B14},
+};
+inline constexpr int kVariaSuit = 2;
+// Copies Prime draws too: the cutscene Varia skin under ANCS 863C1B6A's 8C72FDAC, and the cutscene
+// Phazon body under Tallon ANCS BAD39B59's B333E1D7. They follow the Varia's and Phazon's looks.
+inline constexpr uint32_t kVariaSkinCopy = 0x8C72FDAC;
+inline constexpr uint32_t kPhazonBodyCopy = 0xB333E1D7;
 
 // The first-person arm cannon (CGunWeapon::LoadGunModels: characters 0 and 1 of each beam's ANCS).
 // Echoes' gun and hologram have Prime's ids and are skinned on its own CINF 46ED31E0, the same 50
@@ -81,13 +143,15 @@ uint32_t GunAncs(uint32_t ancs, int* shaderSet = nullptr);
 void SetFirstPersonCannonShown(bool shown);
 bool FirstPersonCannonShown();
 
-// The Prime body CMDLs the mod writes (PortEchoesSuits::kTargets and kCopies): cutscene Varia,
-// Gravity, Phazon, the Tallon Phazon copy, in-game Varia, Gravity, Phazon, then the doll's Varia,
-// Gravity, Phazon. While the mod serves one, PortDreadSamus::Replaces holds for it: Echoes' bodies
-// carry their own boots and visor. Not their cannon: the right forearm ends bare, and Prime's
-// cannon is drawn on it (PortDreadSamus::HasOwnCannon).
+// The Prime body CMDLs a look can be served over (kSuitResources' bodies and kPhazonBodyCopy):
+// cutscene Varia, Gravity, Phazon, the Tallon Phazon copy, in-game Varia, Gravity, Phazon, the
+// doll's Varia, Gravity, Phazon, then Power's cutscene, in-game and doll bodies. While the mod
+// serves one, PortDreadSamus::Replaces holds for it: Echoes' bodies carry their own boots and
+// visor. Not their cannon: the right forearm ends bare, and Prime's cannon is drawn on it
+// (PortDreadSamus::HasOwnCannon).
 inline constexpr uint32_t kBodies[] = {0x776C1A96, 0x57F5C930, 0x2782648E, 0xB333E1D7, 0xE449874A,
-                                       0x57489AD3, 0x891E00FD, 0xA602C954, 0x11A5BC8A, 0x5644E7A1};
+                                       0x57489AD3, 0x891E00FD, 0xA602C954, 0x11A5BC8A, 0x5644E7A1,
+                                       0xF39476F2, 0x4A1A8FD3, 0xCC25E002};
 inline bool IsBody(uint32_t id) {
   for (const uint32_t body : kBodies) {
     if (body == id) return true;

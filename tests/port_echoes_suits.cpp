@@ -182,19 +182,32 @@ void TestSkin() {
   CHECK(!ConvertCskr(orphan, from, to, out, nullptr, &error));
 }
 
-// Every body the import writes is one the loader counts as a body (port_echoes_suits_mod.h), so the
-// game leaves out Prime's cannon, boots and visor for it; and every body the loader counts is written.
-// The arms are not bodies.
+// Every look the import writes is under its own ids (Wear of the Varia's), none a Prime body; the
+// loader serves them over every suit's bodies, which it counts as bodies (port_echoes_suits_mod.h), so
+// the game leaves out Prime's cannon, boots and visor for them. The arms are not bodies.
 void TestBodies() {
-  size_t written = 0;
   for (const Target& t : kTargets) {
-    const bool arm = std::string(t.skeleton) == "grapple";
     if (std::string(t.suit) == "Dark Samus") {
       CHECK(!IsBody(t.cmdl) && t.cmdl == DarkSamusId(t.cinf) && t.cskr == DarkSamusSkinId(t.cinf));
       continue;
     }
-    CHECK(IsBody(t.cmdl) == !arm);
-    written += arm ? 0 : 1;
+    CHECK(!IsBody(t.cmdl) && t.worn >= 0 && t.kind >= 0 && t.kind < kBodyKinds);
+    CHECK(t.cmdl == Wear(t.worn, kSuitResources[kVariaSuit].cmdl[t.kind]));
+    CHECK(t.cskr == Wear(t.worn, kSuitResources[kVariaSuit].cskr[t.kind]));
+  }
+  size_t bodies = 0;
+  for (const SuitResources& suit : kSuitResources) {
+    for (int kind = 0; kind < 3; ++kind) {
+      CHECK(IsBody(suit.cmdl[kind]));
+      ++bodies;
+    }
+    CHECK(!IsBody(suit.cmdl[3]) && !IsBody(suit.arm));  // the grapple arm, the right arm
+  }
+  CHECK(IsBody(kPhazonBodyCopy));
+  CHECK(bodies + 1 == sizeof(kBodies) / sizeof(kBodies[0]));
+  // The looks' ids are all different.
+  for (int a = 0; a < kWornCount; ++a) {
+    for (int b = a + 1; b < kWornCount; ++b) CHECK(Wear(a, 0x776C1A96) != Wear(b, 0x776C1A96));
   }
   // Dark Samus is written on each skeleton kDarkBodies names, and covers every body the mod writes.
   for (const DarkBody& b : kDarkBodies) {
@@ -208,15 +221,8 @@ void TestBodies() {
     CHECK(dark);
   }
   for (const Arm& a : kArms) {
-    CHECK(!IsBody(a.cmdl));
+    CHECK(!IsBody(a.cmdl) && a.cmdl == Wear(a.worn, kSuitResources[kVariaSuit].arm));
   }
-  for (const Copy& c : kCopies) {
-    if (c.type == 0x434D444C) {
-      CHECK(IsBody(c.to));
-      ++written;
-    }
-  }
-  CHECK(written == sizeof(kBodies) / sizeof(kBodies[0]));
   // Dark Samus's ball ids: none a body, a suit's ball, or another of hers.
   for (const auto& t : PortDreadSamus::kBallTargets) {
     for (const uint32_t id : {DarkBallId(t.ancs), DarkBallId(t.cmdl), DarkBallSkinId(t.cmdl), DarkBallId(t.low)}) {

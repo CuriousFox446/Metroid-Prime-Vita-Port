@@ -4282,3 +4282,38 @@ What to look for in test 29:
 - Mods > Echoes: set, say, every beam to the Echoes Power Beam, then switch beams: each takes
   the Power Beam's closed barrel and colours, while shooting its own shots (Wave's arcs, Ice's
   freezing shots...). Then try other mixes. Charge combos still fire.
+
+## 0.46.0 test 30: what each suit wears (echoes-suits 12)
+
+`echoes_suit_looks` (Mods > Echoes, "Power Suit" ... "Phazon Suit"; EPlayerSuit order, default
+`prime,colours,varia,colours`): Prime's own, Echoes' Varia, Dark or Light Suit, or "Echoes Varia in
+its colours".
+- **The import writes each look once under its own ids**, `Wear(worn, Varia's id)` (WornLook:
+  Varia, Dark, Light, and the Varia in Gravity's and Phazon's colours): cutscene, in-game, doll and
+  grapple-arm bodies with their skins, the right arm, and the balls fit to each Prime ball ANCS
+  (plain 9FE58F7A, spider F37654A2, Phazon's D7F7C8EC). `kCopies` is gone.
+- **PortMods serves a look over the suit wearing it** (`kSuitResources`: each suit's bodies,
+  skins, grapple arm and right arm; the balls under the suit's variant ids, main CMDL included),
+  plus the Varia's second cutscene skin 8C72FDAC and Tallon's Phazon body B333E1D7. Dark Samus is
+  served after, over the bodies. `kBodies` now names Power's bodies too.
+- **The colours** (`RecolourVaria`): Prime's Gravity Suit is its Varia with the limbs repainted:
+  measured per joint on Prime's own bodies (`~/tools/bodymesh.py`: purple on the shoulder pads,
+  shoulders, elbows, wrist and fingers, hips, knees, ankles, toes; the chest, abdomen, pelvis and
+  helmet keep the Varia's; greens go cyan). Phazon's is near black (torso and helmet grey), its
+  red in glow maps. The import votes each texel of the Varia's textures limb or not by the
+  triangles over it (a body triangle by the joints its vertices weigh most on; the arm and ball
+  all limb), recolours (Gravity: warm limb texels to Prime's purple, hue 246.4 + 0.35 x offset,
+  saturation x 0.41, value x 0.50; greens + 75 deg. Phazon: warm texels saturation x 0.15, value x
+  0.16 on limbs, 0.30 elsewhere; greens to red; the rest x 0.6), and writes them as CMPR (its own
+  encoder, `EncodeCmpr`, with the source's mips) under Wear of their ids. 19 textures for Gravity,
+  25 for Phazon.
+- Run on the PC with the user's two discs (`~/echoes_suits/import`, the import's own code): 297
+  files; the Gravity and Phazon cutscene bodies rendered from its output as the prototype
+  (`~/tools/variarecolour.py`, `~/tools/bodyrender.py`).
+- Needs the Echoes suits imported again.
+
+What to look for in test 30:
+- After the import (the mods reload): Varia is Echoes' Varia; Gravity and Phazon wear it in their
+  colours (pause screen doll, cutscenes, the morph transition, first-person arms, the ball).
+- Mods > Echoes: change a suit's look (say Gravity to Echoes Dark Suit), reload the mods, check it.
+- Power stays Prime's for now (its Echoes helmet comes next).

@@ -95,6 +95,11 @@ std::set<uint32_t> sEchoesGuns;
 // Whether it serves Dark Samus in place of the suit bodies (PortEchoesSuits::DarkSamusServed).
 bool sDarkSamusServed = false;
 bool sPlayAsDarkSamus = false;  // the setting echoes_dark_samus
+// The setting echoes_suit_looks (PortEchoesSuits::SuitLook) and what the last load served of it. By
+// default the Varia is Echoes' and Gravity and Phazon wear it in their own colours.
+int sSuitLooks[PortEchoesSuits::kSuitLookSuits] = {PortEchoesSuits::kLookPrime, PortEchoesSuits::kLookColours,
+                                                   PortEchoesSuits::kLookVaria, PortEchoesSuits::kLookColours};
+int sServedSuitLooks[PortEchoesSuits::kSuitLookSuits] = {};
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
 // envfx.bin: Remastered's EnvironmentFX textures (port_envfx_assets.h).
@@ -494,6 +499,15 @@ void PortEchoesSuits::SetCannonLook(int beam, int look) {
   }
 }
 void PortEchoesSuits::SetFirstPersonCannonShown(bool shown) { sEchoesCannonShown = shown; }
+int PortEchoesSuits::SuitLook(int suit) {
+  return suit >= 0 && suit < kSuitLookSuits ? PortMods::sSuitLooks[suit] : kLookPrime;
+}
+void PortEchoesSuits::SetSuitLook(int suit, int look) {
+  if (suit >= 0 && suit < kSuitLookSuits && look >= 0 && look < kLookCount) PortMods::sSuitLooks[suit] = look;
+}
+int PortEchoesSuits::ServedSuitLook(int suit) {
+  return suit >= 0 && suit < kSuitLookSuits ? PortMods::sServedSuitLooks[suit] : kLookPrime;
+}
 void PortEchoesSuits::SetPlayAsDarkSamus(bool on) { PortMods::sPlayAsDarkSamus = on; }
 bool PortEchoesSuits::PlayAsDarkSamus() { return PortMods::sPlayAsDarkSamus; }
 bool PortEchoesSuits::DarkSamusServed() { return PortMods::sDarkSamusServed; }
@@ -690,6 +704,7 @@ void Initialize() {
   sDarkSamusBodies.clear();
   sEchoesGuns.clear();
   sDarkSamusServed = false;
+  for (int& served : sServedSuitLooks) served = PortEchoesSuits::kLookPrime;
   {
     std::lock_guard<std::mutex> lock(sEffectIdsMutex);
     sEffectIdMapPath.clear();
@@ -984,6 +999,66 @@ void Initialize() {
     for (auto& [id, path] : native) {
       sNativeTextures[id] = std::move(path);
       sResourceProviders[{0x54585452, id}] = ToUtf8(modDir);
+    }
+  }
+
+  // The suits' looks (PortEchoesSuits::SuitLook): what the Echoes import wrote of each look under its
+  // own ids (Wear of the Varia's), served over the bodies, arms and balls of the suits that wear it,
+  // over whichever mod served those. Dark Samus, below, still stands in for the bodies.
+  {
+    const auto echoes = [&](uint32_t type, uint32_t id) -> const LooseResource* {
+      const auto it = loose.find({type, id});
+      return it != loose.end() && it->second.mod == PortEchoesSuits::kModName ? &it->second : nullptr;
+    };
+    const auto serve = [&](const LooseResource* from, uint32_t to) {
+      LooseResource resource = *from;
+      resource.id = to;
+      const uint32_t type = resource.type;
+      loose[{type, to}] = std::move(resource);
+      if (const auto provider = sResourceProviders.find({from->type, from->id}); provider != sResourceProviders.end()) {
+        sResourceProviders[{type, to}] = provider->second;
+      }
+    };
+    const PortEchoesSuits::SuitResources& varia = PortEchoesSuits::kSuitResources[PortEchoesSuits::kVariaSuit];
+    for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
+      const int look = sSuitLooks[suit];
+      const int worn = PortEchoesSuits::WornFor(suit, look);
+      if (worn < 0) continue;
+      const PortEchoesSuits::SuitResources& mine = PortEchoesSuits::kSuitResources[suit];
+      size_t bodies = 0, arms = 0, balls = 0;
+      for (int kind = 0; kind < PortEchoesSuits::kBodyKinds; ++kind) {
+        const LooseResource* cmdl = echoes(0x434D444Cu, PortEchoesSuits::Wear(worn, varia.cmdl[kind]));  // 'CMDL'
+        const LooseResource* cskr = echoes(0x43534B52u, PortEchoesSuits::Wear(worn, varia.cskr[kind]));  // 'CSKR'
+        if (cmdl == nullptr || cskr == nullptr) continue;
+        serve(cmdl, mine.cmdl[kind]);
+        serve(cskr, mine.cskr[kind]);
+        // The cutscene copies Prime draws too: the Varia's second skin, the Phazon body in Tallon.
+        if (kind == 0 && suit == PortEchoesSuits::kVariaSuit) serve(cskr, PortEchoesSuits::kVariaSkinCopy);
+        if (kind == 0 && suit == 3) serve(cmdl, PortEchoesSuits::kPhazonBodyCopy);
+        ++(kind == 3 ? arms : bodies);
+      }
+      if (const LooseResource* arm = echoes(0x434D444Cu, PortEchoesSuits::Wear(worn, varia.arm))) {
+        serve(arm, mine.arm);
+        ++arms;
+      }
+      // Its balls: the look's fit of each Prime ball ANCS, under the suit's variant ids (main CMDL too,
+      // which PortDreadSamus::ResolveBallOwnership asks for).
+      for (const auto& t : PortDreadSamus::kBallTargets) {
+        if (t.suit != suit) continue;
+        const LooseResource* ancs = echoes(0x414E4353u, PortEchoesSuits::Wear(worn, t.ancs));  // 'ANCS'
+        const LooseResource* main = echoes(0x434D444Cu, PortEchoesSuits::Wear(worn, t.cmdl));
+        const LooseResource* low = echoes(0x434D444Cu, PortEchoesSuits::Wear(worn, t.low));
+        if (ancs == nullptr || main == nullptr || low == nullptr) continue;
+        serve(ancs, PortModelVariant::Id(t.ancs, suit));
+        serve(main, PortModelVariant::Id(t.cmdl, suit));
+        serve(low, PortModelVariant::Id(t.low, suit));
+        ++balls;
+      }
+      if (bodies + arms + balls != 0) {
+        sServedSuitLooks[suit] = look;
+        PortLog::Write("mods: %s: suit %d wears %s (%zu bodies, %zu arms, %zu balls)\n", PortEchoesSuits::kModName,
+                       suit, PortEchoesSuits::kSuitLookKeys[look], bodies, arms, balls);
+      }
     }
   }
 

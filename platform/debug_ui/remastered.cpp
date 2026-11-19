@@ -423,6 +423,23 @@ void DrawBuiltinMods() {
     ImGui::EndDisabled();
     ItemHelp("Which of Echoes' four cannons each beam wears: its barrel's shape, its motions and its colours. "
              "The beam's own shots and effects stay. Applies the next time a beam is selected.");
+    // What each suit wears (CPlayerState::EPlayerSuit indices, shown Power, Varia, Gravity, Phazon).
+    static const int kSuitOrder[PortEchoesSuits::kSuitLookSuits] = {0, 2, 1, 3};
+    static const char* const kSuitNames[PortEchoesSuits::kSuitLookSuits] = {"Power Suit", "Gravity Suit",
+                                                                            "Varia Suit", "Phazon Suit"};
+    bool looksPending = false;
+    for (const int suit : kSuitOrder) {
+      int look = PortEchoesSuits::SuitLook(suit);
+      if (ImGui::Combo(kSuitNames[suit], &look, PortEchoesSuits::kSuitLookNames, PortEchoesSuits::kLookCount)) {
+        PortEchoesSuits::SetSuitLook(suit, look);
+        MarkDirty();
+      }
+      looksPending = looksPending || PortEchoesSuits::SuitLook(suit) != PortEchoesSuits::ServedSuitLook(suit);
+    }
+    ItemHelp("What each suit wears: its cutscene, in-game and pause screen bodies, its first-person arms and "
+             "its Morph and Spider Balls. \"Echoes Varia in its colours\" is Echoes' Varia recoloured the way "
+             "Prime recolours its own Varia: purple limbs and a cyan visor for Gravity, dark with a red visor "
+             "for Phazon. Applies when the mods reload.");
     bool dark = PortEchoesSuits::PlayAsDarkSamus();
     if (ImGui::Checkbox("Play as Dark Samus", &dark)) {
       PortEchoesSuits::SetPlayAsDarkSamus(dark);
@@ -435,7 +452,7 @@ void DrawBuiltinMods() {
       return m.name == PortEchoesSuits::kModName;
     });
     if (echoes != status.mods.end() && echoes->enabled && !ModImportStale(status, PortEchoesSuits::kModName) &&
-        dark != PortEchoesSuits::DarkSamusServed()) {
+        (dark != PortEchoesSuits::DarkSamusServed() || looksPending)) {
       ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
       ImGui::SameLine();
       if (ImGui::SmallButton("Reload mods##echoes")) {
