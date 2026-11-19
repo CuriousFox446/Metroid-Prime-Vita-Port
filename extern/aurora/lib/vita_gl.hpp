@@ -253,8 +253,12 @@ constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5;
 // test). A draw that repeats its program's last constants in the frame points at the same rows,
 // and the render worker, seeing the rows it sent last, sends nothing. The program and the
 // textures are held by the draw's frame (keep).
+// `wanted`: the draw's own program when `program` stands in for it (another light count's of the
+// same material, linked while its own is not: gx/vita_tev.cpp, tev_stand_in); the render worker
+// builds it on as it would at a draw of its own.
 struct ProgramInputs {
   Program* program = nullptr;
+  Program* wanted = nullptr;
   Texture* textures[kSamplers] = {};
   Sampler samplers[kSamplers];
   uint32_t vertexAt = 0;
@@ -357,6 +361,9 @@ void save_material(const void* record, size_t size) noexcept;
 bool program_known(uint64_t key) noexcept;
 bool warm_up_room() noexcept;
 void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource) noexcept;
+// Any thread (the FIFO thread's tev_stand_in): whether `program` is linked, so a draw recorded with
+// it now is drawn with it (a program once linked stays so).
+bool program_ready(const Program* program) noexcept;
 // Render worker: clears the screen, draws the overlay (null: none) and swaps.
 void present(ImDrawData* overlay) noexcept;
 // An RGBA8 texture for ImGui. Game thread; waits for the render worker to make it.
@@ -413,6 +420,7 @@ inline const std::vector<uint8_t>& saved_materials() noexcept {
 }
 inline void save_material(const void*, size_t) noexcept {}
 inline bool program_known(uint64_t) noexcept { return true; }
+inline bool program_ready(const Program*) noexcept { return false; }
 inline bool warm_up_room() noexcept { return false; }
 inline void warm_up(uint64_t, std::string, std::string) noexcept {}
 inline void present(ImDrawData*) noexcept {}

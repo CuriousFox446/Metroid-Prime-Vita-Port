@@ -1767,6 +1767,8 @@ public:
   GLuint id() const noexcept { return m_id; }
   // Linked, or failed: nothing more to build.
   bool settled() const noexcept { return m_state == State::Ready || m_state == State::Failed; }
+  // Any thread: linked (the FIFO thread's program_ready). Set once, with the state Ready.
+  bool linked() const noexcept { return m_linked.load(std::memory_order_acquire); }
   GLint attr(int index) const noexcept { return m_attrs[index]; }
   GLint samplers[kSamplers] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
@@ -1996,6 +1998,7 @@ private:
         }
       }
       m_state = State::Ready;
+      m_linked.store(true, std::memory_order_release);
       ++g_programStats.compiled;
     }
     std::string().swap(m_vertexSource);
@@ -2017,11 +2020,14 @@ private:
   Sent m_vertexSent;
   Sent m_constantsSent;
   State m_state = State::Pending;
+  std::atomic<bool> m_linked{false};
 };
 
 std::shared_ptr<Program> make_program(std::string vertexSource, std::string fragmentSource, uint64_t key) noexcept {
   return std::make_shared<Program>(std::move(vertexSource), std::move(fragmentSource), key);
 }
+
+bool program_ready(const Program* program) noexcept { return program != nullptr && program->linked(); }
 
 const std::vector<uint8_t>& saved_materials() noexcept { return g_savedMaterials; }
 
@@ -2182,7 +2188,7 @@ bool merge_into_last(const Draw& draw) noexcept {
   }
   const ProgramInputs& p = last.program;
   const ProgramInputs& q = draw.program;
-  if (p.program != q.program || !(p.state == q.state) || p.vertexCount != q.vertexCount ||
+  if (p.program != q.program || p.wanted != q.wanted || !(p.state == q.state) || p.vertexCount != q.vertexCount ||
       p.constantCount != q.constantCount) {
     return false;
   }
@@ -2370,6 +2376,9 @@ struct PresentStats {
   // Draws whose program was not ready, left out rather than drawn fixed-function without any of
   // their textures (left_out_while_pending).
   uint64_t pendingLeftOut = 0;
+  // Draws with a stand-in (ProgramInputs::wanted): another light count's program of their
+  // material, while theirs was on its way.
+  uint64_t standIns = 0;
   // EFB copies made on the GPU, the pixels they wrote, the render worker's time on them (the GPU's
   // is in the frame's), and copies left unmade while the copy program was being built.
   uint32_t copies = 0;
@@ -3566,6 +3575,16 @@ void draw_world(const Frame& frame) {
       glPointSize(static_cast<GLfloat>(point));
       width = draw.width;
     }
+    if (draw.program.wanted != nullptr) {
+      // Drawn with a stand-in (gx/vita_tev.cpp, tev_stand_in): its own program built on meanwhile,
+      // as a draw of its own would.
+      const int budgetBefore = buildBudget;
+      draw.program.wanted->ready(buildBudget);
+      if (buildBudget != budgetBefore) {
+        glUseProgram(usedProgram);
+      }
+      ++g_presentStats.standIns;
+    }
     Program* program = draw.program.program;
     bool leaveOut = false;
     if (program != nullptr) {
@@ -4143,8 +4162,9 @@ void present(ImDrawData* overlay) noexcept {
   if (++g_presentStats.presents == 300) {
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame ({:.1f} more joined to the draw before them), {} "
              "destroyed here with the reaper two behind; "
-             "generated programs: {} draws with theirs, {} "
-             "fixed-function waiting for theirs, {} left out waiting for theirs (none of their textures without "
+             "generated programs: {} draws with theirs, {} with a stand-in while theirs was on its way (another "
+             "light count's), {} fixed-function waiting for theirs, {} left out waiting for theirs (none of their "
+             "textures without "
              "them); {} built ({} failed, {} sent to the compiler thread, {:.0f} ms "
              "compiling there, at most {} KiB of its heap in use, {} allocations past it; {} from the precompiled "
              "pack; {} loaded from the card, {} of them compiled again, {:.0f} ms) in all, the warm-up's {} ({} "
@@ -4158,7 +4178,8 @@ void present(ImDrawData* overlay) noexcept {
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.draws) / g_presentStats.framesWithDraws : 0.0,
              g_presentStats.framesWithDraws != 0 ? double(g_presentStats.merged) / g_presentStats.framesWithDraws : 0.0,
              g_reaper.take_destroyed_here(),
-             g_presentStats.programDraws, g_presentStats.programPending, g_presentStats.pendingLeftOut,
+             g_presentStats.programDraws - g_presentStats.standIns, g_presentStats.standIns,
+             g_presentStats.programPending, g_presentStats.pendingLeftOut,
              g_programStats.compiled,
              g_programStats.failed, g_programStats.queued, g_programStats.compileMs,
              g_compilerPeak.load(std::memory_order_relaxed) / 1024, g_compilerOverflows.load(std::memory_order_relaxed),

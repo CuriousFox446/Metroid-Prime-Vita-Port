@@ -307,6 +307,8 @@ struct Stats {
   u32 withProgram = 0;
   u32 constantsRecorded = 0;
   u32 constantsShared = 0;
+  // Of those, the ones recorded with a stand-in while theirs was not linked (tev_stand_in).
+  u32 standIns = 0;
   // Materials worked out that sample an EFB copy (their hash moves with every copy), and those
   // that replaced another still in use this window.
   u32 materialMissesCopy = 0;
@@ -1628,8 +1630,10 @@ struct Material {
   const TcgConfig* tcgs[kTexUnits] = {};
   vita_gl::RenderState state; // before TEV's constant alpha is folded in (record_draw)
   // Its generated program (vita_tev.hpp; null: fixed-function only), with the textures it samples,
-  // its coordinate generators (the mesh's sets in order) and its state (the program alpha-tests).
+  // its coordinate generators (the mesh's sets in order) and its state (the program alpha-tests);
+  // the program's family, for a stand-in while it is not linked (tev_stand_in).
   const TevProgram* program = nullptr;
+  u64 programFamily = 0;
   std::shared_ptr<vita_gl::Texture> programTextures[kSamplers];
   vita_gl::Sampler programSamplers[kSamplers] = {};
   int coordCount = 0;
@@ -1935,7 +1939,7 @@ const Material& current_material() noexcept {
       // GXSetDstAlpha's constant other than zero comes from the program (dst_alpha_mode); the
       // fixed-function draw meanwhile writes its own alpha.
       const bool constantAlpha = dst_alpha_mode() == DstAlpha::Replace;
-      material.program = tev_program(layout, constantAlpha);
+      material.program = tev_program(layout, constantAlpha, &material.programFamily);
       material.coordCount = layout.coordCount;
       for (int c = 0; c < layout.coordCount; ++c) {
         material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
@@ -2111,7 +2115,17 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
   if (material.program != nullptr) {
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord);
     vita_gl::ProgramInputs& inputs = draw.program;
-    inputs.program = vita_gl::keep(material.program->program);
+    // Its own program, or while that is on its way another light count's of its material, linked
+    // (tev_stand_in): the rows below are made for the one drawn with.
+    const TevProgram* drawn = material.program;
+    if (!vita_gl::program_ready(drawn->program.get())) {
+      if (const TevProgram* standIn = tev_stand_in(material.programFamily, *drawn)) {
+        inputs.wanted = vita_gl::keep(drawn->program);
+        drawn = standIn;
+        ++sStats.standIns;
+      }
+    }
+    inputs.program = vita_gl::keep(drawn->program);
     for (int m = 0; m < kSamplers; ++m) {
       inputs.textures[m] = vita_gl::keep(material.programTextures[m]);
       inputs.samplers[m] = material.programSamplers[m];
@@ -2126,7 +2140,7 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
                        (c == 3 ? p[3] : 0.f);
       }
     }
-    const TevProgram& program = *material.program;
+    const TevProgram& program = *drawn;
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
     tev_constants(program, material.coordIds, material.mapIds, constants);
@@ -3138,12 +3152,14 @@ void log_stats() noexcept {
            "materials alone {}, {:.1f} MiB); "
            "skinned calls: {} from their template ({} drawn by index; {} corners as {} vertices), {} decoded whole, "
            "{} templates made; {} draws with a generated "
-           "program ({} generated), their constant arrays {} recorded, {} repeating the last",
+           "program ({} generated; {} of the draws with another light count's while theirs was on its way), their "
+           "constant arrays {} recorded, {} repeating the last",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
-           s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.constantsRecorded, s.constantsShared);
+           s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
+           s.constantsShared);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "
            "for at {} frame ends ({:.1f} ms in all), {} times for the frame's vertices to grow, {} at a draw done, "

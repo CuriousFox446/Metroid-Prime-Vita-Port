@@ -75,7 +75,14 @@ TevLayout tev_layout() noexcept;
 // The program for the current GX state with that layout, generated once (cached by its source;
 // the pointer stays valid for the session). With `constantAlpha`, it returns GXSetDstAlpha's
 // constant as its alpha (tev_constants puts it in the alpha references' row), after its alpha test.
-const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha = false) noexcept;
+// `family`, when given, is set to the state's family: the same state but for the lights its
+// channels sum (tev_stand_in).
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha = false, u64* family = nullptr) noexcept;
+// FIFO thread, for a draw whose `program` is not linked yet (vita_gl::program_ready), with the
+// current GX state its own: a linked program of its `family` (tev_program's) summing other counts
+// of lights, to draw with meanwhile, its rows made for it (tev_vertex_rows: its lights the mask's
+// first ones, or dark ones past them). Null when its family has none linked.
+const TevProgram* tev_stand_in(u64 family, const TevProgram& program) noexcept;
 // The fragment constants `program` declares, packed, from the current GX state; `coordIds` and
 // `mapIds` are the layout's coordinate generators and textures by slot (TevLayout's coords, maps).
 void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapIds,

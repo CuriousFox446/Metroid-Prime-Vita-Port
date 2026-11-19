@@ -47,9 +47,17 @@ constexpr int kConstFogParams = kConstFogColor + 1;
 static_assert(kConstFogParams + 1 == vita_gl::kProgramConstants);
 
 // Programs by the hash of their source (an unordered_map's elements stay where they are), and by
-// the hash of the GX state they were made from.
+// the hash of the GX state they were made from, with that state's family: its hash without the
+// lights each channel part sums (tev_program's key with them zero).
 std::unordered_map<u64, TevProgram> sPrograms;
-std::unordered_map<u64, const TevProgram*> sProgramsByState;
+struct StateProgram {
+  const TevProgram* program = nullptr;
+  u64 family = 0;
+};
+std::unordered_map<u64, StateProgram> sProgramsByState;
+// The programs of each family: a material's programs for the light counts it was drawn with
+// (tev_stand_in's). FIFO thread, as the maps above.
+std::unordered_map<u64, std::vector<const TevProgram*>> sFamilies;
 
 // The TEV register (0 PREV, 1-3 REG0-2) an argument reads, or -1.
 int color_register(GXTevColorArg arg) noexcept {
@@ -997,7 +1005,7 @@ TevLayout tev_layout() noexcept {
   return layout;
 }
 
-const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha) noexcept {
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha, u64* family) noexcept {
   const GXState& s = g_gxState;
   // What the source is made from, hashed: generating it is the costly part, and most materials
   // share a program with another.
@@ -1025,29 +1033,43 @@ const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha) noexc
     fixed[kLightKeys + part] = static_cast<u32>(program_lights(light_count(part)));
   }
   fixed[kFogKey] = static_cast<u32>(s.fog.type);
-  u64 stateKey = XXH3_64bits(fixed, sizeof(fixed));
-  stateKey = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), stateKey);
-  stateKey = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), stateKey);
-  stateKey = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), stateKey);
-  // The layout field by field (its padding is not set). The slots each stage samples are the
-  // program's; which coordinate generator and texture fill them is not.
-  stateKey = XXH3_64bits_withSeed(layout.stageCoord.data(), sizeof(layout.stageCoord), stateKey);
-  stateKey = XXH3_64bits_withSeed(layout.stageMap.data(), sizeof(layout.stageMap), stateKey);
-  const int counts[2] = {layout.coordCount, layout.samplerCount};
-  stateKey = XXH3_64bits_withSeed(counts, sizeof(counts), stateKey);
-  // The indirect stages read: their slots and scales (the stages' indirect setup is in theirs).
-  stateKey = XXH3_64bits_withSeed(layout.indCoord.data(), sizeof(layout.indCoord), stateKey);
-  stateKey = XXH3_64bits_withSeed(layout.indMap.data(), sizeof(layout.indMap), stateKey);
-  u32 indScales[MaxIndStages] = {};
-  for (u32 ind = 0; ind < MaxIndStages; ++ind) {
-    if (layout.indCoord[ind] >= 0) {
-      indScales[ind] = static_cast<u32>(s.indStages[ind].scaleS) | static_cast<u32>(s.indStages[ind].scaleT) << 8;
+  // The key of `fixed` and the rest of the state.
+  const auto state_key = [&](const u32 (&words)[kAlphaKey + 1]) {
+    u64 key = XXH3_64bits(words, sizeof(words));
+    key = XXH3_64bits_withSeed(s.tevStages.data(), stages * sizeof(TevStage), key);
+    key = XXH3_64bits_withSeed(s.tevSwapTable.data(), sizeof(s.tevSwapTable), key);
+    key = XXH3_64bits_withSeed(s.colorChannelConfig.data(), sizeof(s.colorChannelConfig), key);
+    // The layout field by field (its padding is not set). The slots each stage samples are the
+    // program's; which coordinate generator and texture fill them is not.
+    key = XXH3_64bits_withSeed(layout.stageCoord.data(), sizeof(layout.stageCoord), key);
+    key = XXH3_64bits_withSeed(layout.stageMap.data(), sizeof(layout.stageMap), key);
+    const int counts[2] = {layout.coordCount, layout.samplerCount};
+    key = XXH3_64bits_withSeed(counts, sizeof(counts), key);
+    // The indirect stages read: their slots and scales (the stages' indirect setup is in theirs).
+    key = XXH3_64bits_withSeed(layout.indCoord.data(), sizeof(layout.indCoord), key);
+    key = XXH3_64bits_withSeed(layout.indMap.data(), sizeof(layout.indMap), key);
+    u32 indScales[MaxIndStages] = {};
+    for (u32 ind = 0; ind < MaxIndStages; ++ind) {
+      if (layout.indCoord[ind] >= 0) {
+        indScales[ind] = static_cast<u32>(s.indStages[ind].scaleS) | static_cast<u32>(s.indStages[ind].scaleT) << 8;
+      }
     }
-  }
-  stateKey = XXH3_64bits_withSeed(indScales, sizeof(indScales), stateKey);
+    return XXH3_64bits_withSeed(indScales, sizeof(indScales), key);
+  };
+  const u64 stateKey = state_key(fixed);
   if (const auto it = sProgramsByState.find(stateKey); it != sProgramsByState.end()) {
-    return it->second;
+    if (family != nullptr) {
+      *family = it->second.family;
+    }
+    return it->second.program;
   }
+  // Its family: the same state summing no lights (tev_stand_in).
+  u32 unlit[kAlphaKey + 1];
+  std::memcpy(unlit, fixed, sizeof(fixed));
+  for (int part = 0; part < 4; ++part) {
+    unlit[kLightKeys + part] = 0;
+  }
+  const u64 familyKey = state_key(unlit);
   // A material state new to the session: saved for the next sessions' warm-up (which makes the
   // programs without the constant alpha: generate).
   if (!constantAlpha) {
@@ -1070,8 +1092,56 @@ const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha) noexc
     info.program = vita_gl::make_program(std::move(vertexSource), std::move(fragmentSource), key);
     program = std::move(info);
   }
-  sProgramsByState.emplace(stateKey, &program);
+  std::vector<const TevProgram*>& members = sFamilies[familyKey];
+  if (std::find(members.begin(), members.end(), &program) == members.end()) {
+    members.push_back(&program);
+  }
+  sProgramsByState.emplace(stateKey, StateProgram{&program, familyKey});
+  if (family != nullptr) {
+    *family = familyKey;
+  }
   return &program;
+}
+
+// 0.46.0 test 37. A material's light counts change from draw to draw: a beam's shot or an
+// explosion lights the walls it passes (one light more, the next program: program_lights), a
+// pirate walks under the room's lights. Each count is a program of its own, and the first draw
+// with one waited for it, loaded from the card (some 120 ms each in the Phazon Mines, up to 300) or
+// compiled (seconds), drawn fixed-function meanwhile: the walls flat at each shot, the user's
+// "flickering" in the Phazon Mines (test 36's log: up to 4,135 draws a report fixed-function while
+// waiting). Such a draw takes a linked program of its family instead: one summing at least its
+// lights if there is one (the rest dark: the same picture), else the one leaving out the fewest
+// (the mask's last ones, for the frames till its own is linked).
+const TevProgram* tev_stand_in(u64 family, const TevProgram& program) noexcept {
+  const auto it = sFamilies.find(family);
+  if (it == sFamilies.end() || it->second.size() < 2) {
+    return nullptr;
+  }
+  int lights[4];
+  for (int part = 0; part < 4; ++part) {
+    lights[part] = program.lightCounts[part] != 0 ? light_count(part) : 0;
+  }
+  const TevProgram* best = nullptr;
+  int bestMissing = 0;
+  int bestDark = 0;
+  for (const TevProgram* member : it->second) {
+    if (member == &program || !vita_gl::program_ready(member->program.get())) {
+      continue;
+    }
+    int missing = 0;
+    int dark = 0;
+    for (int part = 0; part < 4; ++part) {
+      const int sums = member->lightCounts[part];
+      missing += std::max(0, lights[part] - sums);
+      dark += std::max(0, sums - lights[part]);
+    }
+    if (best == nullptr || missing < bestMissing || (missing == bestMissing && dark < bestDark)) {
+      best = member;
+      bestMissing = missing;
+      bestDark = dark;
+    }
+  }
+  return best;
 }
 
 namespace {

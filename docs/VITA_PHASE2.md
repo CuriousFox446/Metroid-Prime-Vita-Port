@@ -4565,3 +4565,34 @@ What to look for in test 36:
 - After the import, the doll from behind and the in-game body up close, in Gravity's and Phazon's
   colours: the panel's edges where Echoes' Varia has its red lines, the strip beside them at the
   back of the thighs yellow (Phazon: the abdomen's grey), no wedges, no slivers or ragged bits.
+
+## 0.46.0 test 37: a stand-in while a light count's program is on its way
+
+The user, with test 36's log (480p, the Phazon Mines from the save station through the Elite
+Pirates, the elevator and the drones): "I noticed some flickering in Phazon Mines".
+- The log: draws drawn fixed-function while their program was on its way, up to 4,135 a report (300
+  presents; 43 list draws a frame at the worst), and up to 977 left out so. 395 programs were loaded
+  from the card in the session at 123 ms each (100 to 300 in the Mines; test 20's frigate 42), and
+  86 compiled at 3.5 s each, one at a time in the fourth core's spare time.
+- Why it flickers: a material's program is made for the lights each channel sums
+  (`program_lights`: none, 1, 2, 4 or 8). A beam's shot, an explosion or a pirate's shot lights the
+  walls and bodies it passes, one light more, and each count is another program, which the first
+  draw with it waited for: drawn fixed-function meanwhile (its texture by its vertex colour, flat)
+  or left out, and back once the light had passed. So surfaces flashed at shots and fights. The
+  Mines are new ground for these programs (new materials, new counts), so few were on the card.
+- `tev_stand_in` (gx/vita_tev.cpp): a draw whose program is not linked takes a linked program of its
+  family (`tev_program`'s: the same state, other light counts), with rows made for it
+  (`tev_vertex_rows`): one summing at least its lights when there is one (the rest dark: the same
+  picture), else the one leaving out the fewest (the mask's last lights, for the frames till its
+  own is linked). Its own is built on meanwhile (`ProgramInputs::wanted`: the render worker's
+  `ready` as at a draw of its own). A material whose family has none linked yet (its first sight in
+  a session) is drawn fixed-function as before.
+- Nothing changes on the card: the same programs and keys, nothing compiled again.
+- The log: the presents line counts "with a stand-in while theirs was on its way", the materials
+  line "of the draws with another light count's".
+
+What to look for in test 37:
+- The Phazon Mines' rooms, shooting near walls and in the pirates' fights: no surfaces going flat or
+  missing for a moment and back. A material seen for the first time in a session may still show flat
+  briefly before its program loads.
+- In the log, stand-ins where the fixed-function counts were, and those counts far lower.
