@@ -4332,3 +4332,27 @@ What to look for in test 30:
 - The pause screen doll with the Power Suit: Echoes' helmet with its own visor, no second visor,
   Prime's boots and legs.
 - Mods > Echoes: change a suit's look (say Gravity to Echoes Dark Suit), reload the mods, check it.
+
+## 0.46.0 test 31: two choices each, the cannons' textures only
+
+The user set the choices out after test 30 was staged (before trying it): "only the textures only
+for the arm canons ... only two options for each beams and there should not be an option for the
+power beam. the power should have only two options, prime's own or echoes helmet. the gravity suit
+should have only two options, dark suit or the echoes varia in it's colors and the phazon suit is the
+same with only light suit or the echoes varia in it's colors, there should not be an option for the
+varia suit".
+- **Cannons** (`echoes_cannon_looks`, same key): Ice, Wave and Plasma each wear their counterpart's
+  material set (Dark, Light, Annihilator) or the Power Beam's; `GunAncs` now always hands the beam
+  its own ANCS variant (its shape and motions), only `x20c_shaderIdx` follows the choice. Power has
+  none (`SetCannonLook` takes only 0 or the beam's own slot for beams 1-3).
+- **Suits** (`echoes_suit_looks`, same key): `kSuitLookChoices` gives each suit's two looks: Power
+  Prime's own or Echoes' helmet; Gravity the Dark Suit or the Varia in its colours; Phazon the
+  Light Suit or the Varia in its colours; Varia only Echoes' Varia. `SetSuitLook` takes no other.
+  The defaults stay (helmet, colours, varia, colours).
+- The menu shows a two-way choice for Ice's, Wave's and Plasma's cannon and for the Power, Gravity
+  and Phazon Suits. The import is test 30's (mod version 13): one re-import covers both.
+
+What to look for in test 31:
+- Mods > Echoes: Ice's cannon set to the Echoes Power Beam: the Power Beam's colours on Ice's own
+  barrel shape. Back to the Dark Beam: the purple again.
+- The suit choices as above; Varia has none.

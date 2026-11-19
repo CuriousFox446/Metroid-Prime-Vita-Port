@@ -547,7 +547,7 @@ const SettingKey kSettingKeys[] = {
          out << (beam != 0 ? "," : "") << PortEchoesSuits::kCannonLookKeys[PortEchoesSuits::CannonLook(beam)];
        }
      },
-     false, "power,dark,light,annihilator", "light,light,power,dark"},
+     false, "power,dark,light,annihilator", "power,power,power,power"},
     {"echoes_suit_looks",
      [](const std::string& value) {
        // Power's, Gravity's, Varia's and Phazon's, comma-separated: prime, varia, dark, light or colours.
@@ -568,7 +568,7 @@ const SettingKey kSettingKeys[] = {
          out << (suit != 0 ? "," : "") << PortEchoesSuits::kSuitLookKeys[PortEchoesSuits::SuitLook(suit)];
        }
      },
-     false, "prime,colours,varia,colours", "varia,dark,varia,light"},
+     false, "prime,colours,varia,colours", "helmet,dark,varia,light"},
     {"echoes_dark_samus", [](const std::string& value) { PortEchoesSuits::SetPlayAsDarkSamus(ParseBool(value)); },
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::PlayAsDarkSamus()); }, false, "0", "1"},
     BoolKey< &sVsyncEnabled >("vsync"),

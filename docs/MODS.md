@@ -353,15 +353,15 @@ and the left grapple arm); and their Morph Balls, with the Dark Spider Ball as i
 Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball), so those suits'
 balls are their Spider Balls too.
 
-Each of Prime's suits picks what it wears ("Power Suit" ... "Phazon Suit", `echoes_suit_looks`, in
-Power, Gravity, Varia, Phazon order; from the next mod reload): Prime's own, Echoes' Varia, Dark or
-Light Suit, "Echoes Varia in its colours" (Echoes' Varia recoloured the way Prime recolours its own
-Varia: Gravity's limbs and shoulder pads purple, its lights and visor cyan, the torso and helmet
-kept; Phazon dark with red lights and visor), or "Prime's, Echoes helmet": Prime's own body with
-Echoes' Varia helmet (in the suit's colours), its arms and ball Prime's. By default the Power Suit
-is Prime's with Echoes' helmet, Varia is Echoes' Varia, and Gravity and Phazon wear it in their
-colours (`helmet,colours,varia,colours`). From mod version 12 the import writes each look once
-under its own ids, and the loader serves it over the suits that wear it; the helmet bodies from 13.
+The Varia Suit is Echoes' Varia. The others each pick one of two looks ("Power Suit", "Gravity
+Suit", "Phazon Suit"; `echoes_suit_looks` in Power, Gravity, Varia, Phazon order; from the next mod
+reload): the Power Suit Prime's own, or Prime's own body with Echoes' Varia helmet (its arms and ball
+Prime's); Gravity and Phazon Echoes' Dark and Light Suits, or "Echoes Varia in its colours": Echoes'
+Varia recoloured the way Prime recolours its own Varia (Gravity's limbs and shoulder pads purple, its
+lights and visor cyan, the torso and helmet kept; Phazon dark with red lights and visor). By default
+the Power Suit wears Echoes' helmet and Gravity and Phazon the Varia in their colours
+(`helmet,colours,varia,colours`). From mod version 12 the import writes each look once under its own
+ids, and the loader serves it over the suits that wear it; the helmet bodies from 13.
 
 - It is the mod `echoes-suits`. Its bodies carry their own arm cannon, so Prime's is not drawn on
   them. They are skinned onto Prime's skeleton: joints Prime lacks fold into their nearest parent
@@ -376,10 +376,10 @@ under its own ids, and the loader serves it over the suits that wear it; the hel
   with Echoes' own missile animations from mod version 9. "Echoes arm cannon in first person"
   (`echoes_first_person_cannon`, on by default; console `echoescannon 0|1`) switches it, from the
   next beam selected.
-- Each of Power, Ice, Wave and Plasma can wear any of Echoes' four cannons ("... Beam's cannon",
-  `echoes_cannon_looks`, default `power,dark,light,annihilator`): that cannon's whole look, its
-  barrel's shape, its shooting, charging and missile motions and its colours, while the beam's
-  shots and effects stay its own. From the next beam selected.
+- Ice, Wave and Plasma each wear their Echoes counterpart's textures (Dark, Light, Annihilator) or
+  the Power Beam's ("... Beam's cannon", `echoes_cannon_looks` in Power, Ice, Wave, Plasma order,
+  default `power,dark,light,annihilator`): only the textures, the barrel's shape and motions stay
+  the beam's. The Power Beam always wears the Power Beam's. From the next beam selected.
 - "Play as Dark Samus" (`echoes_dark_samus`, off by default; console `darksamus 0|1`) puts Echoes'
   Dark Samus body in place of every suit's, in third person, cutscenes and the pause screen, and
   her Morph Ball (the one from the Aerie fight) in place of every suit's ball, from the next mod

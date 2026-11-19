@@ -50,7 +50,12 @@ inline constexpr int kSuitLookSuits = 4;
 inline constexpr const char* kSuitLookKeys[kLookCount] = {"prime", "varia", "dark", "light", "colours", "helmet"};
 inline constexpr const char* kSuitLookNames[kLookCount] = {"Prime's own",        "Echoes Varia Suit",
                                                            "Echoes Dark Suit",   "Echoes Light Suit",
-                                                           "Echoes Varia in its colours", "Prime's, Echoes helmet"};
+                                                           "Echoes Varia in its colours", "Echoes helmet"};
+// The two looks each suit offers, as the user set them out (0.46.0 test 30): Power Prime's own or its
+// body with Echoes' helmet; Gravity the Dark Suit or Echoes' Varia in its colours; Phazon the Light
+// Suit or the Varia in its colours; the Varia always Echoes' Varia. SetSuitLook takes no other.
+inline constexpr int kSuitLookChoices[kSuitLookSuits][2] = {
+    {kLookPrime, kLookHelmet}, {kLookDark, kLookColours}, {kLookVaria, kLookVaria}, {kLookLight, kLookColours}};
 // The helmet bodies (kLookHelmet): each suit's Prime body of kinds 0-2 (cutscene, in-game, doll) with
 // its head swapped for Echoes' Varia's (SwapHead), under HelmetId of Prime's body and skin ids.
 inline constexpr int kHelmetKey = 0x454848;  // "EHH"
@@ -135,22 +140,21 @@ inline constexpr const char* kMissileAnimNames[] = {"PortEchoes_FromMissile", "P
                                                     "PortEchoes_MissileShoot", "PortEchoes_MissileReload",
                                                     "PortEchoes_MissileFirstShoot"};
 inline constexpr uint32_t kFirstMissileShot = 0xB9A04995;  // genericMissleFirstShoot
-// Which of Echoes' four cannons each of Power, Ice, Wave and Plasma wears (the setting
-// echoes_cannon_looks): a beam slot's whole cannon, its ANCS variant (the barrel's shape and its
-// shooting, charging and missile motions) and its material set. By default each beam its own slot:
-// Power, Dark (Ice), Light (Wave), Annihilator (Plasma). The beam's shots and effects stay its own
-// (the gun anims' events are the same in every slot: panel sounds, the combo's fire cue at LBEAM).
-// Phazon keeps its own.
+// The textures the Echoes cannon of Ice, Wave and Plasma wears (the setting echoes_cannon_looks,
+// in Power, Ice, Wave, Plasma order): its own Echoes counterpart's (Dark, Light, Annihilator) or
+// the Power Beam's. Only the material set changes: the beam keeps its own ANCS variant, so its
+// barrel's shape and motions (the user's choice, 0.46.0 test 30). Power always wears the Power
+// Beam's, Phazon its own. CannonLook gives the beam slot whose set it wears (0 or the beam).
 inline constexpr int kCannonLookBeams = 4;
 inline constexpr const char* kCannonLookKeys[kCannonLookBeams] = {"power", "dark", "light", "annihilator"};
 inline constexpr const char* kCannonLookNames[kCannonLookBeams] = {"Echoes Power Beam", "Echoes Dark Beam",
                                                                    "Echoes Light Beam", "Echoes Annihilator Beam"};
 int CannonLook(int beam);
 void SetCannonLook(int beam, int look);
-// The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon() of the beam's look's ANCS
-// (CannonLook; the beam's own when the mod lacks that one) while the mod serves the beam's and the
-// setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs. *shaderSet gets
-// the material set that cannon draws with (CGunWeapon x20c_shaderIdx), -1 for Prime's cannon.
+// The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon(ancs) while the mod serves it
+// and the setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs.
+// *shaderSet gets the material set that cannon draws with (CGunWeapon x20c_shaderIdx: the beam's
+// CannonLook), -1 for Prime's cannon.
 uint32_t GunAncs(uint32_t ancs, int* shaderSet = nullptr);
 void SetFirstPersonCannonShown(bool shown);
 bool FirstPersonCannonShown();

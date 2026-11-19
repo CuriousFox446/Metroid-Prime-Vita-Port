@@ -407,39 +407,46 @@ void DrawBuiltinMods() {
     }
     ItemHelp("Off keeps Prime's own arm cannon in first person; the Echoes Suit bodies stay. Applies the next "
              "time a beam is selected.");
-    // Which of Echoes' cannons each beam wears: shape, motions and colours, its shots its own.
+    // Ice, Wave and Plasma: their Echoes counterpart's textures or the Power Beam's (the shape stays).
     static const char* const kBeamNames[PortEchoesSuits::kCannonLookBeams] = {"Power Beam", "Ice Beam",
                                                                               "Wave Beam", "Plasma Beam"};
     ImGui::BeginDisabled(!cannon);
-    for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
-      int look = PortEchoesSuits::CannonLook(beam);
+    for (int beam = 1; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
+      const char* const choices[2] = {PortEchoesSuits::kCannonLookNames[beam], PortEchoesSuits::kCannonLookNames[0]};
+      int choice = PortEchoesSuits::CannonLook(beam) == beam ? 0 : 1;
       char label[64];
       std::snprintf(label, sizeof(label), "%s's cannon", kBeamNames[beam]);
-      if (ImGui::Combo(label, &look, PortEchoesSuits::kCannonLookNames, PortEchoesSuits::kCannonLookBeams)) {
-        PortEchoesSuits::SetCannonLook(beam, look);
+      if (ImGui::Combo(label, &choice, choices, 2)) {
+        PortEchoesSuits::SetCannonLook(beam, choice == 0 ? beam : 0);
         MarkDirty();
       }
     }
     ImGui::EndDisabled();
-    ItemHelp("Which of Echoes' four cannons each beam wears: its barrel's shape, its motions and its colours. "
-             "The beam's own shots and effects stay. Applies the next time a beam is selected.");
-    // What each suit wears (CPlayerState::EPlayerSuit indices, shown Power, Varia, Gravity, Phazon).
-    static const int kSuitOrder[PortEchoesSuits::kSuitLookSuits] = {0, 2, 1, 3};
+    ItemHelp("The textures each beam's cannon wears: its own Echoes beam's (Dark, Light, Annihilator) or the "
+             "Power Beam's. Its shape and motions stay the beam's. Applies the next time a beam is selected.");
+    // Power, Gravity and Phazon each pick one of their two looks (kSuitLookChoices); the Varia is
+    // always Echoes' Varia (CPlayerState::EPlayerSuit indices).
+    static const int kSuitOrder[3] = {0, 1, 3};
     static const char* const kSuitNames[PortEchoesSuits::kSuitLookSuits] = {"Power Suit", "Gravity Suit",
                                                                             "Varia Suit", "Phazon Suit"};
     bool looksPending = false;
     for (const int suit : kSuitOrder) {
-      int look = PortEchoesSuits::SuitLook(suit);
-      if (ImGui::Combo(kSuitNames[suit], &look, PortEchoesSuits::kSuitLookNames, PortEchoesSuits::kLookCount)) {
-        PortEchoesSuits::SetSuitLook(suit, look);
+      const int* const pair = PortEchoesSuits::kSuitLookChoices[suit];
+      const char* const choices[2] = {PortEchoesSuits::kSuitLookNames[pair[0]],
+                                      PortEchoesSuits::kSuitLookNames[pair[1]]};
+      int choice = PortEchoesSuits::SuitLook(suit) == pair[1] ? 1 : 0;
+      if (ImGui::Combo(kSuitNames[suit], &choice, choices, 2)) {
+        PortEchoesSuits::SetSuitLook(suit, pair[choice]);
         MarkDirty();
       }
+    }
+    for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
       looksPending = looksPending || PortEchoesSuits::SuitLook(suit) != PortEchoesSuits::ServedSuitLook(suit);
     }
-    ItemHelp("What each suit wears: its cutscene, in-game and pause screen bodies, its first-person arms and "
-             "its Morph and Spider Balls. \"Echoes Varia in its colours\" is Echoes' Varia recoloured the way "
-             "Prime recolours its own Varia: purple limbs and a cyan visor for Gravity, dark with a red visor "
-             "for Phazon. Applies when the mods reload.");
+    ItemHelp("The Varia Suit is Echoes' Varia. The Power Suit is Prime's own, or Prime's with Echoes' helmet. "
+             "Gravity and Phazon wear Echoes' Dark and Light Suits, or Echoes' Varia in their own colours "
+             "(recoloured the way Prime recolours its Varia: purple limbs and a cyan visor for Gravity, dark "
+             "with a red visor for Phazon). Applies when the mods reload.");
     bool dark = PortEchoesSuits::PlayAsDarkSamus();
     if (ImGui::Checkbox("Play as Dark Samus", &dark)) {
       PortEchoesSuits::SetPlayAsDarkSamus(dark);

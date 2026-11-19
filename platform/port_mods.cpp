@@ -498,7 +498,8 @@ int PortEchoesSuits::CannonLook(int beam) {
   return beam >= 0 && beam < kCannonLookBeams ? sEchoesCannonLooks[beam] : beam;
 }
 void PortEchoesSuits::SetCannonLook(int beam, int look) {
-  if (beam >= 0 && beam < kCannonLookBeams && look >= 0 && look < kCannonLookBeams) {
+  // Ice, Wave and Plasma: their own counterpart's textures or the Power Beam's; Power has no choice.
+  if (beam >= 1 && beam < kCannonLookBeams && (look == 0 || look == beam)) {
     sEchoesCannonLooks[beam] = look;
   }
 }
@@ -507,7 +508,11 @@ int PortEchoesSuits::SuitLook(int suit) {
   return suit >= 0 && suit < kSuitLookSuits ? PortMods::sSuitLooks[suit] : kLookPrime;
 }
 void PortEchoesSuits::SetSuitLook(int suit, int look) {
-  if (suit >= 0 && suit < kSuitLookSuits && look >= 0 && look < kLookCount) PortMods::sSuitLooks[suit] = look;
+  // Only the suit's own two choices (kSuitLookChoices); the Varia has none.
+  if (suit >= 0 && suit < kSuitLookSuits &&
+      (look == kSuitLookChoices[suit][0] || look == kSuitLookChoices[suit][1])) {
+    PortMods::sSuitLooks[suit] = look;
+  }
 }
 int PortEchoesSuits::ServedSuitLook(int suit) {
   return suit >= 0 && suit < kSuitLookSuits ? PortMods::sServedSuitLooks[suit] : kLookPrime;
@@ -526,14 +531,10 @@ uint32_t PortEchoesSuits::GunAncs(uint32_t ancs, int* shaderSet) {
   for (int i = 0; i < int(std::size(kBeamAncs)); ++i) {
     if (kBeamAncs[i] == ancs) beam = i;
   }
-  if (beam < 0) return Cannon(ancs);
-  int look = CannonLook(beam);
-  if (look < 0 || look >= int(std::size(kBeamAncs)) || PortMods::sEchoesGuns.count(kBeamAncs[look]) == 0) {
-    look = beam;
-  }
-  // The variant's material sets are in beam slot order (kGunSets), so a slot's set is its index.
-  if (shaderSet != nullptr) *shaderSet = look;
-  return Cannon(kBeamAncs[look]);
+  // The variant's material sets are in beam slot order (kGunSets), so a slot's set is its index;
+  // the cannon itself (its anims, its shape) is the beam's own.
+  if (shaderSet != nullptr && beam >= 0) *shaderSet = CannonLook(beam);
+  return Cannon(ancs);
 }
 
 uint32_t PortDreadSamus::Skeleton(uint32_t bodyCmdl) {
