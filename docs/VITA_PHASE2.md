@@ -4458,9 +4458,12 @@ revert the Echoes' morphball model from overwriting the MP1's spiderball models"
   purple plates (its thighs: 153 purple triangles, 105 of the undersuit's yellow-orange), its Phazon
   Suit as dark as the abdomen. Now a hip triangle votes with the torso when it shows the undersuit
   (`ShowsUndersuit`: the mean of its texels 36 to 70 degrees; measured per triangle, the armour's
-  orange is 12 to 34, the abdomen 36 to 54) and does not face out (`FacingMiddle` at least -0.1:
-  the in-game body's plates have lighter patches of the same hue, and there is yellow behind the
-  outer plates, both purple in Prime's). Within such a triangle, a texel of the armour's red-orange
+  orange is 12 to 34, the abdomen 36 to 54) and does not face well out (`FacingMiddle` at least
+  -0.5: the in-game body's plates have lighter patches of the same hue, facing out at -0.8 to -1,
+  and there is a strip of yellow behind the outer plates, both purple in Prime's). Cut at -0.1 first,
+  the front of the panel, which leans a little out, went purple too; the user's answer to the render
+  of the version with no cut at all: "You did had it look like how I expected it to look like". At
+  -0.5 the front renders are pixel for pixel that version's. Within such a triangle, a texel of the armour's red-orange
   (below 25 degrees) still votes limb (`VoteUndersuit`), or the in-game body's small texture left
   orange specks at the panel's edge. `ForEachUvTriangle` now winds a strip's odd triangles back.
   Checked on the PC with both discs: the cutscene, doll and in-game bodies rendered per pixel

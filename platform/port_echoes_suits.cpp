@@ -2897,11 +2897,14 @@ bool Import(const Io& io, Result& result, std::string& error) {
             // The inner thighs' undersuit votes with the torso, the armour with the limbs: Prime's
             // Gravity Suit keeps it yellow between the purple thigh plates, as its abdomen, and its
             // Phazon Suit as dark as its abdomen. Painted as a limb, the inner thighs came out purple
-            // and darker than the lower torso (the user, after 0.46.0 test 33). Only where the thigh
-            // does not face out: the plates' lighter patches (the in-game body's) and the yellow
-            // behind the outer plates are of the undersuit's colour too, and Prime paints them purple.
+            // and darker than the lower torso (the user, after 0.46.0 test 33). Not where the thigh
+            // faces well out: the plates' lighter patches (the in-game body's) and the yellow behind
+            // the outer plates are of the undersuit's colour too, and Prime paints them purple. The
+            // panel's front leans a little out, so a triangle facing out by up to half (-0.5) is still
+            // the panel's: cut at -0.1, the front of it went purple too, short of the look the user
+            // wanted.
             bool undersuit = false;
-            if (limb && hips >= 2 && !ids.empty() && FacingMiddle(body.model, pos) >= -0.1) {
+            if (limb && hips >= 2 && !ids.empty() && FacingMiddle(body.model, pos) >= -0.5) {
               const Map* map = use(ids[0]);
               undersuit = map != nullptr && ShowsUndersuit(map->width, map->height, map->rgba, uv);
             }
