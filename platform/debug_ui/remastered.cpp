@@ -407,6 +407,22 @@ void DrawBuiltinMods() {
     }
     ItemHelp("Off keeps Prime's own arm cannon in first person; the Echoes Suit bodies stay. Applies the next "
              "time a beam is selected.");
+    // Which of Echoes' cannons each beam wears: shape, motions and colours, its shots its own.
+    static const char* const kBeamNames[PortEchoesSuits::kCannonLookBeams] = {"Power Beam", "Ice Beam",
+                                                                              "Wave Beam", "Plasma Beam"};
+    ImGui::BeginDisabled(!cannon);
+    for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
+      int look = PortEchoesSuits::CannonLook(beam);
+      char label[64];
+      std::snprintf(label, sizeof(label), "%s's cannon", kBeamNames[beam]);
+      if (ImGui::Combo(label, &look, PortEchoesSuits::kCannonLookNames, PortEchoesSuits::kCannonLookBeams)) {
+        PortEchoesSuits::SetCannonLook(beam, look);
+        MarkDirty();
+      }
+    }
+    ImGui::EndDisabled();
+    ItemHelp("Which of Echoes' four cannons each beam wears: its barrel's shape, its motions and its colours. "
+             "The beam's own shots and effects stay. Applies the next time a beam is selected.");
     bool dark = PortEchoesSuits::PlayAsDarkSamus();
     if (ImGui::Checkbox("Play as Dark Samus", &dark)) {
       PortEchoesSuits::SetPlayAsDarkSamus(dark);

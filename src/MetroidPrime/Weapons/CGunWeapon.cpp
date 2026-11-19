@@ -153,9 +153,12 @@ void CGunWeapon::LoadGunModels(CStateManager& mgr) {
     defaultAnim = 0;
   }
 #ifdef TARGET_PC
-  // Echoes' arm cannon (echoes-suits mod): the beam's ANCS with Echoes' gun and hologram.
-  const CAssetId ancsId = PortEchoesSuits::GunAncs(x214_ancsId);
+  // Echoes' arm cannon (echoes-suits mod): the ANCS variant with Echoes' gun and hologram of the
+  // beam slot whose cannon this beam wears (echoes_cannon_looks), drawn with that slot's set.
+  int echoesSet = -1;
+  const CAssetId ancsId = PortEchoesSuits::GunAncs(x214_ancsId, &echoesSet);
   mPortEchoesCannon = ancsId != x214_ancsId;
+  x20c_shaderIdx = echoesSet >= 0 ? u32(echoesSet) : u32(x200_beamId);
   mPortAnimStandIn = -1.f;
   mPortMissilePose = false;
   x10_solidModelData = CAnimRes(ancsId, 0, x4_scale, defaultAnim, false);

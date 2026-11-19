@@ -61,9 +61,23 @@ inline constexpr const char* kMissileAnimNames[] = {"PortEchoes_FromMissile", "P
                                                     "PortEchoes_MissileShoot", "PortEchoes_MissileReload",
                                                     "PortEchoes_MissileFirstShoot"};
 inline constexpr uint32_t kFirstMissileShot = 0xB9A04995;  // genericMissleFirstShoot
-// The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon(ancs) while the mod serves it
-// and the setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs.
-uint32_t GunAncs(uint32_t ancs);
+// Which of Echoes' four cannons each of Power, Ice, Wave and Plasma wears (the setting
+// echoes_cannon_looks): a beam slot's whole cannon, its ANCS variant (the barrel's shape and its
+// shooting, charging and missile motions) and its material set. By default each beam its own slot:
+// Power, Dark (Ice), Light (Wave), Annihilator (Plasma). The beam's shots and effects stay its own
+// (the gun anims' events are the same in every slot: panel sounds, the combo's fire cue at LBEAM).
+// Phazon keeps its own.
+inline constexpr int kCannonLookBeams = 4;
+inline constexpr const char* kCannonLookKeys[kCannonLookBeams] = {"power", "dark", "light", "annihilator"};
+inline constexpr const char* kCannonLookNames[kCannonLookBeams] = {"Echoes Power Beam", "Echoes Dark Beam",
+                                                                   "Echoes Light Beam", "Echoes Annihilator Beam"};
+int CannonLook(int beam);
+void SetCannonLook(int beam, int look);
+// The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon() of the beam's look's ANCS
+// (CannonLook; the beam's own when the mod lacks that one) while the mod serves the beam's and the
+// setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs. *shaderSet gets
+// the material set that cannon draws with (CGunWeapon x20c_shaderIdx), -1 for Prime's cannon.
+uint32_t GunAncs(uint32_t ancs, int* shaderSet = nullptr);
 void SetFirstPersonCannonShown(bool shown);
 bool FirstPersonCannonShown();
 

@@ -367,6 +367,10 @@ Power Suit stays Prime's.
   with Echoes' own missile animations from mod version 9. "Echoes arm cannon in first person"
   (`echoes_first_person_cannon`, on by default; console `echoescannon 0|1`) switches it, from the
   next beam selected.
+- Each of Power, Ice, Wave and Plasma can wear any of Echoes' four cannons ("... Beam's cannon",
+  `echoes_cannon_looks`, default `power,dark,light,annihilator`): that cannon's whole look, its
+  barrel's shape, its shooting, charging and missile motions and its colours, while the beam's
+  shots and effects stay its own. From the next beam selected.
 - "Play as Dark Samus" (`echoes_dark_samus`, off by default; console `darksamus 0|1`) puts Echoes'
   Dark Samus body in place of every suit's, in third person, cutscenes and the pause screen, and
   her Morph Ball (the one from the Aerie fight) in place of every suit's ball, from the next mod

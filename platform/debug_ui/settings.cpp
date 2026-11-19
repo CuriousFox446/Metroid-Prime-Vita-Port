@@ -527,6 +527,27 @@ const SettingKey kSettingKeys[] = {
     {"echoes_first_person_cannon",
      [](const std::string& value) { PortEchoesSuits::SetFirstPersonCannonShown(ParseBool(value)); },
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::FirstPersonCannonShown()); }, false, "0", "1"},
+    {"echoes_cannon_looks",
+     [](const std::string& value) {
+       // Power's, Ice's, Wave's and Plasma's, comma-separated: power, dark, light or annihilator.
+       size_t at = 0;
+       for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams && at <= value.size(); ++beam) {
+         const size_t end = std::min(value.find(',', at), value.size());
+         const std::string key = value.substr(at, end - at);
+         for (int look = 0; look < PortEchoesSuits::kCannonLookBeams; ++look) {
+           if (SDL_strcasecmp(key.c_str(), PortEchoesSuits::kCannonLookKeys[look]) == 0) {
+             PortEchoesSuits::SetCannonLook(beam, look);
+           }
+         }
+         at = end + 1;
+       }
+     },
+     [](std::ostream& out) {
+       for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
+         out << (beam != 0 ? "," : "") << PortEchoesSuits::kCannonLookKeys[PortEchoesSuits::CannonLook(beam)];
+       }
+     },
+     false, "power,dark,light,annihilator", "light,light,power,dark"},
     {"echoes_dark_samus", [](const std::string& value) { PortEchoesSuits::SetPlayAsDarkSamus(ParseBool(value)); },
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::PlayAsDarkSamus()); }, false, "0", "1"},
     BoolKey< &sVsyncEnabled >("vsync"),

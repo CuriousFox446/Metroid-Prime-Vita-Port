@@ -4258,3 +4258,27 @@ What to look for in test 28:
   strip covered) and open again when the cannon leaves missile mode. With the Annihilator, the
   gills pull back from the rings. With Dark, they settle level. Power as before.
 - The Echoes cannon's colours change with the place, as in Echoes (no even cyan cast).
+
+### Test 28 result
+
+The user re-imported (no stale-import note in the log; Echoes' first shot, reload and close
+played) and moved on to an idea: pick each beam's cannon, and each suit's look (Prime's Power
+Suit with Echoes' Varia helmet; Echoes' Varia for Varia; Echoes' Varia in the Gravity and Phazon
+colours, or the Dark and Light Suits, for those two).
+
+## 0.46.0 test 29: each beam picks its Echoes cannon
+
+`echoes_cannon_looks` (Mods > Metroid Prime 2: Echoes, "... Beam's cannon"; default
+`power,dark,light,annihilator`): each of Power, Ice, Wave and Plasma wears one of Echoes' four
+cannons. `PortEchoesSuits::GunAncs` hands `CGunWeapon::LoadGunModels` that slot's ANCS variant (its
+anims: the barrel's shape, shooting, charging and missile motions) and its material set index
+(`x20c_shaderIdx`; the variant's sets are in slot order). Safe to borrow: every slot's gun
+character has the same 20 anims (slots 9 and 10 are its beam-change poses), the anims' events
+are the same panel and missile-switch sounds in every slot, and the combo's fire cue is a user
+event of value 0 at LBEAM in each (`CPlayerGun` reads the value). Phazon keeps its own. No
+re-import.
+
+What to look for in test 29:
+- Mods > Echoes: set, say, every beam to the Echoes Power Beam, then switch beams: each takes
+  the Power Beam's closed barrel and colours, while shooting its own shots (Wave's arcs, Ice's
+  freezing shots...). Then try other mixes. Charge combos still fire.

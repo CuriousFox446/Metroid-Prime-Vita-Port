@@ -483,14 +483,36 @@ bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
 }
 namespace {
 bool sEchoesCannonShown = true;
+int sEchoesCannonLooks[PortEchoesSuits::kCannonLookBeams] = {0, 1, 2, 3};
+}
+int PortEchoesSuits::CannonLook(int beam) {
+  return beam >= 0 && beam < kCannonLookBeams ? sEchoesCannonLooks[beam] : beam;
+}
+void PortEchoesSuits::SetCannonLook(int beam, int look) {
+  if (beam >= 0 && beam < kCannonLookBeams && look >= 0 && look < kCannonLookBeams) {
+    sEchoesCannonLooks[beam] = look;
+  }
 }
 void PortEchoesSuits::SetFirstPersonCannonShown(bool shown) { sEchoesCannonShown = shown; }
 void PortEchoesSuits::SetPlayAsDarkSamus(bool on) { PortMods::sPlayAsDarkSamus = on; }
 bool PortEchoesSuits::PlayAsDarkSamus() { return PortMods::sPlayAsDarkSamus; }
 bool PortEchoesSuits::DarkSamusServed() { return PortMods::sDarkSamusServed; }
 bool PortEchoesSuits::FirstPersonCannonShown() { return sEchoesCannonShown; }
-uint32_t PortEchoesSuits::GunAncs(uint32_t ancs) {
-  return sEchoesCannonShown && PortMods::sEchoesGuns.count(ancs) != 0 ? Cannon(ancs) : ancs;
+uint32_t PortEchoesSuits::GunAncs(uint32_t ancs, int* shaderSet) {
+  if (shaderSet != nullptr) *shaderSet = -1;
+  if (!sEchoesCannonShown || PortMods::sEchoesGuns.count(ancs) == 0) return ancs;
+  int beam = -1;
+  for (int i = 0; i < int(std::size(kBeamAncs)); ++i) {
+    if (kBeamAncs[i] == ancs) beam = i;
+  }
+  if (beam < 0) return Cannon(ancs);
+  int look = CannonLook(beam);
+  if (look < 0 || look >= int(std::size(kBeamAncs)) || PortMods::sEchoesGuns.count(kBeamAncs[look]) == 0) {
+    look = beam;
+  }
+  // The variant's material sets are in beam slot order (kGunSets), so a slot's set is its index.
+  if (shaderSet != nullptr) *shaderSet = look;
+  return Cannon(kBeamAncs[look]);
 }
 
 uint32_t PortDreadSamus::Skeleton(uint32_t bodyCmdl) {
