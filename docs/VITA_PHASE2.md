@@ -4481,3 +4481,25 @@ What to look for in test 34:
   thighs yellow as the lower torso, the plates purple; Phazon's inner thighs the abdomen's dark grey.
 - The Spider Ball with Varia, Gravity and Phazon in the Varia looks: Prime's own, in each suit's
   colours. Gravity with the Dark Suit: Echoes' Dark Spider Ball still.
+
+### Test 34 result
+
+Two photos of the pause screen's doll from behind, Phazon's and Gravity's colours, with the
+wedges circled: lighter triangles (yellow-orange, light grey) in the plates at the back of both
+thighs. The import had taken them for the panel: they show the undersuit's hue (the plates'
+lighter patches) and face out by less than half (-0.5), as the panel's front does, but backward.
+
+## 0.46.0 test 35: no wedges at the back of the thighs (echoes-suits 16)
+
+- `FacingOf` gives a triangle's lean toward the body's middle and forward. A thigh triangle of the
+  undersuit's colour votes with the torso when it faces in or across (to -0.1), or out by up to
+  half (-0.5) while facing forward: the panel's front. Facing back, that lean is the plates' wedges
+  (22 triangles on the doll and cutscene bodies, 11 a thigh); they vote limb again. The in-game
+  body has none in that band.
+- Checked on the PC with both discs: the front renders pixel for pixel the look the user approved;
+  from behind (`bodyrender.py` legsback) the wedges are gone in both colours.
+- Needs the Echoes suits imported again (version 16).
+
+What to look for in test 35:
+- After the import, the doll from behind in Gravity's and Phazon's colours: the plates whole at the
+  back of the thighs; from the front, as test 34.

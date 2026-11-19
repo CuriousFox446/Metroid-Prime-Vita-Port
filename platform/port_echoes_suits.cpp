@@ -1780,23 +1780,27 @@ bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::stri
   return true;
 }
 
-// How far a triangle of `model` (its position indices, wound as drawn) faces the body's middle, the
-// plane x = 0 (Prime's bodies stand facing +y): 1 straight at it, -1 straight away from it.
-double FacingMiddle(const PrimeCmdl& model, const uint32_t (&pos)[3]) {
-  if (model.arrays.empty()) return 0.0;
+// Which way a triangle of `model` (its position indices, wound as drawn) faces: `middle`, how far
+// toward the body's middle, the plane x = 0 (1 straight at it, -1 straight away); `front`, how far
+// forward (Prime's bodies stand facing +y).
+struct Facing {
+  double middle = 0.0, front = 0.0;
+};
+Facing FacingOf(const PrimeCmdl& model, const uint32_t (&pos)[3]) {
+  if (model.arrays.empty()) return {};
   Reader r{model.arrays[0].data(), model.arrays[0].size()};
   double p[3][3];
   for (int v = 0; v < 3; ++v) {
     for (int c = 0; c < 3; ++c) p[v][c] = r.F32(size_t(pos[v]) * 12 + size_t(c) * 4);
   }
-  if (r.bad) return 0.0;
+  if (r.bad) return {};
   const double e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
   const double e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
   const double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
   const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
   const double x = (p[0][0] + p[1][0] + p[2][0]) / 3.0;
-  if (length <= 0.0 || x == 0.0) return 0.0;
-  return -n[0] / length * (x > 0.0 ? 1.0 : -1.0);
+  if (length <= 0.0) return {};
+  return {x == 0.0 ? 0.0 : -n[0] / length * (x > 0.0 ? 1.0 : -1.0), n[1] / length};
 }
 
 // The joint each vertex of a Prime CSKR weighs most on, in vertex order.
@@ -2897,14 +2901,17 @@ bool Import(const Io& io, Result& result, std::string& error) {
             // The inner thighs' undersuit votes with the torso, the armour with the limbs: Prime's
             // Gravity Suit keeps it yellow between the purple thigh plates, as its abdomen, and its
             // Phazon Suit as dark as its abdomen. Painted as a limb, the inner thighs came out purple
-            // and darker than the lower torso (the user, after 0.46.0 test 33). Not where the thigh
-            // faces well out: the plates' lighter patches (the in-game body's) and the yellow behind
-            // the outer plates are of the undersuit's colour too, and Prime paints them purple. The
-            // panel's front leans a little out, so a triangle facing out by up to half (-0.5) is still
-            // the panel's: cut at -0.1, the front of it went purple too, short of the look the user
-            // wanted.
+            // and darker than the lower torso (the user, after 0.46.0 test 33). Only where the thigh
+            // faces in or across (to -0.1): the plates' lighter patches (the in-game body's, facing
+            // well out) and the yellow behind the outer plates are of the undersuit's colour too, and
+            // Prime paints them purple. The panel's front leans a little out, so a triangle facing out
+            // by up to half (-0.5) is the panel's too when it faces forward; cut at -0.1 throughout,
+            // the front went purple, short of the look the user wanted. Facing back, that lean is the
+            // plates' lighter wedges at the back of the thighs (the user's photos of test 34).
             bool undersuit = false;
-            if (limb && hips >= 2 && !ids.empty() && FacingMiddle(body.model, pos) >= -0.5) {
+            const Facing facing = FacingOf(body.model, pos);
+            const bool panelSide = facing.middle >= -0.1 || (facing.middle >= -0.5 && facing.front > 0.0);
+            if (limb && hips >= 2 && !ids.empty() && panelSide) {
               const Map* map = use(ids[0]);
               undersuit = map != nullptr && ShowsUndersuit(map->width, map->height, map->rgba, uv);
             }
