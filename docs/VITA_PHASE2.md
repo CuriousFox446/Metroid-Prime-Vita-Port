@@ -4517,21 +4517,32 @@ across triangles, so a triangle over it came out all panel (the plate's orange l
 purple) or all plate (purple into the yellow); the in-game body's few big triangles over a small
 texture made it ragged. Echoes' own Varia, not recoloured, shows the line as drawn.
 
-## 0.46.0 test 36: the thighs' panel texel by texel (echoes-suits 17)
+## 0.46.0 test 36: the thighs' panel texel by texel, grown from the inner thigh (echoes-suits 17)
 
-- `KeepUndersuit`: the thigh triangles facing the panel's way (`FacingOf`, as test 35) mark where
-  the panel may be (`MarkPanelSide`; they vote limb as any limb triangle); after the votes, each
-  texel there is decided by its own colour. Measured texel by texel, the panel is 39 degrees and up,
-  the plates 36 and down (doll: 88% of each on its side; in-game alike). A yellow texel (38 to 70)
-  is the panel's when its 5x5 neighbourhood holds more yellow than orange (a plate's highlight
-  stays purple); any other texel (orange, the line, a shade) only deep in yellow (ten more of it
-  round it), so the line Echoes draws stays the plate's and the edge does not creep across it.
-  The panel ends where the texture's colour turns, on every body.
-- Checked on the PC with both discs: the doll and the in-game body from the front and behind, in
-  both colours, against Echoes' Varia: the edges follow its red lines; the changed pixels between
-  the 5x5 majority alone and the final rule all lie on the edge.
+- `KeepUndersuit`: the thigh triangles facing the panel's way mark where it may be
+  (`MarkPanelSide`: 2 facing in or across, to -0.1; 1 leaning out by up to half, to -0.5, front or
+  back; they vote limb as any limb triangle). After the votes each texel there is judged by its own
+  colour. Measured texel by texel, the panel is 39 degrees and up, the plates 36 and down (doll: 88%
+  of each on its side; in-game alike). A yellow texel (38 to 70) is yellow when its 5x5 neighbourhood
+  holds more yellow than orange; any other texel (orange, the line, a shade) only deep in yellow (ten
+  more of it round it), so the line Echoes draws stays the plate's.
+- The panel is the yellow texels joined, side by side through yellow, to one where it surely is
+  (mark 2). It ends along Echoes' line and reaches round the back of the thigh as far as the panel
+  does there. A plate's lighter patch, as yellow but cut off from the panel by that line or the
+  plate's orange (test 34's wedges at the back), is not joined and stays purple.
+- On the way: the user's circles on the PC render of the first version of this (back of both
+  thighs, both bodies) were a strip of the panel beside the line painted purple. Traced pixel by
+  pixel to the triangles under them: the facing cut of test 35 (leaning out only facing forward),
+  5442 of 5455 such pixels on the doll, 3527 of 3532 in-game. Cut at -0.5 throughout instead, the
+  wedges came back (their texels are as yellow as the panel); grown from the inner thigh, they do
+  not.
+- Checked on the PC with both discs: the front renders pixel for pixel the version before (the look
+  the user approved); at the circled spots the strip is yellow to the line (Varia's yellow painted
+  purple there: 5502 to 3689 pixels on the doll, 3551 to 1181 in-game, the rest the plates' light
+  patches, rightly purple); no wedges; the side's outer plates whole.
 - Needs the Echoes suits imported again (version 17).
 
 What to look for in test 36:
 - After the import, the doll from behind and the in-game body up close, in Gravity's and Phazon's
-  colours: the panel's edges where Echoes' Varia has its red lines, no slivers or ragged bits.
+  colours: the panel's edges where Echoes' Varia has its red lines, the strip beside them at the
+  back of the thighs yellow (Phazon: the abdomen's grey), no wedges, no slivers or ragged bits.

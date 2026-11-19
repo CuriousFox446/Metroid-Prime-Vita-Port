@@ -1830,7 +1830,7 @@ bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints,
 }
 
 // Limb and other votes over a texture's texels (LimbTexels), and where a thigh triangle facing the
-// panel's way lies (MarkPanelSide, KeepUndersuit).
+// panel's way lies (MarkPanelSide, KeepUndersuit): 1 leaning out by up to half, 2 facing in or across.
 struct TexelVotes {
   int width = 0, height = 0;
   std::vector<uint16_t> limb, other;
@@ -1872,23 +1872,30 @@ void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
   });
 }
 
-// The texels of a thigh triangle facing the panel's way (KeepUndersuit).
-void MarkPanelSide(TexelVotes& votes, const float (&uv)[3][2]) {
-  ForEachTexel(votes.width, votes.height, uv, [&votes](size_t k) { votes.panelSide[k] = 1; });
+// The texels of a thigh triangle facing the panel's way (KeepUndersuit): `inward` for one facing in
+// or across, where the panel surely is.
+void MarkPanelSide(TexelVotes& votes, const float (&uv)[3][2], bool inward) {
+  const uint8_t mark = inward ? 2 : 1;
+  ForEachTexel(votes.width, votes.height, uv, [&votes, mark](size_t k) {
+    votes.panelSide[k] = std::max(votes.panelSide[k], mark);
+  });
 }
 
 // The thighs' undersuit panel, texel by texel, out of the limbs `limb` (LimbTexels) of the texture
 // `rgba`. Where a thigh triangle facing the panel's way lies (`panelSide`; and the texels no triangle
 // covers two round it, as LimbTexels fills them), a texel of the undersuit's yellow (38 to 70
-// degrees) is the panel's when its 5x5 neighbourhood holds more of that yellow than of the plates'
+// degrees) is yellow when its 5x5 neighbourhood holds more of that yellow than of the plates'
 // orange (warm, below 38), and any other texel (orange, the line between, a shade) when it lies
-// deep in the yellow (ten more of it than of orange round it): it goes with the torso. Measured
-// texel by texel on Echoes' Varia, the panel is 39 degrees and up, the plates 36 and down, the
-// abdomen 36 to 54. So the panel ends where the texture's colour turns, along the line Echoes draws
-// between it and a plate (that line stays the plate's), and a plate's highlight or a shade in the
-// panel, smaller than the window, stays with its side. (Whole triangles took one side or the other
-// till 0.46.0 test 35: a triangle across that line left a sliver of the wrong colour, and the
-// low-poly in-game body's edges were ragged.)
+// deep in the yellow (ten more of it than of orange round it). Measured texel by texel on Echoes'
+// Varia, the panel is 39 degrees and up, the plates 36 and down, the abdomen 36 to 54. The panel is
+// then the yellow texels joined (side by side, through yellow) to one a triangle facing in or across
+// covers (`panelSide` 2): it goes with the torso. So the panel ends where the texture's colour turns,
+// along the line Echoes draws between it and a plate (that line stays the plate's), round the back
+// of the thigh as far as it reaches; and a plate's lighter patch, as yellow but cut off from the
+// panel by that line or the plate's orange (the wedges at the back of the thighs, test 34), stays
+// with the plate, as a highlight or a shade smaller than the window stays with its side. (Whole
+// triangles took one side or the other till 0.46.0 test 35: a triangle across that line left a
+// sliver of the wrong colour, and the low-poly in-game body's edges were ragged.)
 void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, std::vector<uint8_t>& limb) {
   const int w = votes.width, h = votes.height;
   const size_t count = size_t(w) * size_t(h);
@@ -1903,22 +1910,41 @@ void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, st
   const auto at = [w, h](int x, int y) {
     return size_t(((y % h) + h) % h) * size_t(w) + size_t(((x % w) + w) % w);
   };
+  // 0: not the panel's; 1: yellow where the panel may be; 2: that, where it surely is.
+  std::vector<uint8_t> yellow(count, 0);
+  std::vector<size_t> grow;
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
       const size_t k = size_t(y) * size_t(w) + size_t(x);
       if (limb[k] == 0) continue;
-      bool panel = votes.panelSide[k] != 0;
-      if (!panel && votes.limb[k] + votes.other[k] == 0) {
-        for (int dy = -2; dy <= 2 && !panel; ++dy) {
-          for (int dx = -2; dx <= 2 && !panel; ++dx) panel = votes.panelSide[at(x + dx, y + dy)] != 0;
+      uint8_t side = votes.panelSide[k];
+      if (side == 0 && votes.limb[k] + votes.other[k] == 0) {
+        for (int dy = -2; dy <= 2; ++dy) {
+          for (int dx = -2; dx <= 2; ++dx) side = std::max(side, votes.panelSide[at(x + dx, y + dy)]);
         }
       }
-      if (!panel) continue;
+      if (side == 0) continue;
       int sum = 0;
       for (int dy = -2; dy <= 2; ++dy) {
         for (int dx = -2; dx <= 2; ++dx) sum += tone[at(x + dx, y + dy)];
       }
-      if (tone[k] > 0 ? sum > 0 : sum >= 10) limb[k] = 0;
+      if (!(tone[k] > 0 ? sum > 0 : sum >= 10)) continue;
+      yellow[k] = side;
+      if (side == 2) grow.push_back(k);
+    }
+  }
+  // From where the panel surely is, through yellow side by side.
+  for (const size_t k : grow) limb[k] = 0;
+  while (!grow.empty()) {
+    const size_t k = grow.back();
+    grow.pop_back();
+    const int x = int(k % size_t(w)), y = int(k / size_t(w));
+    for (const auto& [dx, dy] : {std::pair{1, 0}, std::pair{-1, 0}, std::pair{0, 1}, std::pair{0, -1}}) {
+      const size_t n = at(x + dx, y + dy);
+      if (yellow[n] != 0 && limb[n] != 0) {
+        limb[n] = 0;
+        grow.push_back(n);
+      }
     }
   }
 }
@@ -2925,23 +2951,23 @@ bool Import(const Io& io, Result& result, std::string& error) {
             // texel by texel): Prime's Gravity Suit keeps it yellow between the purple thigh plates, as
             // its abdomen, and its Phazon Suit as dark as its abdomen. Painted as a limb, the inner
             // thighs came out purple and darker than the lower torso (the user, after 0.46.0 test 33).
-            // Only where the thigh faces in or across (to -0.1): the plates' lighter patches (the
-            // in-game body's, facing well out) and the yellow behind the outer plates are of the
-            // undersuit's colour too, and Prime paints them purple. The panel's front leans a little
-            // out, so a triangle facing out by up to half (-0.5) is the panel's side too when it faces
-            // forward; cut at -0.1 throughout, the front went purple, short of the look the user
-            // wanted. Facing back, that lean is the plates' lighter wedges at the back of the thighs
-            // (the user's photos of test 34).
-            bool panelSide = false;
+            // Not where the thigh faces well out (past -0.5): the in-game body's plates have lighter
+            // patches there, and there is yellow behind the outer plates, both purple in Prime's. The
+            // panel leans out by up to half at its front and wraps round the back of the thigh so
+            // too: cut at -0.1, its front went purple (tests 33-34), and cut there facing back (test
+            // 35, against the plates' lighter wedges at the back, which the texels' colour now keeps
+            // purple), the strip of it beside Echoes' line at the back did (the user's circles).
+            // Facing in or across (to -0.1), the panel surely is there; leaning out by up to half,
+            // it may be, joined to it (KeepUndersuit).
+            double middle = -1.0;
             if (limb && hips >= 2) {
-              const Facing facing = FacingOf(body.model, pos);
-              panelSide = facing.middle >= -0.1 || (facing.middle >= -0.5 && facing.front > 0.0);
+              middle = FacingOf(body.model, pos).middle;
             }
             for (const uint32_t id : ids) {
               Map* map = use(id);
               if (map == nullptr) continue;
               VoteTriangle(map->votes, uv, limb);
-              if (panelSide) MarkPanelSide(map->votes, uv);
+              if (middle >= -0.5) MarkPanelSide(map->votes, uv, middle >= -0.1);
             }
           },
           &why);
