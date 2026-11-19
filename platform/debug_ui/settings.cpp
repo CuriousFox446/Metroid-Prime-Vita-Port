@@ -529,25 +529,25 @@ const SettingKey kSettingKeys[] = {
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::FirstPersonCannonShown()); }, false, "0", "1"},
     {"echoes_cannon_looks",
      [](const std::string& value) {
-       // Power's, Ice's, Wave's and Plasma's, comma-separated: power, dark, light or annihilator.
+       // Power's, Ice's, Wave's and Plasma's, comma-separated: for Ice, Wave and Plasma their Echoes
+       // look's key (dark, light, annihilator) or prime for the original's; anything else Echoes'.
        size_t at = 0;
        for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams && at <= value.size(); ++beam) {
          const size_t end = std::min(value.find(',', at), value.size());
          const std::string key = value.substr(at, end - at);
-         for (int look = 0; look < PortEchoesSuits::kCannonLookBeams; ++look) {
-           if (SDL_strcasecmp(key.c_str(), PortEchoesSuits::kCannonLookKeys[look]) == 0) {
-             PortEchoesSuits::SetCannonLook(beam, look);
-           }
-         }
+         PortEchoesSuits::SetCannonOriginal(beam,
+                                            SDL_strcasecmp(key.c_str(), PortEchoesSuits::kCannonOriginalKey) == 0);
          at = end + 1;
        }
      },
      [](std::ostream& out) {
        for (int beam = 0; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
-         out << (beam != 0 ? "," : "") << PortEchoesSuits::kCannonLookKeys[PortEchoesSuits::CannonLook(beam)];
+         out << (beam != 0 ? "," : "")
+             << (PortEchoesSuits::CannonOriginal(beam) ? PortEchoesSuits::kCannonOriginalKey
+                                                       : PortEchoesSuits::kCannonEchoesKeys[beam]);
        }
      },
-     false, "power,dark,light,annihilator", "power,power,power,power"},
+     false, "power,dark,light,annihilator", "power,prime,prime,prime"},
     {"echoes_suit_looks",
      [](const std::string& value) {
        // Power's, Gravity's, Varia's and Phazon's, comma-separated: prime, varia, dark, light or colours.

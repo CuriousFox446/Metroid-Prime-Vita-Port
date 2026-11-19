@@ -27,7 +27,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 12: each look written once under its own ids (Wear), served over whichever suit wears it
 //     (echoes_suit_looks); Echoes' Varia also in Prime's Gravity and Phazon colours.
 // 13: Prime's bodies with Echoes' Varia helmet (kLookHelmet, HelmetId).
-inline constexpr int kVersion = 13;
+// 14: the cannon's sets 5-7, Prime's original Ice, Wave and Plasma looks (kOriginalSets).
+inline constexpr int kVersion = 14;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
@@ -140,21 +141,32 @@ inline constexpr const char* kMissileAnimNames[] = {"PortEchoes_FromMissile", "P
                                                     "PortEchoes_MissileShoot", "PortEchoes_MissileReload",
                                                     "PortEchoes_MissileFirstShoot"};
 inline constexpr uint32_t kFirstMissileShot = 0xB9A04995;  // genericMissleFirstShoot
-// The textures the Echoes cannon of Ice, Wave and Plasma wears (the setting echoes_cannon_looks,
-// in Power, Ice, Wave, Plasma order): its own Echoes counterpart's (Dark, Light, Annihilator) or
-// the Power Beam's. Only the material set changes: the beam keeps its own ANCS variant, so its
-// barrel's shape and motions (the user's choice, 0.46.0 test 30). Power always wears the Power
-// Beam's, Phazon its own. CannonLook gives the beam slot whose set it wears (0 or the beam).
+// The textures the Echoes cannon of Ice, Wave and Plasma wears (the setting echoes_cannon_looks, in
+// Power, Ice, Wave, Plasma order): Echoes' own for that beam (Dark, Light, Annihilator) or Prime's
+// original Ice, Wave or Plasma Beam's, as the user set them out (0.46.0 test 31). Only the material
+// set changes: the beam keeps its own ANCS variant, so its barrel's shape and missile motions.
+// Echoes built its beam sets on Prime's: its material 0 is Prime's material 0 and its material 3
+// Prime's material 2 (the beam's own scrolling textures), and its material 2 adds a body texture of
+// its own (Prime's body is the same grey for every beam). The import writes the originals as sets
+// kOriginalSets on (Ice, Wave, Plasma): Echoes' set of the beam with Prime's textures in those two
+// materials and the Power set's body and shine in material 2. Power and Phazon have no choice.
 inline constexpr int kCannonLookBeams = 4;
-inline constexpr const char* kCannonLookKeys[kCannonLookBeams] = {"power", "dark", "light", "annihilator"};
-inline constexpr const char* kCannonLookNames[kCannonLookBeams] = {"Echoes Power Beam", "Echoes Dark Beam",
-                                                                   "Echoes Light Beam", "Echoes Annihilator Beam"};
-int CannonLook(int beam);
-void SetCannonLook(int beam, int look);
+inline constexpr uint32_t kOriginalSets = 5;
+inline constexpr int kOriginalSetsVersion = 14;  // the first import with them
+inline constexpr const char* kCannonEchoesKeys[kCannonLookBeams] = {"power", "dark", "light", "annihilator"};
+inline constexpr const char* kCannonOriginalKey = "prime";
+inline constexpr const char* kCannonEchoesNames[kCannonLookBeams] = {"Power Beam", "Dark Beam (Echoes)",
+                                                                     "Light Beam (Echoes)", "Annihilator Beam (Echoes)"};
+inline constexpr const char* kCannonOriginalNames[kCannonLookBeams] = {"Power Beam", "Ice Beam (original)",
+                                                                       "Wave Beam (original)", "Plasma Beam (original)"};
+// Whether Ice, Wave or Plasma (beams 1-3) wears Prime's original look.
+bool CannonOriginal(int beam);
+void SetCannonOriginal(int beam, bool original);
 // The ANCS CGunWeapon::LoadGunModels loads for a beam's ANCS: Cannon(ancs) while the mod serves it
 // and the setting echoes_first_person_cannon (SetFirstPersonCannonShown) is on, else ancs.
-// *shaderSet gets the material set that cannon draws with (CGunWeapon x20c_shaderIdx: the beam's
-// CannonLook), -1 for Prime's cannon.
+// *shaderSet gets the material set that cannon draws with (CGunWeapon x20c_shaderIdx): the beam's
+// own, or its original (kOriginalSets + beam - 1) when chosen and the import has them; -1 for
+// Prime's cannon.
 uint32_t GunAncs(uint32_t ancs, int* shaderSet = nullptr);
 void SetFirstPersonCannonShown(bool shown);
 bool FirstPersonCannonShown();

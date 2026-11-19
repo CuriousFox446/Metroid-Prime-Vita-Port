@@ -2311,6 +2311,88 @@ bool SkinGroups(const std::vector<uint8_t>& cskr, std::vector<uint8_t>& bytes, u
   return true;
 }
 
+// The texture ids of a material's slots, from its set's list.
+bool MaterialTextureIds(const MaterialSet& set, size_t material, std::vector<uint32_t>& ids, std::string* error) {
+  const std::vector<uint8_t>& m = set.materials[material];
+  Reader r{m.data(), m.size()};
+  const uint32_t n = r.U32(4);
+  if (r.bad || !r.Has(8, size_t(n) * 4)) return Fail(error, "material " + std::to_string(material) + " cut short");
+  ids.clear();
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t index = r.U32(8 + size_t(i) * 4);
+    if (index >= set.textures.size()) {
+      return Fail(error, "material " + std::to_string(material) + " has a texture out of range");
+    }
+    ids.push_back(set.textures[index]);
+  }
+  return true;
+}
+
+// Prime's original look of a beam (Ice, Wave or Plasma) on Echoes' cannon (kOriginalSets): Echoes'
+// set of that beam (`echoes`, converted) with Prime's set of it (`prime`) in the two materials Echoes
+// built on Prime's, its material 0 from Prime's 0 and its 3 from Prime's 2 (the beam's scrolling
+// textures, and Prime's scrolling itself where the two draw alike), and the Power set's body and
+// shine in material 2, as Prime's body is the same for every beam. `note` gets what stayed Echoes'.
+bool OriginalGunSet(const std::vector<uint8_t>& echoes, const std::vector<uint8_t>& power,
+                    const std::vector<uint8_t>& prime, std::vector<uint8_t>& out, std::string& note,
+                    std::string* error) {
+  MaterialSet set, powerSet, primeSet;
+  if (!ParseSet(echoes, set, error) || !ParseSet(power, powerSet, error) || !ParseSet(prime, primeSet, error)) {
+    return false;
+  }
+  if (set.materials.size() < 4 || powerSet.materials.size() != set.materials.size() ||
+      primeSet.materials.size() < 3) {
+    return Fail(error, "its materials are not laid out as Prime's");
+  }
+  std::vector<std::vector<uint32_t>> ids(set.materials.size());
+  for (size_t m = 0; m < set.materials.size(); ++m) {
+    if (!MaterialTextureIds(set, m, ids[m], error)) return false;
+  }
+  struct Take {
+    size_t to, from;
+  };
+  for (const Take take : {Take{0, 0}, Take{3, 2}}) {
+    std::vector<uint32_t> primeIds;
+    if (!MaterialTextureIds(primeSet, take.from, primeIds, error)) return false;
+    if (primeIds.size() != ids[take.to].size()) {
+      return Fail(error, "Prime's material " + std::to_string(take.from) + " has " + std::to_string(primeIds.size()) +
+                             " textures, Echoes' " + std::to_string(take.to) + " " +
+                             std::to_string(ids[take.to].size()));
+    }
+    ids[take.to] = primeIds;
+    // The rest of Prime's material (blend, TEV stages, texgens, UV animations) when it draws the
+    // same vertices: the same vertex flags, and the flags its layout follows (konst colours, an
+    // indirect texture). The header (flags, slots, vertex flags, group) stays Echoes'.
+    std::vector<uint8_t>& mine = set.materials[take.to];
+    const std::vector<uint8_t>& theirs = primeSet.materials[take.from];
+    const size_t head = 16 + primeIds.size() * 4;
+    Reader a{mine.data(), mine.size()}, b{theirs.data(), theirs.size()};
+    const uint32_t layout = 0x408;
+    if (a.Has(0, head) && b.Has(0, head) && ((a.U32(0) ^ b.U32(0)) & layout) == 0 &&
+        ((a.U32(head - 8) ^ b.U32(head - 8)) & 0x00FFFFFF) == 0) {
+      mine.resize(head);
+      mine.insert(mine.end(), theirs.begin() + std::ptrdiff_t(head), theirs.end());
+    } else {
+      note += " material " + std::to_string(take.to) + " keeps Echoes' drawing;";
+    }
+  }
+  std::vector<uint32_t> powerIds;
+  if (!MaterialTextureIds(powerSet, 2, powerIds, error)) return false;
+  if (powerIds.size() != ids[2].size()) return Fail(error, "the Power set's material 2 is not its own");
+  ids[2] = powerIds;
+  // The set's own list: the textures its materials use, so it loads none of the Echoes beam's.
+  set.textures.clear();
+  for (size_t m = 0; m < set.materials.size(); ++m) {
+    for (size_t i = 0; i < ids[m].size(); ++i) {
+      auto it = std::find(set.textures.begin(), set.textures.end(), ids[m][i]);
+      if (it == set.textures.end()) it = set.textures.insert(set.textures.end(), ids[m][i]);
+      Set32(set.materials[m], 8 + i * 4, uint32_t(it - set.textures.begin()));
+    }
+  }
+  out = WriteSet(set);
+  return true;
+}
+
 }  // namespace
 
 bool SwapHead(PrimeCmdl& body, std::vector<uint8_t>& skin, const PrimeCmdl& donor,
@@ -2934,6 +3016,31 @@ bool Import(const Io& io, Result& result, std::string& error) {
         std::vector<std::vector<uint8_t>> sets;
         for (const uint32_t set : kGunSets) sets.push_back(model.materialSets[set]);
         model.materialSets = std::move(sets);
+        // Then Prime's original Ice, Wave and Plasma looks (kOriginalSets on), from Prime's own gun
+        // (the same id), its sets by beam.
+        static_assert(kOriginalSets == std::size(kGunSets), "the originals follow the beam sets");
+        static const char* const kOriginalOf[kCannonLookBeams] = {"", "Ice", "Wave", "Plasma"};
+        std::vector<uint8_t> primeGun;
+        PrimeCmdl prime;
+        why.clear();
+        if (!io.retail(kCMDL, gun.cmdl, primeGun) || !ReadCmdl(primeGun, prime, &why) ||
+            prime.materialSets.size() < size_t(kCannonLookBeams)) {
+          error = "Prime's " + std::string(gun.what) + " " + Hex8(gun.cmdl) + " is missing or unreadable" +
+                  (why.empty() ? "" : ": " + why);
+          return false;
+        }
+        for (int beam = 1; beam < kCannonLookBeams; ++beam) {
+          std::vector<uint8_t> set;
+          std::string note;
+          if (!OriginalGunSet(model.materialSets[beam], model.materialSets[0], prime.materialSets[beam], set, note,
+                              &why)) {
+            error = std::string(gun.what) + ": the original " + kOriginalOf[beam] + " Beam look: " + why;
+            return false;
+          }
+          model.materialSets.push_back(std::move(set));
+          log("echoes: " + std::string(gun.what) + " set " + std::to_string(model.materialSets.size() - 1) +
+              ", the original " + kOriginalOf[beam] + " Beam" + note);
+        }
       }
       outCmdl = WriteCmdl(model);
       if (!ConvertCskr(cskr, echoesCinf, primeCinf, outCskr, &folded, &why)) {

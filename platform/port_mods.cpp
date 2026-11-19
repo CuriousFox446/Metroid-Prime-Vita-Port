@@ -104,6 +104,8 @@ int sServedSuitLooks[PortEchoesSuits::kSuitLookSuits] = {};
 // The Prime body CMDLs it serves with Echoes' helmet on (PortEchoesSuits::HasOwnHelmet): Prime's
 // bodies still, so not in sEchoesBodies (their boots and parts stay), but with their own visor.
 std::set<uint32_t> sEchoesHelmetBodies;
+// The echoes-suits import's version (its stamp's first number; 0 for none): what its files hold.
+int sEchoesImportVersion = 0;
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
 // envfx.bin: Remastered's EnvironmentFX textures (port_envfx_assets.h).
@@ -492,16 +494,14 @@ bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
 }
 namespace {
 bool sEchoesCannonShown = true;
-int sEchoesCannonLooks[PortEchoesSuits::kCannonLookBeams] = {0, 1, 2, 3};
+// Ice, Wave and Plasma wear Prime's original look (echoes_cannon_looks); Power has no choice.
+bool sEchoesCannonOriginal[PortEchoesSuits::kCannonLookBeams] = {};
 }
-int PortEchoesSuits::CannonLook(int beam) {
-  return beam >= 0 && beam < kCannonLookBeams ? sEchoesCannonLooks[beam] : beam;
+bool PortEchoesSuits::CannonOriginal(int beam) {
+  return beam >= 1 && beam < kCannonLookBeams && sEchoesCannonOriginal[beam];
 }
-void PortEchoesSuits::SetCannonLook(int beam, int look) {
-  // Ice, Wave and Plasma: their own counterpart's textures or the Power Beam's; Power has no choice.
-  if (beam >= 1 && beam < kCannonLookBeams && (look == 0 || look == beam)) {
-    sEchoesCannonLooks[beam] = look;
-  }
+void PortEchoesSuits::SetCannonOriginal(int beam, bool original) {
+  if (beam >= 1 && beam < kCannonLookBeams) sEchoesCannonOriginal[beam] = original;
 }
 void PortEchoesSuits::SetFirstPersonCannonShown(bool shown) { sEchoesCannonShown = shown; }
 int PortEchoesSuits::SuitLook(int suit) {
@@ -531,9 +531,14 @@ uint32_t PortEchoesSuits::GunAncs(uint32_t ancs, int* shaderSet) {
   for (int i = 0; i < int(std::size(kBeamAncs)); ++i) {
     if (kBeamAncs[i] == ancs) beam = i;
   }
-  // The variant's material sets are in beam slot order (kGunSets), so a slot's set is its index;
-  // the cannon itself (its anims, its shape) is the beam's own.
-  if (shaderSet != nullptr && beam >= 0) *shaderSet = CannonLook(beam);
+  // The variant's material sets are in beam slot order (kGunSets), so a beam's set is its index, and
+  // Prime's original Ice, Wave and Plasma looks follow them (an import from before has none); the
+  // cannon itself (its anims, its shape) is the beam's own.
+  if (shaderSet != nullptr && beam >= 0) {
+    *shaderSet = CannonOriginal(beam) && PortMods::sEchoesImportVersion >= kOriginalSetsVersion
+                     ? int(kOriginalSets) + beam - 1
+                     : beam;
+  }
   return Cannon(ancs);
 }
 
@@ -714,6 +719,7 @@ void Initialize() {
   sDarkSamusServed = false;
   for (int& served : sServedSuitLooks) served = PortEchoesSuits::kLookPrime;
   sEchoesHelmetBodies.clear();
+  sEchoesImportVersion = 0;
   {
     std::lock_guard<std::mutex> lock(sEffectIdsMutex);
     sEffectIdMapPath.clear();
@@ -769,8 +775,9 @@ void Initialize() {
       }
       if (info.name == PortEchoesSuits::kModName) {
         std::ifstream echoesStamp(modDir / PortEchoesSuits::kStampName);
-        if (ImportStampStale(echoesStamp.is_open() ? port::ReadAllText(echoesStamp) : std::string(),
-                             PortEchoesSuits::kVersion)) {
+        const std::string text = echoesStamp.is_open() ? port::ReadAllText(echoesStamp) : std::string();
+        sEchoesImportVersion = std::atoi(text.c_str());
+        if (ImportStampStale(text, PortEchoesSuits::kVersion)) {
           Message(info.name + " was imported by an older version; import the Echoes suits again");
         }
       }

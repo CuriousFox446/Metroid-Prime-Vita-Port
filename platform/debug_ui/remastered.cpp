@@ -407,23 +407,25 @@ void DrawBuiltinMods() {
     }
     ItemHelp("Off keeps Prime's own arm cannon in first person; the Echoes Suit bodies stay. Applies the next "
              "time a beam is selected.");
-    // Ice, Wave and Plasma: their Echoes counterpart's textures or the Power Beam's (the shape stays).
+    // Ice, Wave and Plasma: their Echoes beam's textures or Prime's original beam's (the shape stays).
     static const char* const kBeamNames[PortEchoesSuits::kCannonLookBeams] = {"Power Beam", "Ice Beam",
                                                                               "Wave Beam", "Plasma Beam"};
     ImGui::BeginDisabled(!cannon);
     for (int beam = 1; beam < PortEchoesSuits::kCannonLookBeams; ++beam) {
-      const char* const choices[2] = {PortEchoesSuits::kCannonLookNames[beam], PortEchoesSuits::kCannonLookNames[0]};
-      int choice = PortEchoesSuits::CannonLook(beam) == beam ? 0 : 1;
+      const char* const choices[2] = {PortEchoesSuits::kCannonOriginalNames[beam],
+                                      PortEchoesSuits::kCannonEchoesNames[beam]};
+      int choice = PortEchoesSuits::CannonOriginal(beam) ? 0 : 1;
       char label[64];
       std::snprintf(label, sizeof(label), "%s's cannon", kBeamNames[beam]);
       if (ImGui::Combo(label, &choice, choices, 2)) {
-        PortEchoesSuits::SetCannonLook(beam, choice == 0 ? beam : 0);
+        PortEchoesSuits::SetCannonOriginal(beam, choice == 0);
         MarkDirty();
       }
     }
     ImGui::EndDisabled();
-    ItemHelp("The textures each beam's cannon wears: its own Echoes beam's (Dark, Light, Annihilator) or the "
-             "Power Beam's. Its shape and motions stay the beam's. Applies the next time a beam is selected.");
+    ItemHelp("The textures each beam's cannon wears: Prime's original Ice, Wave or Plasma Beam's, or Echoes' "
+             "Dark, Light or Annihilator Beam's, on Echoes' cannon (its shape and missile motions stay). "
+             "Applies the next time a beam is selected.");
     // Power, Gravity and Phazon each pick one of their two looks (kSuitLookChoices); the Varia is
     // always Echoes' Varia (CPlayerState::EPlayerSuit indices).
     static const int kSuitOrder[3] = {0, 1, 3};

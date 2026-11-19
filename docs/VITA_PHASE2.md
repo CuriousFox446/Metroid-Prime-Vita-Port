@@ -4333,26 +4333,45 @@ What to look for in test 30:
   Prime's boots and legs.
 - Mods > Echoes: change a suit's look (say Gravity to Echoes Dark Suit), reload the mods, check it.
 
-## 0.46.0 test 31: two choices each, the cannons' textures only
+## 0.46.0 test 31: two choices each; the cannons' original looks (echoes-suits 14)
 
 The user set the choices out after test 30 was staged (before trying it): "only the textures only
 for the arm canons ... only two options for each beams and there should not be an option for the
 power beam. the power should have only two options, prime's own or echoes helmet. the gravity suit
 should have only two options, dark suit or the echoes varia in it's colors and the phazon suit is the
 same with only light suit or the echoes varia in it's colors, there should not be an option for the
-varia suit".
-- **Cannons** (`echoes_cannon_looks`, same key): Ice, Wave and Plasma each wear their counterpart's
-  material set (Dark, Light, Annihilator) or the Power Beam's; `GunAncs` now always hands the beam
-  its own ANCS variant (its shape and motions), only `x20c_shaderIdx` follows the choice. Power has
-  none (`SetCannonLook` takes only 0 or the beam's own slot for beams 1-3).
+varia suit". Then, for the cannons: "Ice beam: original ice beam texture or dark beam. wave beam:
+original wave beam texture or light beam. plasma beam: original plasma beam texture or annihilator
+beam".
+- **Cannons** (`echoes_cannon_looks`, same key; `prime` for the original): Ice, Wave and Plasma each
+  wear their Echoes beam's set (Dark, Light, Annihilator) or Prime's original look. `GunAncs` always
+  hands the beam its own ANCS variant (Echoes' barrel shape and missile motions; Prime's own gun
+  models stay unused, as the user asked); only `x20c_shaderIdx` follows the choice. Power has none.
+- **The originals** are new sets 5-7 of the cannon (`kOriginalSets`; `OriginalGunSet` in the
+  import). Both discs' gun CMDL 19AE626C compared material by material: Echoes built its beam sets
+  on Prime's. Its material 0 is Prime's material 0 byte for byte (TEV, texgens, UV scroll), and its
+  material 3 Prime's material 2, the beam's own scrolling pair. Only Plasma's scroll differs there
+  (Prime 6.67, Echoes 10). Its material 2 is a body texture and shine of each beam's own, which
+  Prime does not have (Prime's body is the same for every beam). So each original is Echoes' set
+  of that beam with Prime's textures in materials 0 and 3, Prime's material bodies where the vertex
+  layouts match (all of them on these discs: Plasma keeps its 6.67 scroll), and the Power set's
+  body and shine (8C15F00E, 7F202198) in material 2. Prime's textures stay on the retail disc. The
+  game uses the originals only from an import of version 14 (`sEchoesImportVersion`, read from the
+  stamp); an older import's cannon has five sets, so the choice falls back to the Echoes look.
 - **Suits** (`echoes_suit_looks`, same key): `kSuitLookChoices` gives each suit's two looks: Power
   Prime's own or Echoes' helmet; Gravity the Dark Suit or the Varia in its colours; Phazon the
   Light Suit or the Varia in its colours; Varia only Echoes' Varia. `SetSuitLook` takes no other.
   The defaults stay (helmet, colours, varia, colours).
-- The menu shows a two-way choice for Ice's, Wave's and Plasma's cannon and for the Power, Gravity
-  and Phazon Suits. The import is test 30's (mod version 13): one re-import covers both.
+- The menu shows a two-way choice for Ice's, Wave's and Plasma's cannon ("Ice Beam (original)" or
+  "Dark Beam (Echoes)"...) and for the Power, Gravity and Phazon Suits.
+- Run on the PC with both discs (`~/echoes_suits/import_repo`): 321 files, only the arm cannon CMDL
+  differs from version 13's; its sets 5-7 carry Prime's Ice (842E5E79; 2EE307AE, 142BF3A2), Wave
+  (73934A6F; DCA4E794) and Plasma (E58C24C1, 20BEA729 in both) textures.
+- Needs the Echoes suits imported again (version 14; it covers test 30's suits too).
 
 What to look for in test 31:
-- Mods > Echoes: Ice's cannon set to the Echoes Power Beam: the Power Beam's colours on Ice's own
-  barrel shape. Back to the Dark Beam: the purple again.
+- After the import: Mods > Echoes, Ice's cannon to "Ice Beam (original)": Prime's icy blue strips
+  on Echoes' barrel, the body grey as the Power Beam's; the missile opening is still Echoes'. The
+  same for Wave (Prime's purple) and Plasma (Prime's orange-red). Back to the Echoes beam: Dark's,
+  Light's, Annihilator's colours again.
 - The suit choices as above; Varia has none.
