@@ -50,17 +50,18 @@ void ScaleAcross(CGuiWidget& widget, float scale) {
 }
 
 // Port: the pause screen keeps its proportions in widescreen (the camera matches the screen's
-// aspect), its sides spread to the screen's edges with the Widescreen HUD. A disc patched for
-// 16:9 has its frames made for a picture the TV stretches across a 16:9 screen: the whole frame
-// widened and pieces of it narrowed against the stretch. Spread, the panels came apart from the
-// middle one ("it looks terrible spread apart like that compared to my patched game image"),
-// 0.46.0 test 38: such a frame is drawn as the patch expects instead, its authored projection
-// stretched across the screen.
-// The user's patched disc (against Rev 2's FRME_PauseScreen and FRME_PauseScreenInstructions): the
-// head widget's m00 1 to 1.12, and the title's text pane and the zoom prompt's icon 1 to 0.75. Test
-// 39 ("The pause menu is still the same with widescreen hud enabled with the unpatched image"):
-// with the Widescreen HUD on a wide screen, an unpatched disc's pause frame takes the same edits
-// here and is drawn so too; with it off, it keeps its proportions as before.
+// aspect). With the Widescreen HUD its sides were spread to the screen's edges too, and the panels
+// came apart from the middle one ("it looks terrible spread apart like that compared to my patched
+// game image"): it is never spread now (0.46.0 test 40).
+// The user's disc is patched for 16:9 (against Rev 2's FRME_PauseScreen and
+// FRME_PauseScreenInstructions): the head widget's m00 1 to 1.12, and the title's text pane and the
+// zoom prompt's icon 1 to 0.75. The camera hangs from the head widget too, and its view takes the
+// camera's rotation transposed (CGraphics::SetViewPointMatrix), so the head's scale counts twice:
+// the layout 1.25 wider, made for a picture at the screen's own aspect. The user's photo of the
+// patched game is that: an earlier build, matched, not spread. Tests 38 and 39 stretched it across
+// the screen instead, 1.32 times wider again, off both edges ("it's too wide").
+// With the Widescreen HUD on a wide screen, an unpatched disc's pause frame takes the same edits
+// here, for the same look; with it off it is the original's, its proportions kept.
 void PortPauseCamera(CGuiFrame& frame) {
   CGuiCamera* cam = frame.GetFrameCamera();
   if (cam == nullptr) {
@@ -68,11 +69,8 @@ void PortPauseCamera(CGuiFrame& frame) {
   }
   CGuiWidget* head = frame.FindWidget("kGSYS_HeadWidgetID");
   const bool patched = head != nullptr && std::fabs(head->GetIdleXform().Get00() - 1.f) > 0.01f;
-  if (patched) {
-    cam->SetAspectMatch(false);
-    return;
-  }
-  if (head != nullptr && PortDebug::HudWide() && PortDebug::AspectMode() != PortDebug::kAspect_4_3) {
+  if (!patched && head != nullptr && PortDebug::HudWide() &&
+      PortDebug::AspectMode() != PortDebug::kAspect_4_3) {
     constexpr float kWiden = 1.12f;
     constexpr float kNarrow = 0.75f;
     ScaleAcross(*head, kWiden);
@@ -81,10 +79,8 @@ void PortPauseCamera(CGuiFrame& frame) {
         ScaleAcross(*widget, kNarrow);
       }
     }
-    cam->SetAspectMatch(false);
-    return;
   }
-  cam->SetAspectMatch(true);
+  cam->SetAspectMatch(true, false);
 }
 } // namespace
 #endif
@@ -210,8 +206,9 @@ bool CPauseScreen::CheckLoadComplete(const CStateManager& mgr) {
     }
     x34_loadedPauseScreenInstructions = x28_pauseScreenInstructions.GetObject();
 #ifdef TARGET_PC
-    // Port: keep the pause screen's proportions in widescreen instead of
-    // stretching it across the wider viewport (a disc patched for 16:9 aside).
+    // Port: keep the pause screen's proportions in widescreen instead of stretching it across the
+    // wider viewport, unspread (PortPauseCamera). This frame is the pool's: widened once, it reads
+    // as patched after, so a pause screen opened again does not widen it further.
     PortPauseCamera(*x34_loadedPauseScreenInstructions);
 #endif
     InitializeFrameGlue();

@@ -4662,3 +4662,25 @@ disc's were matched and spread as before.
 What to look for in test 39:
 - With the Rev 2 disc (or any unpatched one) and the Widescreen HUD on: the pause screen as with the
   patched disc, its panels together, the "[ Inventory ]" heading and the zoom prompt in proportion.
+
+## 0.46.0 test 40: the pause screen matched and never spread
+
+The user, with a photo of test 39 beside their photo of the patched game: "it's too wide" (the panels'
+outer icon columns off both edges of the screen).
+- The head widget's scale counts twice: the camera hangs from the head widget as the panels do
+  (FRME_PauseScreen: the camera, the lights and `basewidget_pivot`, everything else's root, are
+  its children), and the view takes the camera's rotation transposed
+  (CGraphics::SetViewPointMatrix, the original's), not inverted. The patch's 1.12 widens the layout
+  1.25, for a picture drawn at the screen's own aspect. The user's photo of the patched game is that:
+  an earlier build (its prompts the GameCube's Y and Start), the pause screen matched to the screen
+  and not spread (the Widescreen HUD off then: test 36's log still had `hud_wide=0`). Stretched
+  across the screen as in tests 38 and 39, it came out 1.32 times wider again.
+- `PortPauseCamera`: the pause frames are matched and never spread (`SetAspectMatch(true, false)`),
+  whatever the Widescreen HUD (the in-game HUD keeps its spread). An unpatched disc's frames take the
+  patch's edits with the Widescreen HUD on a wide screen (as test 39), so both discs look the same;
+  with it off, the original's layout, unspread. The instructions frame is the pool's: widened once,
+  it reads as patched after, so it is not widened again.
+
+What to look for in test 40:
+- The pause screen with the patched disc, and with the Rev 2 one and the Widescreen HUD on: as the
+  user's photo of the patched game, the icon columns at both sides on the screen.
