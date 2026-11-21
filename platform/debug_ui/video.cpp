@@ -608,15 +608,14 @@ void DrawVideoQuality() {
 #endif
   }
 
+#ifndef __vita__
+  // Not on the Vita: since 0.46.0 test 43 it draws at its screen's 544 lines, the user's call, so
+  // dynamic resolution, the resolution scale and the upscale sharpening are not offered there (a
+  // saved render_scale still applies, clamped to PortDebug::kVitaScaleMin/Max, till the settings
+  // are reset).
   // Dynamic resolution's mode is the two saved settings together: Auto draws up to the
   // window's own scale (auto render scale), User up to the resolution scale set.
-#ifdef __vita__
-  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), from 360 to 544 lines
-  // (PortDebug::kVitaScaleMinLines, kVitaScaleMaxLines): the user's range (0.46.0 test 42).
-  constexpr float kScaleMax = PortDebug::kVitaScaleMax;
-#else
   constexpr float kScaleMax = PortDebug::kRenderScaleMax;
-#endif
   int dynMode = !sDynamicRes ? 0 : sRenderScale <= 0.f ? 1 : 2;
   if (ImGui::Combo("Dynamic resolution", &dynMode, "Off\0" "Auto\0" "User\0")) {
     sDynamicRes = dynMode != 0;
@@ -651,36 +650,18 @@ void DrawVideoQuality() {
     char label[32];
     std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
     const char* const scaleName = dynMode == 2 ? "Maximum resolution scale" : "Resolution scale";
-#ifdef __vita__
-    // In steps of 8 lines (360, 368 ... 480 ... 544): one a press of the D-pad.
-    {
-      constexpr int kSteps = (kVitaScaleMaxLines - kVitaScaleMinLines) / kVitaScaleStepLines;
-      int step = std::clamp(static_cast< int >(std::lround((scale * kVitaScreenLines - kVitaScaleMinLines) /
-                                                           kVitaScaleStepLines)),
-                            0, kSteps);
-      if (ImGui::SliderInt(scaleName, &step, 0, kSteps, label, ImGuiSliderFlags_AlwaysClamp)) {
-        sPendingScale = static_cast< float >(kVitaScaleMinLines + step * kVitaScaleStepLines) / kVitaScreenLines;
-      }
-    }
-#else
     if (ImGui::SliderFloat(scaleName, &scale, 1.f, kScaleMax, label, ImGuiSliderFlags_AlwaysClamp)) {
       sPendingScale = scale;
     }
-#endif
     if (sPendingScale > 0.f && !ImGui::IsItemActive()) {
       SetRenderScale(std::min(sPendingScale, kScaleMax));
       MarkDirty();
       sPendingScale = 0.f;
     }
-#ifdef __vita__
-    ImGui::SetItemTooltip("The resolution the game draws at, 360 to 544 lines (1x is the Vita's screen,\n"
-                          "960x544). Below 544 the picture is softer and lighter on the GPU.");
-#else
     ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
                           "higher values use more GPU memory. Above 2x it supersamples, and each step\n"
                           "costs much more GPU time; 8x with MSAA needs about 2 GB of video memory.\n"
                           "Ctrl+click to type a value.");
-#endif
   } else if (sRenderScale <= 0.f) {
     ImGui::TextDisabled("Window resolution: %.2fx (%dp)", BaseRenderScale(), DrawnLines(0.f));
   }
@@ -699,14 +680,9 @@ void DrawVideoQuality() {
       ResetDynamicRes();
       MarkDirty();
     }
-#ifdef __vita__
-    ImGui::SetItemTooltip("The lowest it drops to. Below 1x it draws fewer pixels than the Vita's screen\n"
-                          "and looks softer; at 1x it never draws below the screen's own resolution.");
-#else
     ImGui::SetItemTooltip("The lowest it drops to. Below 1x it draws fewer pixels than the GameCube did\n"
                           "and looks softer, which lets a phone reach 90 or 120 fps; the lowest values are\n"
                           "for very high resolution displays.");
-#endif
     // The left end is "Display" (saved as 0).
     constexpr int kTargetMin = 30;
     constexpr int kTargetMax = kFpsCapMax;
@@ -723,14 +699,8 @@ void DrawVideoQuality() {
       ResetDynamicRes();
       MarkDirty();
     }
-#ifdef __vita__
-    ImGui::SetItemTooltip("Display (all the way left): the screen's 60 Hz. On the Vita 30 fps suits most\n"
-                          "rooms: it lowers the scale only where the GPU keeps the game below the target,\n"
-                          "and raises it (up to the maximum) where the GPU has time to spare at it.");
-#else
     ImGui::SetItemTooltip("Display (all the way left): the screen's refresh rate. Never above the frame\n"
                           "rate cap: with the 60 FPS cap on it aims for 60. Ctrl+click to type a value.");
-#endif
     if (DynamicResTop() <= sDynamicResMin) {
       ImGui::PushTextWrapPos(0.f);
       ImGui::TextColored(ThemeWarnColor(), "Not lowering: the minimum is not below the top scale (%.2fx). "
@@ -771,6 +741,7 @@ void DrawVideoQuality() {
       }
     }
   }
+#endif
   EndOriginalLocked(locked);
   ImGui::BeginDisabled(sOriginalExperience);
   bool font = PortHdFont::Enabled();

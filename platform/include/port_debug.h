@@ -188,15 +188,13 @@ void SetRenderScale(float scale);
 // EFB inside the device's texture size limit, so a wide window can draw a little less.
 constexpr float kRenderScaleMax = 8.f;
 #ifdef __vita__
-// The Vita's fixed scales, as the user set them out: 360 to 544 lines (0.46.0 test 42; test 32's were
-// 480 to 720), as multiples of its screen's 544 (1x), in steps of 8 lines, which reach both ends (16s
-// from 360 would miss 544). SetRenderScale and the saved setting keep a fixed scale within them; auto
-// (0) stays the screen's.
+// The Vita's fixed scales: 360 to 544 lines (0.46.0 test 42; test 32's were 480 to 720), as multiples
+// of its screen's 544 (1x). Since test 43 the Vita offers no scale at all (the user: "We're committing
+// to 544p"); SetRenderScale and a saved render_scale are still kept within these, so nothing draws
+// above the screen's size, till the settings are reset. Auto (0) is the screen's.
 constexpr int kVitaScreenLines = 544;
 constexpr int kVitaScaleMinLines = 360;
 constexpr int kVitaScaleMaxLines = 544;
-constexpr int kVitaScaleStepLines = 8;
-static_assert((kVitaScaleMaxLines - kVitaScaleMinLines) % kVitaScaleStepLines == 0, "the steps reach both ends");
 constexpr float kVitaScaleMin = static_cast< float >(kVitaScaleMinLines) / kVitaScreenLines;
 constexpr float kVitaScaleMax = static_cast< float >(kVitaScaleMaxLines) / kVitaScreenLines;
 #endif

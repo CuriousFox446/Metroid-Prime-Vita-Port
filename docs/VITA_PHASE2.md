@@ -4785,3 +4785,23 @@ screen's size now.
 What to look for in test 42:
 - The Mines' floors and grates at 480 lines (and any scale under 544): no blocks.
 - The resolution scale slider: 360 to 544 lines, 8 lines a step.
+
+## 0.46.0 test 43: committed to 544 lines
+
+The user, after test 42: "I guess we don't need Dynamic resolution, auto render scale, resolution
+scale, and sharpen when upscaled. We're committing to 544p", and on the saved settings: "I can still
+reset the configuration or delete it".
+- F1 > Video > Quality on the Vita no longer offers dynamic resolution (with its minimum, target and
+  status), the auto render scale, the resolution scale or the upscale sharpening (`video.cpp`,
+  `#ifndef __vita__`); nor does the settings search (`port_settings_index.inc`). Other platforms keep
+  them.
+- Nothing else changes: the settings are still read and saved as before. A saved `render_scale`
+  still applies, kept within 360 to 544 lines (`kVitaScaleMin`/`Max`, now only for that), till the
+  settings are reset; the defaults are the screen's own size with dynamic resolution off. The
+  scaled framebuffer path stays in vita_gl.cpp (test 42's stencil with it), reached only through
+  such a saved scale.
+
+What to look for in test 43:
+- F1 > Video > Quality: anisotropic filtering, then the HD font; none of the four. After resetting
+  the settings, the log's `port: settings:` line says `scale auto` (the screen's) and
+  `dynamic-res off`.

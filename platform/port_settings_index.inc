@@ -198,6 +198,7 @@
 {"Video", "Quality", "Quality", "Per-pixel lighting", "per pixel lighting shading smooth dolphin"},
 {"Video", "Quality", "Quality", "Sun shadows", "sun shadow cascades outdoor remastered look"},
 {"Video", "Quality", "Quality", "Projected actor shadows", "actor shadow blob projected depth map floor remastered"},
+#if !defined(__vita__) // the Vita draws at its screen's 544 lines, with none of these (0.46.0 test 43)
 {"Video", "Quality", "Quality", "Auto render scale (native)", "resolution scale native auto render"},
 {"Video", "Quality", "Quality", "Resolution scale", "resolution scale efb framebuffer draw resolution"},
 {"Video", "Quality", "Quality", "Maximum resolution scale", "resolution scale efb framebuffer draw resolution maximum highest"},
@@ -206,6 +207,7 @@
 {"Video", "Quality", "Quality", "Minimum resolution scale", "dynamic resolution minimum scale lowest"},
 {"Video", "Quality", "Quality", "Sharpen when upscaled", "sharpening cas upscale blurry soft dynamic resolution"},
 {"Video", "Quality", "Quality", "Sharpening", "sharpen strength cas upscale"},
+#endif
 {"Video", "Quality", "Quality", "HD font", "font text high resolution hd"},
 {"Video", "Frame rate", "Frame rate", "60 FPS cap (target)", "fps limit cap framerate 60"},
 {"Video", "Frame rate", "Frame rate", "FPS cap", "fps limit cap framerate number"},
