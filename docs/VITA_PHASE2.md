@@ -4703,10 +4703,11 @@ Ruled out from the log and the code:
 
 A suspect in vitaGL: an uncompressed texture's (RGBA8, I8, IA8) levels after the first are not the
 port's. glTexImage2D at a level above 0 calls gpu_alloc_mipmaps, which ignores the data and makes
-the chain again from the first level with GPU transfer downscales. It sizes the chain only until
-the shorter side reaches 1, so a non-square texture's last levels would lie past its memory. BC1
-levels are copied in as given. Floors seen at a low angle and fine grates are where the small
-levels are sampled, and the Mines come after test 14, when the non-CMPR textures got their levels.
+the chain again from the first level with GPU transfer downscales (`sceGxmTransferDownscale`, in
+U8_R and U8U8_GR for the intensity ones). BC1 levels are copied in as given. (Its chain is sized
+till the shorter side reaches 1; the port's levels stop at 16 texels, so none lies past it.) Floors
+seen at a low angle and fine grates are where the small levels are sampled, and the Mines come
+after test 14, when the non-CMPR textures got their levels.
 
 F1 > Performance > Diagnostics (PS Vita), for the session only: never saved, all off at each start.
 Each box logs `port: diagnostic "..." on/off`, and the renderer's own log
