@@ -311,6 +311,19 @@ struct Draw {
 // Nothing to let go of: a frame's draws are freed as one block.
 static_assert(std::is_trivially_destructible_v<Draw> && std::is_trivially_copyable_v<Draw>);
 
+// 0.46.0 test 41's diagnostics, for the session (set_diagnostics; never saved):
+// - kDiagMaterials: no material reused, each draw's worked out again from GX's state (vita_draw.cpp).
+// - kDiagFinish: the render worker waits for the GPU to finish each frame after its swap, so nothing
+//   a frame drew from is let go or written again while the GPU may still read it.
+// - kDiagNoMips...: the textures of that kind sampled from their first level alone, as before they
+//   had their levels (BC1 since 0.46.0 test 11, the rest since test 14): BC1 (GX's CMPR), RGBA8 (the
+//   other colour formats, palettes among them), and the intensity ones (I8 and IA8).
+constexpr uint32_t kDiagMaterials = 1u << 0;
+constexpr uint32_t kDiagFinish = 1u << 1;
+constexpr uint32_t kDiagNoMipsBC1 = 1u << 2;
+constexpr uint32_t kDiagNoMipsRGBA = 1u << 3;
+constexpr uint32_t kDiagNoMipsIntensity = 1u << 4;
+
 #ifdef AURORA_VITA_GL
 // Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
 // too, must never be created.
@@ -398,6 +411,9 @@ void set_swap_interval(uint32_t vblanks) noexcept;
 // The GPU cost test (0.46.0 test 14), from the next present on: each kind of draw left out in turn,
 // what the GPU's busy time a frame is without it logged (vita_gl.cpp, gpu_test). Any thread.
 void start_gpu_cost_test() noexcept;
+// Diagnostics for the session (kDiag bits above, GXPortSetVitaDiagnostics; never saved). Any thread.
+void set_diagnostics(uint32_t mask) noexcept;
+uint32_t diagnostics() noexcept;
 #else
 inline bool initialize() noexcept { return false; }
 inline bool active() noexcept { return false; }
@@ -440,5 +456,7 @@ inline void set_present_sharpness(float) noexcept {}
 inline float gpu_busy_ms() noexcept { return -1.f; }
 inline void set_swap_interval(uint32_t) noexcept {}
 inline void start_gpu_cost_test() noexcept {}
+inline void set_diagnostics(uint32_t) noexcept {}
+inline uint32_t diagnostics() noexcept { return 0; }
 #endif
 } // namespace aurora::vita_gl

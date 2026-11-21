@@ -180,6 +180,11 @@ void CSimpleShadow::PortCalculate(const CAABox& bounds, const CStateManager& mgr
 void CSimpleShadow::Render(const CTexture* tex) const {
   if (!x48_24_collision)
     return;
+#ifdef TARGET_PC
+  if (PortDebug::DiagOff(PortDebug::kDiag_BlobShadows)) {
+    return; // PS Vita test 41's diagnostics
+  }
+#endif
 
   CGraphics::DisableAllLights();
 #ifdef TARGET_PC

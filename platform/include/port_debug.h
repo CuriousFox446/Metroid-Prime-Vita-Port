@@ -509,6 +509,18 @@ void SetSunShadows(bool enabled);
 // mode); only active with Remastered world geometry, else the retail blob quad is drawn.
 bool ProjectedShadows();
 void SetProjectedShadows(bool enabled);
+// PS Vita diagnostics (0.46.0 test 41, F1 > Performance > Diagnostics): kinds of drawing left out
+// while their box is ticked, to find what draws the flickering dark patches on the Phazon Mines'
+// floors and grates. For this session only: never saved, all off at each start.
+enum EDiag : unsigned {
+  kDiag_Reflections = 1u << 0,      // floor reflections (CCubeRenderer::CacheReflection, black instead)
+  kDiag_Distortion = 1u << 1,       // screen-distorting particles (CElementGen's indirect texture)
+  kDiag_Decals = 1u << 2,           // decals: shot marks, scorches (CDecal::Render)
+  kDiag_ProjectedShadows = 1u << 3, // projected shadows (CProjectedShadow::Render)
+  kDiag_BlobShadows = 1u << 4,      // blob shadows under actors (CSimpleShadow::Render)
+  kDiag_FogVolumes = 1u << 5,       // fog volumes (CCubeRenderer::RenderFogVolume)
+};
+bool DiagOff(EDiag part);
 // Setting `opengles`: start on Dawn's OpenGL ES backend instead of Vulkan, for
 // drivers that draw wrong on Vulkan (Adreno 7xx, issue #7). Read at window
 // creation, so it takes a restart; aurora falls back to Vulkan if it fails.

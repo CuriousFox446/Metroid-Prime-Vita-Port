@@ -13,6 +13,7 @@
 
 #ifdef TARGET_PC
 #include "aurora/vfx.hpp"
+#include "port_debug.h"
 #include "port_fx_debug.h"
 #include "port_projected_decal.h"
 #include "port_vfx_particles.h"
@@ -561,6 +562,11 @@ void CDecal::Render() const {
   if (IsDone()) {
     return;
   }
+#ifdef TARGET_PC
+  if (PortDebug::DiagOff(PortDebug::kDiag_Decals)) {
+    return; // PS Vita test 41's diagnostics
+  }
+#endif
   // A Remastered decal reaches this only outside the HDR scene (CDecalManager::AddToRenderer): it
   // draws retail's flat quads at its Remastered frame.
 

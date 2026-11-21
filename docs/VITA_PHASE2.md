@@ -4684,3 +4684,58 @@ outer icon columns off both edges of the screen).
 What to look for in test 40:
 - The pause screen with the patched disc, and with the Rev 2 one and the Widescreen HUD on: as the
   user's photo of the patched game, the icon columns at both sides on the screen.
+
+## 0.46.0 test 41: switches to find the Phazon Mines' dark patches
+
+The user, with seven photos: the flickering in the Phazon Mines is "these floors and grate like
+textures", dark patches on them, blocky (screen-aligned squares about 32 of the frame's pixels
+across at the 0.88 scale's 848x480: the GPU's tile size) and spiky, changing from frame to frame.
+Test 37's stand-ins were for something else.
+
+Ruled out from the log and the code:
+- No EFB copy goes unmade or comes late in any report window (copies41.py), and the copies'
+  coordinates are right.
+- Upscale sharpening is off for the user (`upscale_sharpen=dynamic` with dynamic resolution off).
+- No texture pack: `texture_pack=1`, but 0 replacements loaded from user_textures.
+- No draws left out or drawn fixed-function there, nor the room geometry kept on the GPU, the
+  port's shadows, projected decals (HDR only), anisotropy (vitaGL has none), the indirect state's
+  dirty bits.
+
+A suspect in vitaGL: an uncompressed texture's (RGBA8, I8, IA8) levels after the first are not the
+port's. glTexImage2D at a level above 0 calls gpu_alloc_mipmaps, which ignores the data and makes
+the chain again from the first level with GPU transfer downscales. It sizes the chain only until
+the shorter side reaches 1, so a non-square texture's last levels would lie past its memory. BC1
+levels are copied in as given. Floors seen at a low angle and fine grates are where the small
+levels are sampled, and the Mines come after test 14, when the non-CMPR textures got their levels.
+
+F1 > Performance > Diagnostics (PS Vita), for the session only: never saved, all off at each start.
+Each box logs `port: diagnostic "..." on/off`, and the renderer's own log
+`diagnostics: ...`.
+- No mipmaps, one box per texture kind (`GXPortSetVitaDiagnostics`, vita_gl's `kDiagNoMips...`,
+  `Texture::mips_off`): BC1 (GX's CMPR), RGBA8 (the other colour formats, paletted ones among
+  them), and intensity (I4/I8/IA4/IA8 as I8 and IA8). That kind is sampled from its first level
+  alone, as before it had levels. A texture already bound takes the change at its next bind.
+- Leave out, each a check at the top of its draw (`PortDebug::DiagOff`): floor reflections
+  (`CCubeRenderer::CacheReflection` draws and copies nothing, `GetRealReflection` gives black),
+  screen-distorting effects (`CElementGen::RenderParticlesIndirectTexture`, its screen copy too),
+  decals (`CDecal::Render`), projected shadows (`CProjectedShadow::Render`), blob shadows
+  (`CSimpleShadow::Render`), fog volumes (`CCubeRenderer::RenderFogVolume`).
+- Work out every draw's material again (`kDiagMaterials`): `current_material` rehashes all of GX's
+  state for each draw, as if every register were written, and rebuilds the material in place
+  instead of taking the last draw's or the cache's.
+- Wait for the GPU after each frame (`kDiagFinish`): `sceGxmFinish` after the swap. A scaled
+  frame's first scene is its framebuffer's, which waits for no display buffer, so at a scale the
+  GPU can be further behind the render worker than at the screen's size; with this nothing a frame
+  drew with is let go or written again while the GPU may still read it.
+- Not a display-list switch: decoding every list each frame would make and upload every room mesh
+  again each frame, too much memory.
+
+Why 4:3 and the original experience run faster (the user's question): heavy rooms are GPU-bound,
+and 4:3 draws a narrower 3D view: a quarter fewer pixels, and less of the room in view. The
+original experience is 4:3 at 1.00x drawn straight to the display (no 848x480 framebuffer and its
+draw to the screen), with mods and the port's extras off. In the user's log the GPU was busy
+28 ms a frame before it was switched on and about 15.5 ms after, though the user was moving.
+
+What to look for in test 41:
+- In a Mines room with the patches: which box makes them stop, ticked one at a time (and which
+  frame rate the slow ones give). Resolution scale 1.00x too: the screen's own size, no framebuffer.

@@ -36,6 +36,7 @@ extern SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 extern SceGxmShaderPatcher* gxm_shader_patcher;
 extern SceGxmNotification query_fence;
 extern void* active_write_fb;
+extern SceGxmContext* gxm_context; // test 41's kDiagFinish waits on it (sceGxmFinish)
 }
 
 #include <cstdio>
@@ -91,6 +92,9 @@ std::atomic<int64_t> g_textureBytes[kTexelFormats];
 // Textures made and not yet uploaded (no draw of theirs bound them): their pixels on the heap.
 std::atomic<int64_t> g_pendingCount;
 std::atomic<int64_t> g_pendingBytes;
+
+// 0.46.0 test 41's diagnostics (set_diagnostics; vita_gl.hpp's kDiag bits).
+std::atomic<uint32_t> g_diagnostics{0};
 
 // vitaGL's shader patcher's heaps (vglSetupShaderPatcher; 1 MiB each by default). Every program
 // is patched once for each blend state it draws with (the colour mask and factors among them) and
@@ -690,7 +694,9 @@ public:
   }
 
   // Render worker: true when binding it again with `sampler` would change nothing.
-  bool holds(const Sampler& sampler) const noexcept { return m_id != 0 && m_samplerSet && sampler == m_sampler; }
+  bool holds(const Sampler& sampler) const noexcept {
+    return m_id != 0 && m_samplerSet && sampler == m_sampler && m_samplerMipsOff == mips_off();
+  }
 
   // Render worker: its size (a copy texture's as its last copy made it), and whether a copy has
   // filled it.
@@ -798,13 +804,16 @@ public:
     } else {
       glBindTexture(GL_TEXTURE_2D, m_id);
     }
-    if (!m_samplerSet || !(sampler == m_sampler)) {
+    const bool mipsOff = mips_off();
+    if (!m_samplerSet || !(sampler == m_sampler) || m_samplerMipsOff != mipsOff) {
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, sampler.wrapS);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, sampler.wrapT);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(sampler.minFilter));
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                      mipsOff ? plain_filter(sampler.minFilter) : min_filter(sampler.minFilter));
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, sampler.magFilter);
       m_sampler = sampler;
       m_samplerSet = true;
+      m_samplerMipsOff = mipsOff;
     }
   }
 
@@ -918,6 +927,19 @@ private:
   // A sampler's min filter as this texture takes it: a mipmapped one samples its first level alone
   // where it has no others (vitaGL would look for levels it was never given).
   GLint min_filter(uint16_t filter) const noexcept { return m_levels > 1 ? filter : plain_filter(filter); }
+  // Test 41's diagnostics: whether this texture's kind is sampled from its first level alone
+  // (kDiagNoMips...; a copy texture has that one level anyway).
+  bool mips_off() const noexcept {
+    const uint32_t diag = g_diagnostics.load(std::memory_order_relaxed);
+    switch (m_format) {
+    case TexelFormat::BC1:
+      return (diag & kDiagNoMipsBC1) != 0;
+    case TexelFormat::RGBA8:
+      return (diag & kDiagNoMipsRGBA) != 0;
+    default:
+      return (diag & kDiagNoMipsIntensity) != 0;
+    }
+  }
   static GLint plain_filter(uint16_t filter) noexcept {
     switch (filter) {
     case GL_NEAREST_MIPMAP_NEAREST:
@@ -949,6 +971,7 @@ private:
   int64_t m_bytes = 0;
   Sampler m_sampler{};
   bool m_samplerSet = false;
+  bool m_samplerMipsOff = false; // mips_off() when m_sampler was set
   // A copy texture's, from its first copy (target); null for the rest.
   std::unique_ptr<std::array<CopySurface, kCopySurfaces>> m_surfaces;
   uint32_t m_copies = 0;
@@ -3906,6 +3929,17 @@ float gpu_busy_ms() noexcept { return g_gpuMs.load(std::memory_order_relaxed); }
 
 void start_gpu_cost_test() noexcept { gpu_test::g_start.store(true, std::memory_order_release); }
 
+void set_diagnostics(uint32_t mask) noexcept {
+  if (g_diagnostics.exchange(mask, std::memory_order_relaxed) != mask) {
+    const auto on = [mask](uint32_t bit) { return (mask & bit) != 0 ? "on" : "off"; };
+    Log.info("diagnostics: materials worked out again for each draw {}, the GPU waited for after each frame {}; "
+             "textures from their first level alone: BC1 {}, RGBA8 {}, intensity {}",
+             on(kDiagMaterials), on(kDiagFinish), on(kDiagNoMipsBC1), on(kDiagNoMipsRGBA), on(kDiagNoMipsIntensity));
+  }
+}
+
+uint32_t diagnostics() noexcept { return g_diagnostics.load(std::memory_order_relaxed); }
+
 void set_swap_interval(uint32_t vblanks) noexcept {
   g_swapInterval.store(std::clamp<uint32_t>(vblanks, 1, 4), std::memory_order_relaxed);
 }
@@ -4223,6 +4257,9 @@ void present(ImDrawData* overlay) noexcept {
   }
   const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
+  if ((g_diagnostics.load(std::memory_order_relaxed) & kDiagFinish) != 0) {
+    sceGxmFinish(gxm_context); // test 41's diagnostics: the GPU done with this frame before the next
+  }
   gpu_swapped(swapStart);
   gpu_test::step();
   {

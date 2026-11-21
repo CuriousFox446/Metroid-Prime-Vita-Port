@@ -15,6 +15,9 @@
 
 #include <dolphin/gx.h>
 #include <float.h>
+#ifdef TARGET_PC
+#include "port_debug.h"
+#endif
 
 struct SShadowDrawContext {
   const CSkinnedModel& model;
@@ -189,6 +192,11 @@ void CProjectedShadow::Render(const CStateManager& mgr) const {
   if (!x80_enabled) {
     return;
   }
+#ifdef TARGET_PC
+  if (PortDebug::DiagOff(PortDebug::kDiag_ProjectedShadows)) {
+    return; // PS Vita test 41's diagnostics
+  }
+#endif
 
   const CAABox bounds =
       ScaleAndTranslateBounds(x68_bounds, x88_translation, rstl::max_val(1.f, x84_scale));
