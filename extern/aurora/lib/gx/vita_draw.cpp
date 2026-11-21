@@ -1851,14 +1851,10 @@ void log_unsupported_layout() noexcept {
 // The Material for the current GX state: the last draw's while none of the registers it reads has
 // been written since, else from the cache, else worked out.
 const Material& current_material() noexcept {
-  // Test 41's diagnostics (vita_gl::kDiagMaterials): every draw's key and material worked out again
-  // from all of GX's state, as if each register had been written, and nothing reused.
-  const bool fresh = (vita_gl::diagnostics() & vita_gl::kDiagMaterials) != 0;
-  const u8 changed = fresh ? static_cast<u8>(DirtyPipeline | DirtyTextures)
-                           : static_cast<u8>(g_gxState.dirty.vita & (DirtyPipeline | DirtyTextures));
+  const u8 changed = g_gxState.dirty.vita & (DirtyPipeline | DirtyTextures);
   g_gxState.dirty.vita = 0;
   const u64 generation = texture::current_bind_generation();
-  if (!fresh && sLastMaterial != nullptr && changed == 0 && generation == sLastGeneration) {
+  if (sLastMaterial != nullptr && changed == 0 && generation == sLastGeneration) {
     ++sStats.materialReused;
     sLastMaterial->window = sWindow;
     sLastMaterial->used = ++sMaterialClock;
@@ -1885,7 +1881,7 @@ const Material& current_material() noexcept {
   material.window = sWindow;
   material.used = ++sMaterialClock;
   sLastMaterial = &material;
-  if (found != nullptr && !fresh) {
+  if (found != nullptr) {
     ++sStats.materialHits;
     return material;
   }

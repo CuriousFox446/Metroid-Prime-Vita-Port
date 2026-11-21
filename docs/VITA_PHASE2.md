@@ -4740,3 +4740,48 @@ draw to the screen), with mods and the port's extras off. In the user's log the 
 What to look for in test 41:
 - In a Mines room with the patches: which box makes them stop, ticked one at a time (and which
   frame rate the slow ones give). Resolution scale 1.00x too: the screen's own size, no framebuffer.
+
+## 0.46.0 test 42: the scaled frame's scissor; resolution scale 360 to 544 lines
+
+The user, without trying test 41's switches: the patches come "only when the resolution scale is
+below or over 544p", and they did not want the diagnostics. Test 41's code is out again (its notes
+above stay as the record).
+
+So the patches are the scaled frame's, drawn into a framebuffer of its own (WorldTarget) rather than
+the display. The photos again: screen-aligned blocks about 32 of the frame's pixels across (one
+lighter square in photo 1 measures 32x32: the GPU's tile), some darker and some lighter, the floor's
+pattern in them as if drawn twice or offset, and spiky edges along the grates' holes.
+- The vitaGL the port links is not the source read so far: the vdpm package
+  vitaGL-0.0.0.r1488.g2bdbe89, commit 2bdbe89 of 2026-09-23 (`~/vgl2bdbe89` holds its source, from
+  `git archive` of ~/src/vitaGL), 37 commits before that checkout. Built without shared render
+  targets (no `get_free_render_target` in the library) and without its texture cache.
+- Ruled out in it: the framebuffer's render target (made for the 8 scenes the port asks), the
+  framebuffer struct the port mirrors (`VglFramebuffer`: the depth surface at 56, 104 bytes, as
+  2bdbe89's), the depth surface's memory and its load and store across copies, the tile clipper's
+  orientation at a framebuffer's scene start (set upside down there, but always set again right
+  after: every such scene follows another framebuffer's).
+- The difference found: vitaGL's scissor is a mask bit in the depth surface. Each scissor change
+  (`update_scissor_test`) clears the mask over the whole target with a pass whose stencil test never
+  passes, then sets it inside the rectangle. The display's depth surface has a stencil (DF32M_S8); a
+  framebuffer's has none (DF32M) unless a depth-and-stencil renderbuffer is attached. Without a
+  stencil that test cannot fail, the mask stays set everywhere, and a draw is kept to its scissor
+  only by the GPU's tile clipper (`sceGxmSetRegionClip`), to the 32-pixel tile.
+- The fog volumes are drawn a screen chunk at a time, each chunk under its own scissor
+  (`CCubeRenderer::ReallyRenderFogVolume`): spilled to the tiles' edges, the chunks overlap each
+  other and the scene around the volume, in tile blocks, changing as the camera moves. The Mines'
+  pits under their grates hold fog.
+
+The fix (`make_world_target`): a `GL_DEPTH24_STENCIL8` renderbuffer attached to the frame's
+framebuffer (`GL_DEPTH_STENCIL_ATTACHMENT`). vitaGL then makes its depth surface DF32M_S8 at its
+first scene, still in the framebuffer's own `depthbuffer`, so `keep_depth` is unchanged; about
+0.4 MiB more at 480 lines. 2bdbe89 frees only a framebuffer's depth when it goes (its fbb190f frees
+the stencil too), so `release_world_target` hands the stencil to vitaGL's collector
+(`vglLazyFree`); to be taken out if vitaGL is updated past fbb190f.
+
+The resolution scale's range, as the user asked: 360 to 544 lines (was 480 to 720), in steps of 8
+lines (16s from 360 would miss 544); the saved 480 lines stays as it is. Nothing is drawn above the
+screen's size now.
+
+What to look for in test 42:
+- The Mines' floors and grates at 480 lines (and any scale under 544): no blocks.
+- The resolution scale slider: 360 to 544 lines, 8 lines a step.

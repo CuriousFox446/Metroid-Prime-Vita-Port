@@ -211,17 +211,6 @@ void GXPortSetSwapInterval(u32 vblanks);
 // PS Vita (0.46.0 test 14): the GPU cost test, from the next frame: each kind of draw left out in
 // turn for a second or so, and the GPU's busy time a frame without it logged. Nothing elsewhere.
 void GXPortRunGpuCostTest(void);
-// PS Vita (0.46.0 test 41): diagnostics for the session, never saved (F1 > Performance). With
-// GX_PORT_DIAG_MATERIALS each draw's material is worked out again from GX's state, nothing reused;
-// with GX_PORT_DIAG_FINISH the renderer waits for the GPU to finish each frame before the next;
-// with a GX_PORT_DIAG_NO_MIPS_ bit that kind of texture is sampled from its first level alone (BC1:
-// GX's CMPR; RGBA: the other colour formats; INTENSITY: I4, I8, IA4, IA8). Nothing elsewhere.
-#define GX_PORT_DIAG_MATERIALS 0x1u
-#define GX_PORT_DIAG_FINISH 0x2u
-#define GX_PORT_DIAG_NO_MIPS_BC1 0x4u
-#define GX_PORT_DIAG_NO_MIPS_RGBA 0x8u
-#define GX_PORT_DIAG_NO_MIPS_INTENSITY 0x10u
-void GXPortSetVitaDiagnostics(u32 mask);
 // PS Vita (0.46.0 test 33): where a framebuffer of fbWidth x fbHeight is drawn on the screen, as
 // fractions of the screen (origin top left): the whole screen, or for one of another shape (4:3) its
 // own shape, centred, black beside it. False elsewhere, where Aurora's present fits it to the window.

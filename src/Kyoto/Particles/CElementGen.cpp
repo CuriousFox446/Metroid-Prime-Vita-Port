@@ -4221,11 +4221,6 @@ void CElementGen::RenderParticlesFlameThrower(CElementGen* const* gens, int coun
 }
 
 void CElementGen::RenderParticlesIndirectTexture() {
-#ifdef TARGET_PC
-  if (PortDebug::DiagOff(PortDebug::kDiag_Distortion)) {
-    return; // PS Vita test 41's diagnostics: neither drawn nor its screen copy made
-  }
-#endif
   CTransform4f systemViewCopy(CGraphics::GetViewMatrix());
   systemViewCopy.SetTranslation(CVector3f::Zero());
   CTransform4f systemCameraCopy(systemViewCopy.GetQuickInverse() * x22c_globalOrientation);

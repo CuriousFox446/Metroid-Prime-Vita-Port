@@ -611,8 +611,8 @@ void DrawVideoQuality() {
   // Dynamic resolution's mode is the two saved settings together: Auto draws up to the
   // window's own scale (auto render scale), User up to the resolution scale set.
 #ifdef __vita__
-  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), from 480 to 720 lines
-  // (PortDebug::kVitaScaleMinLines, kVitaScaleMaxLines): the user's range (0.46.0 test 32).
+  // The Vita's scales are multiples of its screen (1x its 960x544, as auto), from 360 to 544 lines
+  // (PortDebug::kVitaScaleMinLines, kVitaScaleMaxLines): the user's range (0.46.0 test 42).
   constexpr float kScaleMax = PortDebug::kVitaScaleMax;
 #else
   constexpr float kScaleMax = PortDebug::kRenderScaleMax;
@@ -652,7 +652,7 @@ void DrawVideoQuality() {
     std::snprintf(label, sizeof(label), "%.2fx (%dp)", scale, DrawnLines(scale));
     const char* const scaleName = dynMode == 2 ? "Maximum resolution scale" : "Resolution scale";
 #ifdef __vita__
-    // In steps of 16 lines (480, 496 ... 544 ... 720): one a press of the D-pad.
+    // In steps of 8 lines (360, 368 ... 480 ... 544): one a press of the D-pad.
     {
       constexpr int kSteps = (kVitaScaleMaxLines - kVitaScaleMinLines) / kVitaScaleStepLines;
       int step = std::clamp(static_cast< int >(std::lround((scale * kVitaScreenLines - kVitaScaleMinLines) /
@@ -673,9 +673,8 @@ void DrawVideoQuality() {
       sPendingScale = 0.f;
     }
 #ifdef __vita__
-    ImGui::SetItemTooltip("The resolution the game draws at, 480 to 720 lines (1x is the Vita's screen,\n"
-                          "960x544). Above 544 it supersamples: sharper edges, but each step costs much\n"
-                          "more GPU time. Below it the picture is softer and lighter on the GPU.");
+    ImGui::SetItemTooltip("The resolution the game draws at, 360 to 544 lines (1x is the Vita's screen,\n"
+                          "960x544). Below 544 the picture is softer and lighter on the GPU.");
 #else
     ImGui::SetItemTooltip("The resolution the game draws at, as a multiple of the GameCube's 480 lines;\n"
                           "higher values use more GPU memory. Above 2x it supersamples, and each step\n"

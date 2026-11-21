@@ -1201,13 +1201,6 @@ void GXPortSetSwapInterval(u32 vblanks) { aurora::vita_gl::set_swap_interval(vbl
 
 void GXPortRunGpuCostTest(void) { aurora::vita_gl::start_gpu_cost_test(); }
 
-static_assert(GX_PORT_DIAG_MATERIALS == aurora::vita_gl::kDiagMaterials &&
-              GX_PORT_DIAG_FINISH == aurora::vita_gl::kDiagFinish &&
-              GX_PORT_DIAG_NO_MIPS_BC1 == aurora::vita_gl::kDiagNoMipsBC1 &&
-              GX_PORT_DIAG_NO_MIPS_RGBA == aurora::vita_gl::kDiagNoMipsRGBA &&
-              GX_PORT_DIAG_NO_MIPS_INTENSITY == aurora::vita_gl::kDiagNoMipsIntensity);
-void GXPortSetVitaDiagnostics(u32 mask) { aurora::vita_gl::set_diagnostics(mask); }
-
 GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, float* width, float* height) {
   const aurora::vita_gl::ScreenFit fit = aurora::vita_gl::fit_to_screen(fbWidth, fbHeight);
   constexpr float kW = static_cast<float>(aurora::vita_gl::kScreenWidth);
@@ -1222,8 +1215,6 @@ GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, fl
 void GXPortSetSwapInterval(u32) {}
 
 void GXPortRunGpuCostTest(void) {}
-
-void GXPortSetVitaDiagnostics(u32) {}
 
 GXBool GXPortGetScreenFit(u32, u32, float*, float*, float*, float*) { return GX_FALSE; }
 

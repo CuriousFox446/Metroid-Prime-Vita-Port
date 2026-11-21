@@ -188,13 +188,15 @@ void SetRenderScale(float scale);
 // EFB inside the device's texture size limit, so a wide window can draw a little less.
 constexpr float kRenderScaleMax = 8.f;
 #ifdef __vita__
-// The Vita's fixed scales, as the user set them out (0.46.0 test 32): 480 to 720 lines, as multiples
-// of its screen's 544 (1x), in steps of 16 lines; past 720 it is not playable. SetRenderScale and the
-// saved setting keep a fixed scale within them; auto (0) stays the screen's.
+// The Vita's fixed scales, as the user set them out: 360 to 544 lines (0.46.0 test 42; test 32's were
+// 480 to 720), as multiples of its screen's 544 (1x), in steps of 8 lines, which reach both ends (16s
+// from 360 would miss 544). SetRenderScale and the saved setting keep a fixed scale within them; auto
+// (0) stays the screen's.
 constexpr int kVitaScreenLines = 544;
-constexpr int kVitaScaleMinLines = 480;
-constexpr int kVitaScaleMaxLines = 720;
-constexpr int kVitaScaleStepLines = 16;
+constexpr int kVitaScaleMinLines = 360;
+constexpr int kVitaScaleMaxLines = 544;
+constexpr int kVitaScaleStepLines = 8;
+static_assert((kVitaScaleMaxLines - kVitaScaleMinLines) % kVitaScaleStepLines == 0, "the steps reach both ends");
 constexpr float kVitaScaleMin = static_cast< float >(kVitaScaleMinLines) / kVitaScreenLines;
 constexpr float kVitaScaleMax = static_cast< float >(kVitaScaleMaxLines) / kVitaScreenLines;
 #endif
@@ -509,18 +511,6 @@ void SetSunShadows(bool enabled);
 // mode); only active with Remastered world geometry, else the retail blob quad is drawn.
 bool ProjectedShadows();
 void SetProjectedShadows(bool enabled);
-// PS Vita diagnostics (0.46.0 test 41, F1 > Performance > Diagnostics): kinds of drawing left out
-// while their box is ticked, to find what draws the flickering dark patches on the Phazon Mines'
-// floors and grates. For this session only: never saved, all off at each start.
-enum EDiag : unsigned {
-  kDiag_Reflections = 1u << 0,      // floor reflections (CCubeRenderer::CacheReflection, black instead)
-  kDiag_Distortion = 1u << 1,       // screen-distorting particles (CElementGen's indirect texture)
-  kDiag_Decals = 1u << 2,           // decals: shot marks, scorches (CDecal::Render)
-  kDiag_ProjectedShadows = 1u << 3, // projected shadows (CProjectedShadow::Render)
-  kDiag_BlobShadows = 1u << 4,      // blob shadows under actors (CSimpleShadow::Render)
-  kDiag_FogVolumes = 1u << 5,       // fog volumes (CCubeRenderer::RenderFogVolume)
-};
-bool DiagOff(EDiag part);
 // Setting `opengles`: start on Dawn's OpenGL ES backend instead of Vulkan, for
 // drivers that draw wrong on Vulkan (Adreno 7xx, issue #7). Read at window
 // creation, so it takes a restart; aurora falls back to Vulkan if it fails.

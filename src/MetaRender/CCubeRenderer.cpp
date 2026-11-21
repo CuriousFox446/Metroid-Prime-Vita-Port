@@ -1,5 +1,4 @@
 #include "MetaRender/CCubeRenderer.hpp"
-#include "port_debug.h"
 #include "port_profile.h"
 #include "port_retail_resident.h"
 #include "Kyoto/Basics/CBasics.hpp"
@@ -1176,11 +1175,6 @@ void CCubeRenderer::SetDebugOption(IRenderer::EDebugOption option, int value) {
 
 CTexture* CCubeRenderer::GetRealReflection() {
   x2dc_reflectionAge = 0;
-#ifdef TARGET_PC
-  if (PortDebug::DiagOff(PortDebug::kDiag_Reflections)) {
-    return &xe4_blackTex; // PS Vita test 41's diagnostics: nothing reflected
-  }
-#endif
   if (!x14c_reflectionTex.null()) {
     return x14c_reflectionTex.get();
   }
@@ -1189,12 +1183,6 @@ CTexture* CCubeRenderer::GetRealReflection() {
 
 void CCubeRenderer::CacheReflection(void (*cb)(void*, const CVector3f&), void* ctx,
                                     bool clearAfter) {
-#ifdef TARGET_PC
-  if (PortDebug::DiagOff(PortDebug::kDiag_Reflections)) {
-    x318_24_reflectionDirty = false; // nothing drawn or copied (GetRealReflection gives black)
-    return;
-  }
-#endif
   if (x318_24_reflectionDirty) {
     x318_24_reflectionDirty = false;
     x2dc_reflectionAge = 0;
@@ -1796,11 +1784,6 @@ void CCubeRenderer::DoThermalBlendHot() {
 void CCubeRenderer::RenderFogVolume(const CColor& color, const CAABox& aabb,
                                     const TLockedToken< CModel >* model,
                                     const CSkinnedModel* skinnedModel) {
-#ifdef TARGET_PC
-  if (PortDebug::DiagOff(PortDebug::kDiag_FogVolumes)) {
-    return;
-  }
-#endif
   if (!x318_28_disableFog) {
     x2ac_fogVolumes.push_back(
         CFogVolumeListItem(CGraphics::mModelMatrix, color, aabb, model, skinnedModel));
