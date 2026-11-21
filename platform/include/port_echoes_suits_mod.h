@@ -34,7 +34,9 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     outward lean counts only facing forward).
 // 17: the thighs' panel decided texel by texel by its own colour (KeepUndersuit), so its edges
 //     follow the texture's line, on the low-poly in-game body too.
-inline constexpr int kVersion = 17;
+// 18: the Light Suit's ball as its Spider Ball too (kBalls); the pause screen dolls' visor glass
+//     writes no depth, so the face shows through it (SortedWithoutDepth).
+inline constexpr int kVersion = 18;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's

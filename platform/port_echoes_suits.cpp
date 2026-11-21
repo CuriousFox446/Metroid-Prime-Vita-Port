@@ -295,6 +295,38 @@ std::vector<uint8_t> WriteSet(const MaterialSet& set) {
   return out;
 }
 
+// The pause screen's doll draws its body three times (CModelData::MultiLightingDraw): depth alone,
+// then lit and then its pulse, both testing against that depth. Prime's doll bodies have no glass:
+// the visor is a model of its own (CSamusDoll's InvVisor), drawn after with the face showing through.
+// Echoes' have the visor in the body, as Prime's cutscene bodies do: an alpha-blended glass and an
+// added glow over the face, depth-sorted and writing depth. The depth pass wrote the glass's depth,
+// so the face behind it never drew, and the glass showed solid against the dark, its texture's
+// outlines with it (0.46.0 test 38, the user: "her face isn't visible when you view the suit in the
+// pause menu and there are visible lines on the the visor"). A doll body's depth-sorted materials
+// write no depth: the face draws, and the glass over it.
+bool SortedWithoutDepth(PrimeCmdl& model, std::string* error) {
+  constexpr uint32_t kDepthSorting = 0x10;
+  constexpr uint32_t kDepthWrite = 0x80;
+  for (std::vector<uint8_t>& bytes : model.materialSets) {
+    MaterialSet set;
+    if (!ParseSet(bytes, set, error)) {
+      return false;
+    }
+    for (std::vector<uint8_t>& material : set.materials) {
+      Reader r{material.data(), material.size()};
+      const uint32_t flags = r.U32(0);
+      if (r.bad) {
+        return Fail(error, "material cut short");
+      }
+      if ((flags & kDepthSorting) != 0) {
+        Set32(material, 0, flags & ~kDepthWrite);
+      }
+    }
+    bytes = WriteSet(set);
+  }
+  return true;
+}
+
 size_t VertexFlagsAt(const std::vector<uint8_t>& material) {
   Reader m{material.data(), material.size()};
   return 8 + size_t(m.U32(4)) * 4;
@@ -2782,6 +2814,12 @@ bool Import(const Io& io, Result& result, std::string& error) {
     std::vector<std::string> folded;
     PrimeCmdl model;
     if (!ConvertCmdl(cmdl, model, cmdlTextures, &why)) {
+      error = what + " model " + Hex8(t.echoesCmdl) + ": " + why;
+      return false;
+    }
+    // A pause screen doll's glass writes no depth (SortedWithoutDepth); the Varia's colours and
+    // helmet dolls are made from this one.
+    if (t.kind == 2 && !SortedWithoutDepth(model, &why)) {
       error = what + " model " + Hex8(t.echoesCmdl) + ": " + why;
       return false;
     }

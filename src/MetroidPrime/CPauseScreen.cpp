@@ -36,6 +36,28 @@
 #include "port_pointer_menu.h"
 #endif
 #include <float.h>
+#ifdef TARGET_PC
+#include <cmath>
+
+namespace {
+// Port: the pause screen keeps its proportions in widescreen (the camera matches the screen's
+// aspect), its sides spread to the screen's edges with the Widescreen HUD. A disc patched for
+// 16:9 has its frames made for a picture the TV stretches across a 16:9 screen: the whole frame
+// widened (its head widget scaled across: 1.12 in the user's patched disc, 0.46.0 test 38) and
+// pieces of it narrowed by 0.75 against the stretch. Spread, its panels came apart from the middle
+// one ("it looks terrible spread apart like that compared to my patched game image"); such a frame
+// is drawn as the patch expects instead, its authored projection stretched across the screen.
+void PortPauseCamera(CGuiFrame& frame) {
+  CGuiCamera* cam = frame.GetFrameCamera();
+  if (cam == nullptr) {
+    return;
+  }
+  const CGuiWidget* head = frame.FindWidget("kGSYS_HeadWidgetID");
+  const bool patched = head != nullptr && std::fabs(head->GetIdleXform().Get00() - 1.f) > 0.01f;
+  cam->SetAspectMatch(!patched);
+}
+} // namespace
+#endif
 
 CPauseScreen::ESubScreen CPauseScreen::GetPreviousSubscreen(ESubScreen screen) {
   if (screen == kSS_Inventory) {
@@ -157,11 +179,11 @@ bool CPauseScreen::CheckLoadComplete(const CStateManager& mgr) {
       return false;
     }
     x34_loadedPauseScreenInstructions = x28_pauseScreenInstructions.GetObject();
+#ifdef TARGET_PC
     // Port: keep the pause screen's proportions in widescreen instead of
-    // stretching it across the wider viewport.
-    if (CGuiCamera* cam = x34_loadedPauseScreenInstructions->GetFrameCamera()) {
-      cam->SetAspectMatch(true);
-    }
+    // stretching it across the wider viewport (a disc patched for 16:9 aside).
+    PortPauseCamera(*x34_loadedPauseScreenInstructions);
+#endif
     InitializeFrameGlue();
   }
   if (!x60_loadTok.null()) {
@@ -170,18 +192,18 @@ bool CPauseScreen::CheckLoadComplete(const CStateManager& mgr) {
         CMemoryInStream in(x5c_frmePauseScreenBuf.get(), x58_frmePauseScreenBufSz);
         CGuiFrame* frame =
             CGuiFrame::CreateFrame(x54_frmePauseScreenId, *gGuiSystem, in, gpSimplePool);
-        if (CGuiCamera* cam = frame->GetFrameCamera()) {
-          cam->SetAspectMatch(true);
-        }
+#ifdef TARGET_PC
+        PortPauseCamera(*frame);
+#endif
         x64_frameInsts.push_back(frame);
       }
       {
         CMemoryInStream in(x5c_frmePauseScreenBuf.get(), x58_frmePauseScreenBufSz);
         CGuiFrame* frame =
             CGuiFrame::CreateFrame(x54_frmePauseScreenId, *gGuiSystem, in, gpSimplePool);
-        if (CGuiCamera* cam = frame->GetFrameCamera()) {
-          cam->SetAspectMatch(true);
-        }
+#ifdef TARGET_PC
+        PortPauseCamera(*frame);
+#endif
         x64_frameInsts.push_back(frame);
       }
       x60_loadTok = nullptr;

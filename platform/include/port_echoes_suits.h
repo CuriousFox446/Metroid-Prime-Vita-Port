@@ -140,9 +140,11 @@ inline constexpr Target kTargets[] = {
 // the Spider Ball's, Phazon's hyper Spider Ball's): a copy of that ANCS whose character 0 takes the
 // model skinned rigidly on the joint Prime's ball skin weights most, and the model unskinned as the
 // low-poly ball, all under Wear(worn, Prime's ids). Only the Dark Suit has a Spider Ball of its own
-// in Echoes. The other looks (the Varia, the Light Suit, the Varia in Gravity's and Phazon's colours)
-// keep Prime's own Spider Balls, already in each suit's colours: the user's choice over their plain
-// balls standing in for it (mod versions 7 to 14).
+// in Echoes. The Varia and the Varia in Gravity's and Phazon's colours keep Prime's own Spider
+// Balls, already in each suit's colours: the user's choice over their plain balls standing in for
+// it (mod versions 7 to 14). The Light Suit's own ball stands for its Spider Ball too (version 18,
+// the user: "the light suit has it's own morphball model, you mistakenly swapped it with the
+// spiderball model"): it is no recolour.
 struct Ball {
   const char* suit;  // Echoes' ball, for the log
   int worn;          // WornLook
@@ -154,6 +156,7 @@ inline constexpr Ball kBalls[] = {
     {"Dark", kWornDark, false, 0x07C3C0E0, 0},
     {"Light", kWornLight, false, 0x9BE5CFAD, 0},
     {"Dark", kWornDark, true, 0x6AA79226, 0x5A5C0FEC},
+    {"Light", kWornLight, true, 0x9BE5CFAD, 0},
 };
 
 // The first-person right arm (CGunWeapon::LoadSuitArm, a static model at the gun's elbow): Echoes

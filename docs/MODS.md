@@ -350,9 +350,11 @@ Under F1 > Mods > Built-in mods > Metroid Prime 2: Echoes: the Varia, Dark and L
 from your own Echoes GameCube disc image (tested with USA `G2ME01`), in cutscenes, the Morph Ball
 transitions, the third-person camera and the pause screen's doll and the first-person arms (right,
 and the left grapple arm); and their Morph Balls, with the Dark Spider Ball as its Spider Ball.
-Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball), so those looks,
-and the Varia in Gravity's and Phazon's colours, keep Prime's own Spider Balls, each in its suit's
-colours (mod version 15; before, their plain balls stood in for it).
+Echoes has no Varia or Light Spider Ball (its Spider Ball keeps the suit's ball): the Light Suit's
+own ball stands for it (mod version 18), while the Varia and the Varia in Gravity's and Phazon's
+colours keep Prime's own Spider Balls, each in its suit's colours (mod version 15; before, their
+plain balls stood in for it). On the pause screen's doll the face shows through the visor, as on
+Prime's own (mod version 18).
 
 The Varia Suit is Echoes' Varia. The others each pick one of two looks ("Power Suit", "Gravity
 Suit", "Phazon Suit"; `echoes_suit_looks` in Power, Gravity, Varia, Phazon order; from the next mod

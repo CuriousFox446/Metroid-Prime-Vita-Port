@@ -4596,3 +4596,49 @@ What to look for in test 37:
   missing for a moment and back. A material seen for the first time in a session may still show flat
   briefly before its program loads.
 - In the log, stand-ins where the fixed-function counts were, and those counts far lower.
+
+## 0.46.0 test 38: the patched disc's pause screen as its patch draws it; the doll's face (echoes-suits 18)
+
+The user, with photos of the pause screen: "I like that the port gives you a widescreen hud but I
+hate how it handles the pause menus, it looks terrible spread apart like that compared to my patched
+game image, also her face isn't visible when you view the suit in the pause menu and there are
+visible lines on the the visor with the echoes mod, also the light suit has it's own morphball
+model, you mistakenly swapped it with the spiderball model". Then: the Desktop's
+`Metroid Prime.iso` is the modified image (the one on the Vita), `Metroid Prim (Rev 2).iso` the
+unmodified one.
+- **The disc's patch**: against Rev 2, its GGuiSys.pak differs only in eight FRMEs (the combat,
+  scan, thermal and ball HUDs, the map screen, the pause screen and its instructions), each a few
+  floats of widget transforms: a 16:9 patch for a picture a TV stretches across a 16:9 screen. The
+  pause screen's head widget is widened by 1.12 and two of its widgets narrowed by 0.75 against the
+  stretch. The port's widescreen spread (the pause frames' cameras match the screen's aspect and,
+  with the Widescreen HUD, spread the sides to the edges) pulled the patched panels apart; the
+  user's second photo is the patched frame stretched.
+- `PortPauseCamera` (CPauseScreen.cpp): a pause frame whose head widget is scaled across (more than
+  1% off 1) is drawn as its patch expects, its authored projection stretched across the screen
+  (`SetAspectMatch(false)`). Any other pause frame is as before (matched; spread with the
+  Widescreen HUD). The doll keeps its proportions (CSamusDoll's perspective takes the viewport's
+  own); touch takes the drawn rectangles. The in-game HUD and the map screen are as before.
+- **The face** (echoes-suits 18): the doll draws its body three times
+  (CModelData::MultiLightingDraw): depth alone, then lit and then its pulse, both against that
+  depth. Prime's doll bodies have no glass (the visor is CSamusDoll's InvVisor, drawn after), but
+  Echoes' have it in the body, as Prime's cutscene bodies do: a glass at 27% (alpha-blended, konst
+  alpha 0x45) and an added glow over the face (484 triangles, texture 94CC8E0E), both depth-sorted
+  and writing depth. The depth pass wrote the glass's depth, so the face never drew, and the glass
+  and glow over the dark read as a solid red-orange visor, their textures' outlines as lines (a
+  render of that order matches the photo). The import's doll bodies (Varia, Dark, Light, and the
+  Varia's colours and helmet dolls made from it) now write no depth from their depth-sorted
+  materials (`SortedWithoutDepth`): the face draws, the glass over it. The Light Suit's visor takes
+  its alpha from its texture (72% on average), so its face shows faintly, as in Echoes.
+- **The Light Suit's ball** (echoes-suits 18): it stands for its Spider Ball too (kBalls), over both
+  of Prime's Spider Ball models; the Varia and the colours looks keep Prime's (test 34's choice).
+  Prime's spider glass is left out over it (test 22's `ModServesSpiderBall`).
+- On the PC with both discs: 300 files; against version 17's last output only the nine doll bodies'
+  materials (their depth-sorted ones' depth write) and seven new Light Spider Ball files differ.
+- Needs the Echoes suits imported again (version 18).
+
+What to look for in test 38:
+- The pause screen (inventory, options, log book) with the patched disc: its panels together, as in
+  the user's photo of the patched game; the in-game HUD as before.
+- After the import, the pause screen's doll zoomed in: her face through the visor (Dark Suit's
+  orange, Varia's green; faintly through the Light Suit's); the visor's lines faint.
+- The Light Suit look with the Spider Ball: the Light Suit's own ball.
