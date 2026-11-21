@@ -4642,3 +4642,23 @@ What to look for in test 38:
 - After the import, the pause screen's doll zoomed in: her face through the visor (Dark Suit's
   orange, Varia's green; faintly through the Light Suit's); the visor's lines faint.
 - The Light Suit look with the Spider Ball: the Light Suit's own ball.
+
+## 0.46.0 test 39: the patched pause screen on an unpatched disc too
+
+The user, with test 38: "The pause menu is still the same with widescreen hud enabled with the
+unpatched image". Test 38 drew only a patched disc's pause frames the patch's way; an unpatched
+disc's were matched and spread as before.
+- The patch's pause screen edits (test 38's diff against Rev 2): the head widget's m00 1 to 1.12 in
+  FRME_PauseScreen and FRME_PauseScreenInstructions, and in FRME_PauseScreen the title's text pane
+  (`textpane_title`, the "[ Inventory ]" heading) and the zoom prompt's icon (`basewidget_yicon`)
+  1 to 0.75 (each the first float of its orientation, where the two FRMEs differ).
+- `PortPauseCamera` (CPauseScreen.cpp): with the Widescreen HUD on and a wide screen (the aspect
+  not 4:3), an unpatched disc's pause frame takes those edits as it loads (`ScaleAcross` on the
+  widgets' idle transforms) and is drawn stretched as the patched one is: both discs' pause
+  screens the same. With the Widescreen HUD off it keeps its proportions, unspread, as before. A
+  patched disc's frames are drawn the patch's way either way. Toggling the Widescreen HUD in the
+  pause screen's options applies from the next time it opens.
+
+What to look for in test 39:
+- With the Rev 2 disc (or any unpatched one) and the Widescreen HUD on: the pause screen as with the
+  patched disc, its panels together, the "[ Inventory ]" heading and the zoom prompt in proportion.

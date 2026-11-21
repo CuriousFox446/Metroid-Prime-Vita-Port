@@ -39,22 +39,52 @@
 #ifdef TARGET_PC
 #include <cmath>
 
+#include "port_debug.h"
+
 namespace {
+// `widget`'s idle transform with its first column's x (GX's m00: how wide it draws) times `scale`.
+void ScaleAcross(CGuiWidget& widget, float scale) {
+  const CTransform4f& xf = widget.GetIdleXform();
+  widget.SetIdleXform(CTransform4f(xf.Get00() * scale, xf.Get01(), xf.Get02(), xf.Get03(), xf.Get10(), xf.Get11(),
+                                   xf.Get12(), xf.Get13(), xf.Get20(), xf.Get21(), xf.Get22(), xf.Get23()));
+}
+
 // Port: the pause screen keeps its proportions in widescreen (the camera matches the screen's
 // aspect), its sides spread to the screen's edges with the Widescreen HUD. A disc patched for
 // 16:9 has its frames made for a picture the TV stretches across a 16:9 screen: the whole frame
-// widened (its head widget scaled across: 1.12 in the user's patched disc, 0.46.0 test 38) and
-// pieces of it narrowed by 0.75 against the stretch. Spread, its panels came apart from the middle
-// one ("it looks terrible spread apart like that compared to my patched game image"); such a frame
-// is drawn as the patch expects instead, its authored projection stretched across the screen.
+// widened and pieces of it narrowed against the stretch. Spread, the panels came apart from the
+// middle one ("it looks terrible spread apart like that compared to my patched game image"),
+// 0.46.0 test 38: such a frame is drawn as the patch expects instead, its authored projection
+// stretched across the screen.
+// The user's patched disc (against Rev 2's FRME_PauseScreen and FRME_PauseScreenInstructions): the
+// head widget's m00 1 to 1.12, and the title's text pane and the zoom prompt's icon 1 to 0.75. Test
+// 39 ("The pause menu is still the same with widescreen hud enabled with the unpatched image"):
+// with the Widescreen HUD on a wide screen, an unpatched disc's pause frame takes the same edits
+// here and is drawn so too; with it off, it keeps its proportions as before.
 void PortPauseCamera(CGuiFrame& frame) {
   CGuiCamera* cam = frame.GetFrameCamera();
   if (cam == nullptr) {
     return;
   }
-  const CGuiWidget* head = frame.FindWidget("kGSYS_HeadWidgetID");
+  CGuiWidget* head = frame.FindWidget("kGSYS_HeadWidgetID");
   const bool patched = head != nullptr && std::fabs(head->GetIdleXform().Get00() - 1.f) > 0.01f;
-  cam->SetAspectMatch(!patched);
+  if (patched) {
+    cam->SetAspectMatch(false);
+    return;
+  }
+  if (head != nullptr && PortDebug::HudWide() && PortDebug::AspectMode() != PortDebug::kAspect_4_3) {
+    constexpr float kWiden = 1.12f;
+    constexpr float kNarrow = 0.75f;
+    ScaleAcross(*head, kWiden);
+    for (const char* name : {"textpane_title", "basewidget_yicon"}) {
+      if (CGuiWidget* widget = frame.FindWidget(name)) {
+        ScaleAcross(*widget, kNarrow);
+      }
+    }
+    cam->SetAspectMatch(false);
+    return;
+  }
+  cam->SetAspectMatch(true);
 }
 } // namespace
 #endif
