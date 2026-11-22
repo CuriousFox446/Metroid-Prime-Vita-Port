@@ -311,6 +311,10 @@ struct Stats {
   u32 standIns = 0;
   // Draws recorded with a fixed-function part (0.46.0 test 45: no program, or one not yet linked).
   u32 fixedParts = 0;
+  // 0.46.0 test 46: materials worked out with GX's "alpha > 0" left out (alpha_test_unseen: their
+  // programs lean), and alpha passes recorded (DstAlpha::Second: GXSetDstAlpha's constant).
+  u32 alphaTestsLeftOut = 0;
+  u32 alphaPasses = 0;
   // Materials worked out that sample an EFB copy (their hash moves with every copy), and those
   // that replaced another still in use this window.
   u32 materialMissesCopy = 0;
@@ -1091,8 +1095,13 @@ bool efb_alpha() noexcept { return g_gxState.pixelFmt == GX_PF_RGBA6_Z24; }
 // blended alpha as it is), Zero (the alpha blended to zero by factors of its own, no program
 // needed: the frame-long zero of those frames), or Replace (the program returns the constant as
 // its alpha, written as it is: the morph ball shadow's IDs, the Phazon Suit's 255), where the
-// colour's blending reads no source alpha. One the colour's blending reads goes unwritten.
-enum class DstAlpha : u8 { None, Zero, Replace };
+// colour's blending reads no source alpha. One the colour's blending reads takes Second (0.46.0
+// test 46): drawn as it is, then again into the alpha alone, the program returning the constant
+// (record_draw's alpha pass). Before, its constant went unwritten: the pause screen's Samus is drawn
+// blended (CModelData::MultiLightingDraw: a depth pass of alpha 0, then the colour blended), so
+// the Phazon Suit's mask held only what the blended alpha left (none of the depth pass, some of the
+// rest), and its aura, the mask blurred, barely showed.
+enum class DstAlpha : u8 { None, Zero, Replace, Second };
 
 DstAlpha dst_alpha_mode() noexcept {
   const GXState& s = g_gxState;
@@ -1102,13 +1111,58 @@ DstAlpha dst_alpha_mode() noexcept {
   if ((s.dstAlpha & 0xFF) == 0) {
     return DstAlpha::Zero;
   }
+  // Subtracting blends the alpha the other way (GL's reverse subtract): the constant is not kept.
+  if (s.blendMode == GX_BM_SUBTRACT) {
+    return DstAlpha::None;
+  }
   const auto readsSourceAlpha = [](GXBlendFactor factor) {
     return factor == GX_BL_SRCALPHA || factor == GX_BL_INVSRCALPHA;
   };
   const bool needsSourceAlpha = s.colorUpdate && s.blendMode == GX_BM_BLEND &&
                                 (readsSourceAlpha(s.blendFacSrc) || readsSourceAlpha(s.blendFacDst));
-  // Subtracting blends the alpha the other way (GL's reverse subtract): the constant is not kept.
-  return needsSourceAlpha || s.blendMode == GX_BM_SUBTRACT ? DstAlpha::None : DstAlpha::Replace;
+  return needsSourceAlpha ? DstAlpha::Second : DstAlpha::Replace;
+}
+
+// 0.46.0 test 46. GX's alpha test "alpha > 0" alone (CElementGen's particles set it for every
+// draw) changes nothing where a fragment it fails, of alpha 0 (under 0.5/255), adds nothing: the
+// colour blended by its alpha (SRCALPHA) onto INVSRCALPHA or ONE of the destination (0 or under
+// half a step of its 8 bits), no depth written, the EFB's alpha blended the same way or not written
+// (no GXSetDstAlpha constant). Left out there (current_material), its program has no discard, which
+// on this GPU is costly twice: the test's own instructions (13 of a particle program's 40), and a
+// discarding program's pass type, the depth unit waiting on its fragments. Transport Tunnel B's dust
+// (some 220 big blended particle quads a frame, overlapping; test 45: GPU 80 ms a frame) is such
+// draws; their programs are made lean too (tev_program: 12 instructions in all).
+bool alpha_test_unseen() noexcept {
+  const GXState& s = g_gxState;
+  const AlphaCompare& c = s.alphaCompare;
+  const bool greaterZero =
+      c.op == GX_AOP_AND && ((c.comp0 == GX_GREATER && (c.ref0 & 0xFF) == 0 && c.comp1 == GX_ALWAYS) ||
+                             (c.comp1 == GX_GREATER && (c.ref1 & 0xFF) == 0 && c.comp0 == GX_ALWAYS));
+  return greaterZero && !s.depthUpdate && s.blendMode == GX_BM_BLEND && s.blendFacSrc == GX_BL_SRCALPHA &&
+         (s.blendFacDst == GX_BL_INVSRCALPHA || s.blendFacDst == GX_BL_ONE) && dst_alpha_mode() == DstAlpha::None;
+}
+
+// The alpha pass of a draw whose GXSetDstAlpha constant takes a draw of its own (DstAlpha::Second):
+// the same triangles where the draw itself drew (its depth test; LEQUAL where it wrote the depth,
+// which it then passes again), writing the alpha alone, unblended: the program's constant.
+vita_gl::RenderState alpha_pass_state(const vita_gl::RenderState& drawn) noexcept {
+  vita_gl::RenderState state = drawn;
+  state.blend = false;
+  state.blendEquation = kGlFuncAdd;
+  state.blendSrc = kGlOne;
+  state.blendDst = kGlZero;
+  state.alphaBlendOwn = false;
+  state.alphaBlendSrc = kGlOne;
+  state.alphaBlendDst = kGlZero;
+  state.alphaFunc = kGlAlways; // the program tests TEV's alpha
+  state.colorWrite = false;
+  state.alphaWrite = true;
+  if (drawn.depthWrite) {
+    state.depthTest = true;
+    state.depthFunc = gl_compare(GX_LEQUAL);
+  }
+  state.depthWrite = false;
+  return state;
 }
 
 // Blending that writes the source as it is (ONE and ZERO, the alpha's too) is no blending.
@@ -1646,6 +1700,11 @@ struct Material {
   u8 coordIds[kProgramCoords] = {};
   u8 mapIds[kSamplers] = {};
   vita_gl::RenderState programState;
+  // GXSetDstAlpha's constant written by an alpha pass after each draw (DstAlpha::Second): the
+  // program returning it, its family, and the pass's state (alpha_pass_state). Null: none.
+  const TevProgram* alphaProgram = nullptr;
+  u64 alphaFamily = 0;
+  vita_gl::RenderState alphaState;
   u32 used = 0; // sMaterialClock at its last use, for the set's replacement
 };
 // Sets of four, the least recently used of a set replaced: the frigate's heavy rooms keep about a
@@ -1898,6 +1957,28 @@ const Material& current_material() noexcept {
   material.valid = true;
   material.window = sWindow;
   material.used = sMaterialClock;
+  // GX's "alpha > 0" left out where it changes nothing (alpha_test_unseen): the material is worked
+  // out from the state without it (its state, its program, made lean, and the record the warm-up
+  // keeps), the state's own put back after. Its key (pipeline_key) reads the state as GX holds it.
+  const bool testUnseen = alpha_test_unseen();
+  struct CompareScope {
+    AlphaCompare saved;
+    bool swapped;
+    ~CompareScope() {
+      if (swapped) {
+        g_gxState.alphaCompare = saved;
+      }
+    }
+  } compareScope{g_gxState.alphaCompare, testUnseen};
+  if (testUnseen) {
+    AlphaCompare& compare = g_gxState.alphaCompare;
+    compare.comp0 = GX_ALWAYS;
+    compare.ref0 = 0;
+    compare.op = GX_AOP_AND;
+    compare.comp1 = GX_ALWAYS;
+    compare.ref1 = 0;
+    ++sStats.alphaTestsLeftOut;
+  }
   const TevLayout layout = tev_enabled() ? tev_layout() : TevLayout{};
   sStats.indirectMaterials += layout.indirect ? 1 : 0;
   sStats.indirectUnsupported += layout.indirect && !layout.supported ? 1 : 0;
@@ -1942,8 +2023,14 @@ const Material& current_material() noexcept {
     if (copies) {
       // GXSetDstAlpha's constant other than zero comes from the program (dst_alpha_mode); the
       // fixed-function draw meanwhile writes its own alpha.
-      const bool constantAlpha = dst_alpha_mode() == DstAlpha::Replace;
-      material.program = tev_program(layout, constantAlpha, &material.programFamily);
+      const DstAlpha dstAlpha = dst_alpha_mode();
+      const bool constantAlpha = dstAlpha == DstAlpha::Replace;
+      material.program = tev_program(layout, constantAlpha, &material.programFamily, testUnseen);
+      if (dstAlpha == DstAlpha::Second) {
+        // The constant written by an alpha pass after each draw (record_draw).
+        material.alphaProgram = tev_program(layout, true, &material.alphaFamily);
+        material.alphaState = alpha_pass_state(material.state);
+      }
       material.coordCount = layout.coordCount;
       for (int c = 0; c < layout.coordCount; ++c) {
         material.coordTcgs[c] = &g_gxState.tcgs[layout.coords[c]];
@@ -2145,10 +2232,11 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
   for (int unit = 0; unit < material.unitCount; ++unit) {
     sStats.additiveUnits += material.units[unit].envMode == kGlAdd ? 1 : 0;
   }
-  if (drawn != nullptr) {
-    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord);
-    vita_gl::ProgramInputs& inputs = draw.program;
-    inputs.program = vita_gl::keep(drawn->program);
+  // A program's inputs for this draw (its own, a stand-in's, or the alpha pass's): its textures, its
+  // rows and constants among the frame's rows, and the state it draws with.
+  const auto fill_inputs = [&](vita_gl::ProgramInputs& inputs, const TevProgram& program,
+                               const vita_gl::RenderState& programState) {
+    inputs.program = vita_gl::keep(program.program);
     for (int m = 0; m < kSamplers; ++m) {
       inputs.textures[m] = vita_gl::keep(material.programTextures[m]);
       inputs.samplers[m] = material.programSamplers[m];
@@ -2162,7 +2250,6 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
         vertex[r][c] = p[0] * modelView[c] + p[1] * modelView[4 + c] + p[2] * modelView[8 + c] + (c == 3 ? p[3] : 0.f);
       }
     }
-    const TevProgram& program = *drawn;
     const int row = tev_vertex_rows(program, material.coordTcgs, material.coordCount, vertex);
     float constants[vita_gl::kProgramConstants][4];
     tev_constants(program, material.coordIds, material.mapIds, constants);
@@ -2189,16 +2276,34 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
     place(constants, inputs.constantCount, program.constantsAt);
     inputs.vertexAt = program.vertexAt;
     inputs.constantsAt = program.constantsAt;
-    inputs.state = material.programState;
+    inputs.state = programState;
+  };
+  if (drawn != nullptr) {
+    vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord);
+    fill_inputs(draw.program, *drawn, material.programState);
     ++sStats.withProgram;
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRows);
   }
   sStats.blended += state.blend ? 1 : 0;
   sStats.alphaTested += state.alphaFunc != kGlAlways ? 1 : 0;
   sStats.culled += state.cullFace != 0 ? 1 : 0;
+  const vita_gl::ScreenRect viewport = draw.viewport;
+  const vita_gl::ScreenRect scissor = draw.scissor;
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[material.unitCount];
+  if (material.alphaProgram != nullptr) {
+    // The alpha pass (DstAlpha::Second): GXSetDstAlpha's constant into the alpha alone, where the
+    // draw drew (alpha_pass_state). Its program is built at its first such draw, which is left out
+    // meanwhile (it has no fixed-function part): the draw's own blended alpha stays till then.
+    vita_gl::Draw pass{.mesh = vita_gl::keep(mesh), .frameMesh = frameMesh};
+    pass.width = width;
+    pass.viewport = viewport;
+    pass.scissor = scissor;
+    fill_inputs(pass.program, *material.alphaProgram, material.alphaState);
+    vita_gl::record(std::move(pass));
+    ++sStats.alphaPasses;
+  }
 }
 
 // A skinned call's vertices to pose and write (skinned_from_template): its template, the position
@@ -3180,13 +3285,15 @@ void log_stats() noexcept {
            "skinned calls: {} from their template ({} drawn by index; {} corners as {} vertices), {} decoded whole, "
            "{} templates made; {} draws with a generated "
            "program ({} generated; {} of the draws with another light count's while theirs was on its way), their "
-           "constant arrays {} recorded, {} repeating the last; {} draws with a fixed-function part",
+           "constant arrays {} recorded, {} repeating the last; {} draws with a fixed-function part; {} materials "
+           "worked out with their alpha test left out ({} lean programs made in all), {} alpha passes drawn for "
+           "GXSetDstAlpha's constant",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
-           s.constantsShared, s.fixedParts);
+           s.constantsShared, s.fixedParts, s.alphaTestsLeftOut, tev_lean_program_count(), s.alphaPasses);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "
            "for at {} frame ends ({:.1f} ms in all), {} times for the frame's vertices to grow, {} at a draw done, "

@@ -56,6 +56,10 @@ struct TevProgram {
   bool matrices = false;
   // It reads an indirect stage (for the log).
   bool indirect = false;
+  // Made lean (tev_program's `lean`); its fog, if it has fog, from two rows after the rest: the fog's
+  // depth fraction's numerator and denominator (tev_vertex_rows).
+  bool lean = false;
+  bool fogRows = false;
   // FIFO thread (record_draw): where its last draw's constants went among the rows of the frame
   // being recorded (`recordedIn`, that frame's serial; another: none yet), for a draw repeating them.
   mutable u32 recordedIn = 0;
@@ -76,8 +80,13 @@ TevLayout tev_layout() noexcept;
 // the pointer stays valid for the session). With `constantAlpha`, it returns GXSetDstAlpha's
 // constant as its alpha (tev_constants puts it in the alpha references' row), after its alpha test.
 // `family`, when given, is set to the state's family: the same state but for the lights its
-// channels sum (tev_stand_in).
-const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha = false, u64* family = nullptr) noexcept;
+// channels sum (tev_stand_in). With `lean` (0.46.0 test 46: for now the materials whose alpha test
+// is left out, vita_draw.cpp's alpha_test_unseen) it is made the cheaper way, which gives the same
+// results: no clamp of a TEV input that is within [0, 1] already (a texture's, the raster colour's,
+// a konst's, a constant), and the fog's depth fraction from two vertex rows with one division (the
+// material record keeps the choice, so the warm-up makes the same program).
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha = false, u64* family = nullptr,
+                              bool lean = false) noexcept;
 // FIFO thread, for a draw whose `program` is not linked yet (vita_gl::program_ready), with the
 // current GX state its own: a linked program of its `family` (tev_program's) summing other counts
 // of lights, to draw with meanwhile, its rows made for it (tev_vertex_rows: its lights the mask's
@@ -93,9 +102,10 @@ void tev_constants(const TevProgram& program, const u8* coordIds, const u8* mapI
 // Returns the rows in all.
 int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], int coordCount,
                     float (*out)[4]) noexcept;
-// Programs generated so far, and of them those that read an indirect stage.
+// Programs generated so far, and of them those that read an indirect stage, and the lean ones.
 size_t tev_program_count() noexcept;
 size_t tev_indirect_program_count() noexcept;
+size_t tev_lean_program_count() noexcept;
 // The warm-up (docs/VITA_PHASE2.md), at each frame's end (FIFO thread, or the game thread with the
 // FIFO drained): the material records the sessions before saved on the card made into programs with
 // this session's generator, up to 8 ms' worth, and those the card lacks compiled ahead of their

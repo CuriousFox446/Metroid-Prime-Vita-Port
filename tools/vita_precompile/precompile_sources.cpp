@@ -4,15 +4,16 @@
 // compile them here (precompile.py) rather than on the Vita. Built by build.sh.
 //
 //   precompile_sources <materials.bin> <out dir>
-//   precompile_sources --self-test [lava [out dir]]
+//   precompile_sources --self-test [lava|lean [out dir]]
 //
 // Writes <key>.vcg and <key>.fcg (the vertex and fragment programs; key as the card names a
 // program's binary, 16 hex digits) for each program the records make, once each, and manifest.txt
 // (one line a program: key, the two sources' lengths). Records of another build's layout, and
 // materials no program draws, are counted and left out. --self-test makes a textured, vertex
 // coloured, fogged material's record and prints the program it makes again; with `lava`, the
-// bump-mapped lava's (CFluidPlaneCPU::RenderSetup, kFT_Lava: an emboss coordinate), and with an out
-// dir its sources and manifest there too, for precompile.py to compile.
+// bump-mapped lava's (CFluidPlaneCPU::RenderSetup, kFT_Lava: an emboss coordinate), with `lean` the
+// first material's program made lean (a particle's, 0.46.0 test 46), and with an out dir its
+// sources and manifest there too, for precompile.py to compile.
 
 #include "gx/vita_tev.hpp"
 
@@ -41,6 +42,7 @@ const std::vector<uint8_t>& saved_materials() noexcept {
 }
 void save_material(const void*, size_t) noexcept {}
 bool program_known(uint64_t) noexcept { return true; }
+bool program_ready(const Program*) noexcept { return false; }
 bool warm_up_room() noexcept { return false; }
 void warm_up(uint64_t, std::string, std::string) noexcept {}
 } // namespace vita_gl
@@ -107,7 +109,11 @@ void lava_state(aurora::gx::GXState& s) {
   s.colorChannelState[GX_ALPHA1].lightMask.set(3);
 }
 
-int self_test(bool lava, const char* outDir) {
+// A record's flags byte (vita_tev.cpp's MaterialRecord: after its u32 format and two stage counts);
+// bit 0, its program made lean (tev_program's `lean`).
+constexpr size_t kRecordFlags = 6;
+
+int self_test(bool lava, bool lean, const char* outDir) {
   using namespace aurora::gx;
   GXState& s = g_gxState;
   if (lava) {
@@ -127,7 +133,10 @@ int self_test(bool lava, const char* outDir) {
     s.colorChannelConfig[GX_ALPHA0].matSrc = GX_SRC_VTX;
     s.fog.type = GX_FOG_PERSP_LIN;
   }
-  const std::vector<uint8_t> record = vita::tev_capture_material();
+  std::vector<uint8_t> record = vita::tev_capture_material();
+  if (lean && record.size() > kRecordFlags) {
+    record[kRecordFlags] |= 1;
+  }
   // What the record stands in for is put back after: clear it, so a match shows the record made it.
   s = GXState{};
   std::string vertexSource;
@@ -159,14 +168,15 @@ int self_test(bool lava, const char* outDir) {
 int main(int argc, char** argv) {
   if (argc >= 2 && std::strcmp(argv[1], "--self-test") == 0) {
     const bool lava = argc >= 3 && std::strcmp(argv[2], "lava") == 0;
-    if (argc > (lava ? 4 : 2)) {
-      std::fprintf(stderr, "usage: %s --self-test [lava [out dir]]\n", argv[0]);
+    const bool lean = argc >= 3 && std::strcmp(argv[2], "lean") == 0;
+    if (argc > (lava || lean ? 4 : 2)) {
+      std::fprintf(stderr, "usage: %s --self-test [lava|lean [out dir]]\n", argv[0]);
       return 2;
     }
-    return self_test(lava, lava && argc == 4 ? argv[3] : nullptr);
+    return self_test(lava, lean, (lava || lean) && argc == 4 ? argv[3] : nullptr);
   }
   if (argc != 3) {
-    std::fprintf(stderr, "usage: %s <materials.bin> <out dir> | --self-test [lava [out dir]]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <materials.bin> <out dir> | --self-test [lava|lean [out dir]]\n", argv[0]);
     return 2;
   }
   std::ifstream in{argv[1], std::ios::binary};

@@ -244,8 +244,9 @@ constexpr int kProgramConstants = 13 + kProgramCoords + kSamplers + 6 + 2;
 // matrix (4 rows); each texture coordinate slot's matrix (3 rows of 4 for a projective set, else 2)
 // and its post-transform matrix (3 more, when it has one); for a lit program the position and
 // normal matrices (3 rows each); and each lit channel's lights, five rows apiece (position,
-// direction, colour, angle and distance attenuation), up to GX's eight for each of four channels.
-constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5;
+// direction, colour, angle and distance attenuation), up to GX's eight for each of four channels;
+// for a lean program with fog, its depth fraction's two rows last (0.46.0 test 46).
+constexpr int kProgramVertexConstants = 4 + 6 * kProgramCoords + 6 + 4 * 8 * 5 + 2;
 
 // A draw's generated program and what it reads: its textures (sampler slot order), where its
 // vertex and fragment constants are among its frame's constant rows (record_constants; as many as

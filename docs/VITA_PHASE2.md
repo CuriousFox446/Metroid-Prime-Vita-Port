@@ -4880,3 +4880,69 @@ What to look for in test 45:
 - The `[fifo path]` line's record section against test 43's 5.7 ms a frame, its busy total against
   34-36 ms; the presents line's draws a frame (more join now), the materials line's fixed-function
   count (near 0 in play).
+
+## 0.46.0 test 46: the dust's particles cheaper on the GPU; the Phazon Suit's aura
+
+The user, after test 45 (a photo at 9 FPS in a dusty tunnel): "the phazon suit's aura barely
+shows and the dust effect cause the fps to drop and since there's a lot in Transport Tunnel B, the
+fps gets really bad".
+
+**The dust.** Test 45's log, Tallon Overworld's tunnel: 10.3 FPS, the GPU busy 80.5 ms a frame (99%;
+32-45 ms elsewhere at about the same 1,030 draws a frame), the render worker waiting on it 98.5 ms a
+frame. The dust is CElementGen's particles (no envfx there): some 220 big blended quads a frame,
+overlapping across the screen, all pixels: the GPU runs at its top clock (222 MHz, vita_platform.cpp),
+so it is the fragment program's length times the pixels. Compiled on the PC with the Vita's own
+compiler (the oracle of tools/vita_precompile), the particles' program (texture times the vertex
+colour, fog, CElementGen's alpha test "alpha > 0") is 40 USSE instructions a fragment (43 with
+exponential fog):
+- 13 of them the alpha test: its comparison and the `discard`, which also gives the program the
+  discarding pass type (the depth unit waits on each fragment's verdict; test 16's cost test: 10-29
+  alpha-tested draws 8-17 ms).
+- 6 the clamps of the texture's and the raster colour's values (GX takes a, b and c as 8 bits;
+  those inputs are within [0, 1] already), and 4 the clamp of a stage's sum that cannot leave [0, 1].
+- 13 the fog: the window depth's division, then GX's A / (B - z)'s; 5 more for clamps of the colour
+  and of the fog factor that are within [0, 1] already.
+
+The changes, each giving the same picture:
+- `alpha_test_unseen` (vita_draw.cpp): GX's "alpha > 0" alone, blended SRCALPHA onto INVSRCALPHA or
+  ONE, no depth written, no GXSetDstAlpha constant: a fragment it fails (alpha under 0.5/255) adds
+  under half a step of 8 bits, nothing. Such a material is worked out without the test (its state,
+  program and record), so its program has no discard. CElementGen's particles are such draws, unless
+  they write the depth (ZBUF) or blend ONE/ONE.
+- Their programs are made lean (`tev_program`'s `lean`): no clamp on an input within [0, 1] (a
+  texture's, the raster colour's, a konst, a constant; the registers keep theirs), none on a sum of
+  such without d, bias or scale, none on a fog factor (every curve keeps fogF's [0, 1]) or on a colour
+  a stage clamped; and the fog's depth fraction from two vertex rows after the rest (`tev_vertex_rows`:
+  A*w over (B - 1/2)*w - z/2, orthographic A*(z + w)/2 over w), each linear in the position, so
+  interpolated exactly, divided once per fragment. The particles' program: 12 instructions (vertex
+  program 10). `kProgramVertexConstants` has the two rows more.
+- The material record keeps the choice (its padding byte, now `flags`, bit 0), so the warm-up and
+  the PC's precompile tool make the same lean program. Every other program's source is unchanged:
+  the old card's 678 records make the same 552 sources byte for byte (checked on the PC), so the card
+  keeps them all; only the particles' new programs compile, once.
+- tools/vita_precompile: `program_ready`'s stub (the tool no longer linked since test 37), and
+  `--self-test lean`.
+
+The lean way would save about 17% of every world program's instructions too (24 programs of the old
+card's, compiled both ways on the PC), but every program would compile again: that needs the card's
+current `vita_programs/materials.bin` on the PC to precompile them all first.
+
+**The aura.** The Phazon Suit's aura is its mask (the suit drawn with GXSetDstAlpha's 255 into the
+EFB's alpha) blurred and drawn through. The port drew the constant only where the colour's blending
+reads no source alpha; a blended draw kept its blended alpha. The pause screen's Samus
+(`CModelData::MultiLightingDraw`) is drawn blended: a depth pass of alpha 0, then the colour blended
+by its alpha, then an additive pulse. GX writes 255 for every one of those fragments; the port wrote
+nothing for the depth pass and the texture's alpha squared for the rest: a thin, partial mask, a
+faint aura. Now (`DstAlpha::Second`) such a draw is drawn as before, then again into the alpha alone,
+unblended, its program returning the constant (`alpha_pass_state`: its depth test, LEQUAL where it
+wrote the depth; the constant program does the alpha test). Its program (the material's
+constant-alpha one) compiles at its first draw, which is left out meanwhile. The `phazon_shell`
+setting (Remastered's shell) draws nothing on the Vita (no scene copy) and stays off without the
+room-environment mod (this card has none), so the original aura is the one drawn.
+
+What to look for in test 46:
+- The dusty tunnel's frame rate and the presents line's GPU busy against 80.5 ms; the materials line
+  counts the materials whose alpha test was left out and the lean programs made.
+- The particles' look unchanged (the "Compiling shaders" toast once, for their new programs).
+- The pause screen with the Phazon Suit: the aura around the whole suit (the toast once, for the
+  alpha passes' programs); the materials line counts the alpha passes.
