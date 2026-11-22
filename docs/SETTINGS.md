@@ -1191,7 +1191,10 @@
   (`mods_disabled`, the names left out, `/`-separated), read at startup
   (`MODS.md`); the Metroid Dread section's "Dread arm cannon in first person"
   (`dread_first_person_cannon`, on by default; off keeps Prime's arm cannon,
-  `DREAD_SAMUS.md`); the Metroid Prime 2: Echoes section's "Echoes arm cannon in
+  `DREAD_SAMUS.md`); the Metroid Prime 2: Echoes section's "Echoes Suit models"
+  (`echoes_suit_models`, on by default; off gives every suit Prime's own models
+  back from the next mod reload, the arm cannon keeping its own switch, `MODS.md`)
+  and "Echoes arm cannon in
   first person" (`echoes_first_person_cannon`, on by default; off keeps Prime's arm
   cannon from the next beam selected, `MODS.md`); its "Play as Dark Samus"
   (`echoes_dark_samus`, off by default; from the next mod reload, `MODS.md`); the Remastered import's "What to import" (`remastered_skip`: the

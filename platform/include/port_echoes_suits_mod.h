@@ -74,8 +74,17 @@ constexpr uint32_t HelmetId(uint32_t id) { return PortModelVariant::Id(id, kHelm
 bool HasOwnHelmet(uint32_t bodyCmdl);
 int SuitLook(int suit);
 void SetSuitLook(int suit, int look);
-// The look the loaded mods serve for the suit (kLookPrime when none): a reload applies SuitLook.
+// The look the loaded mods serve for the suit (kLookPrime when none): a reload applies WantedSuitLook.
 int ServedSuitLook(int suit);
+// Whether the suits wear their Echoes looks at all (the setting echoes_suit_models, on by default;
+// 0.46.0 test 49, asked for by a player: Prime's suits with the Echoes arm cannon). Off, every suit
+// is Prime's own (its bodies, the pause screen's doll, the first-person arms, the Morph and Spider
+// Balls) while the arm cannon keeps its own switch (FirstPersonCannonShown). The next mod reload
+// applies a change.
+void SetSuitModelsShown(bool shown);
+bool SuitModelsShown();
+// The look the next mod load serves for the suit: SuitLook, or kLookPrime while the suit models are off.
+int WantedSuitLook(int suit);
 
 // What the import writes, once per look, under variant ids of Prime's Varia resources (Wear):
 // Echoes' three suits, and its Varia in Gravity's and Phazon's colours (its recoloured textures

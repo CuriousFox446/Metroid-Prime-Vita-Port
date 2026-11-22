@@ -398,15 +398,25 @@ void DrawBuiltinMods() {
   }
   if (ImGui::CollapsingHeader("Metroid Prime 2: Echoes")) {
     ImGui::Indent();
-    DrawBuiltinModToggle(PortEchoesSuits::kModName, "Use the Echoes Suit models",
+    DrawBuiltinModToggle(PortEchoesSuits::kModName, "Use the Echoes models",
                          ModImportStale(status, PortEchoesSuits::kModName));
+    // 0.46.0 test 49: the suits and the arm cannon each have a switch of their own, so either can be
+    // Prime's while the other stays Echoes'.
+    bool suits = PortEchoesSuits::SuitModelsShown();
+    if (ImGui::Checkbox("Echoes Suit models", &suits)) {
+      PortEchoesSuits::SetSuitModelsShown(suits);
+      MarkDirty();
+    }
+    ItemHelp("Off gives every suit Prime's own models back: its bodies in cutscenes and third person, the pause "
+             "screen's Samus, the first-person arms, the Morph and Spider Balls. The Echoes arm cannon keeps its "
+             "own switch below. Applies when the mods reload.");
     bool cannon = PortEchoesSuits::FirstPersonCannonShown();
     if (ImGui::Checkbox("Echoes arm cannon in first person", &cannon)) {
       PortEchoesSuits::SetFirstPersonCannonShown(cannon);
       MarkDirty();
     }
-    ItemHelp("Off keeps Prime's own arm cannon in first person; the Echoes Suit bodies stay. Applies the next "
-             "time a beam is selected.");
+    ItemHelp("Off keeps Prime's own arm cannon in first person; the suits stay as the switch above has them. "
+             "Applies the next time a beam is selected.");
     // Ice, Wave and Plasma: their Echoes beam's textures or Prime's original beam's (the shape stays).
     static const char* const kBeamNames[PortEchoesSuits::kCannonLookBeams] = {"Power Beam", "Ice Beam",
                                                                               "Wave Beam", "Plasma Beam"};
@@ -432,6 +442,7 @@ void DrawBuiltinMods() {
     static const char* const kSuitNames[PortEchoesSuits::kSuitLookSuits] = {"Power Suit", "Gravity Suit",
                                                                             "Varia Suit", "Phazon Suit"};
     bool looksPending = false;
+    ImGui::BeginDisabled(!suits);
     for (const int suit : kSuitOrder) {
       const int* const pair = PortEchoesSuits::kSuitLookChoices[suit];
       const char* const choices[2] = {PortEchoesSuits::kSuitLookNames[pair[0]],
@@ -442,8 +453,9 @@ void DrawBuiltinMods() {
         MarkDirty();
       }
     }
+    ImGui::EndDisabled();
     for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
-      looksPending = looksPending || PortEchoesSuits::SuitLook(suit) != PortEchoesSuits::ServedSuitLook(suit);
+      looksPending = looksPending || PortEchoesSuits::WantedSuitLook(suit) != PortEchoesSuits::ServedSuitLook(suit);
     }
     ItemHelp("The Varia Suit is Echoes' Varia. The Power Suit is Prime's own, or Prime's with Echoes' helmet. "
              "Gravity and Phazon wear Echoes' Dark and Light Suits, or Echoes' Varia in their own colours "

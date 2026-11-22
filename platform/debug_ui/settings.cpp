@@ -527,6 +527,8 @@ const SettingKey kSettingKeys[] = {
     {"echoes_first_person_cannon",
      [](const std::string& value) { PortEchoesSuits::SetFirstPersonCannonShown(ParseBool(value)); },
      [](std::ostream& out) { WriteBool(out, PortEchoesSuits::FirstPersonCannonShown()); }, false, "0", "1"},
+    {"echoes_suit_models", [](const std::string& value) { PortEchoesSuits::SetSuitModelsShown(ParseBool(value)); },
+     [](std::ostream& out) { WriteBool(out, PortEchoesSuits::SuitModelsShown()); }, false, "0", "1"},
     {"echoes_cannon_looks",
      [](const std::string& value) {
        // Power's, Ice's, Wave's and Plasma's, comma-separated: for Ice, Wave and Plasma their Echoes

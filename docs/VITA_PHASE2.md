@@ -4999,3 +4999,24 @@ port_data_folder.cpp).
 What to look for in test 48: the "shader folder:" lines once, then "programs on the card: N;
 precompiled: 1426" as in test 47; no compile storm at the start (the warm-up finds the records and the
 pack in their new place).
+
+## 0.46.0 test 49: the Echoes suits and arm cannon switched apart
+
+The user, for a player: "Someone asked if it would be possible to separate the Echoes suit models
+from the arm cannon models, so if one were to be able to turn off the Echoes suit models but wanna
+keep the echoes arm cannon enabled, vice versa", then "Yes, add it". Echoes' suits with Prime's cannon
+was there already ("Echoes arm cannon in first person" off); Prime's suits with Echoes' cannon was
+not: the mod's own switch takes both, and only the Power Suit's looks offered Prime's own.
+- "Echoes Suit models" (`echoes_suit_models`, on by default; console `echoessuits 0|1`), under the
+  mod's switch, now "Use the Echoes models": off, every suit wants Prime's own look
+  (`PortEchoesSuits::WantedSuitLook`), so the loader serves none of the looks' bodies, dolls,
+  first-person arms or balls over Prime's (port_mods.cpp); the cannon (`sEchoesGuns`) is served apart
+  and keeps its switch. From the next mod reload, as the looks; the "Reload the mods to apply" note
+  compares the wanted looks with the served ones. The suits' look choices are kept (greyed while it
+  is off) and come back with it. "Play as Dark Samus" stays a switch of its own.
+- MODS.md, SETTINGS.md and the settings search index name it.
+
+What to look for in test 49: F1 > Mods > Built-in mods > Metroid Prime 2: Echoes, "Echoes Suit
+models" off and the mods reloaded: Prime's suits everywhere (cutscenes, the pause screen, the
+first-person arm, the balls) with Echoes' cannon in first person; on again and reloaded, the looks
+as chosen. The log says "the suit models are off" at the load.

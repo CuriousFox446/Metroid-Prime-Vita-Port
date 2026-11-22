@@ -101,6 +101,8 @@ bool sPlayAsDarkSamus = false;  // the setting echoes_dark_samus
 int sSuitLooks[PortEchoesSuits::kSuitLookSuits] = {PortEchoesSuits::kLookHelmet, PortEchoesSuits::kLookColours,
                                                    PortEchoesSuits::kLookVaria, PortEchoesSuits::kLookColours};
 int sServedSuitLooks[PortEchoesSuits::kSuitLookSuits] = {};
+// The setting echoes_suit_models (PortEchoesSuits::SuitModelsShown): off, every suit is Prime's own.
+bool sSuitModels = true;
 // The Prime body CMDLs it serves with Echoes' helmet on (PortEchoesSuits::HasOwnHelmet): Prime's
 // bodies still, so not in sEchoesBodies (their boots and parts stay), but with their own visor.
 std::set<uint32_t> sEchoesHelmetBodies;
@@ -517,6 +519,9 @@ void PortEchoesSuits::SetSuitLook(int suit, int look) {
 int PortEchoesSuits::ServedSuitLook(int suit) {
   return suit >= 0 && suit < kSuitLookSuits ? PortMods::sServedSuitLooks[suit] : kLookPrime;
 }
+void PortEchoesSuits::SetSuitModelsShown(bool shown) { PortMods::sSuitModels = shown; }
+bool PortEchoesSuits::SuitModelsShown() { return PortMods::sSuitModels; }
+int PortEchoesSuits::WantedSuitLook(int suit) { return PortMods::sSuitModels ? SuitLook(suit) : kLookPrime; }
 bool PortEchoesSuits::HasOwnHelmet(uint32_t bodyCmdl) {
   return bodyCmdl != 0 && PortMods::sEchoesHelmetBodies.count(bodyCmdl) != 0;
 }
@@ -1018,9 +1023,15 @@ void Initialize() {
     }
   }
 
-  // The suits' looks (PortEchoesSuits::SuitLook): what the Echoes import wrote of each look under its
-  // own ids (Wear of the Varia's), served over the bodies, arms and balls of the suits that wear it,
-  // over whichever mod served those. Dark Samus, below, still stands in for the bodies.
+  // The suits' looks (PortEchoesSuits::WantedSuitLook): what the Echoes import wrote of each look under
+  // its own ids (Wear of the Varia's), served over the bodies, arms and balls of the suits that wear
+  // it, over whichever mod served those. Dark Samus, below, still stands in for the bodies. With the
+  // suit models off (echoes_suit_models) every suit wants Prime's own: nothing is served over them,
+  // and the arm cannon (served apart, sEchoesGuns) stays.
+  if (!sSuitModels && loose.count({0x414E4353u, PortEchoesSuits::Cannon(PortEchoesSuits::kBeamAncs[0])}) != 0) {
+    PortLog::Write("mods: %s: the suit models are off (echoes_suit_models): every suit is Prime's own\n",
+                   PortEchoesSuits::kModName);
+  }
   {
     const auto echoes = [&](uint32_t type, uint32_t id) -> const LooseResource* {
       const auto it = loose.find({type, id});
@@ -1037,7 +1048,7 @@ void Initialize() {
     };
     const PortEchoesSuits::SuitResources& varia = PortEchoesSuits::kSuitResources[PortEchoesSuits::kVariaSuit];
     for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
-      const int look = sSuitLooks[suit];
+      const int look = PortEchoesSuits::WantedSuitLook(suit);
       const PortEchoesSuits::SuitResources& mine = PortEchoesSuits::kSuitResources[suit];
       if (look == PortEchoesSuits::kLookHelmet) {
         // Prime's bodies with Echoes' helmet, under their own ids; the arms and balls stay Prime's.

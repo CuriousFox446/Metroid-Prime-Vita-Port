@@ -265,6 +265,8 @@
 {"Mods", "", "Built-in mods > Prime Remastered > Import > What to import", "Gallery", "remastered import parts gallery extras skip"},
 {"Mods", "", "Built-in mods > Metroid Dread", "Use the Dread Suit models", "dread samus metroid suit models mod enable disable toggle on off"},
 {"Mods", "", "Built-in mods > Metroid Dread", "Dread arm cannon in first person", "dread samus arm cannon gun first person viewmodel weapon show hide toggle"},
+{"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Use the Echoes models", "echoes mp2 suits arm cannon models mod enable disable toggle on off"},
+{"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Echoes Suit models", "echoes mp2 suit suits body bodies varia dark light model samus prime own show hide toggle"},
 {"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Echoes arm cannon in first person", "echoes mp2 arm cannon gun first person viewmodel weapon missile launcher show hide toggle"},
 {"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Play as Dark Samus", "echoes mp2 dark samus phazon body model character skin play as"},
 {"Mods", "", "Built-in mods > Metroid Dread > Import", "Import##dread", "dread start import run samus suit models nsp xci"},

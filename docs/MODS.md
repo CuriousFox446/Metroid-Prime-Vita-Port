@@ -367,9 +367,15 @@ the Power Suit wears Echoes' helmet and Gravity and Phazon the Varia in their co
 (`helmet,colours,varia,colours`). From mod version 12 the import writes each look once under its own
 ids, and the loader serves it over the suits that wear it; the helmet bodies from 13.
 
-- It is the mod `echoes-suits`. Its bodies carry their own arm cannon, so Prime's is not drawn on
-  them. They are skinned onto Prime's skeleton: joints Prime lacks fold into their nearest parent
-  Prime has.
+- It is the mod `echoes-suits` ("Use the Echoes models": the suits and the arm cannon together). Its
+  bodies carry their own arm cannon, so Prime's is not drawn on them. They are skinned onto Prime's
+  skeleton: joints Prime lacks fold into their nearest parent Prime has.
+- The suits and the first-person arm cannon each have a switch, so either can be Prime's while the
+  other stays Echoes'. "Echoes Suit models" (`echoes_suit_models`, on by default; console
+  `echoessuits 0|1`) off gives every suit Prime's own models back: its bodies in cutscenes and third
+  person, the pause screen's doll, the first-person arms and the Morph and Spider Balls, from the next
+  mod reload (the looks below wait meanwhile). The arm cannon below keeps its own switch: Prime's
+  first-person arm then holds Echoes' cannon, as the Power Suit's helmet look already has it.
 - It replaces the same body models as `dread-samus`: switch one of the two off.
 - A Metroid Prime Trilogy (Wii) image works as the Echoes image: its `MP2` folder holds the same
   PAKs. Playing from a Trilogy disc, the page has no disc picker: Import reads the running disc.
