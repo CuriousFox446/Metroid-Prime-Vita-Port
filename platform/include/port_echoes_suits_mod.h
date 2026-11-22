@@ -38,7 +38,9 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     writes no depth, so the face shows through it (SortedWithoutDepth).
 // 19: the Federation Marine and the Dark Trooper ("Play as a Federation Marine",
 //     port_federation_marine_mod.h), its bodies' hand and rifle turned upright in Samus's poses.
-inline constexpr int kVersion = 19;
+// 20: the troopers' right hand left out, bodies and first-person rifle (its fingers stuck out
+//     through the rifle's frame).
+inline constexpr int kVersion = 20;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's

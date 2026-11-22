@@ -514,9 +514,6 @@ bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
 float PortDreadSamus::FirstPersonCannonRoll(int suit) {
   return PortFederationMarine::ServesFirstPersonRifle(suit) ? 0.f : 30.f;
 }
-float PortDreadSamus::FirstPersonCannonDrop(int suit) {
-  return PortFederationMarine::ServesFirstPersonRifle(suit) ? PortFederationMarine::kRifleDrop : 0.f;
-}
 void PortFederationMarine::SetFirstPersonRifleShown(bool shown) { sMarineRifleShown = shown; }
 bool PortFederationMarine::FirstPersonRifleShown() { return sMarineRifleShown; }
 bool PortFederationMarine::ServesFirstPersonRifle(int suit) {

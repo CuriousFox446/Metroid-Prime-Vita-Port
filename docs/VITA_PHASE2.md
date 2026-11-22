@@ -5203,3 +5203,43 @@ What to look for in test 51:
 - The pause screen and third person: the rifle hangs grip down, the hand around it, the forearm as
   before.
 - First person: the rifle about 7.5 cm lower than in test 50, with shots still from its muzzle.
+
+### Test 51 result
+
+The user asked whether the shots line up with the rifle's barrel: "it looks like it's being shot
+from way below".
+- They do. x418_beamLocalXf (shots, muzzle flashes, charge effects) is the rifle's muzzle, the
+  hexagonal mouth of the barrel under its top housing.
+- Seen from the first-person eye, above and behind, the housing hides that mouth. The rifle's visible
+  front is the housing's top front edge (rifle space y -0.10, z +0.17), 80 of 544 lines above the
+  mouth (`~/marine/ridge.py`, render2's MARK crosses).
+- The user: "if it does then there's no need to change". Then, with an in-game photo and a render of
+  the rifle's left side: "I think moving the arm cannon back up would be a good idea, probably should
+  make sure the hand doesn't appear because it clips through the arm cannon and it already has a grip
+  so we'll just pretend the hand is holding that instead."
+
+## 0.46.0 test 52: the rifle back up, the troopers' right hand left out (echoes-suits 20)
+
+- First person: the drop is gone (`kRifleDrop`, `FirstPersonCannonDrop` and `mPortCannonDrop`
+  removed). The rifle's muzzle sits on the cannon's again, as in test 50, the shots with it.
+- The right hand (`DropHand`, port_federation_marine.cpp): the body material's triangles with a vertex
+  on the Echoes skeleton's R_wrist, to which the hand is skinned rigidly, as the rifle is.
+  - 109 triangles of each trooper: palm, fingers and thumb in 9 pieces, and the 13 that join them to
+    the forearm. The rifle, its own material on the wrist too, stays.
+  - The marine's hand grips a handle inside the rifle's open frame, and its fingers stuck out through
+    the frame's sides (`~/marine/handview.py`: the T-posed hand alone, and the rifle without it).
+  - Left out of every body (cutscene, in-game, doll): after RollGrip and before the Dark Trooper's
+    visor swap, the marine's vertices then compacted (2969 to 2864).
+  - Left out of the first-person rifle too (501 to 397 vertices).
+  - echoes-suits `kVersion` 20, so the user imports again.
+- Checked with the import harness (`~/marine/out5`):
+  - validate.py reads as test 51's but for the vertex counts.
+  - The rifle seen from either side, and the doll posed in the pause screen's idle seen from the
+    side, show the frame's inner bar where the fingers were.
+  - From the front the doll looks as before.
+
+What to look for in test 52:
+- Import the Echoes suits again (mod version 20).
+- First person: the rifle back at test 50's height. The shots still come from under its housing's
+  front.
+- No fingers through the rifle's sides, in first person, third person, cutscenes or the pause screen.

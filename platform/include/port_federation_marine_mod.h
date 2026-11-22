@@ -27,15 +27,12 @@ inline constexpr const char* kLookNames[kLookCount] = {"Federation Marine", "Fed
 // What each suit wears (CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon).
 inline constexpr int kSuitLooks[PortEchoesSuits::kSuitLookSuits] = {kMarine, kGravityMarine, kMarine, kDarkTrooper};
 
-// The first-person rifle of a look: a static model (the marine's right forearm, hand and rifle) with
-// its muzzle at the origin and its barrel up +Y, written as Wear(look, kRifleBase) and served under
-// PortDreadSamus::FirstPersonCannon(suit): the gun draws it the Dread cannon's way, on its live
-// muzzle locator in place of both Prime's cannon and the suit arm.
+// The first-person rifle of a look: a static model (the marine's right forearm and rifle, without the
+// hand) with its muzzle at the origin and its barrel up +Y, written as Wear(look, kRifleBase) and
+// served under PortDreadSamus::FirstPersonCannon(suit): the gun draws it the Dread cannon's way, on its
+// live muzzle locator in place of both Prime's cannon and the suit arm. Its muzzle sits on Prime's
+// (0.46.0 test 51 drew it 7.5 cm lower, its shots with it; test 52 put it back up, the user's call).
 inline constexpr uint32_t kRifleBase = 0x4AD9BBAC;  // Prime's VariaArm, the id the variants derive from
-// How far below the gun's muzzle the rifle is drawn, its shots with it (PortDreadSamus::
-// FirstPersonCannonDrop, gun units): the rifle stands 0.17 above its barrel, Prime's cannon 0.095, so
-// at the muzzle it rose over the cannon's place (the user, 0.46.0 test 50: "a little higher").
-inline constexpr float kRifleDrop = 0.075f;
 // Prime's Spider Ball glass (SamusSpiderBallGlassCMDL; its sets teal, green, aqua): a look's glass is
 // written as Wear(look, kSpiderBallGlass) and served under its suit variant. The Phazon Suit's own
 // Spider Ball (SamusPhazonBallANCS) and glass stay Prime's: the Dark Trooper wears them.

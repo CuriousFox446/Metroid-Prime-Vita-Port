@@ -302,9 +302,54 @@ std::vector<uint8_t> ArmVertices(const Body& body, const std::set<uint32_t>& arm
   return keep;
 }
 
+// The right hand left out: the body material's triangles with a vertex on the right wrist, where the
+// hand is skinned rigidly along with the rifle. Its fingers grip a handle inside the rifle's open frame
+// and stick out through its sides (the user, 0.46.0 test 51: "make sure the hand doesn't appear
+// because it clips through the arm cannon and it already has a grip"); the rifle, its own material on
+// the wrist too, stays, its grip standing for the hand. Vertices are not renumbered: the caller
+// compacts. `dropped` counts the triangles left out.
+bool DropHand(PrimeCmdl& model, const std::vector<Weights>& weights, const std::vector<EchoesJoint>& joints,
+              size_t& dropped, std::string* error) {
+  const std::set<uint32_t> wrist = Subtree(joints, "R_wrist");
+  if (wrist.empty()) return Fail(error, "the right wrist is missing");
+  std::vector<uint8_t> hand(weights.size(), 0);
+  for (size_t v = 0; v < weights.size(); ++v) {
+    for (const auto& [joint, weight] : weights[v]) {
+      if (weight > 0 && wrist.count(joint)) hand[v] = 1;
+    }
+  }
+  const auto onHand = [&hand](uint32_t v) { return v < hand.size() && hand[v] != 0; };
+  // KeepTriangles takes every surface it is given: the body's go through it one at a time, the
+  // others (the rifle, the visor) stay as they are, all in their order.
+  std::vector<std::vector<uint8_t>> all = std::move(model.surfaces), kept;
+  dropped = 0;
+  for (auto& surface : all) {
+    if (SurfaceMaterial(surface) != kBodyMaterial) {
+      kept.push_back(std::move(surface));
+      continue;
+    }
+    model.surfaces.clear();
+    model.surfaces.push_back(std::move(surface));
+    const bool listed = PortEchoesSuits::KeepTriangles(
+        model,
+        [&](uint32_t a, uint32_t b, uint32_t c) {
+          const bool out = onHand(a) || onHand(b) || onHand(c);
+          if (out) ++dropped;
+          return !out;
+        },
+        error);
+    if (!listed) return false;
+    for (auto& s : model.surfaces) kept.push_back(std::move(s));
+  }
+  model.surfaces = std::move(kept);
+  if (dropped == 0) return Fail(error, "no right hand triangles");
+  return true;
+}
+
 // The first-person rifle of a trooper body: its right arm's triangles past kArmCut (the upper arm's
-// end, the forearm, the hand, the rifle), turned down the gun's barrel (RifleFrame) with the muzzle
-// at the origin, the upper arm bent up toward the gun skeleton's shoulder as Prime's arm is; unskinned.
+// end, the forearm, the rifle; not the hand, DropHand), turned down the gun's barrel (RifleFrame) with
+// the muzzle at the origin, the upper arm bent up toward the gun skeleton's shoulder as Prime's arm
+// is; unskinned.
 bool BuildRifle(const Body& body, const std::vector<EchoesJoint>& joints, const PortDread::PrimeSkeleton& gun,
                 PrimeCmdl& out, std::string* error) {
   const EchoesJoint* muzzle = FindJoint(joints, kMuzzleJoint);
@@ -326,6 +371,8 @@ bool BuildRifle(const Body& body, const std::vector<EchoesJoint>& joints, const 
     return false;
   }
   if (out.surfaces.empty()) return Fail(error, "no right arm triangles");
+  size_t hand = 0;
+  if (!DropHand(out, body.echoesWeights, joints, hand, error)) return false;
   // The upper arm: from the elbow straight back in the T-pose, bent toward the gun skeleton's
   // shoulder (about 30 degrees up) by its weight on the shoulder.
   const V3 origin = FromArray(muzzle->position);
@@ -838,6 +885,19 @@ bool Import(const Io& io, Result& result, std::string& error) {
         !RollGrip(dark, echoesCinfs[kDarkTrooperModel.cinf], &why)) {
       error = std::string("the bodies' grip (") + kKindNames[kind] + "): " + why;
       return false;
+    }
+    // The right hand out (DropHand); the marine's vertices then cut to what it draws (the Dark
+    // Trooper's are in the visor swap).
+    size_t marineHand = 0, darkHand = 0;
+    if (!DropHand(marine.model, marine.echoesWeights, echoesCinfs[kMarineTrooper.cinf], marineHand, &why) ||
+        !DropHand(dark.model, dark.echoesWeights, echoesCinfs[kDarkTrooperModel.cinf], darkHand, &why) ||
+        !PortEchoesSuits::CompactSkinned(marine.model, marine.skin, &why)) {
+      error = std::string("the bodies' right hand (") + kKindNames[kind] + "): " + why;
+      return false;
+    }
+    if (kind == 0) {
+      log("marine: the right hand left out: " + std::to_string(marineHand) + " triangles of the marine, " +
+          std::to_string(darkHand) + " of the Dark Trooper");
     }
     if (!SwapVisor(dark.model, dark.skin, marine.model, marine.skin, &why)) {
       error = std::string("Dark Trooper with the marine's visor (") + kKindNames[kind] + "): " + why;

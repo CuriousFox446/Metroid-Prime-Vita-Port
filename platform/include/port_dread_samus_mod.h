@@ -50,9 +50,6 @@ bool FirstPersonCannonShown();
 // The roll (degrees, about the barrel) the gun draws that cannon with: 30 for Dread's, which turns its
 // left light toward the camera; none for the Federation Marine's rifle, modelled upright.
 float FirstPersonCannonRoll(int suit);
-// How far below the gun's muzzle that cannon is drawn, with its shots (gun units): none for Dread's,
-// PortFederationMarine::kRifleDrop for the marine's rifle, taller than the arm cannon.
-float FirstPersonCannonDrop(int suit);
 
 struct BallTarget {
   int suit;

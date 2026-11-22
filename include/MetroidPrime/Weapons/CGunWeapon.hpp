@@ -281,10 +281,8 @@ protected:
   // xb0_suitArmModelData holds the Dread cannon (port_dread_samus_mod.h), or the Federation
   // Marine's rifle: it is drawn in place of the gun model, which it carries along with the arm.
   bool mPortDreadCannon = false;
-  // Its roll about the barrel and its drop below the muzzle (PortDreadSamus::FirstPersonCannonRoll,
-  // FirstPersonCannonDrop), taken with it in LoadSuitArm.
+  // Its roll about the barrel (PortDreadSamus::FirstPersonCannonRoll), taken with it in LoadSuitArm.
   float mPortCannonRoll = 30.f;
-  float mPortCannonDrop = 0.f;
 
   // Echoes' arm cannon (echoes-suits, PortEchoesSuits::GunAncs) is skinned to Prime's gun skeleton,
   // whose missile anims open the barrel; Echoes' cannon never opens. For it PlayAnim plays Echoes'
