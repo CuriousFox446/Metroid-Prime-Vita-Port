@@ -250,10 +250,10 @@ private:
 // ceiling (191 of 229 MiB in use, the 33 MiB free in pieces) test 8 died there: std::bad_alloc for
 // 4,956,896 bytes (88,516 vertices) on the FIFO thread. They come in chunks of one size now, kept
 // for the frames after: no piece larger than a chunk, and the same pieces again and again.
-template <typename T>
+template <typename T, uint32_t Chunk = 8192, size_t Kept = 16>
 class ChunkPool {
 public:
-  static constexpr uint32_t kChunk = 8192; // elements a chunk (448 KiB of vertices)
+  static constexpr uint32_t kChunk = Chunk; // elements a chunk (448 KiB of vertices)
   static ChunkPool& get() noexcept {
     static ChunkPool& pool = *new ChunkPool;
     return pool;
@@ -283,7 +283,7 @@ public:
   }
 
 private:
-  static constexpr size_t kKept = 16;
+  static constexpr size_t kKept = Kept;
   std::mutex m_mutex;
   std::vector<std::unique_ptr<T[]>> m_free;
 };
@@ -338,6 +338,16 @@ public:
   }
   const T* at(uint32_t place) const { return m_chunks[place >> kOffsetBits].data.get() + (place & kOffsetMask); }
   T* at(uint32_t place) { return m_chunks[place >> kOffsetBits].data.get() + (place & kOffsetMask); }
+  // Whether `count` from `place` lie in what was handed out (a chunk before the last as far as its
+  // capacity: a run never crosses one).
+  bool holds(uint32_t place, uint32_t count) const {
+    const uint32_t chunk = place >> kOffsetBits;
+    if (chunk >= m_chunks.size()) {
+      return false;
+    }
+    const uint32_t end = chunk + 1 == m_chunks.size() ? m_used : m_chunks[chunk].capacity;
+    return (place & kOffsetMask) + count <= end;
+  }
   uint32_t size() const { return m_size; }
   // Growing never moves what it holds.
   uint32_t room() const { return UINT32_MAX; }
@@ -442,12 +452,81 @@ struct RecycledVector {
   ~RecycledVector() { VectorPool<T>::get().put(std::move(v)); }
 };
 
+// A frame's draws (0.46.0 test 44), in blocks from a pool as its vertices are in chunks. The full map
+// screen draws each room's faces and outlines a few at a time, each room with its matrix and its
+// colours, so they join little (merge_into_last): in the Phazon Mines some 5,700 draws a frame at
+// 928 bytes, and the frame's draws, one vector, asked for 5.3 MiB in one piece. With the heap at 182
+// of 224 MiB and its 42 MiB free in smaller pieces: std::bad_alloc on the FIFO thread (as 0.42.0
+// test 3's Chozo map, and test 9's vertices). Nothing here is larger than a block now, and the same
+// blocks come back frame after frame. A draw never moves once recorded.
+class FrameDraws {
+public:
+  static constexpr uint32_t kBlock = 128; // draws a block (116 KiB)
+  using Pool = ChunkPool<Draw, kBlock, 48>;
+
+  FrameDraws() = default;
+  FrameDraws(FrameDraws&& other) noexcept
+  : m_blocks(std::move(other.m_blocks)), m_size(std::exchange(other.m_size, 0)) {}
+  FrameDraws& operator=(FrameDraws&& other) noexcept {
+    if (this != &other) {
+      release();
+      m_blocks = std::move(other.m_blocks);
+      m_size = std::exchange(other.m_size, 0);
+    }
+    return *this;
+  }
+  ~FrameDraws() { release(); }
+
+  void push_back(const Draw& draw) {
+    if (m_size == m_blocks.size() * kBlock) {
+      m_blocks.push_back(Pool::get().take());
+    }
+    m_blocks.back()[m_size % kBlock] = draw;
+    ++m_size;
+  }
+  bool empty() const noexcept { return m_size == 0; }
+  size_t size() const noexcept { return m_size; }
+  Draw& back() noexcept { return (*this)[m_size - 1]; }
+  Draw& operator[](size_t index) noexcept { return m_blocks[index / kBlock][index % kBlock]; }
+  const Draw& operator[](size_t index) const noexcept { return m_blocks[index / kBlock][index % kBlock]; }
+
+  class const_iterator {
+  public:
+    const_iterator(const FrameDraws* draws, size_t index) noexcept : m_draws(draws), m_index(index) {}
+    const Draw& operator*() const noexcept { return (*m_draws)[m_index]; }
+    const_iterator& operator++() noexcept {
+      ++m_index;
+      return *this;
+    }
+    bool operator!=(const const_iterator& other) const noexcept { return m_index != other.m_index; }
+
+  private:
+    const FrameDraws* m_draws;
+    size_t m_index;
+  };
+  const_iterator begin() const noexcept { return {this, 0}; }
+  const_iterator end() const noexcept { return {this, m_size}; }
+
+private:
+  void release() noexcept {
+    for (std::unique_ptr<Draw[]>& block : m_blocks) {
+      Pool::get().put(std::move(block));
+    }
+    m_blocks.clear();
+    m_size = 0;
+  }
+  std::vector<std::unique_ptr<Draw[]>> m_blocks;
+  size_t m_size = 0;
+};
+
 // A frame's draws, their programs' constant rows (ProgramInputs) and the vertices and indices of
 // its own meshes (FrameMesh), and its serial, a new one each frame (from 1), by which the render
-// worker tells one frame's rows from another's; and its EFB copies among the draws, counted.
+// worker tells one frame's rows from another's; and its EFB copies among the draws, counted. The
+// rows come in chunks too (0.46.0 test 44: one vector, reserved anew each frame at the last one's
+// size, ~1-2 MiB at the map screen, was let go a frame or two later).
 struct Frame {
-  RecycledVector<Draw> draws;
-  std::vector<std::array<float, 4>> constants;
+  FrameDraws draws;
+  FrameChunks<std::array<float, 4>> constants;
   FrameChunks<Vertex> vertices;
   FrameArray<uint16_t> indices;
   // What its draws draw with, each held once (keep), let go with the frame.
@@ -1027,7 +1106,10 @@ enum Section {
 constexpr const char* kSectionNames[kSectionCount] = {
     "setup",  "build",  "switch",   "upload",   "pointers", "compare", "send",  "textures", "state",   "draw", "switch",
     "upload", "pointers", "units", "matrices", "state",    "draw",    "copies", "finish", "other",   "overlay", "swap"};
-constexpr uint32_t kTimedEvery = 8;
+// 0.46.0 test 44: was 8. A timed present reads the clock some 10,000 times (0.77 us a read): 8 ms more
+// for that frame, a hitch every eighth frame against a steady 30 FPS. One in 64 still gives a few a
+// report window.
+constexpr uint32_t kTimedEvery = 64;
 
 // What made a draw's mesh (make_mesh), and the two draw paths, for the uploads' line.
 constexpr const char* kMeshKindNames[static_cast<int>(MeshKind::Count)] = {"lists", "skinned", "immediate",
@@ -1804,7 +1886,7 @@ private:
 
   static void upload(GLint location, Sent& sent, const Frame& frame, uint32_t at, int count,
                      UniformStats::Side& stats) noexcept {
-    if (location == kNoUniform || count == 0 || at + count > frame.constants.size()) {
+    if (location == kNoUniform || count == 0 || !frame.constants.holds(at, static_cast<uint32_t>(count))) {
       return;
     }
     const bool same = sent.serial == frame.serial && sent.at == at;
@@ -1814,7 +1896,7 @@ private:
       return;
     }
     sent = {frame.serial, at};
-    glUniform4fv(location, count, frame.constants[at].data());
+    glUniform4fv(location, count, frame.constants.at(at)->data());
     g_clock.mark(kProgramSend);
     ++stats.uploaded;
   }
@@ -2149,7 +2231,8 @@ bool same_unit(const DrawUnit& a, const DrawUnit& b) noexcept {
 // A program's rows as two draws point at them: the same rows, or the same values recorded twice.
 bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
   return count == 0 || a == b ||
-         std::memcmp(g_recording.constants[a].data(), g_recording.constants[b].data(), sizeof(float[4]) * count) == 0;
+         std::memcmp(g_recording.constants.at(a)->data(), g_recording.constants.at(b)->data(),
+                     sizeof(float[4]) * count) == 0;
 }
 
 // `draw` joins the frame's last draw where both draw the frame's own vertices, the second's right
@@ -2162,10 +2245,10 @@ bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
 bool merge_into_last(const Draw& draw) noexcept {
   const FrameMesh& b = draw.frameMesh;
   if (draw.mesh != nullptr || b.vertexCount == 0 || b.primitive == MeshPrimitive::Points || draw.clear ||
-      draw.copyTo != nullptr || g_recording.draws.v.empty()) {
+      draw.copyTo != nullptr || g_recording.draws.empty()) {
     return false;
   }
-  Draw& last = g_recording.draws.v.back();
+  Draw& last = g_recording.draws.back();
   FrameMesh& a = last.frameMesh;
   if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || a.kind != b.kind ||
       a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
@@ -2218,7 +2301,7 @@ void record(Draw&& draw) noexcept {
     return;
   }
   g_recording.copies += draw.copyTo != nullptr ? 1 : 0;
-  g_recording.draws.v.push_back(draw);
+  g_recording.draws.push_back(draw);
 }
 
 namespace {
@@ -2238,20 +2321,19 @@ Texture* keep(const std::shared_ptr<Texture>& object) noexcept { return keep_in_
 Program* keep(const std::shared_ptr<Program>& object) noexcept { return keep_in_frame(object); }
 
 uint32_t record_constants(const float (*rows)[4], int count) noexcept {
-  // As one block: a lit program's rows are 30 or more a draw.
-  std::vector<std::array<float, 4>>& constants = g_recording.constants;
-  const auto at = static_cast<uint32_t>(constants.size());
+  // As one run, in one chunk: a lit program's rows are 30 or more a draw.
+  uint32_t at = 0;
   static_assert(sizeof(std::array<float, 4>) == sizeof(float[4]));
-  constants.resize(at + static_cast<size_t>(count));
-  std::memcpy(constants[at].data(), rows, sizeof(float[4]) * static_cast<size_t>(count));
+  std::array<float, 4>* out = g_recording.constants.grow(static_cast<uint32_t>(count), at);
+  std::memcpy(out->data(), rows, sizeof(float[4]) * static_cast<size_t>(count));
   return at;
 }
 
-const float* recorded_constants(uint32_t at) noexcept { return g_recording.constants[at].data(); }
+const float* recorded_constants(uint32_t at) noexcept { return g_recording.constants.at(at)->data(); }
 
 uint32_t recording_serial() noexcept { return g_recording.serial; }
 
-uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.v.size()); }
+uint32_t recorded_draw_count() noexcept { return static_cast<uint32_t>(g_recording.draws.size()); }
 
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept { return g_recording.vertices.grow(count, at); }
 
@@ -2266,8 +2348,6 @@ uint32_t frame_indices(const uint16_t* indices, uint32_t count) noexcept {
 }
 
 void end_frame_draws() noexcept {
-  const size_t drawn = g_recording.draws.v.size();
-  const size_t rows = g_recording.constants.size();
   const size_t kept = g_recording.kept.size();
   const uint32_t indices = g_recording.indices.size();
   const uint32_t serial = g_recording.serial;
@@ -2281,10 +2361,8 @@ void end_frame_draws() noexcept {
   }
   g_recording = {};
   g_recording.serial = serial + 1 != 0 ? serial + 1 : 1;
-  // The draws' storage from the spares (VectorPool); the vertices come a chunk at a time as they
-  // are recorded (FrameChunks).
-  g_recording.draws.v = VectorPool<Draw>::get().take(drawn);
-  g_recording.constants.reserve(rows);
+  // The draws, rows and vertices come a block or chunk at a time from their pools as they are
+  // recorded (FrameDraws, FrameChunks).
   g_recording.kept.reserve(kept);
   g_recording.indices.reserve(indices);
 }
@@ -3395,7 +3473,7 @@ void draw_with_program(const Draw& draw, const Frame& frame, Program& program, G
 }
 
 void draw_world(const Frame& frame) {
-  const std::vector<Draw>& draws = frame.draws.v;
+  const FrameDraws& draws = frame.draws;
   if (draws.empty()) {
     return;
   }
@@ -4289,7 +4367,9 @@ namespace {
 constexpr const char* kNames[kSectionCount] = {
     "idle",   "state", "copies",      "dispatch", "material", "lookup",   "skinned", "skinned copy", "immediate",
     "mesh",   "record", "rows",       "other draws", "aurora", "vita",    "textures", "finish",      "frame"};
-constexpr uint32_t kTimedEvery = 8;
+// 0.46.0 test 44: was 8; a timed frame reads the clock some 14,000 times, 11 ms more (render worker's
+// kTimedEvery).
+constexpr uint32_t kTimedEvery = 64;
 
 uint64_t g_last = 0;
 uint64_t g_us[kSectionCount] = {};

@@ -4805,3 +4805,42 @@ What to look for in test 43:
 - F1 > Video > Quality: anisotropic filtering, then the HD font; none of the four. After resetting
   the settings, the log's `port: settings:` line says `scale auto` (the screen's) and
   `dynamic-res off`.
+
+## 0.46.0 test 44: the map screen's crash; the section clocks' hitch
+
+Test 43 died at the full map screen (the log's last lines; the settings reset, frames at 1.00x):
+`vita: out of memory: operator new(5309088) failed on thread 0x4002025F` (the FIFO processor), the
+heap at 181.9 MiB in use of 224.2 MiB taken, 42.3 MiB free but not in one piece of 5.3 MiB, the
+system's 229.4 MiB nearly all taken; then `std::bad_alloc`, uncaught.
+- The stack (01952f0's ELF): `vita_gl::record(Draw&&)` from `record_draw`: the frame's draws, one
+  `std::vector`, growing. 5,309,088 bytes are 5,721 draws of 928 bytes.
+- The map screen opened: the map's GX begins went from the minimap's 100-270 a frame to 6,941
+  (82,944 vertices), 5,718 draws a frame, 6.3 FPS. Each room's faces and outlines are drawn with the
+  room's matrix and colours, so few join the draw before them (`merge_into_last`). The same as
+  0.42.0 test 3's Chozo map (merging made it rarer) and test 9's vertices (chunked then).
+- The fix: a frame's draws in blocks of 128 (`FrameDraws`, 116 KiB a block, from a pool keeping 48),
+  and its programs' constant rows in chunks (`FrameChunks<std::array<float, 4>>`, 128 KiB chunks;
+  they were one vector reserved anew each frame at the last one's size). No per-frame piece is larger
+  than a chunk now; the same pieces come back frame after frame. `ChunkPool` takes its chunk size
+  and how many it keeps as template parameters; `FrameChunks::holds` checks a draw's rows at the
+  render worker (was `at + count > size`).
+
+The section clocks (`[draw path]`, `[fifo path]`) timed one frame in 8: some 10,000 and 14,000
+clock reads (0.77 us each) in that frame, 8 and 11 ms more on the render worker and the FIFO
+processor, a hitch every eighth frame. Now one in 64 (`kTimedEvery`).
+
+Where a frame goes at 544 lines (test 43's log, a gameplay window, ~1,080 draws a frame, 23-31 FPS,
+frames 1 to 5 vblanks apart):
+- FIFO processor 34-36 ms a frame busy (71%): GX state 6.2, recording the draws 5.7 (928 bytes
+  each, built then copied), materials 4.8, programs' rows 3.9, Aurora's own 3.2, dispatch 2.4,
+  other draws 2.4, immediate 2.0, list lookups 1.6, meshes 1.0.
+- Main thread ~32 ms a frame (79%): the game's draw 14.6 (`CCubeModel::DrawSurfaces` 5.5, the HUD
+  2.9), two 60 Hz ticks 10.0, waiting for the FIFO 3.3, input 1.7, the loader 2.2.
+- GPU 26.7 ms a frame busy (70%); render worker ~20 ms (40%).
+For a steady 30 (33.3 ms) the FIFO processor is the first to bring down, then the main thread's draw;
+a program draw uses little of its 928 bytes (the fixed-function units, 384, and its matrices, held
+in its rows too, are for the fixed-function path).
+
+What to look for in test 44:
+- The full map screen, opened and kept open in a large area: no crash (it stays slow).
+- Fewer hitches: the section clocks' frame comes every 64 now.
