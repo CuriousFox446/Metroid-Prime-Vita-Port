@@ -58,9 +58,6 @@ std::unordered_map<u64, StateProgram> sProgramsByState;
 // The programs of each family: a material's programs for the light counts it was drawn with
 // (tev_stand_in's). FIFO thread, as the maps above.
 std::unordered_map<u64, std::vector<const TevProgram*>> sFamilies;
-// 0.46.0 test 46: the program being made is a lean one (tev_program's `lean`; a record's, while
-// it stands in for GX's state: swap_material). FIFO thread, as the maps above.
-bool sLean = false;
 
 // The TEV register (0 PREV, 1-3 REG0-2) an argument reads, or -1.
 int color_register(GXTevColorArg arg) noexcept {
@@ -266,7 +263,7 @@ const char* scale(GXTevScale s) noexcept {
 // One combiner's result: d +/- lerp(a, b, c), biased, scaled and clamped as GX's are, or a compare
 // (d + c where a > b or a == b, by the component or the packed value the mode names). a, b and c
 // are 8-bit in GX (clamped to [0, 1]); d and the result are 11-bit signed unless clamped.
-// `inRange`: the sum is within [0, 1] without a clamp (a lean program's: in_range_sum), so none is
+// `inRange`: the sum is within [0, 1] without a clamp (fragment_body's in_range_sum), so none is
 // made.
 std::string combine(const TevOp& op, const std::string& type, const std::string& a, const std::string& b,
                     const std::string& c, const std::string& d, bool alpha, bool inRange = false) {
@@ -457,7 +454,7 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
   // declared); one only written starts at zero.
   bool registerRead[4] = {};
   // A register's colour is within [0, 1]: the last stage writing it clamped it, or its sum is so
-  // (a lean program's fog then takes it as it is). GX's register values are not.
+  // (the fog then takes it as it is). GX's register values are not.
   bool colorClamped[4] = {};
   if (layout.indirect) {
     // Each indirect stage read, sampled once as Aurora's shaders do: its coordinates in texels (the
@@ -529,14 +526,14 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     }
     const auto& cp = stage.colorPass;
     const auto& ap = stage.alphaPass;
-    // GX takes a, b and c as 8 bits, clamped here; a lean program leaves the clamp off an input
-    // within [0, 1] already (the particles' program: 14 instructions of 27 were those clamps' and the
-    // conversions they make the compiler keep).
+    // GX takes a, b and c as 8 bits, clamped here, but for an input within [0, 1] already (0.46.0
+    // tests 46-47: the particles' program, 14 instructions of 27 were those clamps' and the
+    // conversions they make the compiler keep; some 17% of the world's programs').
     const auto clampColor = [](GXTevColorArg arg) {
-      return sLean && color_in_range(arg) ? color_arg(arg) : fmt::format("saturate({})", color_arg(arg));
+      return color_in_range(arg) ? color_arg(arg) : fmt::format("saturate({})", color_arg(arg));
     };
     const auto clampAlpha = [](GXTevAlphaArg arg) {
-      return sLean && alpha_in_range(arg) ? alpha_arg(arg) : fmt::format("saturate({})", alpha_arg(arg));
+      return alpha_in_range(arg) ? alpha_arg(arg) : fmt::format("saturate({})", alpha_arg(arg));
     };
     body += fmt::format("    float3 cA = {};\n    float3 cB = {};\n    float3 cC = {};\n"
                         "    float3 cD = {};\n",
@@ -544,10 +541,10 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     body += fmt::format("    float aA = {};\n    float aB = {};\n    float aC = {};\n"
                         "    float aD = {};\n",
                         clampAlpha(ap.a), clampAlpha(ap.b), clampAlpha(ap.c), alpha_arg(ap.d));
-    // A lean program's sum with no d, bias or scale is the lerp of a, b and c, each within [0, 1]
-    // (clamped, or such an input): within [0, 1] itself, no clamp needed.
+    // A sum with no d, bias or scale is the lerp of a, b and c, each within [0, 1] (clamped, or
+    // such an input): within [0, 1] itself, no clamp needed.
     const auto in_range_sum = [](const TevOp& op, bool zeroD) {
-      return sLean && zeroD && op.op == GX_TEV_ADD && op.bias == GX_TB_ZERO && op.scale == GX_CS_SCALE_1;
+      return zeroD && op.op == GX_TEV_ADD && op.bias == GX_TB_ZERO && op.scale == GX_CS_SCALE_1;
     };
     const bool colorInRange = in_range_sum(stage.colorOp, cp.d == GX_CC_ZERO);
     const bool alphaInRange = in_range_sum(stage.alphaOp, ap.d == GX_CA_ZERO);
@@ -585,24 +582,15 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     body += fmt::format("  if (!{}) {{\n    discard;\n  }}\n", pass);
   }
   if (const GXFogType fogType = s.fog.type; fogType != GX_FOG_NONE) {
-    // GX's fog, as Aurora's shaders have it (shader.cpp): from the depth the EFB keeps (the vertex
-    // program's clip z and w; the viewport's depth range is in the projection, so GL's window depth
-    // is GX's), perspective A / (B - z) or orthographic A * z, less C, clamped, through the type's
-    // curve; the colour, clamped as GX's pixel engine takes it, mixed toward the fog's. GX's range
-    // adjustment is not applied (the game leaves it off).
-    if (sLean) {
-      // A lean program's: the vertex program's two rows make A / (B - z) (or A * z) a quotient of
-      // values linear in the position, each exact where interpolated (tev_vertex_rows): one
-      // division here, where the window depth took two (the particles' program: 20 instructions
-      // to 12).
-      body += fmt::format("  float fogF = saturate(vFog.x / vFog.y - uConst[{}].z);\n", kConstFogParams);
-    } else {
-      body += "  float fogZ = vFog.x / vFog.y * 0.5 + 0.5;\n";
-      body += (fogType & 0x08) != 0
-                  ? fmt::format("  float fogF = uConst[{0}].x * fogZ;\n", kConstFogParams)
-                  : fmt::format("  float fogF = uConst[{0}].x / (uConst[{0}].y - fogZ);\n", kConstFogParams);
-      body += fmt::format("  fogF = saturate(fogF - uConst[{}].z);\n", kConstFogParams);
-    }
+    // GX's fog, as Aurora's shaders have it (shader.cpp): from the depth the EFB keeps (the
+    // viewport's depth range is in the projection, so GL's window depth is GX's), perspective
+    // A / (B - z) or orthographic A * z, less C, clamped, through the type's curve; the colour,
+    // clamped as GX's pixel engine takes it, mixed toward the fog's. GX's range adjustment is not
+    // applied (the game leaves it off). Since 0.46.0 test 46 the vertex program's two rows make
+    // A / (B - z) (or A * z) a quotient of values linear in the position, each exact where
+    // interpolated (tev_vertex_rows): one division here, where the window depth took two (the
+    // particles' program: 20 instructions to 12).
+    body += fmt::format("  float fogF = saturate(vFog.x / vFog.y - uConst[{}].z);\n", kConstFogParams);
     switch (fogType & 0x07) {
     case GX_FOG_PERSP_EXP:
       body += "  float fog = 1.0 - exp2(-8.0 * fogF);\n";
@@ -620,12 +608,11 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
       body += "  float fog = fogF;\n";
       break;
     }
-    // A lean program's: the colour unclamped where it is within [0, 1] already, and the fog's
-    // factor as its curve leaves it (each curve's is within [0, 1] for fogF's [0, 1]).
-    const std::string fogged = sLean && colorClamped[lastOut] ? fmt::format("R{}.rgb", lastOut)
-                                                              : fmt::format("saturate(R{}.rgb)", lastOut);
-    body += fmt::format("  R{0}.rgb = lerp({2}, uConst[{1}].rgb, {3});\n", lastOut, kConstFogColor, fogged,
-                        sLean ? "fog" : "saturate(fog)");
+    // The colour unclamped where it is within [0, 1] already, and the fog's factor as its curve
+    // leaves it (each curve's is within [0, 1] for fogF's [0, 1]).
+    const std::string fogged =
+        colorClamped[lastOut] ? fmt::format("R{}.rgb", lastOut) : fmt::format("saturate(R{}.rgb)", lastOut);
+    body += fmt::format("  R{0}.rgb = lerp({2}, uConst[{1}].rgb, fog);\n", lastOut, kConstFogColor, fogged);
   }
   if (constantAlpha) {
     // GXSetDstAlpha's constant for the EFB's alpha, where the blending reads no source alpha
@@ -784,9 +771,9 @@ struct MaterialRecord {
   u32 format = 0;
   u8 numTevStages = 0;
   u8 numIndStages = 0;
-  // Bit 0: its program is a lean one (tev_program; 0.46.0 test 46, in what was padding: the
-  // records before have it 0).
-  u8 flags = 0;
+  // Test 46's lean bit (its records have it 1); since test 47 every program is made so, and the
+  // byte is read by nothing.
+  u8 _p1 = 0;
   u8 _p2 = 0;
   GXFogType fogType = GX_FOG_NONE;
   AlphaCompare alphaCompare{};
@@ -811,7 +798,6 @@ MaterialRecord capture_material(size_t& length) noexcept {
   r.format = kRecordFormat;
   r.numTevStages = static_cast<u8>(std::min<u32>(s.numTevStages, MaxTevStages));
   r.numIndStages = static_cast<u8>(std::min<u32>(s.numIndStages, MaxIndStages));
-  r.flags = sLean ? 1 : 0;
   r.fogType = s.fog.type;
   r.alphaCompare = s.alphaCompare;
   r.alphaCompare.ref0 = 0;
@@ -858,9 +844,6 @@ void swap_material(MaterialRecord& r) noexcept {
   GXState& s = g_gxState;
   std::swap(s.numTevStages, r.numTevStages);
   std::swap(s.numIndStages, r.numIndStages);
-  const bool recordLean = (r.flags & 1) != 0;
-  r.flags = sLean ? 1 : 0;
-  sLean = recordLean;
   std::swap(s.fog.type, r.fogType);
   std::swap(s.alphaCompare, r.alphaCompare);
   std::swap(s.tevSwapTable, r.tevSwapTable);
@@ -1060,7 +1043,7 @@ TevLayout tev_layout() noexcept {
   return layout;
 }
 
-const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha, u64* family, bool lean) noexcept {
+const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha, u64* family) noexcept {
   const GXState& s = g_gxState;
   // What the source is made from, hashed: generating it is the costly part, and most materials
   // share a program with another.
@@ -1075,7 +1058,7 @@ const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha, u64* 
   constexpr int kAlphaKey = kFogKey + 1;
   u32 fixed[kAlphaKey + 1] = {stages, static_cast<u32>(compare.comp0), static_cast<u32>(compare.comp1),
                               static_cast<u32>(compare.op)};
-  fixed[kAlphaKey] = (constantAlpha ? 1u : 0u) | (lean ? 2u : 0u);
+  fixed[kAlphaKey] = constantAlpha ? 1 : 0;
   for (int c = 0; c < layout.coordCount; ++c) {
     const TcgConfig& tcg = s.tcgs[layout.coords[c]];
     const u32 source = tcg.src == GX_TG_POS ? 1 : tcg.src == GX_TG_NRM ? 2 : 0;
@@ -1125,11 +1108,6 @@ const TevProgram* tev_program(const TevLayout& layout, bool constantAlpha, u64* 
     unlit[kLightKeys + part] = 0;
   }
   const u64 familyKey = state_key(unlit);
-  // Made lean or not (the record keeps which: capture_material), sLean back to false after.
-  struct Lean {
-    explicit Lean(bool on) noexcept { sLean = on; }
-    ~Lean() { sLean = false; }
-  } leanScope{lean};
   // A material state new to the session: saved for the next sessions' warm-up (which makes the
   // programs without the constant alpha: generate).
   if (!constantAlpha) {
@@ -1294,16 +1272,6 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
     vertexBody += fmt::format("  vUv{0} = tc{0}{1};\n", c, projective(tcg) ? "" : ".xy");
     add(fragmentParams, fmt::format("{} vUv{} : TEXCOORD{}", type, c, c));
   }
-  const bool fog = body.find("vFog") != std::string::npos;
-  // The fog's depth in the TEXCOORD varying the lit sums leave free past the coordinate slots' (4
-  // with four slots or fewer).
-  const int fogVarying = std::max(kTexCoords, layout.coordCount);
-  if (fog && !sLean) {
-    // Clip z and w, divided per fragment.
-    add(vertexOuts, fmt::format("float2 out vFog : TEXCOORD{}", fogVarying));
-    vertexBody += "  vFog = float2(dot(uVert[2], p), dot(uVert[3], p));\n";
-    add(fragmentParams, fmt::format("float2 vFog : TEXCOORD{}", fogVarying));
-  }
   if (info.matrices) {
     // The view-space position and normal (a zero normal stays zero), then the emboss coordinates and
     // each lit channel's lights.
@@ -1335,16 +1303,17 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
       }
     }
   }
-  if (fog && sLean) {
-    // A lean program's: the depth fraction's numerator and denominator, from two rows after the
-    // rest (tev_vertex_rows).
+  if (body.find("vFog") != std::string::npos) {
+    // The fog's depth fraction's numerator and denominator, from two rows after the rest
+    // (tev_vertex_rows), in the TEXCOORD varying the lit sums leave free past the coordinate slots'
+    // (4 with four slots or fewer).
+    const int fogVarying = std::max(kTexCoords, layout.coordCount);
     add(vertexOuts, fmt::format("float2 out vFog : TEXCOORD{}", fogVarying));
     vertexBody += fmt::format("  vFog = float2(dot(uVert[{}], p), dot(uVert[{}], p));\n", row, row + 1);
     add(fragmentParams, fmt::format("float2 vFog : TEXCOORD{}", fogVarying));
     info.fogRows = true;
     row += 2;
   }
-  info.lean = sLean;
   info.vertexCount = row;
   for (int m = 0; m < layout.samplerCount; ++m) {
     add(fragmentParams, fmt::format("uniform sampler2D uTex{0} : TEXUNIT{0}", m));
@@ -1470,7 +1439,7 @@ int tev_vertex_rows(const TevProgram& program, const TcgConfig* const coords[], 
     row = tev_light_rows(program, row, out);
   }
   if (program.fogRows) {
-    // A lean program's fog (fragment_body): GX's depth fraction A / (B - d), orthographic A * d, of
+    // The fog (fragment_body, since 0.46.0 test 46): GX's depth fraction A / (B - d), orthographic A * d, of
     // the window depth d = (z / w + 1) / 2, as a quotient of two rows linear in the position, made
     // from the projected position's z and w rows (out[2], out[3]): perspective A*w over
     // (B - 1/2)*w - z/2, orthographic A*(z + w)/2 over w. Each is exact where a triangle's fragment
@@ -1532,14 +1501,6 @@ size_t tev_indirect_program_count() noexcept {
   size_t count = 0;
   for (const auto& [_, program] : sPrograms) {
     count += program.indirect ? 1 : 0;
-  }
-  return count;
-}
-
-size_t tev_lean_program_count() noexcept {
-  size_t count = 0;
-  for (const auto& [_, program] : sPrograms) {
-    count += program.lean ? 1 : 0;
   }
   return count;
 }

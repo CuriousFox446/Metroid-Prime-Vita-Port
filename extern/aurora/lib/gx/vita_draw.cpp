@@ -311,8 +311,8 @@ struct Stats {
   u32 standIns = 0;
   // Draws recorded with a fixed-function part (0.46.0 test 45: no program, or one not yet linked).
   u32 fixedParts = 0;
-  // 0.46.0 test 46: materials worked out with GX's "alpha > 0" left out (alpha_test_unseen: their
-  // programs lean), and alpha passes recorded (DstAlpha::Second: GXSetDstAlpha's constant).
+  // 0.46.0 test 46: materials worked out with GX's "alpha > 0" left out (alpha_test_unseen), and
+  // alpha passes recorded (DstAlpha::Second: GXSetDstAlpha's constant).
   u32 alphaTestsLeftOut = 0;
   u32 alphaPasses = 0;
   // Materials worked out that sample an EFB copy (their hash moves with every copy), and those
@@ -1131,7 +1131,7 @@ DstAlpha dst_alpha_mode() noexcept {
 // on this GPU is costly twice: the test's own instructions (13 of a particle program's 40), and a
 // discarding program's pass type, the depth unit waiting on its fragments. Transport Tunnel B's dust
 // (some 220 big blended particle quads a frame, overlapping; test 45: GPU 80 ms a frame) is such
-// draws; their programs are made lean too (tev_program: 12 instructions in all).
+// draws; with the cheaper programs (tev_program) theirs is 12 instructions in all.
 bool alpha_test_unseen() noexcept {
   const GXState& s = g_gxState;
   const AlphaCompare& c = s.alphaCompare;
@@ -1958,8 +1958,8 @@ const Material& current_material() noexcept {
   material.window = sWindow;
   material.used = sMaterialClock;
   // GX's "alpha > 0" left out where it changes nothing (alpha_test_unseen): the material is worked
-  // out from the state without it (its state, its program, made lean, and the record the warm-up
-  // keeps), the state's own put back after. Its key (pipeline_key) reads the state as GX holds it.
+  // out from the state without it (its state, its program, and the record the warm-up keeps), the
+  // state's own put back after. Its key (pipeline_key) reads the state as GX holds it.
   const bool testUnseen = alpha_test_unseen();
   struct CompareScope {
     AlphaCompare saved;
@@ -2025,7 +2025,7 @@ const Material& current_material() noexcept {
       // fixed-function draw meanwhile writes its own alpha.
       const DstAlpha dstAlpha = dst_alpha_mode();
       const bool constantAlpha = dstAlpha == DstAlpha::Replace;
-      material.program = tev_program(layout, constantAlpha, &material.programFamily, testUnseen);
+      material.program = tev_program(layout, constantAlpha, &material.programFamily);
       if (dstAlpha == DstAlpha::Second) {
         // The constant written by an alpha pass after each draw (record_draw).
         material.alphaProgram = tev_program(layout, true, &material.alphaFamily);
@@ -3286,14 +3286,13 @@ void log_stats() noexcept {
            "{} templates made; {} draws with a generated "
            "program ({} generated; {} of the draws with another light count's while theirs was on its way), their "
            "constant arrays {} recorded, {} repeating the last; {} draws with a fixed-function part; {} materials "
-           "worked out with their alpha test left out ({} lean programs made in all), {} alpha passes drawn for "
-           "GXSetDstAlpha's constant",
+           "worked out with their alpha test left out, {} alpha passes drawn for GXSetDstAlpha's constant",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
-           s.constantsShared, s.fixedParts, s.alphaTestsLeftOut, tev_lean_program_count(), s.alphaPasses);
+           s.constantsShared, s.fixedParts, s.alphaTestsLeftOut, s.alphaPasses);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "
            "for at {} frame ends ({:.1f} ms in all), {} times for the frame's vertices to grow, {} at a draw done, "

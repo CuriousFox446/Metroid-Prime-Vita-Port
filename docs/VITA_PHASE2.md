@@ -4946,3 +4946,30 @@ What to look for in test 46:
 - The particles' look unchanged (the "Compiling shaders" toast once, for their new programs).
 - The pause screen with the Phazon Suit: the aura around the whole suit (the toast once, for the
   alpha passes' programs); the materials line counts the alpha passes.
+
+## 0.46.0 test 47: every generated program the cheaper way, precompiled on the PC
+
+For test 46's closing question (every program lean needs the card's records on the PC to precompile
+them), the user sent their card's `vita_programs/materials.bin` (2,485 records, 2026-11-21).
+- Every program is now made the way test 46 made the particles' (`tev_program`, `fragment_body`):
+  no clamp of a TEV input within [0, 1] already, of a sum of such without d, bias or scale, of the fog
+  factor, or of a clamped colour going into the fog; the fog's depth fraction from two vertex rows
+  (`tev_vertex_rows`) with one division. The same results. Compiled on the PC, 24 of the old card's
+  programs had about 17% fewer fragment instructions; 46 others, all made lean, compiled (none
+  failed), 29 instructions a fragment on average.
+- A program's key is its source's hash, so every key changes and the card's binaries go unused. The
+  user's records make 1,426 programs (847 with fog), all compiled on the PC with the Vita's own
+  compiler (tools/vita_precompile) into `precompiled.bin`, which goes in
+  `ux0:data/MetroidPrime/vita_programs/` beside them. The warm-up finds each in the pack
+  (`program_known`) and its first draw links it from there, read on the card thread, instead of
+  compiling. Materials the records lack (rooms not visited yet, the alpha passes' constant-alpha
+  programs, which are never recorded) compile on the Vita as before.
+- Test 46's record byte (bit 0, lean) is read by nothing now (`_p1` again); its `--self-test lean`
+  is `--self-test plain` (an out dir for the first material's sources).
+
+What to look for in test 47:
+- At the start, the log's "programs on the card: N; precompiled: 1426"; in play the presents line's
+  "from the precompiled pack" count growing and few or none sent to the compiler thread (the
+  "Compiling shaders" toast seldom).
+- The same picture everywhere (fog, lit surfaces, the lava, indirect effects).
+- The GPU busy time in heavy scenes against test 45's (32-45 ms a frame in Tallon Overworld).
