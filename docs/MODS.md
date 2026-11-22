@@ -401,8 +401,7 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   have no ball; import again.
 - "Play as a Federation Marine" (`echoes_federation_marine`, off by default; console `marine 0|1`),
   under it, puts Echoes' Federation Marine (its `Galactic_Trooper`, the white GF trooper) in place of
-  Samus, from the next mod reload; the Echoes import brings it (mod version 19, without the right
-  hand from 20; import again). It and
+  Samus, from the next mod reload; the Echoes import brings it (mod version 19; import again). It and
   "Play as Dark Samus" exclude each other. Below.
 
 #### Play as a Federation Marine
@@ -421,14 +420,11 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   rifle and the Morph and Spider Balls.
 - The rifle is part of the troopers' meshes. In cutscenes and third person the marine holds it where
   Samus's cannon sits (the right wrist rides the forearm, as the cannon does), so Prime's cannon is not
-  drawn over it. Samus's animations roll her forearm for her cannon, so the rifle is turned 50° about
-  the forearm (mod version 19): the grip hangs down in her poses.
-- The right hand is left out, in every body and the first-person rifle (mod version 20). Echoes'
-  marine holds a handle inside the rifle's open frame, and the fingers stuck out through its sides;
-  the rifle's own grip stands for the hand.
-- In first person the marine's forearm and rifle stand in for the arm cannon and the suit arm: one
-  model per suit, drawn with its muzzle on the cannon's so it follows the recoil (the same way as the
-  Dread cannon). The shots leave that muzzle, the hexagonal mouth of the barrel under the rifle's top
+  drawn over it. Samus's animations roll her forearm for her cannon, so the hand and rifle are turned
+  50° about the forearm (mod version 19): the grip hangs down in her poses.
+- In first person the marine's forearm, hand and rifle stand in for the arm cannon and the suit arm:
+  one model per suit, drawn with its muzzle on the cannon's so it follows the recoil (the same way as
+  the Dread cannon). The shots leave that muzzle, the hexagonal mouth of the barrel under the rifle's top
   housing; seen from behind and above, the housing hides it, so they show from just under the
   housing's front. (0.46.0 test 51 drew the rifle 7.5 cm lower; test 52 put it back up.) The rifle
   has no moving parts: missiles fire with the beam shots' recoil, and every beam
@@ -437,7 +433,10 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   (`marine_first_person_rifle`, on by default; console `marinerifle 0|1`) off gives the arm cannon
   back (Prime's, or the Echoes cannon), at once.
 - The first-person left arm is the trooper's own left forearm and hand, turned into the grapple arm's
-  frame and skinned on its joints: the fingers follow the grapple animations.
+  frame and skinned on its joints: the fingers follow the grapple animations. It shows only for the
+  grapple beam: Samus's poses that put her left hand on the cannon (the hand on the cannon when still,
+  free look, the fidgets, combo fire, a strike's flinch) went through the rifle, which has a grip of
+  its own for that hand, so with the rifle they are not drawn (0.46.0 test 52).
 - The Morph Ball is Prime's own, its shell in the look's armour colour (the marine's white, the Gravity
   purple, the Dark Trooper's dark grey) and its lights in the look's light colour (teal, aqua; the Dark
   Trooper keeps the red). So is the Spider Ball (Prime's, from its Varia Suit set), with Prime's glass

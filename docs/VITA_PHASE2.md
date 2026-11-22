@@ -5213,33 +5213,34 @@ from way below".
 - Seen from the first-person eye, above and behind, the housing hides that mouth. The rifle's visible
   front is the housing's top front edge (rifle space y -0.10, z +0.17), 80 of 544 lines above the
   mouth (`~/marine/ridge.py`, render2's MARK crosses).
-- The user: "if it does then there's no need to change". Then, with an in-game photo and a render of
-  the rifle's left side: "I think moving the arm cannon back up would be a good idea, probably should
-  make sure the hand doesn't appear because it clips through the arm cannon and it already has a grip
-  so we'll just pretend the hand is holding that instead."
+- The user: "if it does then there's no need to change". Then, with an in-game photo of the left hand
+  resting on the rifle (the hand on the cannon when still) and a render of the rifle's left side: "I
+  think moving the arm cannon back up would be a good idea, probably should make sure the hand doesn't
+  appear because it clips through the arm cannon and it already has a grip so we'll just pretend the
+  hand is holding that instead." Then: "I meant the left hand".
+  - Commit a2510b5 had taken it for the right hand (left out of the troopers' meshes, echoes-suits
+    20). It was never built or staged; test 52 puts the right hand back.
 
-## 0.46.0 test 52: the rifle back up, the troopers' right hand left out (echoes-suits 20)
+## 0.46.0 test 52: the rifle back up, the left hand off it
 
 - First person: the drop is gone (`kRifleDrop`, `FirstPersonCannonDrop` and `mPortCannonDrop`
   removed). The rifle's muzzle sits on the cannon's again, as in test 50, the shots with it.
-- The right hand (`DropHand`, port_federation_marine.cpp): the body material's triangles with a vertex
-  on the Echoes skeleton's R_wrist, to which the hand is skinned rigidly, as the rifle is.
-  - 109 triangles of each trooper: palm, fingers and thumb in 9 pieces, and the 13 that join them to
-    the forearm. The rifle, its own material on the wrist too, stays.
-  - The marine's hand grips a handle inside the rifle's open frame, and its fingers stuck out through
-    the frame's sides (`~/marine/handview.py`: the T-posed hand alone, and the rifle without it).
-  - Left out of every body (cutscene, in-game, doll): after RollGrip and before the Dark Trooper's
-    visor swap, the marine's vertices then compacted (2969 to 2864).
-  - Left out of the first-person rifle too (501 to 397 vertices).
-  - echoes-suits `kVersion` 20, so the user imports again.
-- Checked with the import harness (`~/marine/out5`):
-  - validate.py reads as test 51's but for the vertex counts.
-  - The rifle seen from either side, and the doll posed in the pause screen's idle seen from the
-    side, show the frame's inner bar where the fingers were.
-  - From the front the doll looks as before.
+- The left hand (`CPlayerGun::DrawArm`): with the Federation Marine's rifle as the first-person
+  cannon (`CGunWeapon::PortDrawsMarineRifle`: mPortDreadCannon and the new mPortMarineRifle, from
+  `PortFederationMarine::ServesFirstPersonRifle` in LoadSuitArm), the grapple arm is not drawn while it
+  plays the gun controller's animations (`CGrappleArm::kAS_GunControllerAnimation`).
+  - Those are the poses that put Samus's left hand on her cannon: EnterFreeLook (the GameCube's R
+    free look, and the port's hand on the cannon when still, #244), EnterFidget, EnterComboFire and
+    EnterStruck.
+  - The grapple beam's states draw the arm as before.
+  - The rifle's own grip stands for that hand, as the user said.
+- The import is test 51's again: the harness's output (`~/marine/out6`) is byte for byte test 51's,
+  so echoes-suits stays at version 19 and the user's import stands.
 
 What to look for in test 52:
-- Import the Echoes suits again (mod version 20).
+- No new import: the Echoes import from test 51 stands.
 - First person: the rifle back at test 50's height. The shots still come from under its housing's
   front.
-- No fingers through the rifle's sides, in first person, third person, cutscenes or the pause screen.
+- Stand still for a second (the hand on the cannon when still): the rifle settles, and no left hand
+  comes over it. The same in free look and while firing combos.
+- The grapple beam still shows the marine's left arm.

@@ -43,6 +43,7 @@
 #include "port_beam_colours.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_federation_marine_mod.h"
 #include "port_log.h"
 #include "port_model_variant.h"
 #endif
@@ -1200,6 +1201,7 @@ void CGunWeapon::LoadSuitArm(CStateManager& mgr) {
 #ifdef TARGET_PC
   mPortDreadCannon = PortDreadSamus::ReplacesFirstPersonCannon(suit);
   mPortCannonRoll = PortDreadSamus::FirstPersonCannonRoll(suit);
+  mPortMarineRifle = PortFederationMarine::ServesFirstPersonRifle(suit);
   xb0_suitArmModelData =
       CStaticRes(mPortDreadCannon ? CAssetId(PortDreadSamus::FirstPersonCannon(suit)) : armId,
                  x4_scale);

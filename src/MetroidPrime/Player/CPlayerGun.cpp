@@ -595,6 +595,17 @@ inline void CPlayerGun::DrawArm(const CStateManager& mgr, const CVector3f& pos,
   }
 
 #ifdef TARGET_PC
+  // The Federation Marine's rifle (port_federation_marine_mod.h) is not Samus's cannon: the left
+  // hand's poses on the cannon (free look and the hand on the cannon when still, the fidgets, combo
+  // fire, a strike's flinch: the gun controller's animations) went through it. The rifle has a grip
+  // of its own for that hand, so with it the arm shows only for the grapple beam (the user, 0.46.0
+  // test 51: "make sure the hand doesn't appear because it clips through the arm cannon and it
+  // already has a grip").
+  if (x740_grappleArm->GetAnimState() == CGrappleArm::kAS_GunControllerAnimation &&
+      x72c_currentBeam->PortDrawsMarineRifle()) {
+    return;
+  }
+
   // Port (#276): the arm follows the camera's pitch and the body doesn't, so near the pole the
   // dot falls under 0.1 and the arm vanished. Retail free look stops short of that; direct aim
   // reaches 87 degrees. Compare headings only, which keeps the facing-away test.
