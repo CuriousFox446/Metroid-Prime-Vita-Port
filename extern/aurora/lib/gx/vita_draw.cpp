@@ -309,6 +309,8 @@ struct Stats {
   u32 constantsShared = 0;
   // Of those, the ones recorded with a stand-in while theirs was not linked (tev_stand_in).
   u32 standIns = 0;
+  // Draws recorded with a fixed-function part (0.46.0 test 45: no program, or one not yet linked).
+  u32 fixedParts = 0;
   // Materials worked out that sample an EFB copy (their hash moves with every copy), and those
   // that replaced another still in use this window.
   u32 materialMissesCopy = 0;
@@ -1492,8 +1494,10 @@ std::shared_ptr<vita_gl::Texture> copy_texture_for(const GXTexObj_& obj) noexcep
     vita_gl::Draw draw;
     draw.copyTo = vita_gl::keep(copy.texture);
     draw.copyKind = format == GX_TF_C4 ? vita_gl::CopyKind::Palette4 : vita_gl::CopyKind::Palette8;
-    draw.units[0].texture = vita_gl::keep(source);
-    draw.units[1].texture = vita_gl::keep(palette);
+    // The copy and its palette as the conversion's textures (vita_gl.cpp, palette_on_gpu): a copy
+    // has no program (0.46.0 test 45; they were units 0 and 1).
+    draw.program.textures[0] = vita_gl::keep(source);
+    draw.program.textures[1] = vita_gl::keep(palette);
     vita_gl::record(std::move(draw));
     copy.palette = std::move(palette);
     copy.version = version;
@@ -2075,21 +2079,25 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
   drop_plain_blend(state);
   vita_gl::Draw draw{.mesh = vita_gl::keep(mesh), .frameMesh = frameMesh};
   draw.width = width;
+  // GX's position matrix and its projection: its program's vertex rows are made from them (below),
+  // and its fixed-function part, where it has one, takes them as they are.
+  float modelView[12];
   const Mat3x4<float>& mv = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
-  std::memcpy(draw.modelView, &mv, sizeof(draw.modelView));
+  std::memcpy(modelView, &mv, sizeof(modelView));
   // GX's clip depth runs from -w (near) to 0; GL's from -w to w: row 2 becomes 2 * row 2 + row 3.
   // Then the viewport's depth range (GXSetViewport's near and far, the window depth at the near
   // and far planes), folded in as glDepthRange would apply it: depth n + (f - n) * d for the
   // [0, 1] depth d, so clip z becomes (f - n) * z + (f + n - 1) * w. The game layers with it: the
   // HUD into the nearest depths, the sky and the planet into the farthest.
+  float projection[16];
   const Mat4x4<float>& proj = g_gxState.proj;
   const float n = g_gxState.renderViewport.znear;
   const float f = g_gxState.renderViewport.zfar;
   for (int c = 0; c < 4; ++c) {
-    draw.projection[c] = proj.m0[c];
-    draw.projection[4 + c] = proj.m1[c];
-    draw.projection[8 + c] = (f - n) * (2.f * proj.m2[c] + proj.m3[c]) + (f + n - 1.f) * proj.m3[c];
-    draw.projection[12 + c] = proj.m3[c];
+    projection[c] = proj.m0[c];
+    projection[4 + c] = proj.m1[c];
+    projection[8 + c] = (f - n) * (2.f * proj.m2[c] + proj.m3[c]) + (f + n - 1.f) * proj.m3[c];
+    projection[12 + c] = proj.m3[c];
   }
   sStats.depthRanged += n != 0.f || f != 1.f ? 1 : 0;
   // GX's viewport and scissor: the game draws its reflection and shadows into a corner, then
@@ -2100,31 +2108,46 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
   draw.scissor = screen_rect(static_cast<float>(sc.x), static_cast<float>(sc.y), static_cast<float>(sc.width),
                              static_cast<float>(sc.height), true);
   sStats.cornered += draw.viewport == vita_gl::ScreenRect{} ? 0 : 1;
-  for (int unit = 0; unit < material.unitCount; ++unit) {
-    const vita_gl::TexUnit& from = material.units[unit];
-    vita_gl::DrawUnit& to = draw.units[unit];
-    to.texture = vita_gl::keep(from.texture);
-    to.sampler = from.sampler;
-    to.envMode = from.envMode;
-    to.coord = from.coord;
-    // Texture matrices animate (scrolling, pulsing): read for every draw.
-    tex_matrix(*material.tcgs[unit], to.matrix);
-    sStats.additiveUnits += to.envMode == kGlAdd ? 1 : 0;
+  // Its own program, or while that is on its way another light count's of its material, linked
+  // (tev_stand_in): the rows below are made for the one drawn with.
+  const TevProgram* drawn = material.program;
+  if (drawn != nullptr && !vita_gl::program_ready(drawn->program.get())) {
+    if (const TevProgram* standIn = tev_stand_in(material.programFamily, *drawn)) {
+      draw.program.wanted = vita_gl::keep(drawn->program);
+      drawn = standIn;
+      ++sStats.standIns;
+    }
   }
-  draw.state = state;
-  if (material.program != nullptr) {
+  // Its fixed-function part (0.46.0 test 45), only where it may be drawn so: without a program, or
+  // with one not linked yet (a program once linked stays so). A draw with a linked one, nearly every
+  // draw, has none: its units' matrices are not worked out, nor its textures kept for them.
+  if (drawn == nullptr || !vita_gl::program_ready(drawn->program.get())) {
+    vita_gl::DrawFixed& fixed = *vita_gl::record_fixed(draw.fixed);
+    std::memcpy(fixed.modelView, modelView, sizeof(modelView));
+    std::memcpy(fixed.projection, projection, sizeof(projection));
+    for (int unit = 0; unit < vita_gl::kTexUnits; ++unit) {
+      vita_gl::DrawUnit& to = fixed.units[unit];
+      if (unit >= material.unitCount) {
+        to = {};
+        continue;
+      }
+      const vita_gl::TexUnit& from = material.units[unit];
+      to.texture = vita_gl::keep(from.texture);
+      to.sampler = from.sampler;
+      to.envMode = from.envMode;
+      to.coord = from.coord;
+      // Texture matrices animate (scrolling, pulsing): read for every draw.
+      tex_matrix(*material.tcgs[unit], to.matrix);
+    }
+    fixed.state = state;
+    ++sStats.fixedParts;
+  }
+  for (int unit = 0; unit < material.unitCount; ++unit) {
+    sStats.additiveUnits += material.units[unit].envMode == kGlAdd ? 1 : 0;
+  }
+  if (drawn != nullptr) {
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRecord);
     vita_gl::ProgramInputs& inputs = draw.program;
-    // Its own program, or while that is on its way another light count's of its material, linked
-    // (tev_stand_in): the rows below are made for the one drawn with.
-    const TevProgram* drawn = material.program;
-    if (!vita_gl::program_ready(drawn->program.get())) {
-      if (const TevProgram* standIn = tev_stand_in(material.programFamily, *drawn)) {
-        inputs.wanted = vita_gl::keep(drawn->program);
-        drawn = standIn;
-        ++sStats.standIns;
-      }
-    }
     inputs.program = vita_gl::keep(drawn->program);
     for (int m = 0; m < kSamplers; ++m) {
       inputs.textures[m] = vita_gl::keep(material.programTextures[m]);
@@ -2134,10 +2157,9 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
     // thread: the render worker is the busier one.
     float vertex[vita_gl::kProgramVertexConstants][4];
     for (int r = 0; r < 4; ++r) {
-      const float* p = &draw.projection[4 * r];
+      const float* p = &projection[4 * r];
       for (int c = 0; c < 4; ++c) {
-        vertex[r][c] = p[0] * draw.modelView[c] + p[1] * draw.modelView[4 + c] + p[2] * draw.modelView[8 + c] +
-                       (c == 3 ? p[3] : 0.f);
+        vertex[r][c] = p[0] * modelView[c] + p[1] * modelView[4 + c] + p[2] * modelView[8 + c] + (c == 3 ? p[3] : 0.f);
       }
     }
     const TevProgram& program = *drawn;
@@ -2171,9 +2193,9 @@ void record_draw(const std::shared_ptr<vita_gl::Mesh>& mesh, const Material& mat
     ++sStats.withProgram;
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kRows);
   }
-  sStats.blended += draw.state.blend ? 1 : 0;
-  sStats.alphaTested += draw.state.alphaFunc != kGlAlways ? 1 : 0;
-  sStats.culled += draw.state.cullFace != 0 ? 1 : 0;
+  sStats.blended += state.blend ? 1 : 0;
+  sStats.alphaTested += state.alphaFunc != kGlAlways ? 1 : 0;
+  sStats.culled += state.cullFace != 0 ? 1 : 0;
   vita_gl::record(std::move(draw));
   ++sStats.recorded;
   ++sStats.drawsByUnits[material.unitCount];
@@ -2952,17 +2974,22 @@ void record_masked_clear(const vita_gl::ScreenRect& rect) noexcept {
     std::memcpy(v.raw, rgba, sizeof(rgba));
     v.shade = 255;
   }
+  // Drawn fixed-function: its part (identity matrices, no texture) among the frame's.
   vita_gl::Draw draw{.frameMesh = mesh};
+  vita_gl::DrawFixed& fixed = *vita_gl::record_fixed(draw.fixed);
   constexpr float kRows[16] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
-  std::memcpy(draw.modelView, kRows, sizeof(draw.modelView));
-  std::memcpy(draw.projection, kRows, sizeof(draw.projection));
+  std::memcpy(fixed.modelView, kRows, sizeof(fixed.modelView));
+  std::memcpy(fixed.projection, kRows, sizeof(fixed.projection));
+  for (vita_gl::DrawUnit& unit : fixed.units) {
+    unit = {};
+  }
   draw.scissor = rect; // the viewport stays the whole screen
   const bool depth = g_gxState.depthUpdate;
-  draw.state = {.depthTest = depth,
-                .depthFunc = kGlAlways,
-                .depthWrite = depth,
-                .colorWrite = g_gxState.colorUpdate,
-                .alphaWrite = g_gxState.alphaUpdate};
+  fixed.state = {.depthTest = depth,
+                 .depthFunc = kGlAlways,
+                 .depthWrite = depth,
+                 .colorWrite = g_gxState.colorUpdate,
+                 .alphaWrite = g_gxState.alphaUpdate};
   vita_gl::record(std::move(draw));
   ++sStats.maskedClears;
 }
@@ -3153,13 +3180,13 @@ void log_stats() noexcept {
            "skinned calls: {} from their template ({} drawn by index; {} corners as {} vertices), {} decoded whole, "
            "{} templates made; {} draws with a generated "
            "program ({} generated; {} of the draws with another light count's while theirs was on its way), their "
-           "constant arrays {} recorded, {} repeating the last",
+           "constant arrays {} recorded, {} repeating the last; {} draws with a fixed-function part",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
            onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
            s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
-           s.constantsShared);
+           s.constantsShared, s.fixedParts);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "
            "for at {} frame ends ({:.1f} ms in all), {} times for the frame's vertices to grow, {} at a draw done, "

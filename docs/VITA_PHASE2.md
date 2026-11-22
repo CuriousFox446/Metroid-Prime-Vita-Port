@@ -4813,12 +4813,14 @@ Test 43 died at the full map screen (the log's last lines; the settings reset, f
 heap at 181.9 MiB in use of 224.2 MiB taken, 42.3 MiB free but not in one piece of 5.3 MiB, the
 system's 229.4 MiB nearly all taken; then `std::bad_alloc`, uncaught.
 - The stack (01952f0's ELF): `vita_gl::record(Draw&&)` from `record_draw`: the frame's draws, one
-  `std::vector`, growing. 5,309,088 bytes are 5,721 draws of 928 bytes.
+  `std::vector`, growing. 5,309,088 bytes are 11,442 draws of 464 bytes: the vector, reserved at the
+  last frame's 5,721, doubled past it. (Written as "5,721 draws of 928 bytes" at first; test 45
+  measured a draw at 464 with the Vita's compiler.)
 - The map screen opened: the map's GX begins went from the minimap's 100-270 a frame to 6,941
   (82,944 vertices), 5,718 draws a frame, 6.3 FPS. Each room's faces and outlines are drawn with the
   room's matrix and colours, so few join the draw before them (`merge_into_last`). The same as
   0.42.0 test 3's Chozo map (merging made it rarer) and test 9's vertices (chunked then).
-- The fix: a frame's draws in blocks of 128 (`FrameDraws`, 116 KiB a block, from a pool keeping 48),
+- The fix: a frame's draws in blocks of 128 (`FrameDraws`, 58 KiB a block, from a pool keeping 48),
   and its programs' constant rows in chunks (`FrameChunks<std::array<float, 4>>`, 128 KiB chunks;
   they were one vector reserved anew each frame at the last one's size). No per-frame piece is larger
   than a chunk now; the same pieces come back frame after frame. `ChunkPool` takes its chunk size
@@ -4831,16 +4833,50 @@ processor, a hitch every eighth frame. Now one in 64 (`kTimedEvery`).
 
 Where a frame goes at 544 lines (test 43's log, a gameplay window, ~1,080 draws a frame, 23-31 FPS,
 frames 1 to 5 vblanks apart):
-- FIFO processor 34-36 ms a frame busy (71%): GX state 6.2, recording the draws 5.7 (928 bytes
+- FIFO processor 34-36 ms a frame busy (71%): GX state 6.2, recording the draws 5.7 (464 bytes
   each, built then copied), materials 4.8, programs' rows 3.9, Aurora's own 3.2, dispatch 2.4,
   other draws 2.4, immediate 2.0, list lookups 1.6, meshes 1.0.
 - Main thread ~32 ms a frame (79%): the game's draw 14.6 (`CCubeModel::DrawSurfaces` 5.5, the HUD
   2.9), two 60 Hz ticks 10.0, waiting for the FIFO 3.3, input 1.7, the loader 2.2.
 - GPU 26.7 ms a frame busy (70%); render worker ~20 ms (40%).
 For a steady 30 (33.3 ms) the FIFO processor is the first to bring down, then the main thread's draw;
-a program draw uses little of its 928 bytes (the fixed-function units, 384, and its matrices, held
-in its rows too, are for the fixed-function path).
+a program draw uses little of its 464 bytes (the fixed-function units, 96, its matrices, 112, held in
+its rows too, and its state, 32, are for the fixed-function path).
 
 What to look for in test 44:
 - The full map screen, opened and kept open in a large area: no crash (it stays slow).
 - Fewer hitches: the section clocks' frame comes every 64 now.
+
+## 0.46.0 test 45: optimization round 1, a draw's fixed-function part apart
+
+The user: "We still need some optimization to make it reach around a stable 30fps", and for round 1
+(the FIFO processor) "Yes, start".
+
+A draw (`vita_gl::Draw`) was 464 bytes (measured with the Vita's compiler: `ProgramInputs` 148,
+`DrawUnit` 48, `RenderState` 32, `FrameMesh` 20), built zeroed on the FIFO processor's stack for each
+draw, filled, compared with the last for a merge and copied into the frame. 240 of them, its
+position matrix (48) and projection (64), its two fixed-function units (96: each a texture kept, a
+sampler and a matrix worked out from GX's texture matrix) and its fixed-function state (32), are read
+only where it is drawn fixed-function: without a program, or while its program is not linked. In
+play nearly every draw has a linked program (test 43's log: 0 fixed-function waiting a window).
+- `DrawFixed` holds that part, in the frame's own chunks (`Frame::fixed`, `FrameChunks<DrawFixed,
+  128>`, 30 KiB a chunk), recorded only for a draw whose program (its own or a stand-in) is not linked
+  as it is recorded (`record_fixed`; `Draw::fixed` its place, else `kNoFixed`). A program once linked
+  stays so, so the render worker never needs the part of a draw recorded without one; if it ever did,
+  the draw is left out rather than read amiss.
+- A draw is 228 bytes now. A draw with a linked program skips its units' matrices (`tex_matrix`,
+  two a draw) and their textures' keep, and its matrices are worked out into the FIFO processor's own
+  (for its program's rows) rather than into the draw.
+- Merging (`merge_into_last`) compares what the program path draws with: the program, its textures,
+  samplers and rows (the matrices among them), viewport, scissor and width; no longer the matrices,
+  units and state the program path does not read. A draw with a fixed-function part joins none.
+- A palette copy's two textures (the copy and its palette) go in `program.textures[0]` and `[1]`
+  (were units 0 and 1; a copy has no program). The masked clear (a fixed-function quad) records its
+  part. The GPU cost test sorts by the state the draw draws with (its part's, else its program's).
+- The materials line counts the draws recorded with a fixed-function part.
+
+What to look for in test 45:
+- The same picture everywhere (a draw drawn fixed-function only while its program loads, as before).
+- The `[fifo path]` line's record section against test 43's 5.7 ms a frame, its busy total against
+  34-36 ms; the presents line's draws a frame (more join now), the materials line's fixed-function
+  count (near 0 in play).

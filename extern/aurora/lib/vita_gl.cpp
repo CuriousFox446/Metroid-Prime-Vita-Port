@@ -294,9 +294,10 @@ private:
 // when the frame grows (room). A place is the chunk's number above kOffsetBits and the place in it
 // below: a mesh's vertices are together in one chunk, and two meshes are next to each other (place
 // plus count, merge_into_last) only in the same chunk.
-template <typename T>
+template <typename T, uint32_t Chunk = 8192, size_t Kept = 16>
 class FrameChunks {
 public:
+  using Pool = ChunkPool<T, Chunk, Kept>;
   static constexpr uint32_t kOffsetBits = 20;
   static constexpr uint32_t kOffsetMask = (1u << kOffsetBits) - 1;
 
@@ -320,7 +321,7 @@ public:
     if (m_chunks.empty() || m_used + count > m_chunks.back().capacity) {
       add_chunk(count);
     }
-    Chunk& chunk = m_chunks.back();
+    Piece& chunk = m_chunks.back();
     at = (static_cast<uint32_t>(m_chunks.size() - 1) << kOffsetBits) | m_used;
     T* const out = chunk.data.get() + m_used;
     m_used += count;
@@ -353,15 +354,15 @@ public:
   uint32_t room() const { return UINT32_MAX; }
 
 private:
-  struct Chunk {
+  struct Piece {
     std::unique_ptr<T[]> data;
     uint32_t capacity = 0;
   };
   void add_chunk(uint32_t count) {
-    Chunk chunk;
-    if (count <= ChunkPool<T>::kChunk) {
-      chunk.data = ChunkPool<T>::get().take();
-      chunk.capacity = ChunkPool<T>::kChunk;
+    Piece chunk;
+    if (count <= Pool::kChunk) {
+      chunk.data = Pool::get().take();
+      chunk.capacity = Pool::kChunk;
     } else {
       chunk.data.reset(new T[count]);
       chunk.capacity = count;
@@ -370,16 +371,16 @@ private:
     m_used = 0;
   }
   void release() noexcept {
-    for (Chunk& chunk : m_chunks) {
-      if (chunk.capacity == ChunkPool<T>::kChunk) {
-        ChunkPool<T>::get().put(std::move(chunk.data));
+    for (Piece& chunk : m_chunks) {
+      if (chunk.capacity == Pool::kChunk) {
+        Pool::get().put(std::move(chunk.data));
       }
     }
     m_chunks.clear();
     m_used = 0;
     m_size = 0;
   }
-  std::vector<Chunk> m_chunks;
+  std::vector<Piece> m_chunks;
   uint32_t m_used = 0; // in the last chunk
   uint32_t m_size = 0;
 };
@@ -454,14 +455,15 @@ struct RecycledVector {
 
 // A frame's draws (0.46.0 test 44), in blocks from a pool as its vertices are in chunks. The full map
 // screen draws each room's faces and outlines a few at a time, each room with its matrix and its
-// colours, so they join little (merge_into_last): in the Phazon Mines some 5,700 draws a frame at
-// 928 bytes, and the frame's draws, one vector, asked for 5.3 MiB in one piece. With the heap at 182
-// of 224 MiB and its 42 MiB free in smaller pieces: std::bad_alloc on the FIFO thread (as 0.42.0
-// test 3's Chozo map, and test 9's vertices). Nothing here is larger than a block now, and the same
-// blocks come back frame after frame. A draw never moves once recorded.
+// colours, so they join little (merge_into_last): in the Phazon Mines some 5,700 draws a frame, and
+// the frame's draws, one vector (reserved at the last frame's 5,721, doubled past it: 11,442 draws of
+// 464 bytes), asked for 5.3 MiB in one piece. With the heap at 182 of 224 MiB and its 42 MiB free in
+// smaller pieces: std::bad_alloc on the FIFO thread (as 0.42.0 test 3's Chozo map, and test 9's
+// vertices). Nothing here is larger than a block now, and the same blocks come back frame after
+// frame. A draw never moves once recorded.
 class FrameDraws {
 public:
-  static constexpr uint32_t kBlock = 128; // draws a block (116 KiB)
+  static constexpr uint32_t kBlock = 128; // draws a block (29 KiB since test 45's 228-byte draws)
   using Pool = ChunkPool<Draw, kBlock, 48>;
 
   FrameDraws() = default;
@@ -526,6 +528,8 @@ private:
 // size, ~1-2 MiB at the map screen, was let go a frame or two later).
 struct Frame {
   FrameDraws draws;
+  // The fixed-function parts of the draws that have one (record_fixed), 128 a chunk (30 KiB).
+  FrameChunks<DrawFixed, 128, 16> fixed;
   FrameChunks<std::array<float, 4>> constants;
   FrameChunks<Vertex> vertices;
   FrameArray<uint16_t> indices;
@@ -2223,11 +2227,6 @@ void warm_up(uint64_t key, std::string vertexSource, std::string fragmentSource)
 }
 
 namespace {
-bool same_unit(const DrawUnit& a, const DrawUnit& b) noexcept {
-  return a.texture == b.texture && std::memcmp(a.matrix, b.matrix, sizeof(a.matrix)) == 0 && a.sampler == b.sampler &&
-         a.envMode == b.envMode && a.coord == b.coord;
-}
-
 // A program's rows as two draws point at them: the same rows, or the same values recorded twice.
 bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
   return count == 0 || a == b ||
@@ -2237,21 +2236,24 @@ bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
 
 // `draw` joins the frame's last draw where both draw the frame's own vertices, the second's right
 // after the first's in the frame's arrays, as lists (GL's lines or triangles), and nothing else
-// about them differs: matrices, units, state, program, its textures and rows, viewport, scissor,
+// about them differs: program, its textures and rows (the matrices among them), viewport, scissor,
 // width. Drawn as one, GXM rasterises their primitives in the same order. The map draws each room's
 // outlines and faces a few at a time: Chozo Ruins' was some 5,700 draws a frame, recorded at 1 KiB
 // each, and a frame's draws grew past what the heap had in one piece (0.42.0 test 3,
-// std::bad_alloc on the FIFO thread), at 9 FPS.
+// std::bad_alloc on the FIFO thread), at 9 FPS. A draw with a fixed-function part (no program, or
+// one not linked yet: rare, and for the moment) joins none (0.46.0 test 45): what the program path
+// draws is all in its program's inputs.
 bool merge_into_last(const Draw& draw) noexcept {
   const FrameMesh& b = draw.frameMesh;
   if (draw.mesh != nullptr || b.vertexCount == 0 || b.primitive == MeshPrimitive::Points || draw.clear ||
-      draw.copyTo != nullptr || g_recording.draws.empty()) {
+      draw.copyTo != nullptr || draw.fixed != kNoFixed || draw.program.program == nullptr ||
+      g_recording.draws.empty()) {
     return false;
   }
   Draw& last = g_recording.draws.back();
   FrameMesh& a = last.frameMesh;
-  if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || a.kind != b.kind ||
-      a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
+  if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || last.fixed != kNoFixed ||
+      a.kind != b.kind || a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
       (a.indexCount != 0) != (b.indexCount != 0) || last.width != draw.width) {
     return false;
   }
@@ -2259,15 +2261,8 @@ bool merge_into_last(const Draw& draw) noexcept {
   if (b.indexCount != 0 && (a.indexAt + a.indexCount != b.indexAt || a.vertexCount + b.vertexCount > 0x10000)) {
     return false;
   }
-  if (std::memcmp(last.modelView, draw.modelView, sizeof(draw.modelView)) != 0 ||
-      std::memcmp(last.projection, draw.projection, sizeof(draw.projection)) != 0 || !(last.state == draw.state) ||
-      !(last.viewport == draw.viewport) || !(last.scissor == draw.scissor)) {
+  if (!(last.viewport == draw.viewport) || !(last.scissor == draw.scissor)) {
     return false;
-  }
-  for (int unit = 0; unit < kTexUnits; ++unit) {
-    if (!same_unit(last.units[unit], draw.units[unit])) {
-      return false;
-    }
   }
   const ProgramInputs& p = last.program;
   const ProgramInputs& q = draw.program;
@@ -2303,6 +2298,8 @@ void record(Draw&& draw) noexcept {
   g_recording.copies += draw.copyTo != nullptr ? 1 : 0;
   g_recording.draws.push_back(draw);
 }
+
+DrawFixed* record_fixed(uint32_t& at) noexcept { return g_recording.fixed.grow(1, at); }
 
 namespace {
 template <typename T>
@@ -2477,8 +2474,8 @@ PresentStats g_presentStats;
 // 5, "the white box"; with the program it adds nothing, the depth copies being black). Such a draw
 // that writes no depth is left out until its program is ready; one whose program failed is drawn
 // fixed-function as before.
-bool left_out_while_pending(const Draw& draw) noexcept {
-  if (draw.units[0].texture != nullptr || draw.state.depthWrite) {
+bool left_out_while_pending(const Draw& draw, const DrawFixed& fixed) noexcept {
+  if (fixed.units[0].texture != nullptr || fixed.state.depthWrite) {
     return false;
   }
   return std::any_of(std::begin(draw.program.textures), std::end(draw.program.textures),
@@ -3151,26 +3148,26 @@ State g_state;
 
 MeshKind kind_of(const Draw& draw) noexcept { return draw.mesh != nullptr ? draw.mesh->kind() : draw.frameMesh.kind; }
 
-// Whether the test leaves this draw out now (render worker).
-bool skips(const Draw& draw) noexcept {
+// Whether the test leaves this draw out now (render worker); `state` the one it draws with (its
+// fixed-function part's, else its program's).
+bool skips(const Draw& draw, const RenderState& state) noexcept {
   const uint32_t s = g_skip;
   if ((s & kDraws) != 0) {
     return true;
   }
   const MeshKind kind = kind_of(draw);
   return ((s & kImmediate) != 0 && (kind == MeshKind::Immediate || kind == MeshKind::Indexed)) ||
-         ((s & kBlended) != 0 && draw.state.blend) ||
-         ((s & kAlphaTested) != 0 && draw.state.alphaFunc != GL_ALWAYS) ||
+         ((s & kBlended) != 0 && state.blend) || ((s & kAlphaTested) != 0 && state.alphaFunc != GL_ALWAYS) ||
          ((s & kSkinned) != 0 && kind == MeshKind::Skinned) || ((s & kLists) != 0 && kind == MeshKind::List);
 }
 
-void count(const Draw& draw) noexcept {
+void count(const Draw& draw, const RenderState& state) noexcept {
   const MeshKind kind = kind_of(draw);
   Counts& c = g_counts;
   ++c.draws;
   c.immediate += kind == MeshKind::Immediate || kind == MeshKind::Indexed ? 1 : 0;
-  c.blended += draw.state.blend ? 1 : 0;
-  c.alphaTested += draw.state.alphaFunc != GL_ALWAYS ? 1 : 0;
+  c.blended += state.blend ? 1 : 0;
+  c.alphaTested += state.alphaFunc != GL_ALWAYS ? 1 : 0;
   c.skinned += kind == MeshKind::Skinned ? 1 : 0;
   c.lists += kind == MeshKind::List ? 1 : 0;
 }
@@ -3392,8 +3389,12 @@ bool copy_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32
 // again. False when the copy was never made (nothing to convert).
 bool palette_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uint32_t& attribsOn,
                     RenderState& current, bool moreCopies) noexcept {
-  Texture& source = *draw.units[0].texture;
-  Texture& palette = *draw.units[1].texture;
+  // The copy and its palette, as the conversion's textures (gx/vita_draw.cpp, palette_copy).
+  if (draw.program.textures[0] == nullptr || draw.program.textures[1] == nullptr) {
+    return false;
+  }
+  Texture& source = *draw.program.textures[0];
+  Texture& palette = *draw.program.textures[1];
   const auto width = static_cast<int>(source.width());
   const auto height = static_cast<int>(source.height());
   if (!source.copied() || width <= 0 || height <= 0 || palette.width() == 0 || program.attr(kAttrPos) < 0 ||
@@ -3662,10 +3663,12 @@ void draw_world(const Frame& frame) {
       g_clock.mark(kCopy);
       continue;
     }
+    // Its fixed-function part, where it has one (no program, or one not linked as it was recorded).
+    const DrawFixed* fixed = draw.fixed != kNoFixed ? frame.fixed.at(draw.fixed) : nullptr;
     if (gpu_test::g_counting) {
-      gpu_test::count(draw);
+      gpu_test::count(draw, fixed != nullptr ? fixed->state : draw.program.state);
     }
-    if (gpu_test::g_skip != 0 && gpu_test::skips(draw)) {
+    if (gpu_test::g_skip != 0 && gpu_test::skips(draw, fixed != nullptr ? fixed->state : draw.program.state)) {
       continue; // the GPU cost test leaves this kind out now
     }
     set_rects(draw.viewport, draw.scissor);
@@ -3697,7 +3700,9 @@ void draw_world(const Frame& frame) {
         glUseProgram(usedProgram);
       }
       if (!ready) {
-        leaveOut = !program->settled() && left_out_while_pending(draw);
+        // Without a fixed-function part (its program linked as it was recorded: does not come) it
+        // cannot be drawn so: left out.
+        leaveOut = fixed == nullptr || (!program->settled() && left_out_while_pending(draw, *fixed));
         program = nullptr;
       }
       g_clock.mark(kBuild);
@@ -3711,6 +3716,9 @@ void draw_world(const Frame& frame) {
       g_clock.programDraws += g_clock.on ? 1 : 0;
       draw_with_program(draw, frame, *program, usedProgram, attribsOn, current, bound);
       continue;
+    }
+    if (fixed == nullptr) {
+      continue; // nothing to draw it with (does not come: a draw without a program has its part)
     }
     if (draw.program.program != nullptr) {
       ++g_presentStats.programPending;
@@ -3727,11 +3735,11 @@ void draw_world(const Frame& frame) {
     // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
     for (int unit = 0; unit < kTexUnits; ++unit) {
       glClientActiveTexture(GL_TEXTURE0 + unit);
-      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, uv) + draw.units[unit].coord * sizeof(float[2])));
+      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, uv) + fixed->units[unit].coord * sizeof(float[2])));
     }
     g_clock.mark(kFixedPointers);
     for (int unit = 0; unit < kTexUnits; ++unit) {
-      const DrawUnit& texUnit = draw.units[unit];
+      const DrawUnit& texUnit = fixed->units[unit];
       const bool on = texUnit.texture != nullptr;
       if (!on && !unitOn[unit]) {
         continue;
@@ -3758,18 +3766,18 @@ void draw_world(const Frame& frame) {
       }
     }
     g_clock.mark(kFixedUnits);
-    if (!haveProjection || std::memcmp(lastProjection, draw.projection, sizeof(draw.projection)) != 0) {
+    if (!haveProjection || std::memcmp(lastProjection, fixed->projection, sizeof(fixed->projection)) != 0) {
       set_matrix_mode(GL_PROJECTION);
-      to_column_major(draw.projection, 4, matrix);
+      to_column_major(fixed->projection, 4, matrix);
       glLoadMatrixf(matrix);
-      std::memcpy(lastProjection, draw.projection, sizeof(draw.projection));
+      std::memcpy(lastProjection, fixed->projection, sizeof(fixed->projection));
       haveProjection = true;
     }
     set_matrix_mode(GL_MODELVIEW);
-    to_column_major(draw.modelView, 3, matrix);
+    to_column_major(fixed->modelView, 3, matrix);
     glLoadMatrixf(matrix);
     g_clock.mark(kFixedMatrices);
-    apply_state(draw.state, current, false);
+    apply_state(fixed->state, current, false);
     g_clock.mark(kFixedState);
     draw_mesh(draw, frame);
     g_clock.mark(kFixedDraw);

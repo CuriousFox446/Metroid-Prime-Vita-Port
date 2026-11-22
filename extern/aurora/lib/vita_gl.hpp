@@ -268,19 +268,34 @@ struct ProgramInputs {
   RenderState state;
 };
 
-// One draw: a mesh (its Mesh, or a mesh of its frame's own) with GX's position matrix (3x4, rows)
-// and projection (4x4, rows, already in GL's depth range); its fixed-function texture units and
-// state; and its generated program, when it has one (drawn with it once the program is ready).
-// GX's viewport and scissor, on the screen; a line or point mesh's width in the screen's pixels
-// (GX's line width or point size; GXM takes whole pixels, 1 to 16).
+// A draw's fixed-function part (0.46.0 test 45): GX's position matrix (3x4, rows) and projection
+// (4x4, rows, already in GL's depth range), its texture units and its state. Only a draw drawn
+// fixed-function reads it (one without a program, or whose program is not linked yet), so it is kept
+// apart, among its frame's (record_fixed), for the draws that may be: one whose program is linked as
+// it is recorded never is, a program once linked staying so. It was 240 of a draw's 464 bytes, built
+// for each draw and copied, and its two units' matrices worked out, for nothing.
+struct DrawFixed {
+  float modelView[12];
+  float projection[16];
+  DrawUnit units[kTexUnits];
+  RenderState state;
+};
+// A draw without one (Draw::fixed).
+inline constexpr uint32_t kNoFixed = UINT32_MAX;
+
+// One draw: a mesh (its Mesh, or a mesh of its frame's own); its generated program, when it has one
+// (drawn with it once the program is ready), and its fixed-function part, where it may be drawn
+// without (`fixed`: its place among its frame's DrawFixed). GX's viewport and scissor, on the
+// screen; a line or point mesh's width in the screen's pixels (GX's line width or point size; GXM
+// takes whole pixels, 1 to 16).
 // Or, with `clear` (and no mesh), the clear of an EFB copy: the scissor rectangle set to the clear
 // colour and depth, where GX's colour, alpha and depth updates allow (as Dolphin clears); the
 // colour and the alpha both or neither (one alone is a draw: gx/vita_draw.cpp, record_masked_clear).
 // Or, with `copyTo` (and no mesh), an EFB copy: the scissor rectangle as the draws before it left
 // the screen, into that texture as `copyKind` reads it, halved when `copyHalf` (GX's box filter);
 // the screen's alpha read where `copyAlpha` (the EFB has alpha), else one. With a palette kind, a
-// copy's conversion instead: units[0]'s texture (a copy) through units[1]'s (its palette, one row)
-// into `copyTo`, at the copy's size.
+// copy's conversion instead: program.textures[0] (a copy) through program.textures[1] (its palette,
+// one row) into `copyTo`, at the copy's size (a copy has no program).
 // What it draws with (its mesh, textures and program) is held by its frame, once for all the draws
 // using it (keep): held by each draw instead, as shared pointers, a draw took up to 13 of them,
 // each copy an atomic count change behind two barriers on the FIFO thread and another as the
@@ -289,13 +304,10 @@ struct ProgramInputs {
 struct Draw {
   Mesh* mesh = nullptr;
   FrameMesh frameMesh;
-  float modelView[12];
-  float projection[16];
-  DrawUnit units[kTexUnits];
-  RenderState state;
   ProgramInputs program;
   ScreenRect viewport;
   ScreenRect scissor;
+  uint32_t fixed = kNoFixed;
   uint8_t width = 1;
   bool clear = false;
   bool clearColor = false;
@@ -310,6 +322,7 @@ struct Draw {
 };
 // Nothing to let go of: a frame's draws are freed as one block.
 static_assert(std::is_trivially_destructible_v<Draw> && std::is_trivially_copyable_v<Draw>);
+static_assert(std::is_trivially_destructible_v<DrawFixed> && std::is_trivially_copyable_v<DrawFixed>);
 
 #ifdef AURORA_VITA_GL
 // Starts vitaGL at the Vita's 960x544 (true). After it GXM is vitaGL's: SDL's renderer, GXM
@@ -324,6 +337,9 @@ void fonts_changed() noexcept;
 // FIFO thread: a draw of the frame being processed, and that frame's end (its draws go to the
 // render worker's next present).
 void record(Draw&& draw) noexcept;
+// FIFO thread: room for a draw's fixed-function part in the frame being recorded, `at` set to its
+// place (Draw::fixed); the pointer holds for the frame (0.46.0 test 45).
+DrawFixed* record_fixed(uint32_t& at) noexcept;
 void end_frame_draws() noexcept;
 // FIFO thread: the frame being recorded holds on to `object` till the render worker has drawn it
 // and the reaper lets the frame go (once each frame, however many of its draws use it); returns
@@ -405,6 +421,11 @@ inline void init_imgui() noexcept {}
 inline void shutdown_imgui() noexcept {}
 inline void fonts_changed() noexcept {}
 inline void record(Draw) noexcept {}
+inline DrawFixed* record_fixed(uint32_t& at) noexcept {
+  static DrawFixed none;
+  at = kNoFixed;
+  return &none;
+}
 inline void end_frame_draws() noexcept {}
 inline uint32_t record_constants(const float (*)[4], int) noexcept { return 0; }
 inline const float* recorded_constants(uint32_t) noexcept { return nullptr; }
