@@ -417,6 +417,7 @@ set(MP_PORT_SOURCES
     platform/port_dread_samus.cpp
     platform/port_echoes_suits_import.cpp
     platform/port_echoes_suits.cpp
+    platform/port_federation_marine.cpp
     platform/port_dread_pkg.cpp
     platform/port_dread_bcmdl.cpp
     platform/port_dread_bsmat.cpp

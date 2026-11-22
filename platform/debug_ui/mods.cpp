@@ -561,12 +561,27 @@ std::string FindVitaEchoesDisc() {
 } // namespace
 #endif
 
+namespace {
+// The Echoes disc's image, one for both of its imports (the Echoes suits, the Federation Marine).
+char sEchoesImage[1024] = "";
+// Whether the shared import state is the Echoes suits' or the Federation Marine's.
+bool sEchoesSuitsStarted = false;
+bool sMarineStarted = false;
+
 // The Echoes suits import (port_echoes_suits.h): the Varia, Dark and Light Suit bodies from the
-// player's own Metroid Prime 2: Echoes GameCube or Metroid Prime Trilogy disc into the echoes-suits mod. Same progress, notes
-// and mods reload as the Dread import, with which it shares the one import worker.
-void DrawEchoesSuitsImport() {
-  static char sImage[1024] = "";
-  static bool sStarted = false;  // the shared state is this import's
+// player's own Metroid Prime 2: Echoes GameCube or Metroid Prime Trilogy disc into the echoes-suits mod;
+// or, `marine`, the Federation Marine import (port_federation_marine.h) from the same disc into the
+// federation-marine mod. Same progress, notes and mods reload as the Dread import, with which they
+// share the one import worker.
+void DrawEchoesDiscImport(bool marine) {
+  char (&sImage)[1024] = sEchoesImage;
+  bool& sStarted = marine ? sMarineStarted : sEchoesSuitsStarted;
+  const auto start = [marine](const std::string& image) {
+    const bool started = marine ? StartFederationMarineImport(image) : StartEchoesSuitsImport(image);
+    if (started) (marine ? sEchoesSuitsStarted : sMarineStarted) = false;
+    return started;
+  };
+  const char* const importLabel = marine ? "Import##marine" : "Import##echoes";
   {
     std::lock_guard lock(sRemasteredPickMutex);
 #if defined(__ANDROID__)
@@ -592,19 +607,29 @@ void DrawEchoesSuitsImport() {
   const std::string trilogyDisc = PortDisc::IsTrilogy(PortDisc::Current()) ? PortDiscVerify::ImagePath() : "";
   if (!trilogyDisc.empty()) {
     ImGui::TextWrapped(
-        "Puts the Varia, Dark and Light Suit bodies from Metroid Prime 2: Echoes, on this Trilogy disc, in place "
-        "of Prime's Varia, Gravity and Phazon Suits; the Power Suit stays. It is the echoes-suits mod: switch it "
-        "off above.");
+        "%s",
+        marine ? "Puts Echoes' Federation Marine and Dark Trooper, from Metroid Prime 2: Echoes on this Trilogy disc, in "
+                 "place of Samus: the marine for the Power and Varia Suits, the marine in purple for the Gravity Suit, "
+                 "the Dark Trooper with the marine's visor for the Phazon Suit. It is the federation-marine mod: "
+                 "switch it off above."
+               : "Puts the Varia, Dark and Light Suit bodies from Metroid Prime 2: Echoes, on this Trilogy disc, in "
+                 "place of Prime's Varia, Gravity and Phazon Suits; the Power Suit stays. It is the echoes-suits mod: "
+                 "switch it off above.");
     ImGui::BeginDisabled(state.running);
-    if (ImGui::Button("Import##echoes")) {
-      sStarted = StartEchoesSuitsImport(trilogyDisc) || !state.running;
+    if (ImGui::Button(importLabel)) {
+      sStarted = start(trilogyDisc) || !state.running;
     }
     ImGui::EndDisabled();
   } else {
     ImGui::TextWrapped(
-        "Puts the Varia, Dark and Light Suit bodies from your own Metroid Prime 2: Echoes (GameCube) in place of "
-        "Prime's Varia, Gravity and Phazon Suits; the Power Suit stays. Needs the game's disc image, or Metroid "
-        "Prime Trilogy's. It is the echoes-suits mod: switch it off above.");
+        "%s",
+        marine ? "Puts the Federation Marine and the Dark Trooper from your own Metroid Prime 2: Echoes (GameCube) in "
+                 "place of Samus: the marine for the Power and Varia Suits, the marine in purple for the Gravity Suit, "
+                 "the Dark Trooper with the marine's visor for the Phazon Suit. Needs the game's disc image, or Metroid "
+                 "Prime Trilogy's. It is the federation-marine mod: switch it off above."
+               : "Puts the Varia, Dark and Light Suit bodies from your own Metroid Prime 2: Echoes (GameCube) in place "
+                 "of Prime's Varia, Gravity and Phazon Suits; the Power Suit stays. Needs the game's disc image, or "
+                 "Metroid Prime Trilogy's. It is the echoes-suits mod: switch it off above.");
     ImGui::BeginDisabled(state.running);
 #if defined(__ANDROID__)
     if (ImGui::Button("Load Echoes disc image##echoes-image")) {
@@ -643,8 +668,8 @@ void DrawEchoesSuitsImport() {
     }
 #endif
     ImGui::BeginDisabled(sImage[0] == '\0');
-    if (ImGui::Button("Import##echoes")) {
-      sStarted = StartEchoesSuitsImport(sImage) || !state.running;
+    if (ImGui::Button(importLabel)) {
+      sStarted = start(sImage) || !state.running;
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -656,7 +681,7 @@ void DrawEchoesSuitsImport() {
     const float fraction = state.total > 0 ? float(state.done) / float(state.total) : 0.f;
     ImGui::ProgressBar(fraction, ImVec2(-1.f, 0.f), state.cancelling ? "Cancelling..." : state.message.c_str());
     ImGui::BeginDisabled(state.cancelling || state.installing);
-    if (ImGui::Button("Cancel##echoes")) {
+    if (ImGui::Button(marine ? "Cancel##marine" : "Cancel##echoes")) {
       PortRemastered::CancelImport();
     }
     ImGui::EndDisabled();
@@ -672,12 +697,22 @@ void DrawEchoesSuitsImport() {
     ImGui::TextWrapped("The import failed: %s", state.message.c_str());
     ImGui::PopStyleColor();
   }
-  if (!state.lines.empty() && ImGui::TreeNode("echoes-log", "%d notes", int(state.lines.size()))) {
+  if (!state.lines.empty() && ImGui::TreeNode(marine ? "marine-log" : "echoes-log", "%d notes", int(state.lines.size()))) {
     for (const std::string& line : state.lines) {
       ImGui::TextWrapped("%s", line.c_str());
     }
     ImGui::TreePop();
   }
+}
+}  // namespace
+
+void DrawEchoesSuitsImport() { DrawEchoesDiscImport(false); }
+
+// In an ID scope of its own: its disc image field and button are the Echoes section's twins.
+void DrawFederationMarineImport() {
+  ImGui::PushID("federation-marine");
+  DrawEchoesDiscImport(true);
+  ImGui::PopID();
 }
 
 namespace {

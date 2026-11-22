@@ -1,11 +1,14 @@
 // The Echoes suits import in the game (port_remastered_import.h, StartEchoesSuitsImport): the user's
 // Metroid Prime 2: Echoes GameCube image (or a Trilogy image's MP2 folder) and the open disc, through PortEchoesSuits::Import
 // (port_echoes_suits.h), into <mods>/echoes-suits. Like the Dread Samus import it shares the
-// Remastered import's state, thread and cancel flag; only one of them runs at a time.
+// Remastered import's state, thread and cancel flag; only one of them runs at a time. The Federation
+// Marine import (StartFederationMarineImport, port_federation_marine.h) reads the same disc the same
+// way, into <mods>/federation-marine.
 
 #include "port_remastered_import_internal.h"
 
 #include "port_echoes_suits.h"
+#include "port_federation_marine.h"
 #include "port_utf8_path.h"
 
 #include <aurora/dvd.h>
@@ -20,9 +23,20 @@ namespace PortRemastered {
 namespace ImportDetail {
 namespace {
 
-constexpr const char* kEchoesStaging = ".echoes-suits.staging";
-constexpr const char* kEchoesOld = ".echoes-suits.old";
 constexpr const char* kEchoesDone = ".done";  // in the staging folder once it is complete
+
+// Which import of the Echoes disc runs: the Echoes suits, or the Federation Marine.
+enum class EchoesMod { Suits, Marine };
+struct EchoesModFiles {
+  const char* name;     // the mod's folder
+  const char* staging;  // where the import writes, beside it
+  const char* old;      // where the installed one waits while the new one moves in
+};
+EchoesModFiles FilesOf(EchoesMod mod) {
+  return mod == EchoesMod::Marine
+             ? EchoesModFiles{PortFederationMarine::kModName, ".federation-marine.staging", ".federation-marine.old"}
+             : EchoesModFiles{PortEchoesSuits::kModName, ".echoes-suits.staging", ".echoes-suits.old"};
+}
 
 using PortUtf8::FromUtf8;
 
@@ -166,16 +180,18 @@ private:
   std::map<uint64_t, Entry> m_resources;
 };
 
-// The finished staging folder in place of <mods>/echoes-suits. False (staging kept, for the next
-// start's ApplyPendingImport) when a rename fails, as it can on Windows with a file still open.
-bool MoveEchoesIntoPlace(const fs::path& mods) {
+// The finished staging folder in place of <mods>/echoes-suits (or federation-marine). False (staging
+// kept, for the next start's ApplyPendingImport) when a rename fails, as it can on Windows with a file
+// still open.
+bool MoveEchoesIntoPlace(const fs::path& mods, EchoesMod mod) {
   std::error_code ec;
-  const fs::path staging = mods / kEchoesStaging;
+  const EchoesModFiles files = FilesOf(mod);
+  const fs::path staging = mods / files.staging;
   if (!fs::exists(staging / kEchoesDone, ec)) {
     return false;
   }
-  const fs::path target = mods / PortEchoesSuits::kModName;
-  const fs::path old = mods / kEchoesOld;
+  const fs::path target = mods / files.name;
+  const fs::path old = mods / files.old;
   fs::remove_all(old, ec);
   ec.clear();
   const bool had = fs::exists(target, ec);
@@ -200,8 +216,9 @@ bool MoveEchoesIntoPlace(const fs::path& mods) {
   return true;
 }
 
-void RunEchoes(std::string imagePath, fs::path mods) {
+void RunEchoes(EchoesMod mod, std::string imagePath, fs::path mods) {
   auto fail = [](const std::string& message) { Finish(false, sCancel ? std::string("Cancelled.") : message); };
+  const EchoesModFiles files = FilesOf(mod);
   SetMessage("Opening the Echoes image");
   std::string error;
   EchoesDisc echoes;
@@ -215,7 +232,7 @@ void RunEchoes(std::string imagePath, fs::path mods) {
     fail(error);
     return;
   }
-  const fs::path staging = mods / kEchoesStaging;
+  const fs::path staging = mods / files.staging;
   std::error_code ec;
   fs::remove_all(staging, ec);
   ec.clear();
@@ -236,23 +253,44 @@ void RunEchoes(std::string imagePath, fs::path mods) {
     AddLine(line);
   };
   io.cancelled = [] { return sCancel.load(); };
-  io.progress = [](size_t done, size_t total) {
+  const char* const what = mod == EchoesMod::Marine ? "Converting the Federation Marine" : "Converting Samus's suits";
+  io.progress = [what](size_t done, size_t total) {
     {
       std::lock_guard<std::mutex> lock(sStateMutex);
       sState.done = int(done);
       sState.total = int(total);
     }
-    SetMessage("Converting Samus's suits (" + std::to_string(done) + " of " + std::to_string(total) + ")");
+    SetMessage(std::string(what) + " (" + std::to_string(done) + " of " + std::to_string(total) + ")");
   };
-  PortEchoesSuits::Result result;
-  if (!PortEchoesSuits::Import(io, result, error)) {
-    fs::remove_all(staging, ec);
-    fail(error);
-    return;
+  std::string message;
+  int version = 0;
+  const char* stampName = nullptr;
+  if (mod == EchoesMod::Marine) {
+    PortFederationMarine::Result result;
+    if (!PortFederationMarine::Import(io, result, error)) {
+      fs::remove_all(staging, ec);
+      fail(error);
+      return;
+    }
+    message = std::to_string(result.bodies) + " bodies, " + std::to_string(result.arms) + " arms, " +
+              std::to_string(result.rifles) + " rifles and " + std::to_string(result.balls) +
+              " Morph and Spider Ball models converted";
+    version = PortFederationMarine::kVersion;
+    stampName = PortFederationMarine::kStampName;
+  } else {
+    PortEchoesSuits::Result result;
+    if (!PortEchoesSuits::Import(io, result, error)) {
+      fs::remove_all(staging, ec);
+      fail(error);
+      return;
+    }
+    message = std::to_string(result.converted + result.arms) + " suit models, " + std::to_string(result.balls) +
+              " Morph Balls and the arm cannon converted";
+    version = PortEchoesSuits::kVersion;
+    stampName = PortEchoesSuits::kStampName;
   }
-  const std::string stamp =
-      std::to_string(PortEchoesSuits::kVersion) + "\n" + std::string(MP_BUILD_REVISION) + "\n";
-  if (!WriteFile(staging / PortEchoesSuits::kStampName, std::vector<uint8_t>(stamp.begin(), stamp.end())) ||
+  const std::string stamp = std::to_string(version) + "\n" + std::string(MP_BUILD_REVISION) + "\n";
+  if (!WriteFile(staging / stampName, std::vector<uint8_t>(stamp.begin(), stamp.end())) ||
       !WriteFile(staging / kEchoesDone, {})) {
     fs::remove_all(staging, ec);
     fail("Cannot write " + ToUtf8(staging));
@@ -263,9 +301,7 @@ void RunEchoes(std::string imagePath, fs::path mods) {
     fail("cancelled");
     return;
   }
-  const bool placed = MoveEchoesIntoPlace(mods);
-  std::string message = std::to_string(result.converted + result.arms) + " suit models, " +
-                        std::to_string(result.balls) + " Morph Balls and the arm cannon converted";
+  const bool placed = MoveEchoesIntoPlace(mods, mod);
   message += placed ? "." : "; it is installed at the next start.";
   Finish(true, message);
 }
@@ -274,20 +310,21 @@ void RunEchoes(std::string imagePath, fs::path mods) {
 // The Vita gives a std::thread 32 KiB of stack, little for an import that reads PAK tables,
 // inflates LZO and writes through std::filesystem and the log: there the import runs on a thread
 // of its own with kStack, the import's std::thread waiting for it.
-void RunEchoesOnLargeStack(std::string imagePath, fs::path mods) {
+void RunEchoesOnLargeStack(EchoesMod mod, std::string imagePath, fs::path mods) {
   constexpr size_t kStack = 512 * 1024;
   struct Job {
+    EchoesMod mod;
     std::string imagePath;
     fs::path mods;
   };
-  Job job{std::move(imagePath), std::move(mods)};
+  Job job{mod, std::move(imagePath), std::move(mods)};
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, kStack);
   pthread_t thread;
   const auto run = [](void* arg) -> void* {
     Job& j = *static_cast<Job*>(arg);
-    RunEchoes(std::move(j.imagePath), std::move(j.mods));
+    RunEchoes(j.mod, std::move(j.imagePath), std::move(j.mods));
     return nullptr;
   };
   const bool started = pthread_create(&thread, &attr, run, &job) == 0;
@@ -304,14 +341,15 @@ void RunEchoesOnLargeStack(std::string imagePath, fs::path mods) {
 
 bool ApplyPendingEchoesImport() {
   const std::string mods = PortMods::Folder();
-  return !mods.empty() && MoveEchoesIntoPlace(FromUtf8(mods));
+  if (mods.empty()) return false;
+  const bool suits = MoveEchoesIntoPlace(FromUtf8(mods), EchoesMod::Suits);
+  const bool marine = MoveEchoesIntoPlace(FromUtf8(mods), EchoesMod::Marine);
+  return suits || marine;
 }
 
-}  // namespace ImportDetail
+namespace {
 
-using namespace ImportDetail;
-
-bool StartEchoesSuitsImport(const std::string& imagePath) {
+bool StartEchoesImport(EchoesMod mod, const std::string& imagePath) {
   {
     std::lock_guard<std::mutex> lock(sStateMutex);
     if (sState.running) {
@@ -334,20 +372,22 @@ bool StartEchoesSuitsImport(const std::string& imagePath) {
     sState.message = "Pick the Metroid Prime 2: Echoes disc image.";
     return false;
   }
-  PortLog::Write("echoes: importing Samus's suits from %s\n", imagePath.c_str());
+  PortLog::Write(mod == EchoesMod::Marine ? "echoes: importing the Federation Marine from %s\n"
+                                          : "echoes: importing Samus's suits from %s\n",
+                 imagePath.c_str());
   sCancel = false;
   sState.running = true;
   sState.message = "Starting";
 #if defined(__vita__)
-  sThread = std::thread(RunEchoesOnLargeStack, imagePath, FromUtf8(mods));
+  sThread = std::thread(RunEchoesOnLargeStack, mod, imagePath, FromUtf8(mods));
 #else
-  sThread = std::thread(RunEchoes, imagePath, FromUtf8(mods));
+  sThread = std::thread(RunEchoes, mod, imagePath, FromUtf8(mods));
 #endif
   return true;
 }
 
-int RunEchoesSuitsImportFromCommandLine(const std::string& imagePath) {
-  if (!StartEchoesSuitsImport(imagePath)) {
+int RunEchoesImportFromCommandLine(EchoesMod mod, const std::string& imagePath) {
+  if (!StartEchoesImport(mod, imagePath)) {
     std::fprintf(stderr, "%s\n", ImportStatus().message.c_str());
     return 1;
   }
@@ -370,6 +410,25 @@ int RunEchoesSuitsImportFromCommandLine(const std::string& imagePath) {
     std::printf("  %s\n", line.c_str());
   }
   return state.ok ? 0 : 1;
+}
+
+}  // namespace
+}  // namespace ImportDetail
+
+using namespace ImportDetail;
+
+bool StartEchoesSuitsImport(const std::string& imagePath) { return StartEchoesImport(EchoesMod::Suits, imagePath); }
+
+bool StartFederationMarineImport(const std::string& imagePath) {
+  return StartEchoesImport(EchoesMod::Marine, imagePath);
+}
+
+int RunEchoesSuitsImportFromCommandLine(const std::string& imagePath) {
+  return RunEchoesImportFromCommandLine(EchoesMod::Suits, imagePath);
+}
+
+int RunFederationMarineImportFromCommandLine(const std::string& imagePath) {
+  return RunEchoesImportFromCommandLine(EchoesMod::Marine, imagePath);
 }
 
 }  // namespace PortRemastered

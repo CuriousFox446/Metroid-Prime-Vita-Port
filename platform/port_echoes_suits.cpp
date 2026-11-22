@@ -237,11 +237,7 @@ bool ConvertSurface(const uint8_t* data, size_t size, const std::vector<uint32_t
   return true;
 }
 
-// A Prime material set taken apart; a material's vertex flags sit after its texture indices.
-struct MaterialSet {
-  std::vector<uint32_t> textures;
-  std::vector<std::vector<uint8_t>> materials;
-};
+}  // namespace
 
 bool ParseSet(const std::vector<uint8_t>& in, MaterialSet& out, std::string* error) {
   Reader r{in.data(), in.size()};
@@ -326,6 +322,8 @@ bool SortedWithoutDepth(PrimeCmdl& model, std::string* error) {
   }
   return true;
 }
+
+namespace {
 
 size_t VertexFlagsAt(const std::vector<uint8_t>& material) {
   Reader m{material.data(), material.size()};
@@ -1532,6 +1530,7 @@ bool ParseCinf(const uint8_t* data, size_t size, std::vector<EchoesJoint>& out, 
     EchoesJoint joint;
     joint.id = r.U32(at);
     joint.parent = r.U32(at + 4);
+    for (int c = 0; c < 3; ++c) joint.position[c] = r.F32(at + 8 + size_t(c) * 4);
     at += 8 + 12 + 16 + 16;  // position, rotation, local rotation
     const uint32_t links = r.U32(at);
     at += 4 + size_t(links) * 4;
@@ -1690,8 +1689,6 @@ bool IsLimbJoint(const std::string& name) {
   return false;
 }
 
-namespace {
-
 void RgbToHsv(const uint8_t* c, double& h, double& s, double& v) {
   const double r = c[0] / 255.0, g = c[1] / 255.0, b = c[2] / 255.0;
   const double hi = std::max({r, g, b}), lo = std::min({r, g, b}), d = hi - lo;
@@ -1731,8 +1728,16 @@ void HsvToRgb(double h, double s, double v, uint8_t* c) {
 // A model's triangles (set 0) through `fn`: the textures of the triangle's material, then its three
 // vertices' UVs (texture 0's, from the float UV array) and position indices, wound as drawn (a
 // strip's odd triangles turned back).
-using UvTriangleFn = std::function<void(const std::vector<uint32_t>&, const float (&)[3][2], const uint32_t (&)[3])>;
 bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::string* error) {
+  return ForEachMaterialUvTriangle(
+      model,
+      [&fn](uint32_t, const std::vector<uint32_t>& textures, const float (&uv)[3][2], const uint32_t (&pos)[3]) {
+        fn(textures, uv, pos);
+      },
+      error);
+}
+
+bool ForEachMaterialUvTriangle(const PrimeCmdl& model, const MaterialUvTriangleFn& fn, std::string* error) {
   MaterialSet set;
   if (model.materialSets.empty() || model.arrays.size() < 4 || !ParseSet(model.materialSets[0], set, error)) {
     return Fail(error, "model has no material set or UVs");
@@ -1786,7 +1791,7 @@ bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::stri
       const auto emit = [&](int a, int b, int c) {
         const float tri[3][2] = {{verts[a][0], verts[a][1]}, {verts[b][0], verts[b][1]}, {verts[c][0], verts[c][1]}};
         const uint32_t pos[3] = {positions[a], positions[b], positions[c]};
-        fn(textures, tri, pos);
+        fn(material, textures, tri, pos);
       };
       switch (command & 0xF8) {
       case 0x90:
@@ -1812,6 +1817,8 @@ bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::stri
   return true;
 }
 
+namespace {
+
 // Which way a triangle of `model` (its position indices, wound as drawn) faces: `middle`, how far
 // toward the body's middle, the plane x = 0 (1 straight at it, -1 straight away); `front`, how far
 // forward (Prime's bodies stand facing +y).
@@ -1834,6 +1841,8 @@ Facing FacingOf(const PrimeCmdl& model, const uint32_t (&pos)[3]) {
   if (length <= 0.0) return {};
   return {x == 0.0 ? 0.0 : -n[0] / length * (x > 0.0 ? 1.0 : -1.0), n[1] / length};
 }
+
+}  // namespace
 
 // The joint each vertex of a Prime CSKR weighs most on, in vertex order.
 bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints, std::string* error) {
@@ -1861,13 +1870,11 @@ bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints,
   return true;
 }
 
-// Limb and other votes over a texture's texels (LimbTexels), and where a thigh triangle facing the
-// panel's way lies (MarkPanelSide, KeepUndersuit): 1 leaning out by up to half, 2 facing in or across.
-struct TexelVotes {
-  int width = 0, height = 0;
-  std::vector<uint16_t> limb, other;
-  std::vector<uint8_t> panelSide;
-};
+namespace {
+
+// (TexelVotes, port_echoes_suits.h: limb and other votes over a texture's texels, LimbTexels, and
+// where a thigh triangle facing the panel's way lies, MarkPanelSide and KeepUndersuit: 1 leaning
+// out by up to half, 2 facing in or across.)
 
 // The texels of a w x h texture a triangle covers (its UVs; the edges a little generous, so seams
 // close), wrapped into the texture, each through fn(index); none for one wrapping the whole texture.
@@ -1897,12 +1904,16 @@ void ForEachTexel(int w, int h, const float (&uv)[3][2], const Fn& fn) {
   }
 }
 
+}  // namespace
+
 void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb) {
   auto& grid = limb ? votes.limb : votes.other;
   ForEachTexel(votes.width, votes.height, uv, [&grid](size_t k) {
     if (grid[k] < 0xFFFF) ++grid[k];
   });
 }
+
+namespace {
 
 // The texels of a thigh triangle facing the panel's way (KeepUndersuit): `inward` for one facing in
 // or across, where the panel surely is.
@@ -2094,6 +2105,8 @@ void KeepUndersuit(const TexelVotes& votes, const std::vector<uint8_t>& rgba, st
   }
 }
 
+}  // namespace
+
 // Per texel, 1 where limbs voted more than the rest; texels no triangle covers take their
 // neighbours' (two texels round), so seams and the encoder's blocks stay on one side.
 std::vector<uint8_t> LimbTexels(const TexelVotes& votes) {
@@ -2117,8 +2130,6 @@ std::vector<uint8_t> LimbTexels(const TexelVotes& votes) {
   }
   return out;
 }
-
-}  // namespace
 
 bool RecolourVaria(int worn, std::vector<uint8_t>& rgba, const std::vector<uint8_t>& limb) {
   bool changed = false;
@@ -2359,8 +2370,6 @@ bool ReadCmdl(const std::vector<uint8_t>& in, PrimeCmdl& model, std::string* err
   return true;
 }
 
-namespace {
-
 // Each surface's lists rebuilt as triangle lists of the triangles `keep` passes (by their position
 // indices), wound as drawn (a strip's odd triangles turned back); a surface left with none goes.
 bool KeepTriangles(PrimeCmdl& model, const std::function<bool(uint32_t, uint32_t, uint32_t)>& keep,
@@ -2571,6 +2580,8 @@ bool SkinGroups(const std::vector<uint8_t>& cskr, std::vector<uint8_t>& bytes, u
   bytes.assign(cskr.begin() + 4, cskr.begin() + std::ptrdiff_t(at));
   return true;
 }
+
+namespace {
 
 // The texture ids of a material's slots, from its set's list.
 bool MaterialTextureIds(const MaterialSet& set, size_t material, std::vector<uint32_t>& ids, std::string* error) {

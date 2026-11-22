@@ -1197,7 +1197,10 @@
   and "Echoes arm cannon in
   first person" (`echoes_first_person_cannon`, on by default; off keeps Prime's arm
   cannon from the next beam selected, `MODS.md`); its "Play as Dark Samus"
-  (`echoes_dark_samus`, off by default; from the next mod reload, `MODS.md`); the Remastered import's "What to import" (`remastered_skip`: the
+  (`echoes_dark_samus`, off by default; from the next mod reload, `MODS.md`); the
+  Federation Marine section's "Marine rifle in first person"
+  (`marine_first_person_rifle`, on by default; off gives the arm cannon back at
+  once, `MODS.md`); the Remastered import's "What to import" (`remastered_skip`: the
   parts left out, comma-separated from `geometry`, `effects`, `hud`, `text`,
   `movies` and `gallery`; `MODS.md`); its "Parts to use" (`remastered_hide`:
   the installed parts the mods load without, comma-separated from `geometry`,

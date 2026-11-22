@@ -19,6 +19,7 @@
 #include "port_remastered_import.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_federation_marine_mod.h"
 #include "port_room_env.h"
 #include "port_room_geo.h"
 #include "port_room_effects.h"
@@ -108,6 +109,12 @@ bool sSuitModels = true;
 std::set<uint32_t> sEchoesHelmetBodies;
 // The echoes-suits import's version (its stamp's first number; 0 for none): what its files hold.
 int sEchoesImportVersion = 0;
+// The body CMDLs the federation-marine mod serves (PortDreadSamus::Replaces and HasOwnCannon: its
+// bodies carry their boots, visor and rifle), the first-person cannon ids it serves its rifle under
+// (PortDreadSamus::FirstPersonCannon), and the suits it serves at all.
+std::set<uint32_t> sMarineBodies;
+std::set<uint32_t> sMarineRifles;
+bool sMarineSuits[PortEchoesSuits::kSuitLookSuits] = {};
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
 // envfx.bin: Remastered's EnvironmentFX textures (port_envfx_assets.h).
@@ -470,13 +477,15 @@ bool HasNativeTexture(uint32_t id) { return sNativeTextures.count(id) != 0; }
 }  // namespace PortMods
 
 bool PortDreadSamus::Replaces(uint32_t bodyCmdl) {
-  return bodyCmdl != 0 && (PortMods::sDreadBodies.count(bodyCmdl) != 0 || PortMods::sEchoesBodies.count(bodyCmdl) != 0);
+  return bodyCmdl != 0 && (PortMods::sDreadBodies.count(bodyCmdl) != 0 || PortMods::sEchoesBodies.count(bodyCmdl) != 0 ||
+                           PortMods::sMarineBodies.count(bodyCmdl) != 0);
 }
 bool PortDreadSamus::ReplacesWithDread(uint32_t bodyCmdl) {
   return bodyCmdl != 0 && PortMods::sDreadBodies.count(bodyCmdl) != 0;
 }
 bool PortDreadSamus::HasOwnCannon(uint32_t bodyCmdl) {
-  return ReplacesWithDread(bodyCmdl) || (bodyCmdl != 0 && PortMods::sDarkSamusBodies.count(bodyCmdl) != 0);
+  return ReplacesWithDread(bodyCmdl) ||
+         (bodyCmdl != 0 && (PortMods::sDarkSamusBodies.count(bodyCmdl) != 0 || PortMods::sMarineBodies.count(bodyCmdl) != 0));
 }
 bool PortDreadSamus::ReplacesBall(int suit, bool spider) {
   return PortMods::sDreadBalls.count(BallModel(suit, spider)) != 0;
@@ -490,9 +499,25 @@ bool sDreadCannonShown = true;
 }
 void PortDreadSamus::SetFirstPersonCannonShown(bool shown) { sDreadCannonShown = shown; }
 bool PortDreadSamus::FirstPersonCannonShown() { return sDreadCannonShown; }
+namespace {
+bool sMarineRifleShown = true;
+}
 bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
   const uint32_t id = FirstPersonCannon(suit);
-  return sDreadCannonShown && id != 0 && PortMods::sDreadCannons.count(id) != 0;
+  return id != 0 && ((sDreadCannonShown && PortMods::sDreadCannons.count(id) != 0) ||
+                     (sMarineRifleShown && PortMods::sMarineRifles.count(id) != 0));
+}
+float PortDreadSamus::FirstPersonCannonRoll(int suit) {
+  return PortFederationMarine::ServesFirstPersonRifle(suit) ? 0.f : 30.f;
+}
+void PortFederationMarine::SetFirstPersonRifleShown(bool shown) { sMarineRifleShown = shown; }
+bool PortFederationMarine::FirstPersonRifleShown() { return sMarineRifleShown; }
+bool PortFederationMarine::ServesFirstPersonRifle(int suit) {
+  const uint32_t id = PortDreadSamus::FirstPersonCannon(suit);
+  return sMarineRifleShown && id != 0 && PortMods::sMarineRifles.count(id) != 0;
+}
+bool PortFederationMarine::ServesSuit(int suit) {
+  return suit >= 0 && suit < PortEchoesSuits::kSuitLookSuits && PortMods::sMarineSuits[suit];
 }
 namespace {
 bool sEchoesCannonShown = true;
@@ -725,6 +750,9 @@ void Initialize() {
   for (int& served : sServedSuitLooks) served = PortEchoesSuits::kLookPrime;
   sEchoesHelmetBodies.clear();
   sEchoesImportVersion = 0;
+  sMarineBodies.clear();
+  sMarineRifles.clear();
+  for (bool& served : sMarineSuits) served = false;
   {
     std::lock_guard<std::mutex> lock(sEffectIdsMutex);
     sEffectIdMapPath.clear();
@@ -784,6 +812,13 @@ void Initialize() {
         sEchoesImportVersion = std::atoi(text.c_str());
         if (ImportStampStale(text, PortEchoesSuits::kVersion)) {
           Message(info.name + " was imported by an older version; import the Echoes suits again");
+        }
+      }
+      if (info.name == PortFederationMarine::kModName) {
+        std::ifstream marineStamp(modDir / PortFederationMarine::kStampName);
+        if (ImportStampStale(marineStamp.is_open() ? port::ReadAllText(marineStamp) : std::string(),
+                             PortFederationMarine::kVersion)) {
+          Message(info.name + " was imported by an older version; import the Federation Marine again");
         }
       }
       if (info.importStale && sStatus.staleImport.empty()) {
@@ -1113,6 +1148,90 @@ void Initialize() {
     }
   }
 
+  // The Federation Marine (port_federation_marine_mod.h): each suit's look of the import served over
+  // its bodies, its first-person left arm, its Morph and Spider Balls (and the Spider Ball's glass)
+  // and, under PortDreadSamus::FirstPersonCannon, its first-person rifle; over whichever mod served
+  // them, the Echoes suits' looks included (the user's call, 0.46.0 test 50: the marine wins). Dark
+  // Samus, below, still stands in for the bodies while she is played.
+  {
+    const auto marine = [&](uint32_t type, uint32_t id) -> const LooseResource* {
+      const auto it = loose.find({type, id});
+      return it != loose.end() && it->second.mod == PortFederationMarine::kModName ? &it->second : nullptr;
+    };
+    const auto serve = [&](const LooseResource* from, uint32_t to) {
+      LooseResource resource = *from;
+      resource.id = to;
+      const uint32_t type = resource.type;
+      loose[{type, to}] = std::move(resource);
+      if (const auto provider = sResourceProviders.find({from->type, from->id}); provider != sResourceProviders.end()) {
+        sResourceProviders[{type, to}] = provider->second;
+      }
+    };
+    // What the echoes-suits mod served under an id the marine leaves Prime's (the Phazon Suit's own
+    // Spider Ball): Prime's again.
+    const auto unserveEchoes = [&](uint32_t type, uint32_t id) {
+      const auto it = loose.find({type, id});
+      if (it != loose.end() && it->second.mod == PortEchoesSuits::kModName) {
+        loose.erase(it);
+        sResourceProviders.erase({type, id});
+      }
+    };
+    const PortEchoesSuits::SuitResources& varia = PortEchoesSuits::kSuitResources[PortEchoesSuits::kVariaSuit];
+    for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
+      const int look = PortFederationMarine::kSuitLooks[suit];
+      const PortEchoesSuits::SuitResources& mine = PortEchoesSuits::kSuitResources[suit];
+      size_t bodies = 0, balls = 0;
+      for (int kind = 0; kind < PortEchoesSuits::kBodyKinds; ++kind) {
+        const LooseResource* cmdl = marine(0x434D444Cu, PortFederationMarine::Wear(look, varia.cmdl[kind]));  // 'CMDL'
+        const LooseResource* cskr = marine(0x43534B52u, PortFederationMarine::Wear(look, varia.cskr[kind]));  // 'CSKR'
+        if (cmdl == nullptr || cskr == nullptr) continue;
+        serve(cmdl, mine.cmdl[kind]);
+        serve(cskr, mine.cskr[kind]);
+        // An Echoes helmet body served there is the marine's now: its own visor, no Prime parts.
+        sEchoesHelmetBodies.erase(mine.cmdl[kind]);
+        // The cutscene copies Prime draws too: the Varia's second skin, the Phazon body in Tallon.
+        if (kind == 0 && suit == PortEchoesSuits::kVariaSuit) serve(cskr, PortEchoesSuits::kVariaSkinCopy);
+        if (kind == 0 && suit == 3) {
+          serve(cmdl, PortEchoesSuits::kPhazonBodyCopy);
+          sEchoesHelmetBodies.erase(PortEchoesSuits::kPhazonBodyCopy);
+        }
+        ++bodies;
+      }
+      if (const LooseResource* rifle = marine(0x434D444Cu, PortFederationMarine::Wear(look, PortFederationMarine::kRifleBase))) {
+        serve(rifle, PortDreadSamus::FirstPersonCannon(suit));
+      }
+      for (const auto& t : PortDreadSamus::kBallTargets) {
+        if (t.suit != suit) continue;
+        const LooseResource* ancs = marine(0x414E4353u, PortFederationMarine::Wear(look, t.ancs));  // 'ANCS'
+        const LooseResource* main = marine(0x434D444Cu, PortFederationMarine::Wear(look, t.cmdl));
+        const LooseResource* low = marine(0x434D444Cu, PortFederationMarine::Wear(look, t.low));
+        if (ancs == nullptr || main == nullptr || low == nullptr) {
+          if (bodies != 0) {
+            unserveEchoes(0x414E4353u, PortModelVariant::Id(t.ancs, suit));
+            unserveEchoes(0x434D444Cu, PortModelVariant::Id(t.cmdl, suit));
+            unserveEchoes(0x434D444Cu, PortModelVariant::Id(t.low, suit));
+          }
+          continue;
+        }
+        serve(ancs, PortModelVariant::Id(t.ancs, suit));
+        serve(main, PortModelVariant::Id(t.cmdl, suit));
+        serve(low, PortModelVariant::Id(t.low, suit));
+        if (t.spider) {
+          if (const LooseResource* glass =
+                  marine(0x434D444Cu, PortFederationMarine::Wear(look, PortFederationMarine::kSpiderBallGlass))) {
+            serve(glass, PortModelVariant::Id(PortFederationMarine::kSpiderBallGlass, suit));
+          }
+        }
+        ++balls;
+      }
+      sMarineSuits[suit] = bodies != 0;
+      if (bodies + balls != 0) {
+        PortLog::Write("mods: %s: suit %d wears the %s (%zu bodies and arms, %zu balls)\n",
+                       PortFederationMarine::kModName, suit, PortFederationMarine::kLookNames[look], bodies, balls);
+      }
+    }
+  }
+
   // Dark Samus (PortEchoesSuits::kDarkBodies): the Echoes import's fit for each skeleton under
   // every suit body of it, over whichever mod served that body, when the setting is on.
   if (sPlayAsDarkSamus) {
@@ -1236,10 +1355,12 @@ void Initialize() {
       const uint32_t model = PortDreadSamus::BallModel(t.suit, t.spider);
       if (ownership.main) sDreadBalls.insert(model);
       if (ownership.low) sDreadLowBalls.insert(model);
-      // Any mod's Spider Ball, by the resources that won (the generated looks carry no mod name).
+      // Any mod's Spider Ball, by the resources that won (the generated looks carry no mod name). Not
+      // the federation-marine mod's: Prime's own Spider Ball recoloured, its glass shell still wanted.
       if (t.spider && PortDreadSamus::ResolveBallOwnership(t.suit, true, [&](uint32_t type, uint32_t id) {
                         const auto it = loose.find({type, id});
-                        return it != loose.end() && !it->second.mod.empty();
+                        return it != loose.end() && !it->second.mod.empty() &&
+                               it->second.mod != PortFederationMarine::kModName;
                       }).main) {
         sModSpiderBalls.insert(t.suit);
       }
@@ -1282,6 +1403,25 @@ void Initialize() {
     if (!sEchoesBodies.empty()) {
       PortLog::Write("mods: %s serves %zu Samus body model(s):%s\n", PortEchoesSuits::kModName, sEchoesBodies.size(),
                      ids.c_str());
+    }
+    ids.clear();
+    for (const auto& [key, resource] : loose) {
+      if (key.first == 0x434D444C && resource.mod == PortFederationMarine::kModName && PortEchoesSuits::IsBody(key.second)) {
+        sMarineBodies.insert(key.second);
+        char text[12];
+        std::snprintf(text, sizeof(text), " %08X", key.second);
+        ids += text;
+      }
+    }
+    for (int suit = 0; suit < 4; ++suit) {
+      const auto it = loose.find({0x434D444Cu, PortDreadSamus::FirstPersonCannon(suit)});  // 'CMDL'
+      if (it != loose.end() && it->second.mod == PortFederationMarine::kModName) {
+        sMarineRifles.insert(it->first.second);
+      }
+    }
+    if (!sMarineBodies.empty() || !sMarineRifles.empty()) {
+      PortLog::Write("mods: %s serves %zu Samus body model(s) and %zu first-person rifle(s):%s\n",
+                     PortFederationMarine::kModName, sMarineBodies.size(), sMarineRifles.size(), ids.c_str());
     }
     // A beam's cannon variant: its ANCS and both models it names, all the mod's.
     const auto echoes = [&](uint32_t type, uint32_t id) {

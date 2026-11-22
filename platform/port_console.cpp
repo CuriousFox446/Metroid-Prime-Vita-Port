@@ -22,6 +22,7 @@
 #include "port_third_person_body.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_federation_marine_mod.h"
 #include "port_gci.h"
 #include "port_photo.h"
 #include "port_pointer.h"
@@ -3121,6 +3122,17 @@ void CmdEchoesSuits() {
   Finish();
 }
 
+void CmdMarineRifle() {
+  const std::string value = sCmd.args.size() > 1 ? sCmd.args[1] : "";
+  if (value == "0" || value == "1") {
+    PortFederationMarine::SetFirstPersonRifleShown(value == "1");
+  } else if (!value.empty()) {
+    return Finish("usage: marinerifle [0|1]");
+  }
+  Out(PortFederationMarine::FirstPersonRifleShown() ? "marinerifle 1" : "marinerifle 0");
+  Finish();
+}
+
 void CmdDarkSamus() {
   const std::string value = sCmd.args.size() > 1 ? sCmd.args[1] : "";
   if (value == "0" || value == "1") {
@@ -4697,6 +4709,9 @@ const CommandSpec kCommands[] = {
     {"echoessuits", CmdEchoesSuits, nullptr,
      "echoessuits [0|1]   the Echoes Suit models (echoes_suit_models; off: every suit Prime's own, the arm "
      "cannon as echoescannon has it), from the next mod reload; prints it"},
+    {"marinerifle", CmdMarineRifle, nullptr,
+     "marinerifle [0|1]   the Federation Marine's rifle in first person (marine_first_person_rifle; off: the "
+     "arm cannon), at once; prints it"},
     {"darksamus", CmdDarkSamus, nullptr,
      "darksamus [0|1]     play as Echoes' Dark Samus (echoes_dark_samus), from the next mod reload; prints it "
      "and whether this load serves her"},

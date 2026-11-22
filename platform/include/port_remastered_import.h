@@ -860,4 +860,11 @@ bool StartEchoesSuitsImport(const std::string& imagePath);
 // `--import-echoes-suits <image>`, as RunImportFromCommandLine. Returns the exit code.
 int RunEchoesSuitsImportFromCommandLine(const std::string& imagePath);
 
+// The Federation Marine import (port_federation_marine.h): Echoes' Federation Marine and Dark Trooper
+// from the same Echoes image into <mods>/federation-marine, with the disc open, as
+// StartEchoesSuitsImport (the same state, cancelling and thread).
+bool StartFederationMarineImport(const std::string& imagePath);
+// `--import-federation-marine <image>`, as RunImportFromCommandLine. Returns the exit code.
+int RunFederationMarineImportFromCommandLine(const std::string& imagePath);
+
 }  // namespace PortRemastered

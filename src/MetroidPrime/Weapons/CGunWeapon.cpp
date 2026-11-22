@@ -739,13 +739,14 @@ void CGunWeapon::DrawHologram(const CStateManager& mgr, const CTransform4f& xf,
 // The Dread cannon's model has its muzzle at the origin and its barrel up +Y, the gun's axes. It
 // sits on the gun's live LBEAM locator, less PortDreadMuzzleShift, so it follows the recoil too.
 // Seen from behind, its wide back end hides the beam lights on its sides, so it is rolled 30
-// degrees about the barrel to turn its left light toward the camera.
+// degrees about the barrel to turn its left light toward the camera. The Federation Marine's rifle
+// (federation-marine mod), made the same way, stands upright (mPortCannonRoll 0).
 CTransform4f CGunWeapon::PortDreadCannonXf(const CTransform4f& xf) const {
   const CVector3f muzzle =
       x10_solidModelData->GetScaledLocatorTransform(rstl::string_l(skMuzzleLocator))
           .GetTranslation();
   return xf * CTransform4f::Translate(muzzle + PortDreadMuzzleShift()) *
-         CTransform4f::RotateY(CRelAngle::FromDegrees(30.f));
+         CTransform4f::RotateY(CRelAngle::FromDegrees(mPortCannonRoll));
 }
 
 // The Plasma Beam's animations push LBEAM out along the barrel (+Y) past its bind pose, 0.204
@@ -1198,6 +1199,7 @@ void CGunWeapon::LoadSuitArm(CStateManager& mgr) {
   const CAssetId armId = NWeaponTypes::get_asset_id_from_name(skSuitArmNames[suit]);
 #ifdef TARGET_PC
   mPortDreadCannon = PortDreadSamus::ReplacesFirstPersonCannon(suit);
+  mPortCannonRoll = PortDreadSamus::FirstPersonCannonRoll(suit);
   xb0_suitArmModelData =
       CStaticRes(mPortDreadCannon ? CAssetId(PortDreadSamus::FirstPersonCannon(suit)) : armId,
                  x4_scale);

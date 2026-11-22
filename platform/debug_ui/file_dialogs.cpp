@@ -16,6 +16,7 @@
 #include "port_remastered_import.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_federation_marine_mod.h"
 #include "port_remastered_text.h"
 #include "port_discord.h"
 #include "port_savestate.h"
@@ -938,6 +939,14 @@ bool StartEchoesSuitsImport(const std::string& image) {
     return false;
   }
   WatchModImport(PortEchoesSuits::kModName);
+  return true;
+}
+
+bool StartFederationMarineImport(const std::string& image) {
+  if (!PortRemastered::StartFederationMarineImport(image)) {
+    return false;
+  }
+  WatchModImport(PortFederationMarine::kModName);
   return true;
 }
 

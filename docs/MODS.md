@@ -400,6 +400,50 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   first-person arm stays the suit's (Echoes has none for her). Imports from before mod version 8
   have no ball; import again.
 
+### Federation Marine (Echoes)
+
+Under F1 > Mods > Built-in mods > Federation Marine (Echoes): Echoes' Federation Marine (its
+`Galactic_Trooper`, the white GF trooper) in place of Samus, from the same Echoes disc image as the
+Echoes suits (USA `G2ME01`, or a Trilogy image's `MP2` folder). Its own mod, `federation-marine`, with
+its own Import button.
+
+- The Power and Varia Suits wear the marine.
+- The Gravity Suit wears the marine in the Gravity Suit's colours: its shoulder pads, arms and hands,
+  thighs and knees, shins and boots in Prime's Gravity purple (the parts Prime's Gravity Suit paints
+  purple; the hip guards, torso and helmet stay white), its visor and lights in the Gravity visor's
+  aqua.
+- The Phazon Suit wears Echoes' Dark Trooper (`Dark_Trooper`), its broken visor replaced by the
+  marine's whole one.
+- Every visor is opaque: Echoes draws the marine's visor glass at 64% over an empty helmet, with a teal
+  glow added over it; here the glass is solid and the glow stays.
+- Each look covers the suit's cutscene and third-person bodies (the Morph Ball transitions and the
+  elevator included), the pause screen's doll, the first-person left (grapple) arm, the first-person
+  rifle and the Morph and Spider Balls.
+- The rifle is part of the troopers' meshes. In cutscenes and third person the marine holds it where
+  Samus's cannon sits (the right wrist rides the forearm, as the cannon does), so Prime's cannon is not
+  drawn over it.
+- In first person the marine's forearm, hand and rifle stand in for the arm cannon and the suit arm:
+  one model per suit, drawn on the gun's muzzle so it follows the recoil (the same way as the Dread
+  cannon). The rifle has no moving parts: missiles fire with the beam shots' recoil, and every beam
+  shows the same rifle (the shots, charge and beam effects stay the beam's own). In the X-ray visor
+  the rifle is drawn in place of the see-through cannon. "Marine rifle in first person"
+  (`marine_first_person_rifle`, on by default; console `marinerifle 0|1`) off gives the arm cannon
+  back (Prime's, or the Echoes cannon when that mod is on), at once.
+- The first-person left arm is the trooper's own left forearm and hand, turned into the grapple arm's
+  frame and skinned on its joints: the fingers follow the grapple animations.
+- The Morph Ball is Prime's own, its shell in the look's armour colour (the marine's white, the Gravity
+  purple, the Dark Trooper's dark grey) and its lights in the look's light colour (teal, aqua; the Dark
+  Trooper keeps the red). So is the Spider Ball (Prime's, from its Varia Suit set), with Prime's glass
+  shell in teal (the Gravity marine's aqua). The Phazon Suit keeps Prime's own Phazon Spider Ball,
+  dark already.
+- The marine and the Dark Trooper are skinned on a copy of Echoes Samus's skeleton (the same joint
+  names, Samus's Varia shoulder-pad joints and left-hand fingers among them; every head within 3.2 mm
+  of hers), so they go onto Prime's skeletons the way the Echoes suits do, with Prime's animations.
+- While it is on it takes the place of the Echoes suits' looks and the Echoes arm cannon in first
+  person; switch it off and those come back (from the next mod reload). "Play as Dark Samus" still
+  stands in for the bodies while it is on. The Fusion Suits stay Prime's.
+- From a terminal: `--import-federation-marine <Echoes disc image>` (the Prime disc from `MP_DISC`).
+
 ## Texture packs
 
 Texture packs replace the game's textures with Aurora-format images named

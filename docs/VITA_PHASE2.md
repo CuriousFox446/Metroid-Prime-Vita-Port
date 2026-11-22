@@ -5020,3 +5020,122 @@ What to look for in test 49: F1 > Mods > Built-in mods > Metroid Prime 2: Echoes
 models" off and the mods reloaded: Prime's suits everywhere (cutscenes, the pause screen, the
 first-person arm, the balls) with Echoes' cannon in first person; on again and reloaded, the looks
 as chosen. The log says "the suit models are off" at the load.
+
+## 0.46.0 test 50: the Federation Marine mod (federation-marine 1)
+
+The user asked for Echoes' Federation Marine in place of Samus, from their own Echoes disc, as a mod
+of its own:
+- the marine for the Power, Varia and Gravity Suits (cutscene and third-person bodies, the pause
+  screen's Samus, the first-person arms);
+- the Phazon Suit as Echoes' Dark Trooper, its broken visor replaced by the marine's whole one,
+  opaque;
+- the Gravity marine with the parts they circled on a picture (both arms, the thighs and knees, the
+  lower legs and boots) in the Gravity Suit's purple and the visor in its visor's colour;
+- the Morph Ball in each look's armour colour;
+- the marine's rifle in place of the first-person arm cannon.
+
+After the survey they chose the defaults offered: the Spider Balls recoloured too, every visor opaque,
+and the marine winning over the Echoes suits when both mods are on.
+
+What the Echoes disc has (all in Metroid1.pak, Temple Grounds; survey tools in `~/marine`):
+- `Galactic_Trooper` (the marine; ANCS 46B2D36D, only dead poses): CMDL A93225BD, CSKR C21D8A6B, CINF
+  0A32C29A. Four materials:
+  - the body (atlas 35E1A1D2, glow 947A82B4, reflection mask 5645A0A9 × sphere map E4111B76);
+  - the rifle (8DC49C2A, all on the right wrist);
+  - the visor's glass (64% opaque, depth-sorted);
+  - the visor's glow (the same 12 triangles, added: the teal you see, 43,139,139).
+- `Dark_Trooper` (ANCS A2CC5B52): CMDL F7507082, CSKR 9C7FDF54, CINF B69EF3E2. The same mesh plus the
+  Ing growths; its broken visor is 22 triangles (crack F79C1D91) in exactly the marine visor's box.
+- Also there, not used: `TrooperWface` (a face behind a see-through visor) and `missle_Trooper`.
+- The troopers' skeleton (39 joints) is a copy of Echoes Samus's: the same names (her Varia
+  shoulder-pad joints, which carry the marine's pads, and her left-hand fingers) and every head
+  within 3.2 mm of hers. So `ConvertCskr` fits them onto Prime's cutscene, in-game and doll skeletons
+  unchanged; R_wrist (hand and rifle) folds onto R_elbow, where Samus's cannon rides.
+
+The import (`platform/port_federation_marine.cpp`, `PortFederationMarine::Import`) writes 66 files,
+each look once under `Wear(look, Prime's Varia ids)` ("FMM", "FMG", "FMD" variants):
+- Bodies of kinds 0-2 from the converted troopers, the visor's glass made opaque (not depth-sorted,
+  blend ONE/ZERO; the glow stays added). The Dark Trooper's glass and glow surfaces are swapped for the
+  marine's (`SwapVisor`: MergeCmdl, the skins' groups end to end, `CompactSkinned`, `PruneMaterials`).
+  The doll's sorted glow writes no depth (`SortedWithoutDepth`).
+- The Gravity marine's two textures (atlas and glow):
+  - its texels voted limb by the body's triangles (`IsLimbJoint`: shoulder pads, arms, hands, hips,
+    knees, ankles, toes);
+  - except the hip guards: a hip triangle's UV piece reaching above the hip joint stays the waist's
+    (144 triangles; the user's circles start below them);
+  - limb plates (saturation < 0.3) in Prime's Gravity purple (246.4°, 0.356, the value scaled 0.702
+    from the plates' median 0.686 to 0.482);
+  - the visor's glow (its texels marked by the glow material's triangles) in the Gravity glass's aqua
+    (169.5°, 0.83, brighter by 0.89/0.545); the other teal lights aqua.
+- The first-person rifle (`BuildRifle`):
+  - the converted body's right-arm triangles out from |x| 0.33 (the upper arm's last 20 cm, the
+    forearm, the hand and the rifle);
+  - turned down the barrel (`RifleFrame`: +x to +y, up stays up) with the muzzle locator
+    (GUN_Particle_LCTR) at the origin;
+  - the upper arm bent by its shoulder weight toward the gun skeleton's shoulder (about 30°);
+  - unskinned, with its bounds.
+  - The muzzle is 0.54 m from the elbow; Prime's LBEAM is 0.583.
+- The first-person left arm (`BuildGrappleArm`):
+  - the left arm's triangles the same way, turned into the grapple arm's frame (`GrappleFrame`: -x to
+    +y, the thumb forward to up), elbows together;
+  - each vertex moved by its joints' head offsets, so the wrist and fingers pivot where Prime's do;
+    the upper arm bent toward its shoulder;
+  - skinned by name, case aside (L_Index_1 on L_index_1; joints above the shoulder on the shoulder).
+- The balls (`RecolourBall`):
+  - Prime's Morph Ball (Power set: yellow shell C01FFF01) and Spider Ball (Varia set: orange 2EE6F56F)
+    with their low-poly models;
+  - the shell (13-70°) at the look's armour colour, its median there and its shading kept: the
+    marine's white (195°, 0.05, its plates' value), the Gravity purple (its hue spread a third), the
+    Dark Trooper's grey (measured: 43°, 0.09, 0.35);
+  - the lights (red, the low spider's green) teal (180°), aqua (169.5°), or left red for the Dark
+    Trooper;
+  - the ANCS's character 0 pointed at the recoloured model, its skin kept;
+  - the Spider Ball's glass is Prime's AE78BEBE with one set: teal (0) for the marine, aqua (2) for the
+    Gravity marine. The Varia's own set is green.
+  - The Dark Trooper keeps Prime's Phazon Spider Ball and its glass, dark already.
+
+The game:
+- port_mods.cpp serves each suit's look (`kSuitLooks`: marine, Gravity marine, marine, Dark Trooper)
+  after the Echoes looks and before Dark Samus:
+  - its bodies and left arm over the suit's own ids, with the cutscene copies 8C72FDAC and B333E1D7;
+  - its balls under the suit variant ids, and the glass under `Id(AE78BEBE, suit)`;
+  - its rifle under `PortDreadSamus::FirstPersonCannon(suit)`;
+  - an Echoes helmet body there leaves `sEchoesHelmetBodies`, and an Echoes ball where the marine has
+    none (the Phazon Suit's spider ball) is taken back to Prime's.
+- `sMarineBodies` makes `Replaces` and `HasOwnCannon` hold, so Prime's boots, visor and cannon are not
+  drawn on them.
+- The marine's spider balls are not "a mod's spider ball" (`sModSpiderBalls`): Prime's glass shell
+  stays.
+- `ReplacesFirstPersonCannon` holds for the rifle while "Marine rifle in first person"
+  (`marine_first_person_rifle`, console `marinerifle`) is on. CGunWeapon draws it the Dread cannon's
+  way, on the live LBEAM, in place of the gun and the suit arm, with `mPortCannonRoll` 0 (Dread's 30).
+- F1 > Mods > Built-in mods > "Federation Marine (Echoes)": the mod's switch, the rifle's, and the
+  import. It reads the same disc as the Echoes suits (`ux0:data/MetroidPrime2`), with one image field
+  for both. `--import-federation-marine <image>` from a terminal. Its stamp is
+  `.federation-marine-version` 1.
+- The Echoes import's shared helpers (`ParseSet`, `KeepTriangles`, `CompactSkinned`, `SkinGroups`,
+  `MainJoints`, `ForEachUvTriangle`/`ForEachMaterialUvTriangle`, `TexelVotes`, `VoteTriangle`,
+  `LimbTexels`, `RgbToHsv`/`HsvToRgb`) are in port_echoes_suits.h now; `EchoesJoint` keeps its bind
+  position. The echoes-suits import's output is unchanged.
+- Checked on the PC: `~/marine/import_repo` (the real import against both Desktop discs) and
+  `~/marine/render2.py` (bind-pose renders with the glow and blend passes, and first-person views from
+  the PlayerGun tweak's gun position 0.25, 0.30, -0.35 from the eye).
+
+What to look for in test 50:
+- Import: put the Echoes ISO in `ux0:data/MetroidPrime2` (it is there already for the Echoes suits),
+  then F1 > Mods > Built-in mods > Federation Marine (Echoes) > Import. Then switch "Use the Federation
+  Marine models" on, if it is not, and reload the mods.
+- In third person, cutscenes and the pause screen:
+  - Power and Varia are the white marine with the teal visor, holding its rifle where the cannon was.
+  - Gravity has purple pads, arms, thighs, shins and boots, an aqua visor and lights, and white hip
+    guards, torso and helmet.
+  - Phazon is the Dark Trooper with the marine's teal visor.
+- In first person:
+  - the marine's forearm, hand and rifle at the lower right: white, or with a purple forearm for
+    Gravity, or dark for Phazon;
+  - shots from its muzzle;
+  - the left hand when grappling.
+- The Morph Ball is white with teal lights (Gravity purple with aqua, Phazon dark grey with red). The
+  Spider Ball is the same, inside its teal or aqua glass; Phazon's is Prime's own.
+- The log: "mods: federation-marine: suit N wears the ..." for the four suits, and "serves 13 Samus
+  body model(s) and 4 first-person rifle(s)".

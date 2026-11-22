@@ -13,6 +13,7 @@
 #include "port_mods.h"
 #include "port_dread_samus_mod.h"
 #include "port_echoes_suits_mod.h"
+#include "port_federation_marine_mod.h"
 #include "port_remastered_import.h"
 #include "port_remastered_text.h"
 #include "port_savestate.h"
@@ -482,6 +483,30 @@ void DrawBuiltinMods() {
     }
     ImGui::SeparatorText("Import");
     DrawEchoesSuitsImport();
+    ImGui::Unindent();
+  }
+  // 0.46.0 test 50: Echoes' Federation Marine in place of Samus, a mod of its own from the same disc.
+  if (StartSection("Mods", "Federation Marine (Echoes)")) {
+    ImGui::SetNextItemOpen(true);
+  }
+  if (ImGui::CollapsingHeader("Federation Marine (Echoes)")) {
+    ImGui::Indent();
+    DrawBuiltinModToggle(PortFederationMarine::kModName, "Use the Federation Marine models",
+                         ModImportStale(status, PortFederationMarine::kModName));
+    ItemHelp("The Power and Varia Suits wear Echoes' Federation Marine, the Gravity Suit the marine with its "
+             "shoulder pads, arms, thighs, knees, shins and boots in the Gravity Suit's purple and its visor in its "
+             "aqua, the Phazon Suit Echoes' Dark Trooper with the marine's whole visor. In cutscenes, third person, "
+             "the pause screen, the first-person arms and the Morph and Spider Balls. While it is on it takes the "
+             "place of the Echoes suits and the Echoes arm cannon.");
+    bool rifle = PortFederationMarine::FirstPersonRifleShown();
+    if (ImGui::Checkbox("Marine rifle in first person", &rifle)) {
+      PortFederationMarine::SetFirstPersonRifleShown(rifle);
+      MarkDirty();
+    }
+    ItemHelp("The marine's forearm, hand and rifle in place of the arm cannon (the shots and beams stay the "
+             "beam's own). Off keeps the arm cannon (Prime's, or the Echoes one when that is on). Applies at once.");
+    ImGui::SeparatorText("Import");
+    DrawFederationMarineImport();
     ImGui::Unindent();
   }
 }

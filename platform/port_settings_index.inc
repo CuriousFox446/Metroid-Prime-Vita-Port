@@ -269,6 +269,8 @@
 {"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Echoes Suit models", "echoes mp2 suit suits body bodies varia dark light model samus prime own show hide toggle"},
 {"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Echoes arm cannon in first person", "echoes mp2 arm cannon gun first person viewmodel weapon missile launcher show hide toggle"},
 {"Mods", "", "Built-in mods > Metroid Prime 2: Echoes", "Play as Dark Samus", "echoes mp2 dark samus phazon body model character skin play as"},
+{"Mods", "", "Built-in mods > Federation Marine (Echoes)", "Use the Federation Marine models", "federation marine gf trooper galactic dark trooper soldier echoes mp2 suit models mod enable disable toggle on off"},
+{"Mods", "", "Built-in mods > Federation Marine (Echoes)", "Marine rifle in first person", "federation marine trooper rifle gun arm cannon first person viewmodel weapon show hide toggle"},
 {"Mods", "", "Built-in mods > Metroid Dread > Import", "Import##dread", "dread start import run samus suit models nsp xci"},
 #if !defined(__ANDROID__)
 {"Mods", "", "Importers", "Argument", "importer argument parameter file"},

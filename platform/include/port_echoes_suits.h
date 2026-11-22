@@ -73,6 +73,7 @@ struct EchoesJoint {
   uint32_t id = 0;
   uint32_t parent = 0;
   std::string name;
+  float position[3] = {};  // bind position, model space
 };
 // An Echoes CINF: u32 count, {u32 id, u32 parent, f32 position[3], f32 rotation[4],
 // f32 local rotation[4], u32 n, u32 links[n]}, u32 count, u32 build order[], u32 count,
@@ -226,6 +227,53 @@ bool AddGunMissileAnims(std::vector<uint8_t>& ancs, const GunMissileAnims& missi
 
 // `model` with only its material set `set`; `textures` gets that set's TXTR ids.
 bool KeepMaterialSet(PrimeCmdl& model, size_t set, std::vector<uint32_t>& textures, std::string* error);
+
+// --- Pieces the Federation Marine import (port_federation_marine.h) shares. ---
+
+// A Prime material set taken apart; a material's vertex flags sit after its texture indices.
+struct MaterialSet {
+  std::vector<uint32_t> textures;
+  std::vector<std::vector<uint8_t>> materials;
+};
+bool ParseSet(const std::vector<uint8_t>& in, MaterialSet& out, std::string* error);
+std::vector<uint8_t> WriteSet(const MaterialSet& set);
+// A pause screen doll body's depth-sorted materials write no depth (its depth-only pass, 0.46.0 test 38).
+bool SortedWithoutDepth(PrimeCmdl& model, std::string* error);
+// Each surface's lists rebuilt as triangle lists of the triangles `keep` passes (by their position
+// indices), wound as drawn; a surface left with none goes.
+bool KeepTriangles(PrimeCmdl& model, const std::function<bool(uint32_t, uint32_t, uint32_t)>& keep,
+                   std::string* error);
+// A skinned model's positions and normals cut to the ones its lists draw, renumbered, and its skin's
+// runs cut to match. The model must have float normals.
+bool CompactSkinned(PrimeCmdl& model, std::vector<uint8_t>& skin, std::string* error);
+// A Prime CSKR's groups as bytes (without the count and the footer), their count and the vertices
+// they cover.
+bool SkinGroups(const std::vector<uint8_t>& cskr, std::vector<uint8_t>& bytes, uint32_t& count, uint32_t& vertices,
+                std::string* error);
+// The joint each vertex of a Prime CSKR weighs most on, in vertex order.
+bool MainJoints(const std::vector<uint8_t>& cskr, std::vector<uint32_t>& joints, std::string* error);
+// A model's triangles (set 0) through `fn`: the textures of the triangle's material, then its three
+// vertices' UVs (texture 0's) and position indices, wound as drawn. The second form names the
+// material too.
+using UvTriangleFn = std::function<void(const std::vector<uint32_t>&, const float (&)[3][2], const uint32_t (&)[3])>;
+bool ForEachUvTriangle(const PrimeCmdl& model, const UvTriangleFn& fn, std::string* error);
+using MaterialUvTriangleFn =
+    std::function<void(uint32_t, const std::vector<uint32_t>&, const float (&)[3][2], const uint32_t (&)[3])>;
+bool ForEachMaterialUvTriangle(const PrimeCmdl& model, const MaterialUvTriangleFn& fn, std::string* error);
+// Limb and other votes over a texture's texels (LimbTexels), and where a thigh triangle facing the
+// undersuit panel's way lies (the Echoes Varia's recolours).
+struct TexelVotes {
+  int width = 0, height = 0;
+  std::vector<uint16_t> limb, other;
+  std::vector<uint8_t> panelSide;
+};
+// One vote, limb or other, on each texel a triangle (its UVs) covers.
+void VoteTriangle(TexelVotes& votes, const float (&uv)[3][2], bool limb);
+// Per texel, 1 where limbs voted more than the rest; texels no triangle covers take their
+// neighbours' (two texels round).
+std::vector<uint8_t> LimbTexels(const TexelVotes& votes);
+void RgbToHsv(const uint8_t* c, double& h, double& s, double& v);
+void HsvToRgb(double h, double s, double v, uint8_t* c);
 
 struct Io {
   // A resource of the Echoes disc by type FourCC and id, decompressed.
