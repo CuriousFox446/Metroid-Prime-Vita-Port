@@ -1413,7 +1413,7 @@ void send_to_compiler(const std::shared_ptr<CompileJob>& job) noexcept {
 }
 
 // Programs compiled on the PC with the Vita's own compiler (tools/vita_precompile): the card's
-// vita_programs/precompiled.bin, its index read at the start (key, then each GXP's place). A program
+// shader_cache/precompiled.bin (vita_programs/ until 0.46.0 test 47), its index read at the start (key, then each GXP's place). A program
 // there is linked from its GXPs, read on the card thread, rather than compiled. Read-only after
 // initialize: the render worker and the FIFO thread (program_known) both look keys up.
 struct PackEntry {
@@ -1580,7 +1580,8 @@ void index_card() noexcept {
   }
 }
 
-// What vita_programs/build says of the card's program binaries. The user found the map's GPU crash
+// What shader_cache/build (vita_programs/build until 0.46.0 test 47) says of the card's program
+// binaries. The user found the map's GPU crash
 // came from the shaders an earlier build had left in vita_programs after a new build was installed,
 // and went away with them deleted (VITA_PHASE2.md, "The map's GPU crash: stale shaders"); how an old
 // binary differs from a new compile was never found (a binary's key names both its sources, and the
@@ -1602,7 +1603,7 @@ std::string program_binaries_build() noexcept {
 
 std::string this_build() noexcept { return kMpBuildRevision != nullptr ? std::string{kMpBuildRevision} : std::string{}; }
 
-// What vita_programs/build holds for binaries of this format.
+// What shader_cache/build holds for binaries of this format.
 std::string binaries_marker() noexcept { return fmt::format("binaries {}", kProgramBinaryVersion); }
 
 void write_binaries_marker(const std::string& marker) noexcept {
@@ -3913,20 +3914,101 @@ void log_clock_costs() noexcept {
            kCalls, osTime, steady, process, sharedLock, mutexLock, threadLocal);
 }
 
+// Whether `dir` holds no file at any depth (folders alone, or nothing).
+bool holds_no_file(const std::filesystem::path& dir) noexcept {
+  std::error_code ec;
+  std::filesystem::recursive_directory_iterator it{dir, ec};
+  for (; !ec && it != std::filesystem::recursive_directory_iterator{}; it.increment(ec)) {
+    std::error_code kind;
+    if (!it->is_directory(kind)) {
+      return false;
+    }
+  }
+  return !ec;
+}
+
+// 0.46.0 test 48. The user: "move the shaders location to ux0:data/MetroidPrime/shader_cache/
+// where it should be" (upstream's <data>/shader_cache, port_data_folder.cpp). The generated
+// programs' binaries, the warm-up's records and the precompiled pack were in vita_programs/, and
+// vitaGL's glCompileShader cache (empty: nothing compiles through it) in vitagl_shader_cache/. At the
+// first start vita_programs becomes shader_cache whole (one rename); if shader_cache is there already
+// (made by hand for precompiled.bin), each file it lacks moves in, and vita_programs goes when it is
+// empty. vitagl_shader_cache goes when it holds no file. vitaGL's fixed-function cache stays in
+// ux0:data/shader_cache (check_fixed_function_cache): its path is vitaGL's own, built in.
+void move_shader_folders(const std::string& user) noexcept {
+  namespace fs = std::filesystem;
+  const fs::path from = fs::path{user} / "vita_programs";
+  const fs::path to = fs::path{user} / "shader_cache";
+  std::error_code ec;
+  if (fs::is_directory(from, ec)) {
+    if (!fs::exists(to, ec)) {
+      std::error_code renamed;
+      fs::rename(from, to, renamed);
+      if (!renamed) {
+        Log.info("shader folder: vita_programs moved whole to shader_cache");
+      } else {
+        Log.warn("shader folder: vita_programs not moved whole to shader_cache ({}); file by file instead",
+                 renamed.message());
+      }
+    }
+    if (fs::is_directory(from, ec)) {
+      fs::create_directories(to, ec);
+      std::vector<fs::path> files;
+      std::error_code listed;
+      fs::directory_iterator it{from, listed};
+      for (; !listed && it != fs::directory_iterator{}; it.increment(listed)) {
+        std::error_code kind;
+        if (it->is_regular_file(kind)) {
+          files.push_back(it->path());
+        }
+      }
+      uint32_t moved = 0;
+      uint32_t left = 0;
+      for (const fs::path& file : files) {
+        const fs::path target = to / file.filename();
+        std::error_code there;
+        std::error_code renamed;
+        if (!fs::exists(target, there)) {
+          fs::rename(file, target, renamed);
+          if (!renamed) {
+            ++moved;
+            continue;
+          }
+        }
+        ++left;
+      }
+      std::error_code gone;
+      const bool removed = left == 0 && fs::remove(from, gone);
+      Log.info("shader folder: {} files of vita_programs moved into shader_cache, {} left there (shader_cache has its "
+               "own copy, or they would not move){}",
+               moved, left, removed ? "; vita_programs removed" : "; vita_programs is no longer read: it can be deleted");
+    }
+  }
+  const fs::path vitaGl = fs::path{user} / "vitagl_shader_cache";
+  if (fs::is_directory(vitaGl, ec) && holds_no_file(vitaGl)) {
+    std::error_code gone;
+    fs::remove_all(vitaGl, gone);
+    Log.info("shader folder: vitagl_shader_cache (no files in it) {}", gone ? "not removed: " + gone.message() : "removed");
+  }
+}
+
 } // namespace
 
 bool initialize() noexcept {
-  // vitaGL's cache for what glCompileShader compiles, in the game's folder. Nothing here compiles
-  // through it: the generated programs compile on the compiler thread, and vitaGL keeps its
+  // Since 0.46.0 test 48 the game's shaders are in its shader_cache folder (move_shader_folders,
+  // before anything there is made).
+  move_shader_folders(g_config.userPath);
+  // vitaGL's cache for what glCompileShader compiles, in the game's shader folder. Nothing here
+  // compiles through it: the generated programs compile on the compiler thread, and vitaGL keeps its
   // fixed-function shaders in a folder of its own (check_fixed_function_cache).
-  static const std::string cachePath = std::string{g_config.userPath} + "/vitagl_shader_cache";
+  static const std::string cachePath = std::string{g_config.userPath} + "/shader_cache/vitagl";
   std::error_code ec;
   std::filesystem::create_directories(cachePath, ec);
   vglSetShaderCachePath(cachePath.c_str());
   check_fixed_function_cache();
   // The generated programs' own cache (Program, read_cached), and what it holds: the binaries of
   // this format, whichever build wrote them (program_binaries_build).
-  g_programCacheDir = std::string{g_config.userPath} + "/vita_programs";
+  g_programCacheDir = std::string{g_config.userPath} + "/shader_cache";
   std::filesystem::create_directories(g_programCacheDir, ec);
   const std::string marker = binaries_marker();
   const std::string found = program_binaries_build();

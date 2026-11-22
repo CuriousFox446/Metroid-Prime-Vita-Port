@@ -4973,3 +4973,29 @@ What to look for in test 47:
   "Compiling shaders" toast seldom).
 - The same picture everywhere (fog, lit surfaces, the lava, indirect effects).
 - The GPU busy time in heavy scenes against test 45's (32-45 ms a frame in Tallon Overworld).
+
+The pack: 1,426 programs compiled on the PC in 80 minutes (12 jobs), none failed, 2,726 KiB; its
+fragment programs 33 instructions on average (the old card's 552 legacy ones: 45, other materials).
+
+## 0.46.0 test 48: the shaders in ux0:data/MetroidPrime/shader_cache
+
+The user: "Been meaning to ask to move the shaders location to "ux0:data/MetroidPrime/shader_cache/"
+where it should be" (upstream keeps its pipeline cache in `<data>/shader_cache`,
+port_data_folder.cpp).
+- The generated programs' binaries, `build`, `materials.bin` and `precompiled.bin` are read and
+  written in `shader_cache/` (`g_programCacheDir`), vitaGL's glCompileShader cache (nothing compiles
+  through it) in `shader_cache/vitagl/`.
+- `move_shader_folders` (vita_gl.cpp, `initialize`, before anything there is made): at the first
+  start `vita_programs/` becomes `shader_cache/` with one rename (VitaSDK's `rename` is
+  `sceIoRename`); if `shader_cache/` is there already (made by hand for `precompiled.bin`), each file
+  of `vita_programs/` it lacks moves in, and `vita_programs/` goes when that leaves it empty. The old
+  `vitagl_shader_cache/` (vitaGL's empty folders) goes when it holds no file. The log's
+  "shader folder:" lines say what moved.
+- vitaGL's fixed-function cache stays in `ux0:data/shader_cache/` (outside the game's folder, shared
+  by every vitaGL program): its path is built into the vitaGL the port links (vgl.c's
+  "ux0:data/shader_cache/v%d").
+- tools/vita_precompile's notes name the new folder.
+
+What to look for in test 48: the "shader folder:" lines once, then "programs on the card: N;
+precompiled: 1426" as in test 47; no compile storm at the start (the warm-up finds the records and the
+pack in their new place).

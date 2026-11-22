@@ -1,5 +1,6 @@
 // PS Vita: the generated programs' sources for the material records a Vita session saved on its
-// card (ux0:data/MetroidPrime/vita_programs/materials.bin), made on the PC with this tree's own
+// card (ux0:data/MetroidPrime/shader_cache/materials.bin, vita_programs/ until 0.46.0 test 47), made
+// on the PC with this tree's own
 // generator (extern/aurora/lib/gx/vita_tev.cpp, tev_record_program), so the Vita's compiler can
 // compile them here (precompile.py) rather than on the Vita. Built by build.sh.
 //

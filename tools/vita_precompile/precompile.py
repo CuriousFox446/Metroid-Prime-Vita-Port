@@ -21,7 +21,8 @@ SDK 3.0.0 (shacc r13225): its GXPs were byte for byte the ones the Vita compiled
 
 The pack (vita_gl.cpp, read_pack_index): "VPK1", the count, then per program sorted by key
 (u64 key, u32 vertex offset, u32 vertex size, u32 fragment offset, u32 fragment size), then the
-GXPs. It goes in ux0:data/MetroidPrime/vita_programs/ beside the card's program binaries.
+GXPs. It goes in ux0:data/MetroidPrime/shader_cache/ beside the card's program binaries (vita_programs/
+until 0.46.0 test 47; test 48 moves that folder there).
 """
 from __future__ import annotations
 
