@@ -5139,3 +5139,67 @@ What to look for in test 50:
   Spider Ball is the same, inside its teal or aqua glass; Phazon's is Prime's own.
 - The log: "mods: federation-marine: suit N wears the ..." for the four suits, and "serves 13 Samus
   body model(s) and 4 first-person rifle(s)".
+
+### Test 50 result
+
+The user imported it and sent photos:
+- the pause screen's Varia with the Echoes look and with the marine;
+- first person with the marine's rifle and with the Echoes cannon;
+- the Mods page.
+
+Their words: "the Federation Marine's arm cannon is held sideways, I think a simple fix rotating that
+and the hand, not the forearm. I think the arm canon is a little higher in first person and I want it
+this mod to be a toggle under 'Play as Dark Samus' as 'Play as a Federation Marine', not a separate
+catagory."
+- Sideways: in the pause screen's idle the rifle's grip points in toward the body, not down.
+  - The bind pose has the rifle upright (top +z, profile facing front), but Samus's animations roll
+    her forearm for her cannon.
+  - Posed with her own animations (`~/marine/roll.py`), the grip hangs down after turning the hand and
+    rifle about the forearm by: -51° in the pause screen's idle (B_ready_itemscreen_samus), -45°
+    standing ready, -50° walking, -49° landing, -82° running.
+  - The first-person model is placed by the port, upright already (`~/marine/render2.py` views
+    gtop/gside/gfront).
+- Higher: the rifle stands 0.17 above its barrel, Prime's cannon 0.095. With the muzzles together, the
+  rifle's top rose 7.4 cm over the cannon's.
+
+## 0.46.0 test 51: the Federation Marine as "Play as a Federation Marine" (echoes-suits 19)
+
+- The Federation Marine is part of the echoes-suits mod now, as the user asked:
+  - "Play as a Federation Marine" (`echoes_federation_marine`, off by default; console `marine 0|1`)
+    sits under "Play as Dark Samus" in F1 > Mods > Metroid Prime 2: Echoes, with "Marine rifle in
+    first person" under it.
+  - The two "play as" switches exclude each other (each setter turns the other off; if both are on,
+    Dark Samus wins). The section's "Reload the mods to apply" note covers it
+    (`PortFederationMarine::MarineServed`).
+- The Echoes import (port_echoes_suits_import.cpp RunEchoes) runs `PortFederationMarine::Import`
+  after the suits into the same staging folder: 300 + 66 files, no name shared.
+  - echoes-suits `kVersion` 19, so the user imports again.
+  - Moving the import into place removes test 50's separate `federation-marine` folder (told by its
+    `.federation-marine-version`). Its files' ids are the same, and the later folder would shadow the
+    new ones.
+  - Test 50's separate section, import button, start hooks and `--import-federation-marine` are gone
+    (those files are back to test 49's).
+- The loader (port_mods.cpp):
+  - serves the marine from the echoes-suits mod's files while the setting is on and Dark Samus is off;
+  - records what it served: `sMarineBodies` (Replaces, HasOwnCannon), `sMarineRifles`
+    (ReplacesFirstPersonCannon), `sMarineSpiderSuits` (whose spider ball keeps Prime's glass);
+  - logs "echoes-suits serves the Federation Marine: 13 Samus body model(s), 4 first-person rifle(s)".
+- The grip (`RollGrip`, kGripRollDegrees -50): the bodies of kinds 0-2 have the right wrist's
+  vertices turned -50° about the bind pose's elbow-to-wrist axis, through the wrist, by their weight
+  on it. The forearm stays. Done before the Dark Trooper's visor swap renumbers its vertices; the
+  first-person rifle and left arm are built from the unturned bodies.
+  - Checked by posing the doll in the pause screen's idle (`~/marine/posebody.py`, Prime's skinning
+    and pose builder on F76E70A6). Before, from the right, the rifle showed its flat top; now it shows
+    its profile with the grip down.
+- First person: `PortDreadSamus::FirstPersonCannonDrop` (`kRifleDrop` 0.075 gun units) for the
+  marine's rifle. CGunWeapon keeps it as `mPortCannonDrop` and `PortDreadMuzzleShift` adds it as
+  -z, so CPlayerGun's shot origin (x418_beamLocalXf) moves with the drawn rifle and the shots still
+  leave its muzzle.
+
+What to look for in test 51:
+- Import the Echoes suits again (Mods > Metroid Prime 2: Echoes > Import): one run makes both, and
+  the old federation-marine folder goes. "Other mods" should show echoes-suits, switched on.
+- Switch "Play as a Federation Marine" on and reload the mods. Dark Samus switches off with it.
+- The pause screen and third person: the rifle hangs grip down, the hand around it, the forearm as
+  before.
+- First person: the rifle about 7.5 cm lower than in test 50, with shots still from its muzzle.

@@ -496,7 +496,6 @@ void DrawImportKeys();
 void DrawRemasteredImport();
 void DrawDreadSamusImport();
 void DrawEchoesSuitsImport();
-void DrawFederationMarineImport();
 void DrawMods();
 // remastered.cpp: the Mods page's built-in mods (Remastered's models, Dread's Samus).
 void DrawBuiltinMods();

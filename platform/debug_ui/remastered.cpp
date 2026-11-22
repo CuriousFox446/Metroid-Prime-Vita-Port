@@ -469,12 +469,37 @@ void DrawBuiltinMods() {
     }
     ItemHelp("Dark Samus's body in place of every suit's, in third person, cutscenes and the pause screen. "
              "The first-person arm and the Morph Ball stay the suit's.");
-    // A stale import has no Dark Samus to serve: its own note asks for the re-import.
+    // 0.46.0 test 51: the Federation Marine, the user's call: "a toggle under 'Play as Dark Samus' as
+    // 'Play as a Federation Marine', not a separate category". The two exclude each other.
+    bool marine = PortFederationMarine::PlayAsMarine();
+    if (ImGui::Checkbox("Play as a Federation Marine", &marine)) {
+      PortFederationMarine::SetPlayAsMarine(marine);
+      MarkDirty();
+    }
+    ItemHelp("Echoes' Federation Marine in place of Samus: the marine for the Power and Varia Suits, the marine "
+             "with its shoulder pads, arms, thighs, knees, shins and boots in the Gravity Suit's purple and its "
+             "visor in its aqua for the Gravity Suit, Echoes' Dark Trooper with the marine's whole visor for the "
+             "Phazon Suit. In cutscenes, third person, the pause screen, the first-person arms and the Morph and "
+             "Spider Balls; it takes the place of the suits chosen above. Turning it on turns Play as Dark Samus "
+             "off. Applies when the mods reload.");
+    ImGui::Indent();
+    ImGui::BeginDisabled(!marine);
+    bool rifle = PortFederationMarine::FirstPersonRifleShown();
+    if (ImGui::Checkbox("Marine rifle in first person", &rifle)) {
+      PortFederationMarine::SetFirstPersonRifleShown(rifle);
+      MarkDirty();
+    }
+    ImGui::EndDisabled();
+    ItemHelp("The marine's forearm, hand and rifle in place of the arm cannon (the shots and beams stay the "
+             "beam's own). Off keeps the arm cannon (Prime's, or the Echoes one when that is on). Applies at once.");
+    ImGui::Unindent();
+    // A stale import has no Dark Samus or Federation Marine to serve: its own note asks for the re-import.
     const auto echoes = std::find_if(status.mods.begin(), status.mods.end(), [](const PortMods::ModInfo& m) {
       return m.name == PortEchoesSuits::kModName;
     });
     if (echoes != status.mods.end() && echoes->enabled && !ModImportStale(status, PortEchoesSuits::kModName) &&
-        (dark != PortEchoesSuits::DarkSamusServed() || looksPending)) {
+        (PortEchoesSuits::PlayAsDarkSamus() != PortEchoesSuits::DarkSamusServed() ||
+         marine != PortFederationMarine::MarineServed() || looksPending)) {
       ImGui::TextColored(ThemeWarnColor(), "Reload the mods to apply.");
       ImGui::SameLine();
       if (ImGui::SmallButton("Reload mods##echoes")) {
@@ -483,30 +508,6 @@ void DrawBuiltinMods() {
     }
     ImGui::SeparatorText("Import");
     DrawEchoesSuitsImport();
-    ImGui::Unindent();
-  }
-  // 0.46.0 test 50: Echoes' Federation Marine in place of Samus, a mod of its own from the same disc.
-  if (StartSection("Mods", "Federation Marine (Echoes)")) {
-    ImGui::SetNextItemOpen(true);
-  }
-  if (ImGui::CollapsingHeader("Federation Marine (Echoes)")) {
-    ImGui::Indent();
-    DrawBuiltinModToggle(PortFederationMarine::kModName, "Use the Federation Marine models",
-                         ModImportStale(status, PortFederationMarine::kModName));
-    ItemHelp("The Power and Varia Suits wear Echoes' Federation Marine, the Gravity Suit the marine with its "
-             "shoulder pads, arms, thighs, knees, shins and boots in the Gravity Suit's purple and its visor in its "
-             "aqua, the Phazon Suit Echoes' Dark Trooper with the marine's whole visor. In cutscenes, third person, "
-             "the pause screen, the first-person arms and the Morph and Spider Balls. While it is on it takes the "
-             "place of the Echoes suits and the Echoes arm cannon.");
-    bool rifle = PortFederationMarine::FirstPersonRifleShown();
-    if (ImGui::Checkbox("Marine rifle in first person", &rifle)) {
-      PortFederationMarine::SetFirstPersonRifleShown(rifle);
-      MarkDirty();
-    }
-    ItemHelp("The marine's forearm, hand and rifle in place of the arm cannon (the shots and beams stay the "
-             "beam's own). Off keeps the arm cannon (Prime's, or the Echoes one when that is on). Applies at once.");
-    ImGui::SeparatorText("Import");
-    DrawFederationMarineImport();
     ImGui::Unindent();
   }
 }

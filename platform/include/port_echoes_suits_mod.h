@@ -36,7 +36,9 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     follow the texture's line, on the low-poly in-game body too.
 // 18: the Light Suit's ball as its Spider Ball too (kBalls); the pause screen dolls' visor glass
 //     writes no depth, so the face shows through it (SortedWithoutDepth).
-inline constexpr int kVersion = 18;
+// 19: the Federation Marine and the Dark Trooper ("Play as a Federation Marine",
+//     port_federation_marine_mod.h), its bodies' hand and rifle turned upright in Samus's poses.
+inline constexpr int kVersion = 19;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
@@ -234,6 +236,7 @@ inline constexpr int kDarkBallKey = 0x445342;      // "DSB"
 inline constexpr int kDarkBallSkinKey = 0x445343;  // "DSC"
 constexpr uint32_t DarkBallId(uint32_t id) { return PortModelVariant::Id(id, kDarkBallKey); }
 constexpr uint32_t DarkBallSkinId(uint32_t id) { return PortModelVariant::Id(id, kDarkBallSkinKey); }
+// It and "Play as a Federation Marine" (PortFederationMarine::SetPlayAsMarine) exclude each other.
 void SetPlayAsDarkSamus(bool on);
 bool PlayAsDarkSamus();
 // Whether the loaded mods serve Dark Samus: the setting was on when they last loaded, and the

@@ -740,7 +740,8 @@ void CGunWeapon::DrawHologram(const CStateManager& mgr, const CTransform4f& xf,
 // sits on the gun's live LBEAM locator, less PortDreadMuzzleShift, so it follows the recoil too.
 // Seen from behind, its wide back end hides the beam lights on its sides, so it is rolled 30
 // degrees about the barrel to turn its left light toward the camera. The Federation Marine's rifle
-// (federation-marine mod), made the same way, stands upright (mPortCannonRoll 0).
+// (Play as a Federation Marine), made the same way, stands upright (mPortCannonRoll 0), and lower
+// (mPortCannonDrop, in PortDreadMuzzleShift).
 CTransform4f CGunWeapon::PortDreadCannonXf(const CTransform4f& xf) const {
   const CVector3f muzzle =
       x10_solidModelData->GetScaledLocatorTransform(rstl::string_l(skMuzzleLocator))
@@ -762,7 +763,10 @@ CVector3f CGunWeapon::PortDreadMuzzleShift() const {
   const float scaleY = x10_solidModelData->GetScale().GetY();
   const float live = anim.GetLocatorTransform(lbeam, nullptr).GetTranslation().GetY();
   const float bind = layout.GetReferenceStanceOffset(lbeam).GetY();
-  return live > bind ? CVector3f(0.f, (bind - live) * scaleY, 0.f) : CVector3f::Zero();
+  // The Federation Marine's rifle sits mPortCannonDrop lower than the muzzle (it is taller than the
+  // cannon), its shots with it.
+  const float drop = -mPortCannonDrop * x10_solidModelData->GetScale().GetZ();
+  return CVector3f(0.f, live > bind ? (bind - live) * scaleY : 0.f, drop);
 }
 
 // Keeps points with dot(normal, p) >= d (world space) on every draw until turned off. The
@@ -1200,6 +1204,7 @@ void CGunWeapon::LoadSuitArm(CStateManager& mgr) {
 #ifdef TARGET_PC
   mPortDreadCannon = PortDreadSamus::ReplacesFirstPersonCannon(suit);
   mPortCannonRoll = PortDreadSamus::FirstPersonCannonRoll(suit);
+  mPortCannonDrop = PortDreadSamus::FirstPersonCannonDrop(suit);
   xb0_suitArmModelData =
       CStaticRes(mPortDreadCannon ? CAssetId(PortDreadSamus::FirstPersonCannon(suit)) : armId,
                  x4_scale);

@@ -42,7 +42,7 @@ inline uint32_t FirstPersonCannon(int suit) {
 // Whether the mod serves FirstPersonCannon(suit) now: the gun then draws it at the elbow locator in
 // place of both Prime's gun model and its suit arm. Never while the setting
 // dread_first_person_cannon (SetFirstPersonCannonShown, Mods > Metroid Dread) is off.
-// Also while the federation-marine mod serves its rifle there (port_federation_marine_mod.h; its own
+// Also while the Federation Marine's rifle is served there (port_federation_marine_mod.h; its own
 // switch, marine_first_person_rifle).
 bool ReplacesFirstPersonCannon(int suit);
 void SetFirstPersonCannonShown(bool shown);
@@ -50,6 +50,9 @@ bool FirstPersonCannonShown();
 // The roll (degrees, about the barrel) the gun draws that cannon with: 30 for Dread's, which turns its
 // left light toward the camera; none for the Federation Marine's rifle, modelled upright.
 float FirstPersonCannonRoll(int suit);
+// How far below the gun's muzzle that cannon is drawn, with its shots (gun units): none for Dread's,
+// PortFederationMarine::kRifleDrop for the marine's rifle, taller than the arm cannon.
+float FirstPersonCannonDrop(int suit);
 
 struct BallTarget {
   int suit;

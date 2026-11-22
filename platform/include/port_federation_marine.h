@@ -9,15 +9,17 @@
 #include "port_federation_marine_mod.h"
 
 // The Federation Marine import: Echoes' Federation Marine and Dark Trooper from the user's own
-// Metroid Prime 2: Echoes disc (GameCube, G2ME01, or Trilogy's MP2 folder) in place of Samus, written
-// as the "federation-marine" mod (port_federation_marine_mod.h).
+// Metroid Prime 2: Echoes disc (GameCube, G2ME01, or Trilogy's MP2 folder) in place of Samus, run by
+// the Echoes suits import into the echoes-suits mod ("Play as a Federation Marine",
+// port_federation_marine_mod.h).
 //
 // Both troopers (Metroid1.pak: Galactic_Trooper A93225BD, Dark_Trooper F7507082) are skinned on a copy
 // of Echoes Samus's skeleton: the same joint names (her Varia shoulder-pad joints and left-hand
 // fingers among them), every head within 3.2 mm of hers. So they convert onto Prime's skeletons as the
 // echoes-suits bodies do (PortEchoesSuits::ConvertCskr): the right wrist, holding the rifle, folds onto
 // the elbow, where Samus's cannon rides. Built from them:
-// - the bodies (cutscene, in-game, the pause screen's doll), the marine's visor glass made opaque;
+// - the bodies (cutscene, in-game, the pause screen's doll), the marine's visor glass made opaque,
+//   the hand and rifle turned about the forearm so they stand upright in Samus's poses;
 // - the Dark Trooper with its broken visor taken out and the marine's whole visor merged in;
 // - the Gravity marine: the limbs' plates (shoulder pads, arms, hands, thighs, knees, shins, boots:
 //   the parts Prime's Gravity Suit paints purple) in its purple, the visor and lights in its aqua;

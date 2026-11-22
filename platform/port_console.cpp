@@ -3122,6 +3122,18 @@ void CmdEchoesSuits() {
   Finish();
 }
 
+void CmdMarine() {
+  const std::string value = sCmd.args.size() > 1 ? sCmd.args[1] : "";
+  if (value == "0" || value == "1") {
+    PortFederationMarine::SetPlayAsMarine(value == "1");
+  } else if (!value.empty()) {
+    return Finish("usage: marine [0|1]");
+  }
+  Out("marine %d (served %d)", PortFederationMarine::PlayAsMarine() ? 1 : 0,
+      PortFederationMarine::MarineServed() ? 1 : 0);
+  Finish();
+}
+
 void CmdMarineRifle() {
   const std::string value = sCmd.args.size() > 1 ? sCmd.args[1] : "";
   if (value == "0" || value == "1") {
@@ -4709,6 +4721,9 @@ const CommandSpec kCommands[] = {
     {"echoessuits", CmdEchoesSuits, nullptr,
      "echoessuits [0|1]   the Echoes Suit models (echoes_suit_models; off: every suit Prime's own, the arm "
      "cannon as echoescannon has it), from the next mod reload; prints it"},
+    {"marine", CmdMarine, nullptr,
+     "marine [0|1]        play as Echoes' Federation Marine (echoes_federation_marine; off: Dark Samus or the "
+     "suits as set), from the next mod reload; prints it and whether this load serves it"},
     {"marinerifle", CmdMarineRifle, nullptr,
      "marinerifle [0|1]   the Federation Marine's rifle in first person (marine_first_person_rifle; off: the "
      "arm cannon), at once; prints it"},

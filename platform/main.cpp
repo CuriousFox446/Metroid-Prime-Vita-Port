@@ -899,10 +899,7 @@ int main(int argc, char** argv) {
     // --import-echoes-suits <image>: the Varia, Dark and Light Suit bodies from the user's own
     // Metroid Prime 2: Echoes GameCube disc, or a Metroid Prime Trilogy disc (its MP2 folder), into
     // <mods>/echoes-suits (port_echoes_suits.h), without starting the game. The Prime disc comes from MP_DISC or the path the game remembers.
-    // --import-federation-marine <image>: Echoes' Federation Marine and Dark Trooper from the same
-    // disc into <mods>/federation-marine (port_federation_marine.h), the same way.
-    const bool marineImport = argc >= 2 && std::strcmp(argv[1], "--import-federation-marine") == 0;
-    if (argc >= 2 && (std::strcmp(argv[1], "--import-echoes-suits") == 0 || marineImport)) {
+    if (argc >= 2 && std::strcmp(argv[1], "--import-echoes-suits") == 0) {
         if (argc != 3) {
             std::fprintf(stderr, "usage: %s %s <Echoes disc image>\n", argv[0], argv[1]);
             return 2;
@@ -918,8 +915,7 @@ int main(int argc, char** argv) {
         if (!IsSupportedDisc(id)) {
             std::fprintf(stderr, "unsupported disc: %s\n", DescribeUnsupportedDisc(id).c_str());
         } else {
-            result = marineImport ? PortRemastered::RunFederationMarineImportFromCommandLine(argv[2])
-                                  : PortRemastered::RunEchoesSuitsImportFromCommandLine(argv[2]);
+            result = PortRemastered::RunEchoesSuitsImportFromCommandLine(argv[2]);
         }
         aurora_dvd_close();
         return result;

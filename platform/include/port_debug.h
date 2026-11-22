@@ -730,8 +730,6 @@ bool StartRemasteredImport(const std::string& image, const std::string& keys);
 bool StartDreadSamusImport(const std::string& image, const std::string& keys);
 // The Echoes suits import (PortRemastered::StartEchoesSuitsImport), likewise.
 bool StartEchoesSuitsImport(const std::string& image);
-// The Federation Marine import (PortRemastered::StartFederationMarineImport), likewise.
-bool StartFederationMarineImport(const std::string& image);
 // Memory card transfer to and from Dolphin (port_gci.h), for the overlay and
 // the console. Each returns a message for the user. Imports are refused in
 // game; `path` may be a .gci, a raw card image, a folder of .gci files or an

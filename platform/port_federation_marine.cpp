@@ -126,6 +126,13 @@ constexpr uint32_t kGunCinf = 0x46ED31E0;
 constexpr double kArmCut = 0.33;
 // The skeleton's locator at the rifle's muzzle (where Echoes' trooper fires from).
 constexpr const char* kMuzzleJoint = "GUN_Particle_LCTR";
+// The bodies' hand and rifle turned this far about the forearm (degrees, about the bind pose's
+// elbow-to-wrist axis, by each vertex's weight on the right wrist). Samus's animations roll her
+// forearm for her cannon: on the T-posed trooper's rifle (top up) the grip then points in, not down
+// (the user's pause screen photo, 0.46.0 test 50: "held sideways"). Posed with her own animations,
+// the grip hangs straight down after -51 degrees in the pause screen's idle, -45 standing ready, -50
+// walking, -49 landing (-82 running): ~/marine/roll.py.
+constexpr double kGripRollDegrees = -50.0;
 // Prime's spider ball glass (SamusSpiderBallGlassCMDL): its set 0 teal (Power and Gravity), set 1
 // green (Varia), set 2 aqua.
 constexpr uint32_t kSpiderGlass = kSpiderBallGlass;
@@ -468,6 +475,39 @@ bool BuildGrappleArm(const Body& body, const std::vector<EchoesJoint>& joints, c
   return PruneMaterials(out, error);
 }
 
+// A body's hand and rifle (the right wrist's vertices, by their weight on it) turned kGripRollDegrees
+// about the forearm, through the wrist: the forearm stays. Only for the bodies Samus's animations
+// pose; the first-person rifle is modelled upright as it is.
+bool RollGrip(Body& body, const std::vector<EchoesJoint>& joints, std::string* error) {
+  const EchoesJoint* elbow = FindJoint(joints, "R_elbow");
+  const EchoesJoint* wrist = FindJoint(joints, "R_wrist");
+  if (elbow == nullptr || wrist == nullptr) return Fail(error, "the right elbow or wrist is missing");
+  const std::set<uint32_t> hand = Subtree(joints, "R_wrist");
+  const V3 pivot = FromArray(wrist->position);
+  const V3 axis = Normalized(pivot - FromArray(elbow->position));
+  const double angle = kGripRollDegrees * 3.14159265358979323846 / 180.0;
+  PrimeCmdl& m = body.model;
+  if (m.arrays.size() < 2 || (Get32(m.header, 8) & 0x2) != 0) return Fail(error, "the body has no float normals");
+  const size_t count = std::min(m.arrays[0].size() / 12, m.arrays[1].size() / 12);
+  for (size_t v = 0; v < count && v < body.echoesWeights.size(); ++v) {
+    double w = 0;
+    for (const auto& [joint, weight] : body.echoesWeights[v]) {
+      if (hand.count(joint)) w += weight;
+    }
+    if (w <= 0) continue;
+    const V3 p = pivot + Rotate(Position(m, uint32_t(v)) - pivot, axis, angle * w);
+    const V3 n = Rotate({GetF(m.arrays[1], v * 12), GetF(m.arrays[1], v * 12 + 4), GetF(m.arrays[1], v * 12 + 8)}, axis,
+                        angle * w);
+    SetF(m.arrays[0], v * 12, float(p.x));
+    SetF(m.arrays[0], v * 12 + 4, float(p.y));
+    SetF(m.arrays[0], v * 12 + 8, float(p.z));
+    SetF(m.arrays[1], v * 12, float(n.x));
+    SetF(m.arrays[1], v * 12 + 4, float(n.y));
+    SetF(m.arrays[1], v * 12 + 8, float(n.z));
+  }
+  return true;
+}
+
 // The Dark Trooper's broken visor (its glass and glow surfaces) out, the marine's whole one in: the
 // marine's glass and glow surfaces merged into the body (MergeCmdl, the marine's opaque glass and its
 // glow with them), the skins' groups one after the other (a group over the body's padding between
@@ -789,9 +829,16 @@ bool Import(const Io& io, Result& result, std::string& error) {
   progress();
   std::array<std::array<Body, 3>, kLookCount> looks;
   for (int kind = 0; kind < 3; ++kind) {
-    const Body& marine = bodies[&kMarineTrooper][size_t(kind)];
+    // The hand and rifle upright in Samus's poses (RollGrip), before the visor swap renumbers the
+    // Dark Trooper's vertices.
+    Body marine = bodies[&kMarineTrooper][size_t(kind)];
     Body dark = bodies[&kDarkTrooperModel][size_t(kind)];
     std::string why;
+    if (!RollGrip(marine, echoesCinfs[kMarineTrooper.cinf], &why) ||
+        !RollGrip(dark, echoesCinfs[kDarkTrooperModel.cinf], &why)) {
+      error = std::string("the bodies' grip (") + kKindNames[kind] + "): " + why;
+      return false;
+    }
     if (!SwapVisor(dark.model, dark.skin, marine.model, marine.skin, &why)) {
       error = std::string("Dark Trooper with the marine's visor (") + kKindNames[kind] + "): " + why;
       return false;

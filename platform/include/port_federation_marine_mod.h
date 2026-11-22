@@ -5,23 +5,17 @@
 #include "port_echoes_suits_mod.h"
 #include "port_model_variant.h"
 
-// What the game and the mod loader need to know of the "federation-marine" mod (port_federation_marine.h,
+// What the game and the mod loader need to know of the Federation Marine (port_federation_marine.h,
 // the import that makes it), without the import's headers.
 //
-// Echoes' Federation Marine (its Galactic_Trooper, a GF trooper) in place of Samus: the Power and
-// Varia Suits wear the marine, the Gravity Suit the marine in the Gravity Suit's purple, the Phazon
-// Suit Echoes' Dark Trooper with the marine's whole visor. Each look covers the suit's cutscene,
-// in-game and pause screen bodies, its first-person left (grapple) arm, the first-person rifle (in
-// place of the arm cannon and the suit arm) and its Morph and Spider Balls, in the look's colours.
-// While the mod is on it wins over the echoes-suits mod for every suit.
+// Echoes' Federation Marine (its Galactic_Trooper, a GF trooper) in place of Samus, "Play as a
+// Federation Marine" under the Echoes suits' "Play as Dark Samus": the Power and Varia Suits wear the
+// marine, the Gravity Suit the marine in the Gravity Suit's purple, the Phazon Suit Echoes' Dark Trooper
+// with the marine's whole visor. Each look covers the suit's cutscene, in-game and pause screen bodies,
+// its first-person left (grapple) arm, the first-person rifle (in place of the arm cannon and the suit
+// arm) and its Morph and Spider Balls, in the look's colours. The Echoes suits import writes it into the
+// echoes-suits mod (from version 19); 0.46.0 test 50 had it as a mod of its own, federation-marine.
 namespace PortFederationMarine {
-
-// The mod's folder in the mods folder, and its stamp: kVersion, then the build's commit. Bump
-// kVersion when the output changes.
-inline constexpr const char* kModName = "federation-marine";
-inline constexpr const char* kStampName = ".federation-marine-version";
-// 1: the marine, the Gravity marine and the Dark Trooper (0.46.0 test 50).
-inline constexpr int kVersion = 1;
 
 // The looks the import writes, each once, under its own ids (Wear of Prime's Varia resources, as the
 // echoes-suits mod writes its looks).
@@ -38,18 +32,27 @@ inline constexpr int kSuitLooks[PortEchoesSuits::kSuitLookSuits] = {kMarine, kGr
 // PortDreadSamus::FirstPersonCannon(suit): the gun draws it the Dread cannon's way, on its live
 // muzzle locator in place of both Prime's cannon and the suit arm.
 inline constexpr uint32_t kRifleBase = 0x4AD9BBAC;  // Prime's VariaArm, the id the variants derive from
+// How far below the gun's muzzle the rifle is drawn, its shots with it (PortDreadSamus::
+// FirstPersonCannonDrop, gun units): the rifle stands 0.17 above its barrel, Prime's cannon 0.095, so
+// at the muzzle it rose over the cannon's place (the user, 0.46.0 test 50: "a little higher").
+inline constexpr float kRifleDrop = 0.075f;
 // Prime's Spider Ball glass (SamusSpiderBallGlassCMDL; its sets teal, green, aqua): a look's glass is
 // written as Wear(look, kSpiderBallGlass) and served under its suit variant. The Phazon Suit's own
 // Spider Ball (SamusPhazonBallANCS) and glass stay Prime's: the Dark Trooper wears them.
 inline constexpr uint32_t kSpiderBallGlass = 0xAE78BEBE;
 
+// "Play as a Federation Marine" (the setting echoes_federation_marine, off by default; the next mod
+// reload applies it). It and "Play as Dark Samus" exclude each other: turning one on turns the other off.
+void SetPlayAsMarine(bool on);
+bool PlayAsMarine();
+// Whether the loaded mods serve the marine: the setting was on when they last loaded, and the
+// echoes-suits import has it.
+bool MarineServed();
 // The first-person rifle's switch (the setting marine_first_person_rifle, on by default): off, the
-// gun is Prime's own (or the Echoes cannon) with the suit arm, as without the mod. Applies at once.
+// gun is Prime's own (or the Echoes cannon) with the suit arm. Applies at once.
 void SetFirstPersonRifleShown(bool shown);
 bool FirstPersonRifleShown();
-// Whether the loaded mods serve the marine's rifle as the suit's first-person cannon.
+// Whether the loaded mods serve the marine's rifle as the suit's first-person cannon (and it is shown).
 bool ServesFirstPersonRifle(int suit);
-// Whether the loaded mods serve the look of the suit at all (its bodies).
-bool ServesSuit(int suit);
 
 }  // namespace PortFederationMarine
