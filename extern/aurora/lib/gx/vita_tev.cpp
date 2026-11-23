@@ -46,6 +46,34 @@ constexpr int kConstFogColor = kConstIndMtx + 2 * MaxIndTexMtxs;
 constexpr int kConstFogParams = kConstFogColor + 1;
 static_assert(kConstFogParams + 1 == vita_gl::kProgramConstants);
 
+// 0.46.0 test 60: the colour maths in half precision. fragment_body writes these tokens where a
+// colour value's type goes, and with_precision makes them half or float (float: the source as
+// before, byte for byte). Half is finer than GX's TEV over its whole clamped range (-4 to 4: a step
+// of 1/512 at worst against GX's 1/255). The texture coordinates, the indirect stages, the fog's
+// division and the alpha test's 8-bit value stay float, and a program with a TEV compare (its
+// packed 16- and 24-bit values) stays float whole (half_precision). The Vita's compiler (PC oracle)
+// made the particles' program 9 instructions for 12, 5 for 7 without fog, its colour varying half.
+//   $C   half / float, a colour value's type ("$C4 tex", "$C3(1.0)")
+//   $K1  (half) / nothing: a float constant (uConst) into the colour maths; $K3 (half3), $K4 (half4)
+//   $F   (float) / nothing: a colour value into float maths
+std::string with_precision(std::string source, bool half) {
+  struct Token {
+    std::string_view token;
+    std::string_view half;
+    std::string_view full;
+  };
+  static constexpr Token kTokens[] = {
+      {"$K1", "(half)", ""}, {"$K3", "(half3)", ""}, {"$K4", "(half4)", ""}, {"$F", "(float)", ""}, {"$C", "half", "float"},
+  };
+  for (const Token& t : kTokens) {
+    const std::string_view text = half ? t.half : t.full;
+    for (size_t pos = source.find(t.token); pos != std::string::npos; pos = source.find(t.token, pos + text.size())) {
+      source.replace(pos, t.token.size(), text);
+    }
+  }
+  return source;
+}
+
 // Programs by the hash of their source (an unordered_map's elements stay where they are), and by
 // the hash of the GX state they were made from, with that state's family: its hash without the
 // lights each channel part sums (tev_program's key with them zero).
@@ -132,38 +160,43 @@ int program_lights(int count) noexcept { return count <= 2 ? count : count <= 4 
 // program sums the lights (vLit, rgb the colour part's, a the alpha part's: lighting_code).
 std::string raster(int n) {
   const GXState& s = g_gxState;
-  const std::string vertex = n == 0 ? "vRaw" : "float4(1.0)";
+  const std::string vertex = n == 0 ? "vRaw" : "$C4(1.0)";
   const std::string mat = fmt::format("uConst[{}]", kConstMat0 + 2 * n);
   const std::string amb = fmt::format("uConst[{}]", kConstMat0 + 2 * n + 1);
+  // The vertex colour's part, or a register's (a constant) cast into the colour maths' precision.
+  const auto source = [&](GXColorSrc src, const std::string& reg, const char* sw) {
+    return src == GX_SRC_VTX ? fmt::format("{}.{}", vertex, sw)
+                             : fmt::format("{}{}.{}", std::strlen(sw) == 3 ? "$K3" : "$K1", reg, sw);
+  };
   const auto part = [&](int chan, const char* sw) {
     const ColorChannelConfig& cfg = s.colorChannelConfig[chan];
-    std::string m = fmt::format("{}.{}", cfg.matSrc == GX_SRC_VTX ? vertex : mat, sw);
+    std::string m = source(cfg.matSrc, mat, sw);
     if (!cfg.lightingEnabled) {
       return m;
     }
-    std::string a = fmt::format("{}.{}", cfg.ambSrc == GX_SRC_VTX ? vertex : amb, sw);
+    std::string a = source(cfg.ambSrc, amb, sw);
     if (light_count(chan) == 0) {
       return fmt::format("({} * saturate({}))", m, a);
     }
     return fmt::format("({} * saturate({} + vLit{}.{}))", m, a, n, sw);
   };
-  return fmt::format("float4({}, {})", part(GX_COLOR0 + n, "rgb"), part(GX_ALPHA0 + n, "a"));
+  return fmt::format("$C4({}, {})", part(GX_COLOR0 + n, "rgb"), part(GX_ALPHA0 + n, "a"));
 }
 
 std::string konst_color(GXTevKColorSel sel) {
   const u32 v = sel;
   if (v <= GX_TEV_KCSEL_1_8) {
-    return fmt::format("float3({:.6f})", static_cast<float>(8 - v) / 8.f);
+    return fmt::format("$C3({:.6f})", static_cast<float>(8 - v) / 8.f);
   }
   if (v >= GX_TEV_KCSEL_K0 && v <= GX_TEV_KCSEL_K3) {
-    return fmt::format("uConst[{}].rgb", kConstKonst + (v - GX_TEV_KCSEL_K0));
+    return fmt::format("$K3uConst[{}].rgb", kConstKonst + (v - GX_TEV_KCSEL_K0));
   }
   if (v >= GX_TEV_KCSEL_K0_R && v <= GX_TEV_KCSEL_K3_A) {
     const u32 comp = (v - GX_TEV_KCSEL_K0_R) / 4;
     const u32 reg = (v - GX_TEV_KCSEL_K0_R) % 4;
-    return fmt::format("uConst[{}].{}{}{}", kConstKonst + reg, "rgba"[comp], "rgba"[comp], "rgba"[comp]);
+    return fmt::format("$K3uConst[{}].{}{}{}", kConstKonst + reg, "rgba"[comp], "rgba"[comp], "rgba"[comp]);
   }
-  return "float3(1.0)";
+  return "$C3(1.0)";
 }
 
 std::string konst_alpha(GXTevKAlphaSel sel) {
@@ -174,7 +207,7 @@ std::string konst_alpha(GXTevKAlphaSel sel) {
   if (v >= GX_TEV_KASEL_K0_R && v <= GX_TEV_KASEL_K3_A) {
     const u32 comp = (v - GX_TEV_KASEL_K0_R) / 4;
     const u32 reg = (v - GX_TEV_KASEL_K0_R) % 4;
-    return fmt::format("uConst[{}].{}", kConstKonst + reg, "rgba"[comp]);
+    return fmt::format("$K1uConst[{}].{}", kConstKonst + reg, "rgba"[comp]);
   }
   return "1.0";
 }
@@ -206,13 +239,13 @@ std::string color_arg(GXTevColorArg arg) {
   case GX_CC_RASA:
     return "ras.aaa";
   case GX_CC_ONE:
-    return "float3(1.0)";
+    return "$C3(1.0)";
   case GX_CC_HALF:
-    return "float3(0.5)";
+    return "$C3(0.5)";
   case GX_CC_KONST:
     return "konst.rgb";
   default:
-    return "float3(0.0)";
+    return "$C3(0.0)";
   }
 }
 
@@ -443,8 +476,31 @@ std::string tev_coord_code(const TevLayout& layout, u32 i, std::string& body) {
   return simple ? "tevCoord" : fmt::format("(tevCoord / uConst[{}].xy)", kConstTexSize + layout.stageMap[i]);
 }
 
+// Whether a program's colour maths are half (with_precision): not where a stage compares (GX's
+// packed 16- and 24-bit compares need more than half's 11 bits), nor in an indirect program with fog
+// of five stages or more: the Vita's compiler (PC oracle) made those longer in half, 18 of the
+// user's programs (66 instructions to 69 on average, where the rest came out 8% shorter), their
+// float coordinates' and registers' conversions outweighing what half saved.
+bool half_precision(const TevLayout& layout) noexcept {
+  const GXState& s = g_gxState;
+  const u32 stages = std::min<u32>(s.numTevStages, MaxTevStages);
+  if (layout.indirect && s.fog.type != GX_FOG_NONE && stages >= 5) {
+    return false;
+  }
+  for (u32 i = 0; i < stages; ++i) {
+    const TevStage& stage = s.tevStages[i];
+    for (const TevOp* op : {&stage.colorOp, &stage.alphaOp}) {
+      if (op->op != GX_TEV_ADD && op->op != GX_TEV_SUB) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // The fragment program's body: the stages, then the alpha compare (and, with `constantAlpha`,
-// GXSetDstAlpha's constant as the alpha returned: tev_program).
+// GXSetDstAlpha's constant as the alpha returned: tev_program). Its colour values' types are
+// with_precision's tokens.
 std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
   const GXState& s = g_gxState;
   std::string body;
@@ -487,18 +543,18 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     body += fmt::format("  {{ // stage {}\n", i);
     const std::string uv = layout.indirect && tev_coord(stage) ? tev_coord_code(layout, i, body) : std::string();
     if (layout.stageMap[i] >= 0 && !uv.empty()) {
-      body += fmt::format("    float4 tex = tex2D(uTex{}, {}).{};\n", layout.stageMap[i], uv,
+      body += fmt::format("    $C4 tex = tex2D(uTex{}, {}).{};\n", layout.stageMap[i], uv,
                           swizzle(s.tevSwapTable[stage.tevSwapTex]));
     } else if (layout.stageMap[i] >= 0) {
       const int coord = layout.stageCoord[i];
       const bool proj = projective(s.tcgs[layout.coords[coord]]);
-      body += fmt::format("    float4 tex = {}(uTex{}, vUv{}).{};\n", proj ? "tex2Dproj" : "tex2D",
+      body += fmt::format("    $C4 tex = {}(uTex{}, vUv{}).{};\n", proj ? "tex2Dproj" : "tex2D",
                           layout.stageMap[i], coord, swizzle(s.tevSwapTable[stage.tevSwapTex]));
     } else if (reads_texture(stage)) {
-      body += "    float4 tex = float4(0.0);\n";
+      body += "    $C4 tex = $C4(0.0);\n";
     }
     if (reads_raster(stage) && bump_channel(stage)) {
-      body += fmt::format("    float4 ras = float4({});\n", bump_alpha(stage));
+      body += fmt::format("    $C4 ras = $C4({});\n", bump_alpha(stage));
     } else if (reads_raster(stage)) {
       int channel = -1;
       switch (stage.channelId) {
@@ -516,13 +572,13 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
         break;
       }
       if (channel < 0) {
-        body += "    float4 ras = float4(0.0);\n";
+        body += "    $C4 ras = $C4(0.0);\n";
       } else {
-        body += fmt::format("    float4 ras = ({}).{};\n", raster(channel), swizzle(s.tevSwapTable[stage.tevSwapRas]));
+        body += fmt::format("    $C4 ras = ({}).{};\n", raster(channel), swizzle(s.tevSwapTable[stage.tevSwapRas]));
       }
     }
     if (reads_konst(stage)) {
-      body += fmt::format("    float4 konst = float4({}, {});\n", konst_color(stage.kcSel), konst_alpha(stage.kaSel));
+      body += fmt::format("    $C4 konst = $C4({}, {});\n", konst_color(stage.kcSel), konst_alpha(stage.kaSel));
     }
     const auto& cp = stage.colorPass;
     const auto& ap = stage.alphaPass;
@@ -535,11 +591,11 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     const auto clampAlpha = [](GXTevAlphaArg arg) {
       return alpha_in_range(arg) ? alpha_arg(arg) : fmt::format("saturate({})", alpha_arg(arg));
     };
-    body += fmt::format("    float3 cA = {};\n    float3 cB = {};\n    float3 cC = {};\n"
-                        "    float3 cD = {};\n",
+    body += fmt::format("    $C3 cA = {};\n    $C3 cB = {};\n    $C3 cC = {};\n"
+                        "    $C3 cD = {};\n",
                         clampColor(cp.a), clampColor(cp.b), clampColor(cp.c), color_arg(cp.d));
-    body += fmt::format("    float aA = {};\n    float aB = {};\n    float aC = {};\n"
-                        "    float aD = {};\n",
+    body += fmt::format("    $C aA = {};\n    $C aB = {};\n    $C aC = {};\n"
+                        "    $C aD = {};\n",
                         clampAlpha(ap.a), clampAlpha(ap.b), clampAlpha(ap.c), alpha_arg(ap.d));
     // A sum with no d, bias or scale is the lerp of a, b and c, each within [0, 1] (clamped, or
     // such an input): within [0, 1] itself, no clamp needed.
@@ -548,10 +604,10 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     };
     const bool colorInRange = in_range_sum(stage.colorOp, cp.d == GX_CC_ZERO);
     const bool alphaInRange = in_range_sum(stage.alphaOp, ap.d == GX_CA_ZERO);
-    body += fmt::format("    float3 color = {};\n",
-                        combine(stage.colorOp, "float3", "cA", "cB", "cC", "cD", false, colorInRange));
-    body += fmt::format("    float alpha = {};\n",
-                        combine(stage.alphaOp, "float", "aA", "aB", "aC", "aD", true, alphaInRange));
+    body += fmt::format("    $C3 color = {};\n",
+                        combine(stage.colorOp, "$C3", "cA", "cB", "cC", "cD", false, colorInRange));
+    body += fmt::format("    $C alpha = {};\n",
+                        combine(stage.alphaOp, "$C", "aA", "aB", "aC", "aD", true, alphaInRange));
     const u32 colorOut = stage.colorOp.outReg & 3;
     const u32 alphaOut = stage.alphaOp.outReg & 3;
     colorClamped[colorOut] = (stage.colorOp.op == GX_TEV_ADD || stage.colorOp.op == GX_TEV_SUB) &&
@@ -561,7 +617,7 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
   }
   const AlphaCompare& compare = s.alphaCompare;
   if (compare.comp0 != GX_ALWAYS || compare.comp1 != GX_ALWAYS) {
-    body += fmt::format("  float a8 = floor(saturate(R{}.a) * 255.0 + 0.5);\n", lastOut);
+    body += fmt::format("  float a8 = floor(saturate($FR{}.a) * 255.0 + 0.5);\n", lastOut);
     const std::string pass0 = alpha_compare(compare.comp0, "uConst[12].x");
     const std::string pass1 = alpha_compare(compare.comp1, "uConst[12].y");
     std::string pass;
@@ -612,12 +668,12 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
     // leaves it (each curve's is within [0, 1] for fogF's [0, 1]).
     const std::string fogged =
         colorClamped[lastOut] ? fmt::format("R{}.rgb", lastOut) : fmt::format("saturate(R{}.rgb)", lastOut);
-    body += fmt::format("  R{0}.rgb = lerp({2}, uConst[{1}].rgb, fog);\n", lastOut, kConstFogColor, fogged);
+    body += fmt::format("  R{0}.rgb = lerp({2}, $K3uConst[{1}].rgb, $K1fog);\n", lastOut, kConstFogColor, fogged);
   }
   if (constantAlpha) {
     // GXSetDstAlpha's constant for the EFB's alpha, where the blending reads no source alpha
     // (vita_draw.cpp, dst_alpha_mode); the alpha test above took TEV's.
-    body += fmt::format("  return float4(R{}.rgb, uConst[{}].z);\n", lastOut, kConstAlphaRef);
+    body += fmt::format("  return $C4(R{}.rgb, $K1uConst[{}].z);\n", lastOut, kConstAlphaRef);
   } else {
     body += fmt::format("  return R{};\n", lastOut);
   }
@@ -625,8 +681,8 @@ std::string fragment_body(const TevLayout& layout, bool constantAlpha) {
   registerRead[lastOut] = true;
   std::string registers;
   for (int reg = 0; reg < 4; ++reg) {
-    registers += registerRead[reg] ? fmt::format("  float4 R{} = uConst[{}];\n", reg, kConstReg + reg)
-                                   : fmt::format("  float4 R{} = float4(0.0);\n", reg);
+    registers += registerRead[reg] ? fmt::format("  $C4 R{} = $K4uConst[{}];\n", reg, kConstReg + reg)
+                                   : fmt::format("  $C4 R{} = $C4(0.0);\n", reg);
   }
   return registers + body;
 }
@@ -1187,7 +1243,11 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
               u64& key, bool constantAlpha) {
   const GXState& s = g_gxState;
   info.indirect = layout.indirect;
-  const std::string body = pack_constants(fragment_body(layout, constantAlpha), info);
+  // The colour maths half where nothing compares (with_precision), the colour varyings and the
+  // result too: the Vita's compiler kept them float where only the maths were half.
+  const bool half = half_precision(layout);
+  const char* const colorType = half ? "half" : "float";
+  const std::string body = with_precision(pack_constants(fragment_body(layout, constantAlpha), info), half);
   const bool raw = body.find("vRaw") != std::string::npos;
   // The channels whose lights the raster colours take (raster), and so the lights summed.
   bool litChannel[2] = {body.find("vLit0") != std::string::npos, body.find("vLit1") != std::string::npos};
@@ -1226,7 +1286,7 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
     add(vertexParams, "float4 aRaw");
     add(vertexOuts, "float4 out vRaw : COLOR");
     vertexBody += "  vRaw = aRaw;\n";
-    add(fragmentParams, "float4 vRaw : COLOR");
+    add(fragmentParams, fmt::format("{}4 vRaw : COLOR", colorType));
   }
   if (normals) {
     add(vertexParams, "float3 aNrm");
@@ -1297,7 +1357,7 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
         continue;
       }
       add(vertexOuts, fmt::format("float4 out vLit{0} : TEXCOORD{1}", n, litVarying + n));
-      add(fragmentParams, fmt::format("float4 vLit{0} : TEXCOORD{1}", n, litVarying + n));
+      add(fragmentParams, fmt::format("{2}4 vLit{0} : TEXCOORD{1}", n, litVarying + n, colorType));
       vertexBody += fmt::format("  vLit{} = float4(0.0);\n", n);
       for (const int part : {GX_COLOR0 + n, GX_ALPHA0 + n}) {
         const int count = info.lightCounts[part];
@@ -1326,7 +1386,7 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
   }
   const std::string vertexUniforms = fmt::format("uniform float4 uVert[{}]", row);
   vertexSource = fmt::format("void main({}, {}, {}) {{\n{}}}\n", vertexParams, vertexUniforms, vertexOuts, vertexBody);
-  fragmentSource = fmt::format("float4 main({}) : COLOR {{\n{}}}\n", fragmentParams, body);
+  fragmentSource = fmt::format("{}4 main({}) : COLOR {{\n{}}}\n", colorType, fragmentParams, body);
 
   // The key also names the program's binary on the memory card (vita_gl.cpp); the seed changes
   // when what a source compiles to could (the compiler's options, the attribute layout).

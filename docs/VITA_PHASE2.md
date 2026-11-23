@@ -5495,3 +5495,47 @@ log's steady 20 FPS stretch (3 ticks of 8.6 ms, the draw 16.5); not changed here
 
 What to look for in test 59: the fight's frame rate where test 58 had 4 FPS (the same as the fight's
 other parts, 18-30), and the materials line's "templates made" in its reports (a few, not thousands).
+
+## 0.46.0 test 60: the ending, round 5 (the colour maths in half precision)
+
+The user ran the GPU cost test in the ending three times (the cutscene is shorter than the test's
+21 s; "third time's a charm, right?"). The third run (4a86360) had its last eight phases in the heavy
+part:
+- Every draw into one pixel took the GPU to 11.6 ms a frame where it had 50-80, and the frame stayed
+  at 54-55 ms: the CPU (the game thread 85% busy, the FIFO processor 81%) holds the heavy part at about
+  18.5 FPS, and the GPU makes its dips (72-80 ms a frame for some 4 s, 12-14 FPS).
+- At the dips, no display lists (the room and some 670 particle models a frame) left the GPU at 80 ms,
+  and no skinned draws saved about 7; just before them, no blended draws took 30-40 ms to 10. So the
+  dips are the blended particles' pixels: the effects' sprites and the ash, immediate draws.
+- The particles' program was lean already (test 46: 12 instructions). On the Vita's compiler (PC
+  oracle) it is 9 in half precision, 5 for 7 without fog, with its colour varying and its result half
+  too (half maths with a float varying gained nothing with fog; half constants nothing more).
+
+So the generated fragment programs do their colour maths in half (`with_precision`, `half_precision`):
+- In half: the TEV's values (textures, the raster colour, konst, the registers, each stage's sum), the
+  vertex colour and the lights' sums as they come in (`vRaw`, `vLit`), and the result. Half is finer
+  than GX's TEV over the TEV's clamped range, -4 to 4 (a step of 1/512 at worst, GX's 1/255).
+- Float as before: the texture coordinates, the indirect stages, the fog's factor (cast for its mix)
+  and the alpha test's 8-bit value; and whole programs with a TEV compare (GX's packed 16- and 24-bit
+  compares need more than half's 11 bits) or indirect ones with fog of five stages or more (the
+  compiler made those longer in half: 18 programs, 66 instructions to 69 on average). Their sources
+  are byte for byte as before (`with_precision`'s tokens left out), and so are their keys.
+- The vertex programs are unchanged. vitaGL links a half program as any other (its own GLSL
+  translator makes fragment programs half), into the same UCHAR4 output register.
+
+Compiled on the PC with the Vita's own compiler for the user's records (2026-11-21's 2,485 and the
+card's 1,494 of 2026-11-23): 1,559 programs, 1,534 of them half, none failed. The 1,493 with a test 47
+program to compare have 8.4% fewer fragment instructions (33.2 to 30.4 on average; one stage 7.6%
+fewer, lit 8-10%, alpha-tested 3%, indirect 7%).
+
+The pack: every key but 25 changed, so `precompiled.bin` is essential (without it the Vita compiles
+each program at about 3.8 s). The new one holds test 47's programs and test 60's (2,960, 5,629 KiB). It
+goes in `ux0:data/MetroidPrime/shader_cache/` in place of the old one, and tests 47-59 find theirs in
+it too.
+
+What to look for in test 60:
+- The same picture everywhere: fog, lit surfaces, the lava, water and the other indirect effects, the
+  visors, particles, alpha-tested edges (grates, foliage).
+- At the start "precompiled: 2960"; in play few or no programs sent to the compiler thread.
+- The ending's dips (12-14 FPS for some 4 s in its heavy part, the GPU 72-80 ms a frame), its last shot
+  (22-28 FPS), and the GPU busy time in heavy scenes elsewhere against test 59's.
