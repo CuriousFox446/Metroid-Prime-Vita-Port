@@ -2474,39 +2474,23 @@ std::array<u32, kHelperFills> sHelperFillJobs{};
 size_t sNextHelperFill = 0;
 u32 sLastHelperJob = 0;
 bool sNoHelper = false;
-// The helper's jobs' posed pairs (sPosed is the FIFO processor's own path's), one for each fill
-// running at once: since 0.46.0 test 12 the FIFO processor runs jobs the helper has not taken while
-// it waits for them (side_jobs::wait_helper), and since test 57 a second helper thread on the
-// fourth core takes them too, so three fills may run at once. Each takes a free one (a bit of
-// sHelperPosedTaken) and gives it back.
-constexpr u32 kHelperPosed = 4;
-std::vector<PosedVertex> sHelperPosed[kHelperPosed];
-std::atomic<u32> sHelperPosedTaken{0};
-
-u32 take_helper_posed() noexcept {
-  u32 taken = sHelperPosedTaken.load(std::memory_order_relaxed);
-  for (;;) {
-    const u32 slot = static_cast<u32>(std::countr_one(taken));
-    if (slot >= kHelperPosed) {
-      // Four at once: none comes (three threads run fills); look again.
-      taken = sHelperPosedTaken.load(std::memory_order_relaxed);
-      continue;
-    }
-    if (sHelperPosedTaken.compare_exchange_weak(taken, taken | (1u << slot), std::memory_order_acquire,
-                                                std::memory_order_relaxed)) {
-      return slot;
-    }
-  }
-}
+// The helper's jobs' posed pairs (sPosed is the FIFO processor's own path's). Two: since 0.46.0
+// test 12 the FIFO processor runs jobs the helper has not taken while it waits for them
+// (side_jobs::wait_helper), so two fills may run at once, each with one of these.
+std::vector<PosedVertex> sHelperPosed[2];
+std::atomic<bool> sHelperPosedTaken{false};
 
 void run_helper_fill(void* data) {
   const SkinnedFill& f = *static_cast<const SkinnedFill*>(data);
-  const u32 slot = take_helper_posed();
-  std::vector<PosedVertex>& posed = sHelperPosed[slot];
+  // The first if it is free; else the other thread has it, and the second is free (two threads).
+  const bool second = sHelperPosedTaken.exchange(true, std::memory_order_acquire);
+  std::vector<PosedVertex>& posed = sHelperPosed[second ? 1 : 0];
   pose_skinned(f, posed);
   write_skinned(f, posed);
   vita_gl::finish_vertex_writes();
-  sHelperPosedTaken.fetch_and(~(1u << slot), std::memory_order_release);
+  if (!second) {
+    sHelperPosedTaken.store(false, std::memory_order_release);
+  }
 }
 
 // The fill sent to the helper (false: none, the caller fills it).

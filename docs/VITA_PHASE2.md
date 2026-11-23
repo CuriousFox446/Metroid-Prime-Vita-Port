@@ -5433,3 +5433,12 @@ helper's line, the core 3 helper's jobs and the FIFO processor's runs of them (1
 before), the `[split]` lines' begin-wait (5-7 ms) and the `[fifo path]` "vita" share (15-20 ms). The
 game thread's own work (some 51 ms a frame) and the GPU's 46 then hold it: about 19 FPS at most.
 Sound and the particle steps as before (the core 3 helper is below both).
+
+Test 57's log: the ending at 14-17 FPS, mostly 15 (16-17 in test 56), the scenes after it 31-35 and
+22-27 FPS (37-38 and 26-27). No error. The core 3 helper took 3,004 of the 25,379 jobs in 18.6 s, its
+jobs 270 ms a second of its time but 6% of a core (`[threads]`): the side worker, the mixer and the
+others above it on the fourth core preempted it with its jobs in hand, 4.5 times their length. The
+FIFO processor waited for 238 of the helper's jobs, 1,023 ms in all and up to 20 ms (151, 40 ms and
+2.6 ms in test 56), and its frame's end for the helper 22.7 ms a frame (15.1). Taken out again: the
+helper's two files are test 56's (vita_side_jobs.cpp, gx/vita_draw.cpp), and the lesson kept: a thread
+the FIFO processor may wait on at a frame's end must not run below busy work on its core.
