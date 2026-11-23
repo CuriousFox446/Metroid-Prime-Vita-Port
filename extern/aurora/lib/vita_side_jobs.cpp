@@ -424,6 +424,45 @@ void run_stolen(Worker& w, uint32_t job) noexcept {
   gPortGameJobStackSpan = 0;
 }
 
+// Job c + 1 of `w` claimed and run here (run_stolen), counted as the worker's stolen ones.
+void run_stolen_counted(Worker& w, uint32_t job, uint64_t& ranUs) noexcept {
+  const uint64_t ranStart = now_us();
+  run_stolen(w, job);
+  const uint64_t took = now_us() - ranStart;
+  ranUs += took;
+  w.stolen.fetch_add(1, std::memory_order_relaxed);
+  w.stolenUs.fetch_add(took, std::memory_order_relaxed);
+}
+
+// Whether `w`'s next job (the first no thread has claimed) is queued and one the game thread may run.
+// The slot read is the job's: it is not reused before the job has run, which needs it claimed first,
+// and a claim made since this read fails the caller's compare-exchange.
+bool can_steal(const Worker& w) noexcept {
+  const uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+  return c != w.submitted.load(std::memory_order_seq_cst) && w.ring[(c + 1) % kSlots].stealable;
+}
+
+// That next job claimed and run here when it is stealable: true when one ran, or a worker claimed it
+// first (worth looking again at once), false when there was none to take.
+bool steal_next(Worker& w, uint64_t& ranUs) noexcept {
+  uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+  if (c == w.submitted.load(std::memory_order_seq_cst) || !w.ring[(c + 1) % kSlots].stealable) {
+    return false;
+  }
+  if (w.claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
+    run_stolen_counted(w, c + 1, ranUs);
+  }
+  return true;
+}
+
+// The other side worker of the two (the one `w` is not), or none.
+Worker* other_side_worker(const Worker& w) noexcept {
+  Worker* const first = sWorker.load(std::memory_order_acquire);
+  Worker* const second = sSecond.load(std::memory_order_acquire);
+  Worker* const other = &w == first ? second : &w == second ? first : nullptr;
+  return other != nullptr && other->claiming ? other : nullptr;
+}
+
 // The game thread's wait for a side worker's job (0.46.0 test 17): the stealable jobs up to it that
 // no worker has taken yet run here, in their order, as the FIFO processor does with the helper's
 // (wait_helper). In test 16's Sheegoth rooms the game thread waited for the particle steps 11 ms a
@@ -433,33 +472,42 @@ void run_stolen(Worker& w, uint32_t job) noexcept {
 // (run_stolen): in test 17 they ran in the game thread's slot 0, where a projectile's step, taking
 // itself for the game thread, waited for itself (CProjectileWeapon::PortFinishStep), and the game
 // froze. And it waits for its job alone (ran), not for those still running ahead of it.
+// Since test 55, while its job runs on a worker (or waits behind one of the worker's own kind), it
+// runs the next untaken steps of either worker, those queued after its job too. In test 53's ending
+// (MLVL 13D79165) it waited 12 ms a frame for 77 of the 214 effects' steps, every one already taken:
+// it waits for them in the order they began, and the workers take them in that order, so it was
+// always behind them and ran 9 a frame. The steps are each object's own, in no order (two workers
+// already run them side by side), and each is needed within the tick, which these waits end.
 void wait_game(Worker& w, uint32_t job) noexcept {
   const uint64_t start = now_us();
   uint64_t ranUs = 0;
   bool waited = false;
   bool ok = true;
   sGameStealing = true;
+  Worker* const other = other_side_worker(w);
   while (!ran(w, job)) {
     uint32_t c = w.claimed.load(std::memory_order_seq_cst);
     if (static_cast<int32_t>(c - job) < 0) {
       // Job c + 1 was queued before `job` was: its slot holds it till it has run.
       if (w.ring[(c + 1) % kSlots].stealable) {
         if (w.claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
-          const uint64_t ranStart = now_us();
-          run_stolen(w, c + 1);
-          const uint64_t took = now_us() - ranStart;
-          ranUs += took;
-          w.stolen.fetch_add(1, std::memory_order_relaxed);
-          w.stolenUs.fetch_add(took, std::memory_order_relaxed);
+          run_stolen_counted(w, c + 1, ranUs);
         }
         continue;
       }
-      waited = true;
-      ok = wait_until(w, [&] { return ran(w, job) || w.claimed.load(std::memory_order_seq_cst) != c; });
-    } else {
-      waited = true;
-      ok = wait_until(w, [&] { return ran(w, job); });
+    } else if (steal_next(w, ranUs)) {
+      // `job` runs on the worker: the steps queued after it meanwhile.
+      continue;
     }
+    if (other != nullptr && steal_next(*other, ranUs)) {
+      continue;
+    }
+    waited = true;
+    // Till `job` has run, the worker claims another (one of its own kind taken, or one to run here),
+    // or the other worker has one to run here.
+    ok = wait_until(w, [&] {
+      return ran(w, job) || w.claimed.load(std::memory_order_seq_cst) != c || (other != nullptr && can_steal(*other));
+    });
     if (!ok) {
       break;
     }

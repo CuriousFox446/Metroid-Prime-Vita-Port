@@ -699,6 +699,66 @@ inline void put_sets(vita_gl::Vertex& v, u8 sets, float s, float t) noexcept {
   }
 }
 
+// 0.46.0 test 55. The vertices written here, a frame's own, are out of the caches by their next use
+// (several MiB a frame go through them), and each 32-byte line a store misses waits for its fill
+// from memory: in test 53's ending (MLVL 13D79165) the core 0 helper's decodes and skinned calls
+// took about 0.7 and 1.4 us a vertex, three times their instructions, with the GPU at 77% sharing
+// the memory. The lines a few vertices on are asked for ahead (PLD: a hint, which never faults past
+// the end), so their fills overlap the work on these. kWriteAhead vertices on, two lines each (a
+// 56-byte vertex spans at most three, its last one the next vertex's first). The addresses are
+// worked out as integers: past an array's end they are only hints, never pointers into it.
+constexpr u32 kWriteAhead = 6;
+inline void prefetch_at(uintptr_t at) noexcept { __builtin_prefetch(reinterpret_cast<const void*>(at)); }
+inline void prefetch_vertex(const vita_gl::Vertex* v, u32 index) noexcept {
+  const uintptr_t at = reinterpret_cast<uintptr_t>(v) + uintptr_t{index} * sizeof(vita_gl::Vertex);
+  prefetch_at(at);
+  prefetch_at(at + 32);
+}
+
+// The snow's and the ash's (CEnvFxManager: an s16 position and s8 coordinates, 8 bytes) and the
+// particles' (a float position, an RGBA8 colour and float coordinates) in loops of their own, as
+// the general loop's steps decode them; the general loop's switch, its targets taken in turn from
+// one branch, mispredicts each step.
+bool decode_direct_known(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 stride, u32 count,
+                         const vita_gl::Vertex& base, vita_gl::Vertex* out) noexcept {
+  if (nsteps == 2 && steps[0].op == DirectOp::PosS16x3 && steps[1].op == DirectOp::TexS8x2) {
+    const float ps = steps[0].scale;
+    const float ts = steps[1].scale;
+    const u8 sets = steps[1].sets;
+    const u32 texAt = steps[0].advance;
+    for (u32 i = 0; i < count; ++i, vtx += stride) {
+      prefetch_vertex(out, i + kWriteAhead);
+      vita_gl::Vertex& v = out[i];
+      v = base;
+      v.pos[0] = static_cast<s16>(read16(vtx, false)) * ps;
+      v.pos[1] = static_cast<s16>(read16(vtx + 2, false)) * ps;
+      v.pos[2] = static_cast<s16>(read16(vtx + 4, false)) * ps;
+      put_sets(v, sets, static_cast<s8>(vtx[texAt]) * ts, static_cast<s8>(vtx[texAt + 1]) * ts);
+    }
+    return true;
+  }
+  if (nsteps == 3 && steps[0].op == DirectOp::PosF32x3 && steps[1].op == DirectOp::ClrRgba8 &&
+      steps[2].op == DirectOp::TexF32x2) {
+    const u8 sets = steps[2].sets;
+    const u32 clrAt = steps[0].advance;
+    const u32 texAt = clrAt + steps[1].advance;
+    for (u32 i = 0; i < count; ++i, vtx += stride) {
+      prefetch_vertex(out, i + kWriteAhead);
+      vita_gl::Vertex& v = out[i];
+      v = base;
+      v.pos[0] = std::bit_cast<float>(read32(vtx, false));
+      v.pos[1] = std::bit_cast<float>(read32(vtx + 4, false));
+      v.pos[2] = std::bit_cast<float>(read32(vtx + 8, false));
+      std::memcpy(v.color, vtx + clrAt, 4);
+      std::memcpy(v.raw, vtx + clrAt, 4);
+      put_sets(v, sets, std::bit_cast<float>(read32(vtx + texAt, false)),
+               std::bit_cast<float>(read32(vtx + texAt + 4, false)));
+    }
+    return true;
+  }
+  return false;
+}
+
 // `count` vertices of `stride` bytes each from `vtx` (room for them checked by the caller).
 void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 stride, u32 count, u8 grey,
                    vita_gl::Vertex* out) noexcept {
@@ -706,7 +766,11 @@ void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 strid
   base.color[0] = base.color[1] = base.color[2] = grey;
   base.color[3] = 255;
   base.raw[0] = base.raw[1] = base.raw[2] = base.raw[3] = 255;
+  if (decode_direct_known(vtx, steps, nsteps, stride, count, base, out)) {
+    return;
+  }
   for (u32 i = 0; i < count; ++i, vtx += stride) {
+    prefetch_vertex(out, i + kWriteAhead);
     vita_gl::Vertex& v = out[i];
     v = base;
     const u8* p = vtx;
@@ -2340,7 +2404,18 @@ void pose_skinned(const SkinnedFill& f, std::vector<PosedVertex>& posed) noexcep
   if (posed.size() < t.distinct.size()) {
     posed.resize(t.distinct.size());
   }
-  for (size_t d = 0; d < t.distinct.size(); ++d) {
+  // The arrays' entries a few pairs on asked for ahead (0.46.0 test 55, prefetch_vertex's reason).
+  constexpr size_t kPoseAhead = 8;
+  const size_t distinct = t.distinct.size();
+  for (size_t d = 0; d < distinct; ++d) {
+    if (d + kPoseAhead < distinct) {
+      const VertexIndices& a = t.distinct[d + kPoseAhead];
+      prefetch_at(reinterpret_cast<uintptr_t>(f.base) + static_cast<uintptr_t>((u64{a.pos} + f.baseIndex) * f.stride));
+      if (f.normals && a.nrm != UINT32_MAX) {
+        prefetch_at(reinterpret_cast<uintptr_t>(f.nrmBase) +
+                    static_cast<uintptr_t>((u64{a.nrm} + f.nrmBaseIndex) * f.nrmStride));
+      }
+    }
     const VertexIndices& v = t.distinct[d];
     PosedVertex& p = posed[d];
     read_components(f.base + (u64{v.pos} + f.baseIndex) * f.stride, f.posType, f.posScale, f.le, f.cnt, p.pos);
@@ -2357,15 +2432,21 @@ void pose_skinned(const SkinnedFill& f, std::vector<PosedVertex>& posed) noexcep
   }
 }
 
-// Then copied to the vertices that read them.
+// Then copied to the vertices that read them. Since 0.46.0 test 55 each vertex is copied from the
+// template and posed in one pass, the lines ahead of both asked for (prefetch_vertex): the copy of
+// them all first (a call's 45 KiB in the ending, more than the first cache holds) had the posing
+// read every line back.
 void write_skinned(const SkinnedFill& f, const std::vector<PosedVertex>& posed) noexcept {
   const SkinnedTemplate& t = *f.t;
   const std::vector<vita_gl::Vertex>& source = f.byIndex ? t.unique : t.vertices;
   const std::vector<u32>& slots = f.byIndex ? t.uniqueSlots : t.slots;
-  if (f.copySource) {
-    std::memcpy(f.out, source.data(), sizeof(vita_gl::Vertex) * f.count);
-  }
+  const vita_gl::Vertex* const from = f.copySource ? source.data() : nullptr;
   for (u32 i = 0; i < f.count; ++i) {
+    prefetch_vertex(f.out, i + kWriteAhead);
+    if (from != nullptr) {
+      prefetch_vertex(from, i + kWriteAhead);
+      f.out[i] = from[i];
+    }
     const PosedVertex& p = posed[slots[i]];
     for (u32 c = 0; c < f.cnt; ++c) {
       f.out[i].pos[c] = p.pos[c];

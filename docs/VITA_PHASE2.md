@@ -5308,3 +5308,45 @@ None of this is changed in test 54: a round of its own (see the reply).
 
 What to look for in test 54: the credits fill the screen (only the black above and below their band
 cut); the title and file select menus as before; F1 > Video > Display without the two checkboxes.
+
+## 0.46.0 test 55: the ending, round 1 (the game thread's waits, the helper's vertices)
+
+The user, to "Start an optimization round for the ending cutscene?": "Yes, start it". Test 53's log
+again, closer, for the ending's 13-15 FPS (MLVL 13D79165):
+- The game thread's waits in the tick: 13.8 ms a frame in "SM: effects' Think finished", 77 of the
+  frame's 214 effects' steps waited for (12.25 ms). Each one it waited for was already running on a
+  side worker: it waits for them in the order they began, the workers take them in that order, so it
+  was always behind them. It ran 9 steps a frame itself (`wait_game` ran only those queued before the
+  one it waited for), while the side worker on core 3 was 29% busy and side worker 2 20%.
+- The core 0 helper's work: its jobs' time and the FIFO processor's runs of them, report by report
+  across the log, fit 0.7 us an immediate vertex and 1.4 us a skinned call's vertex (calm scenes too:
+  4,200 skinned calls, 1.06 million vertices, 1.4 s). In the ending, 25,400 immediate vertices a frame
+  (the ash 21,600, the particles 5,200) and 17,000 skinned ones (21 calls of a large skinned model, 812
+  vertices each): about 45 ms of work a frame, the helper 28 ms of it and the FIFO processor 20 (run
+  at the frame's end, waiting for the helper). Three times the loops' instructions: the frame's
+  vertices (56 bytes each, several MiB a frame) are out of the caches when written, each line a store
+  misses waits for its fill from memory, and the GPU (77% busy) shares that memory.
+
+Changes:
+- `side_jobs::wait_game`: while its job runs on a worker, or waits behind one of the worker's own kind
+  (a skinned model's vertices), the game thread runs the next untaken step of either side worker,
+  those queued after its job too (`steal_next`, `can_steal`). The steps are each object's own and in
+  no order (two workers run them side by side already), and each is needed within the tick these
+  waits end. It wakes for the other worker's steps too.
+- The helper's loops ask for the lines a few vertices on ahead (`prefetch_vertex`, PLD: a hint, which
+  never faults): `decode_direct` (immediate draws), `write_skinned` and the positions and normals
+  `pose_skinned` reads. `write_skinned` copies each vertex from the template and poses it in one pass
+  (the copy of them all first, 45 KiB a call in the ending, had the posing read every line back). The
+  snow's and the ash's layout (an s16 position, s8 coordinates) and the particles' (a float position,
+  an RGBA8 colour, float coordinates) decode in loops of their own (`decode_direct_known`), as the
+  general loop's steps do, without its switch's mispredictions.
+
+Not changed: the particle models' draws (707 of the frame's 1,218 draws are their surfaces), the GPU's
+51 ms a frame, the MusyX mix. The simulation keeps its 60 Hz (`sim_adaptive` is the
+user's setting, off).
+
+What to look for in test 55: the ending's frame rate against test 53's 13-15 FPS. In the log there:
+the `[particles]` line's effects' "waited for (x ms)" (12.25 ms before) and the side jobs' "the game
+thread ran N of them itself"; the core 0 helper's side-jobs line, its busy share and the FIFO
+processor's runs of its jobs (6,070 ms in 19.8 s before); the `[split]` line's tick (35.9 ms a frame).
+The ash, the particles and the skinned models look as before.
