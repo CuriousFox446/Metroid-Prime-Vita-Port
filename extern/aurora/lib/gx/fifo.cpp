@@ -103,6 +103,12 @@ void process_to(uint64_t target, std::memory_order order) noexcept {
       dispatch_draw_done();
     }
     processed += result.bytesProcessed;
+#ifdef __vita__
+    // What this thread wrote of the frame's vertices, in the GPU's uncached memory since 0.46.0 test
+    // 56, completed (DSB) before the progress is shared, as the core 0 helper's jobs end
+    // (vita_gl::finish_vertex_writes): the barriers below order it for the other threads alone.
+    __asm__ volatile("dsb" ::: "memory");
+#endif
     sProcessed.store(processed, order);
     sProcessed.notify_all();
   }

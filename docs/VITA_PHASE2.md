@@ -5350,3 +5350,53 @@ the `[particles]` line's effects' "waited for (x ms)" (12.25 ms before) and the 
 thread ran N of them itself"; the core 0 helper's side-jobs line, its busy share and the FIFO
 processor's runs of its jobs (6,070 ms in 19.8 s before); the `[split]` line's tick (35.9 ms a frame).
 The ash, the particles and the skinned models look as before.
+
+## 0.46.0 test 56: the ending, round 2 (the frame's vertices drawn where they are written)
+
+Test 55's log (the user's play through the ending on a Rev 2 disc, USA 1.02): the ending at 14-15 FPS
+still (log lines 9250-10880).
+- The game thread's waits worked as meant: the effects' steps waited for 6.6 ms a frame (12.25 in
+  test 53), the game thread running 11,500 steps in 16.6 s itself (2,700 in test 53's 19.8). The work
+  moved onto it, and its tick came to 33 ms a frame (36).
+- Test 55's prefetches changed nothing: across the log's reports the helper's work fits 0.74 us an
+  immediate vertex and 1.31 us a skinned one (0.70 and 1.51 in test 53).
+- The render worker held the frame: busy 80 to 100% (the `[split]` lines; 40% of the CPU in the
+  `[threads]` line, the rest preempted on core 0 or waiting), the game thread waiting 3-12 ms a frame
+  for it to begin the next. Its `[draw path]` lines, every timed present across the log, fit 2.1 us a
+  draw and 16.6 us a KiB of the frame's own vertices: vitaGL copies those (client memory) into its
+  per-frame pool at each draw, and that pool is uncached memory. The ending's frames have 2.5 MB of
+  them (the ash 1.2, the skinned models 1.0, the particles), 57-61 ms of the render worker's draws a
+  frame; the ash after the ending 1.85 MB in 164 draws, 13-30 ms, with the GPU at 62%.
+
+Changes:
+- `VertexArena` (vita_gl.cpp): 36 chunks of 8,192 vertices (15.75 MiB) from vitaGL's own pools,
+  uncached and mapped for the GPU (physically contiguous first, then its RAM). A frame's vertices
+  (`FrameVertices`, which replaces `FrameChunks<Vertex>`) take their chunks there, or from the heap's
+  pool as before when none is free. The render worker draws an arena mesh through one buffer object
+  pointed at its first vertex as the draw is sent (`vglBufferData`: vitaGL reads the buffer's address
+  at each draw, in the program path and the fixed-function one; GXM's attribute offsets are 16-bit, so
+  a mesh's place in its chunk cannot be one): nothing copied. The indices are still copied (small).
+- A chunk its frame lets go of is free again once the GPU is past the present being built then: the
+  fence of that present's last scene (vitaGL ends every scene with `query_fence`), noted at each swap
+  (`VertexArena::swapped`).
+- vitaGL's per-frame pool from 32 MiB to 16 (`vglSetCircularPoolSize`): the arena takes what it gives
+  back. It still holds the indices, the legacy pool, the fixed-function arrays and uploads' staging.
+- The frame's vertices are written once each, whole (made in a local, stored in four 16- and 8-byte
+  blocks): in uncached memory each store goes out on its own. The decode loops (`decode_direct`,
+  `decode_vertices`), `write_skinned` and the masked clears. Test 55's prefetches of the lines being
+  written are gone; those of what the loops read (a skinned template's vertices, the posed arrays)
+  stay.
+- The writes completed before the GPU can read them (DSB): at the end of each core 0 helper job and
+  in `fifo::process_to` before the FIFO's progress is shared (the FIFO thread, or the game thread at a
+  drain); the threads' own barriers order them for the other threads alone.
+- The log: a `frame vertices:` line after each presents report (draws of the frame's own meshes drawn
+  in place, copied, the arena's chunks taken and the times none was free), and the `[draw uploads]`
+  lines count only what vitaGL copied.
+
+What to look for in test 56: the ending's frame rate (14-15 FPS before) and the ash scene after it
+(21-23 FPS before); in the log the `[draw path]` lines' program "draw" share there (57-61 and 13-39 ms
+before), the `frame vertices:` line (in place against copied, "times none free" near 0), the core 0
+helper's work and the FIFO processor's runs of its jobs (now writing to uncached memory). The ash,
+the snow, Samus's model, particles, the masked clears (the Phazon Suit's) and GX's lines (the map's
+outlines, the rain) look as before: a flicker, a stray triangle or a spike from one of them would be
+a chunk taken again too soon.

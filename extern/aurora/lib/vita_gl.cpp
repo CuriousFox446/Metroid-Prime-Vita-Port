@@ -80,6 +80,8 @@ constexpr int kHeight = kScreenHeight;
 constexpr int kRamThreshold = 32 * 1024 * 1024;
 // For glBegin/glEnd; nothing here uses them.
 constexpr int kLegacyPool = 256 * 1024;
+// vitaGL's per-frame pool, all display buffers' (vglSetCircularPoolSize, VertexArena).
+constexpr uint32_t kCircularPool = 16 * 1024 * 1024;
 
 bool g_active = false;
 std::atomic_bool g_fontsChanged{false};
@@ -521,6 +523,230 @@ private:
   size_t m_size = 0;
 };
 
+// 0.46.0 test 56. The frame's own vertices (FrameMesh: the immediate draws, the skinned calls, GX's
+// lines, the masked clears) drawn where they are written, not copied first. vitaGL copies a draw's
+// vertices in client memory into its per-frame pool at the draw (one copy for a program's
+// interleaved attributes), and that pool is uncached: over test 55's timed presents the render
+// worker's draws took 2.1 us each and 16.6 us a KiB of such vertices (13 to 30 ms a frame for the
+// 1.85 MB of the ash after the ending, 57 to 61 ms in the ending's 2.5 MB, where the render worker
+// held the frame at 80 to 100% busy). So a frame's vertex chunks come from here: memory of vitaGL's
+// own pools, uncached and mapped for the GPU (physically contiguous first, then its RAM; the caches
+// would keep what the FIFO thread and the core 0 helper write from the GPU, and no user-mode call
+// cleans them). A draw of them binds one buffer object pointed at its mesh's first vertex as it is
+// sent (vglBufferData: vitaGL reads the buffer's address at each draw), so the arrays' offsets are
+// the vertex's own (GXM's attribute offsets are 16-bit: the mesh's place in a 448 KiB chunk cannot
+// be one). A chunk its frame lets go of is taken again only once the GPU is past the present that was
+// being built then: the fence of that present's last scene (vitaGL ends each scene with
+// query_fence). With none free, a chunk comes from the heap's pool, its meshes copied as before.
+class VertexArena {
+public:
+  static constexpr uint32_t kChunk = 8192; // vertices a chunk (448 KiB), as FrameChunks's
+  static constexpr uint32_t kChunks = 36;  // 15.75 MiB: the ending's frames take 6 or 7 each
+  static constexpr uint32_t kRing = 8;     // the swaps whose fences are kept
+
+  static VertexArena& get() noexcept {
+    static VertexArena& arena = *new VertexArena;
+    return arena;
+  }
+
+  // Once vitaGL is up (initialize): the chunks from its pools, and the buffer the draws point.
+  void init() noexcept {
+    std::lock_guard lock{m_mutex};
+    constexpr uint32_t kBytes = kChunk * sizeof(Vertex);
+    while (m_count < kChunks) {
+      void* memory = vglAlloc(kBytes, VGL_MEM_PHYCONT);
+      if (memory == nullptr) {
+        memory = vglAlloc(kBytes, VGL_MEM_RAM);
+      }
+      if (memory == nullptr) {
+        break;
+      }
+      m_chunks[m_count] = static_cast<Vertex*>(memory);
+      m_free.push_back(static_cast<int>(m_count));
+      ++m_count;
+    }
+    if (m_count != 0) {
+      glGenBuffers(1, &m_buffer);
+    }
+    Log.info("frame vertices: {} chunks of {} KiB in the GPU's memory, drawn where they are written", m_count,
+             kBytes / 1024);
+  }
+
+  // FIFO thread: a chunk the GPU is done with (its number in `index`), or none.
+  Vertex* take(int& index) noexcept {
+    std::lock_guard lock{m_mutex};
+    if (m_count == 0) {
+      return nullptr;
+    }
+    const uint32_t done = *query_fence.address;
+    while (!m_released.empty()) {
+      const auto [chunk, stamp] = m_released.front();
+      const auto age = static_cast<int32_t>(m_presents - stamp);
+      if (age <= 0) {
+        break; // its present not yet swapped
+      }
+      if (age <= static_cast<int32_t>(kRing) && static_cast<int32_t>(done - m_swapFence[stamp % kRing]) < 0) {
+        break; // the GPU not yet past that present's last scene
+      }
+      m_free.push_back(chunk);
+      m_released.pop_front();
+    }
+    if (m_free.empty()) {
+      ++m_missed;
+      return nullptr;
+    }
+    index = m_free.back();
+    m_free.pop_back();
+    ++m_taken;
+    return m_chunks[index];
+  }
+
+  // A chunk a frame lets go of, wherever the frame is destroyed (the reaper, the render worker, the
+  // FIFO thread for one never drawn): free once the GPU is past the present being built now, which
+  // drew the frame or comes after the one that did.
+  void put(int index) noexcept {
+    std::lock_guard lock{m_mutex};
+    m_released.emplace_back(index, m_presents);
+  }
+
+  // Render worker, after each swap: its last scene's fence, for the present it ended.
+  void swapped(uint32_t fence) noexcept {
+    std::lock_guard lock{m_mutex};
+    m_swapFence[m_presents % kRing] = fence;
+    ++m_presents;
+  }
+
+  // Render worker: the buffer object an arena mesh's draw binds.
+  GLuint buffer() const noexcept { return m_buffer; }
+
+  // For the log: chunks taken and runs that found none free since the last call; free and in all now.
+  void take_stats(uint32_t& taken, uint32_t& missed, uint32_t& freeNow, uint32_t& total) noexcept {
+    std::lock_guard lock{m_mutex};
+    taken = std::exchange(m_taken, 0);
+    missed = std::exchange(m_missed, 0);
+    freeNow = static_cast<uint32_t>(m_free.size());
+    total = m_count;
+  }
+
+private:
+  std::mutex m_mutex;
+  std::array<Vertex*, kChunks> m_chunks{};
+  uint32_t m_count = 0;
+  std::vector<int> m_free;
+  std::deque<std::pair<int, uint32_t>> m_released; // chunk, the present built when it was let go
+  uint32_t m_presents = 0;                          // swaps so far: the present being built's number
+  std::array<uint32_t, kRing> m_swapFence{};
+  GLuint m_buffer = 0;
+  uint32_t m_taken = 0;
+  uint32_t m_missed = 0;
+};
+
+// A frame's own vertices (FrameMesh), in chunks as FrameChunks keeps them (a mesh's vertices
+// together in one, a place its chunk's number above kOffsetBits and its place in it below), each
+// chunk from the GPU's arena (VertexArena: drawn in place) or, with none free there, the heap's pool
+// (copied at the draw, as before test 56). A run larger than a chunk gets heap memory of its own.
+class FrameVertices {
+public:
+  using Pool = ChunkPool<Vertex, VertexArena::kChunk, 16>;
+  static constexpr uint32_t kOffsetBits = 20;
+  static constexpr uint32_t kOffsetMask = (1u << kOffsetBits) - 1;
+
+  FrameVertices() = default;
+  FrameVertices(FrameVertices&& other) noexcept
+  : m_chunks(std::move(other.m_chunks)), m_used(std::exchange(other.m_used, 0)),
+    m_size(std::exchange(other.m_size, 0)) {}
+  FrameVertices& operator=(FrameVertices&& other) noexcept {
+    if (this != &other) {
+      release();
+      m_chunks = std::move(other.m_chunks);
+      m_used = std::exchange(other.m_used, 0);
+      m_size = std::exchange(other.m_size, 0);
+    }
+    return *this;
+  }
+  ~FrameVertices() { release(); }
+
+  // Room for `count` more, `at` set to their place; the pointer holds for the frame.
+  Vertex* grow(uint32_t count, uint32_t& at) {
+    if (m_chunks.empty() || m_used + count > m_chunks.back().capacity) {
+      add_chunk(count);
+    }
+    Piece& chunk = m_chunks.back();
+    at = (static_cast<uint32_t>(m_chunks.size() - 1) << kOffsetBits) | m_used;
+    Vertex* const out = chunk.data + m_used;
+    m_used += count;
+    m_size += count;
+    return out;
+  }
+  // Back to `at`, the place the last grow gave (in the last chunk).
+  void trim(uint32_t at) {
+    const uint32_t chunk = at >> kOffsetBits;
+    const uint32_t offset = at & kOffsetMask;
+    if (!m_chunks.empty() && chunk == m_chunks.size() - 1 && offset < m_used) {
+      m_size -= m_used - offset;
+      m_used = offset;
+    }
+  }
+  const Vertex* at(uint32_t place) const { return m_chunks[place >> kOffsetBits].data + (place & kOffsetMask); }
+  Vertex* at(uint32_t place) { return m_chunks[place >> kOffsetBits].data + (place & kOffsetMask); }
+  // Whether `place` lies in a chunk of the GPU's arena (its meshes drawn in place).
+  bool in_arena(uint32_t place) const { return m_chunks[place >> kOffsetBits].arena >= 0; }
+  // Whether `count` from `place` lie in what was handed out (a chunk before the last as far as its
+  // capacity: a run never crosses one).
+  bool holds(uint32_t place, uint32_t count) const {
+    const uint32_t chunk = place >> kOffsetBits;
+    if (chunk >= m_chunks.size()) {
+      return false;
+    }
+    const uint32_t end = chunk + 1 == m_chunks.size() ? m_used : m_chunks[chunk].capacity;
+    return (place & kOffsetMask) + count <= end;
+  }
+  uint32_t size() const { return m_size; }
+  // Growing never moves what it holds.
+  uint32_t room() const { return UINT32_MAX; }
+
+private:
+  struct Piece {
+    Vertex* data = nullptr;
+    std::unique_ptr<Vertex[]> owned; // a heap chunk's, or a larger run's
+    int arena = -1;                  // an arena chunk's number
+    uint32_t capacity = 0;
+  };
+  void add_chunk(uint32_t count) {
+    Piece chunk;
+    if (count <= VertexArena::kChunk) {
+      chunk.capacity = VertexArena::kChunk;
+      chunk.data = VertexArena::get().take(chunk.arena);
+      if (chunk.data == nullptr) {
+        chunk.arena = -1;
+        chunk.owned = Pool::get().take();
+        chunk.data = chunk.owned.get();
+      }
+    } else {
+      chunk.owned.reset(new Vertex[count]);
+      chunk.data = chunk.owned.get();
+      chunk.capacity = count;
+    }
+    m_chunks.push_back(std::move(chunk));
+    m_used = 0;
+  }
+  void release() noexcept {
+    for (Piece& chunk : m_chunks) {
+      if (chunk.arena >= 0) {
+        VertexArena::get().put(chunk.arena);
+      } else if (chunk.capacity == VertexArena::kChunk) {
+        Pool::get().put(std::move(chunk.owned));
+      }
+    }
+    m_chunks.clear();
+    m_used = 0;
+    m_size = 0;
+  }
+  std::vector<Piece> m_chunks;
+  uint32_t m_used = 0; // in the last chunk
+  uint32_t m_size = 0;
+};
+
 // A frame's draws, their programs' constant rows (ProgramInputs) and the vertices and indices of
 // its own meshes (FrameMesh), and its serial, a new one each frame (from 1), by which the render
 // worker tells one frame's rows from another's; and its EFB copies among the draws, counted. The
@@ -531,7 +757,7 @@ struct Frame {
   // The fixed-function parts of the draws that have one (record_fixed), 128 a chunk (30 KiB).
   FrameChunks<DrawFixed, 128, 16> fixed;
   FrameChunks<std::array<float, 4>> constants;
-  FrameChunks<Vertex> vertices;
+  FrameVertices vertices;
   FrameArray<uint16_t> indices;
   // What its draws draw with, each held once (keep), let go with the frame.
   std::vector<std::shared_ptr<const void>> kept;
@@ -2461,6 +2687,11 @@ struct PresentStats {
   uint64_t copyPixels = 0;
   uint64_t copyUs = 0;
   uint32_t copiesWaiting = 0;
+  // Draws of the frame's own meshes drawn in place (VertexArena) and copied by vitaGL, and the
+  // copied ones' vertices (0.46.0 test 56).
+  uint64_t inPlace = 0;
+  uint64_t copied = 0;
+  uint64_t copiedVertices = 0;
 };
 PresentStats g_presentStats;
 
@@ -2580,28 +2811,43 @@ void bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
 }
 
 // Binds a draw's mesh (render worker) and gives what its arrays' offsets are from: its Mesh's
-// (bind_mesh), or for a mesh of the frame's own no buffer, its vertices in the frame, counted for
-// the log as a Mesh in client memory is (vitaGL copies them at each draw).
+// (bind_mesh); for a mesh of the frame's own in the GPU's arena (VertexArena, 0.46.0 test 56) the
+// arena's buffer object pointed at its first vertex, the offsets the vertex's own; else no buffer,
+// its vertices in the frame, counted for the log as a Mesh in client memory is (vitaGL copies them
+// at each draw). The program path and the fixed-function one both read a bound buffer's address
+// at the draw.
 const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath path, Section section) noexcept {
   if (draw.mesh != nullptr) {
     bind_mesh(*draw.mesh, path, section);
     return draw.mesh->base();
   }
-  glBindBuffer(GL_ARRAY_BUFFER, 0);
   const FrameMesh& mesh = draw.frameMesh;
+  const Vertex* const first = frame.vertices.at(mesh.vertexAt);
+  const bool inPlace = frame.vertices.in_arena(mesh.vertexAt);
+  if (inPlace) {
+    glBindBuffer(GL_ARRAY_BUFFER, VertexArena::get().buffer());
+    vglBufferData(GL_ARRAY_BUFFER, first);
+    ++g_presentStats.inPlace;
+  } else {
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    ++g_presentStats.copied;
+    g_presentStats.copiedVertices += mesh.vertexCount;
+  }
   const uint64_t us = g_clock.mark(section);
   if (g_clock.on) {
     SectionClock::Uploads& uploads = g_clock.uploads[path][static_cast<int>(mesh.kind)];
     ++uploads.draws;
     uploads.us += us;
-    ++uploads.made;
-    uploads.bytes += static_cast<uint64_t>(mesh.vertexCount) * sizeof(Vertex);
+    if (!inPlace) {
+      ++uploads.made;
+      uploads.bytes += static_cast<uint64_t>(mesh.vertexCount) * sizeof(Vertex);
+    }
   }
   if (path == kPathFixed && mesh.vertexCount > g_clock.largestFixedVertices) {
     g_clock.largestFixedVertices = mesh.vertexCount;
     g_clock.largestFixedKind = mesh.kind;
   }
-  return reinterpret_cast<const uint8_t*>(frame.vertices.at(mesh.vertexAt));
+  return inPlace ? nullptr : reinterpret_cast<const uint8_t*>(first);
 }
 
 // Draws a draw's mesh, its arrays set (render worker): a mesh of the frame's own by its indices
@@ -4051,10 +4297,17 @@ bool initialize() noexcept {
   vglSetupRenderTargetScenesNum(8, 4);
   // The shader patcher's heaps, larger (kPatcherFragmentUsse's comment).
   vglSetupShaderPatcher(kPatcherBuffer, kPatcherVertexUsse, kPatcherFragmentUsse);
+  // vitaGL's per-frame pool (32 MiB by default, a third for each display buffer, in its RAM and
+  // physically contiguous pools): since 0.46.0 test 56 the frame's own vertices are in the GPU's
+  // arena (VertexArena), which takes the 16 MiB this gives back. The pool keeps the draws' indices,
+  // a frame's legacy pool (kLegacyPool), the fixed-function draws' arrays and texture uploads' staging;
+  // a frame past its share takes vitaGL's pools' memory for the rest, as before.
+  vglSetCircularPoolSize(kCircularPool);
   // Not a success flag: this vitaGL returns true when the requested size was beyond the display's
   // and it started at the display's own size instead, false when it started as asked. Either way
   // GXM is now vitaGL's, so nothing else (SDL's renderer) may initialise it after this.
   const bool clamped = vglInitExtended(kLegacyPool, kWidth, kHeight, kRamThreshold, SCE_GXM_MULTISAMPLE_NONE);
+  VertexArena::get().init();
   use_compiler_heap();
   g_copyProgram = make_program(std::string(kCopyVertex), std::string(kCopyFragment), kCopyProgramKey);
   g_paletteProgram = make_program(std::string(kCopyVertex), std::string(kPaletteFragment), kPaletteProgramKey);
@@ -4391,6 +4644,17 @@ void present(ImDrawData* overlay) noexcept {
                                  : 0.0,
              g_world.width, g_world.height, g_pacing[0], g_pacing[1], g_pacing[2], g_pacing[3], g_pacing[4],
              g_swapApplied);
+    {
+      uint32_t taken = 0;
+      uint32_t missed = 0;
+      uint32_t freeNow = 0;
+      uint32_t total = 0;
+      VertexArena::get().take_stats(taken, missed, freeNow, total);
+      Log.info("frame vertices: {} draws of the frame's own meshes drawn in place, {} copied by vitaGL ({} vertices); "
+               "the GPU's arena: {} chunks taken, {} times none free (the heap's then), {} of {} free now",
+               g_presentStats.inPlace, g_presentStats.copied, g_presentStats.copiedVertices, taken, missed, freeNow,
+               total);
+    }
     g_pacing = {};
     g_gpu.reportBusyUs = 0;
     g_gpu.reportUs = 0;
@@ -4417,6 +4681,9 @@ void present(ImDrawData* overlay) noexcept {
   }
   const uint64_t swapStart = sceKernelGetProcessTimeWide();
   vglSwapBuffers(update_keyboard() ? GL_TRUE : GL_FALSE);
+  // The fence of this present's last scene: the arena's chunks let go of while it was built are free
+  // once the GPU is past it (VertexArena).
+  VertexArena::get().swapped(query_fence.value);
   gpu_swapped(swapStart);
   gpu_test::step();
   {

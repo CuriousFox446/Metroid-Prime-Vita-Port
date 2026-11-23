@@ -117,9 +117,12 @@ void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept;
 // A mesh made for one frame alone and drawn with a program (gx/vita_draw.cpp: immediate draws,
 // GX's lines, skinned calls): its vertices among the frame's own (frame_vertices) and, drawn by
 // index, its indices among the frame's (frame_indices, padded as pad_triangle_indices pads). The
-// frame holds them till it is drawn, and vitaGL copies a draw's into its per-frame pool: no Mesh
-// to make and free for each (a frame's 500 or more in Tallon Overworld, two allocations each on
-// the FIFO thread and two frees on the reaper's, all through one heap lock).
+// frame holds them till it is drawn: no Mesh to make and free for each (a frame's 500 or more in
+// Tallon Overworld, two allocations each on the FIFO thread and two frees on the reaper's, all
+// through one heap lock). Since 0.46.0 test 56 the frame's vertices are in the GPU's memory as a rule
+// (vita_gl.cpp's VertexArena), uncached, and drawn where they are: write each one whole, once, and
+// read none back. In heap memory (none of the GPU's free), vitaGL copies a draw's into its per-frame
+// pool, as before.
 struct FrameMesh {
   uint32_t vertexAt = 0;
   uint32_t vertexCount = 0; // 0: none, the draw's mesh is its Mesh
@@ -357,10 +360,20 @@ uint32_t recording_serial() noexcept;
 // FIFO thread: the draws recorded so far in the frame being recorded.
 uint32_t recorded_draw_count() noexcept;
 // FIFO thread: room for `count` vertices of a FrameMesh among the frame's own, `at` set to where
-// it starts: the caller writes each whole (none is cleared first), before its next call here. The
-// frame's vertices cut back to `at`'s first (a draw that could not be decoded after all).
+// it starts: the caller writes each whole and once (none is cleared first), and reads none back (the
+// GPU's uncached memory as a rule since 0.46.0 test 56). The frame's vertices cut back to `at`'s
+// first (a draw that could not be decoded after all).
 Vertex* frame_vertices(uint32_t count, uint32_t& at) noexcept;
 void trim_frame_vertices(uint32_t at) noexcept;
+// The calling thread's writes to the frame's vertices completed, not only ordered (DSB): the GPU
+// reads them from uncached memory, outside the barriers the threads' handing over keeps (0.46.0
+// test 56). The core 0 helper's jobs end with it; gx/fifo.cpp's process_to keeps one for the
+// thread that processes the FIFO (the FIFO thread, or the game thread at a drain).
+inline void finish_vertex_writes() noexcept {
+#ifdef __vita__
+  __asm__ volatile("dsb" ::: "memory");
+#endif
+}
 // FIFO thread: how many more vertices frame_vertices hands out before the frame's vertices move
 // (they grow by doubling): a vertex written later by another thread (the core 0 helper) must be
 // written before they do.

@@ -699,15 +699,16 @@ inline void put_sets(vita_gl::Vertex& v, u8 sets, float s, float t) noexcept {
   }
 }
 
-// 0.46.0 test 55. The vertices written here, a frame's own, are out of the caches by their next use
-// (several MiB a frame go through them), and each 32-byte line a store misses waits for its fill
-// from memory: in test 53's ending (MLVL 13D79165) the core 0 helper's decodes and skinned calls
-// took about 0.7 and 1.4 us a vertex, three times their instructions, with the GPU at 77% sharing
-// the memory. The lines a few vertices on are asked for ahead (PLD: a hint, which never faults past
-// the end), so their fills overlap the work on these. kWriteAhead vertices on, two lines each (a
-// 56-byte vertex spans at most three, its last one the next vertex's first). The addresses are
-// worked out as integers: past an array's end they are only hints, never pointers into it.
-constexpr u32 kWriteAhead = 6;
+// The frame's own vertices are written once each, whole (0.46.0 test 56): since then they are in the
+// GPU's memory as a rule (vita_gl's VertexArena), uncached, where each store goes out to memory on
+// its own, so a vertex is made in a local and stored in one piece (a field set twice, the base's
+// and then its own, would go out twice). Test 55 asked for the lines being written ahead of time
+// (PLD), which changed nothing in its log (0.74 us an immediate vertex against test 53's 0.70);
+// only what the loops read is still asked for ahead: a skinned template's vertices and the posed
+// arrays (kReadAhead vertices on, two lines each, a 56-byte vertex spanning at most three, its last
+// the next one's first). The addresses are worked out as integers: past an array's end they are
+// only hints, never pointers into it, and PLD never faults.
+constexpr u32 kReadAhead = 6;
 inline void prefetch_at(uintptr_t at) noexcept { __builtin_prefetch(reinterpret_cast<const void*>(at)); }
 inline void prefetch_vertex(const vita_gl::Vertex* v, u32 index) noexcept {
   const uintptr_t at = reinterpret_cast<uintptr_t>(v) + uintptr_t{index} * sizeof(vita_gl::Vertex);
@@ -727,13 +728,12 @@ bool decode_direct_known(const u8* vtx, const DirectStep* steps, u32 nsteps, u32
     const u8 sets = steps[1].sets;
     const u32 texAt = steps[0].advance;
     for (u32 i = 0; i < count; ++i, vtx += stride) {
-      prefetch_vertex(out, i + kWriteAhead);
-      vita_gl::Vertex& v = out[i];
-      v = base;
+      vita_gl::Vertex v = base;
       v.pos[0] = static_cast<s16>(read16(vtx, false)) * ps;
       v.pos[1] = static_cast<s16>(read16(vtx + 2, false)) * ps;
       v.pos[2] = static_cast<s16>(read16(vtx + 4, false)) * ps;
       put_sets(v, sets, static_cast<s8>(vtx[texAt]) * ts, static_cast<s8>(vtx[texAt + 1]) * ts);
+      out[i] = v;
     }
     return true;
   }
@@ -743,9 +743,7 @@ bool decode_direct_known(const u8* vtx, const DirectStep* steps, u32 nsteps, u32
     const u32 clrAt = steps[0].advance;
     const u32 texAt = clrAt + steps[1].advance;
     for (u32 i = 0; i < count; ++i, vtx += stride) {
-      prefetch_vertex(out, i + kWriteAhead);
-      vita_gl::Vertex& v = out[i];
-      v = base;
+      vita_gl::Vertex v = base;
       v.pos[0] = std::bit_cast<float>(read32(vtx, false));
       v.pos[1] = std::bit_cast<float>(read32(vtx + 4, false));
       v.pos[2] = std::bit_cast<float>(read32(vtx + 8, false));
@@ -753,6 +751,7 @@ bool decode_direct_known(const u8* vtx, const DirectStep* steps, u32 nsteps, u32
       std::memcpy(v.raw, vtx + clrAt, 4);
       put_sets(v, sets, std::bit_cast<float>(read32(vtx + texAt, false)),
                std::bit_cast<float>(read32(vtx + texAt + 4, false)));
+      out[i] = v;
     }
     return true;
   }
@@ -770,9 +769,7 @@ void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 strid
     return;
   }
   for (u32 i = 0; i < count; ++i, vtx += stride) {
-    prefetch_vertex(out, i + kWriteAhead);
-    vita_gl::Vertex& v = out[i];
-    v = base;
+    vita_gl::Vertex v = base;
     const u8* p = vtx;
     for (u32 s = 0; s < nsteps; ++s) {
       const DirectStep& d = steps[s];
@@ -828,6 +825,7 @@ void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 strid
       }
       p += d.advance;
     }
+    out[i] = v;
   }
 }
 
@@ -858,9 +856,12 @@ bool decode_vertices(const u8*& vtx, const u8* end, GXVtxFmt fmt, u32 count, con
     return true;
   }
   for (u32 i = 0; i < count; ++i) {
-    if (vtx >= end || !decode_vertex(vtx, plan.data(), steps, grey, out[i], indices != nullptr ? &indices[i] : nullptr)) {
+    // Made whole here, then stored (out may be the GPU's memory: the comment at kReadAhead).
+    vita_gl::Vertex v;
+    if (vtx >= end || !decode_vertex(vtx, plan.data(), steps, grey, v, indices != nullptr ? &indices[i] : nullptr)) {
       return false;
     }
+    out[i] = v;
   }
   return vtx <= end;
 }
@@ -2404,7 +2405,7 @@ void pose_skinned(const SkinnedFill& f, std::vector<PosedVertex>& posed) noexcep
   if (posed.size() < t.distinct.size()) {
     posed.resize(t.distinct.size());
   }
-  // The arrays' entries a few pairs on asked for ahead (0.46.0 test 55, prefetch_vertex's reason).
+  // The arrays' entries a few pairs on asked for ahead (0.46.0 test 55; the comment at kReadAhead).
   constexpr size_t kPoseAhead = 8;
   const size_t distinct = t.distinct.size();
   for (size_t d = 0; d < distinct; ++d) {
@@ -2433,27 +2434,34 @@ void pose_skinned(const SkinnedFill& f, std::vector<PosedVertex>& posed) noexcep
 }
 
 // Then copied to the vertices that read them. Since 0.46.0 test 55 each vertex is copied from the
-// template and posed in one pass, the lines ahead of both asked for (prefetch_vertex): the copy of
-// them all first (a call's 45 KiB in the ending, more than the first cache holds) had the posing
-// read every line back.
+// template and posed in one pass (the copy of them all first, a call's 45 KiB in the ending, more
+// than the first cache holds, had the posing read every line back); since test 56 a frame's vertex
+// (`copySource`, the frame's own) is made in a local and stored whole (the comment at kReadAhead).
+// Without `copySource`, `out` is the caller's own copy of the template, posed where it is.
 void write_skinned(const SkinnedFill& f, const std::vector<PosedVertex>& posed) noexcept {
   const SkinnedTemplate& t = *f.t;
   const std::vector<vita_gl::Vertex>& source = f.byIndex ? t.unique : t.vertices;
   const std::vector<u32>& slots = f.byIndex ? t.uniqueSlots : t.slots;
-  const vita_gl::Vertex* const from = f.copySource ? source.data() : nullptr;
-  for (u32 i = 0; i < f.count; ++i) {
-    prefetch_vertex(f.out, i + kWriteAhead);
-    if (from != nullptr) {
-      prefetch_vertex(from, i + kWriteAhead);
-      f.out[i] = from[i];
-    }
-    const PosedVertex& p = posed[slots[i]];
+  const auto pose = [&f](vita_gl::Vertex& v, const PosedVertex& p) {
     for (u32 c = 0; c < f.cnt; ++c) {
-      f.out[i].pos[c] = p.pos[c];
+      v.pos[c] = p.pos[c];
     }
     if (p.hasNormal) {
-      std::memcpy(f.out[i].normal, p.normal, sizeof(p.normal));
+      std::memcpy(v.normal, p.normal, sizeof(p.normal));
     }
+  };
+  if (!f.copySource) {
+    for (u32 i = 0; i < f.count; ++i) {
+      pose(f.out[i], posed[slots[i]]);
+    }
+    return;
+  }
+  const vita_gl::Vertex* const from = source.data();
+  for (u32 i = 0; i < f.count; ++i) {
+    prefetch_vertex(from, i + kReadAhead);
+    vita_gl::Vertex v = from[i];
+    pose(v, posed[slots[i]]);
+    f.out[i] = v;
   }
 }
 
@@ -2479,6 +2487,7 @@ void run_helper_fill(void* data) {
   std::vector<PosedVertex>& posed = sHelperPosed[second ? 1 : 0];
   pose_skinned(f, posed);
   write_skinned(f, posed);
+  vita_gl::finish_vertex_writes();
   if (!second) {
     sHelperPosedTaken.store(false, std::memory_order_release);
   }
@@ -2557,6 +2566,7 @@ size_t sStageUsed = 0;
 void run_immediate_fill(void* data) {
   const ImmediateFill& f = *static_cast<const ImmediateFill*>(data);
   decode_direct(f.src, f.steps, f.nsteps, f.stride, f.count, f.grey, f.out);
+  vita_gl::finish_vertex_writes();
 }
 
 // Room for `size` bytes the helper will read: when it has run out, what is there is read first.
@@ -3159,14 +3169,15 @@ void record_masked_clear(const vita_gl::ScreenRect& rect) noexcept {
     rgba[c] = static_cast<u8>(std::lround(std::clamp(g_gxState.clearColor[c], 0.f, 1.f) * 255.f));
   }
   for (int i = 0; i < 6; ++i) {
-    vita_gl::Vertex& v = out[i];
-    v = vita_gl::Vertex{};
+    // Made whole, then stored (the frame's vertices may be the GPU's memory: kReadAhead's comment).
+    vita_gl::Vertex v{};
     v.pos[0] = kCorners[i][0];
     v.pos[1] = kCorners[i][1];
     v.pos[2] = z;
     std::memcpy(v.color, rgba, sizeof(rgba));
     std::memcpy(v.raw, rgba, sizeof(rgba));
     v.shade = 255;
+    out[i] = v;
   }
   // Drawn fixed-function: its part (identity matrices, no texture) among the frame's.
   vita_gl::Draw draw{.frameMesh = mesh};
