@@ -72,6 +72,10 @@ void DrawVideoDisplay() {
     SetAspectMode(static_cast< EAspectMode >(aspect));
     MarkDirty();
   }
+#ifndef __vita__
+  // On the Vita the menus (and since 0.46.0 test 54 the credits) are always zoomed (the user: "you
+  // don't need to show the two options"): stretch_menus and zoom_menus keep their saved values, by
+  // default off and on there.
   if (ImGui::Checkbox("Stretch menus to the screen", &sStretchMenus)) {
     MarkDirty();
   }
@@ -83,9 +87,11 @@ void DrawVideoDisplay() {
     MarkDirty();
   }
   ImGui::EndDisabled();
-  ImGui::SetItemTooltip("The title and file select menus' picture is a wide band inside their 4:3 frame.\n"
-                        "On: zoomed in proportion until the frame fills the screen's width; only the\n"
-                        "black above and below the band is cut. Off: the whole 4:3 frame, smaller.");
+  ImGui::SetItemTooltip("The title and file select menus' picture is a wide band inside their 4:3 frame,\n"
+                        "as is the credits'. On: zoomed in proportion until the frame fills the screen's\n"
+                        "width; only the black above and below the band is cut. Off: the whole 4:3 frame,\n"
+                        "smaller.");
+#endif
   if (ImGui::Checkbox("Cutscene black bars", &sCinemaBars)) {
     MarkDirty();
   }

@@ -5274,3 +5274,37 @@ seven a frame (2,100) dropped none, so it came and went.
 What to look for in test 53: third person in the Phazon Suit, moving and turning where the sun's
 shadows fall: the aura round the body every frame. The presents report's copies line: "past a
 frame's 12" at 0; the frame rate there against test 52's (about 33-38 FPS in those windows).
+
+## 0.46.0 test 54: the credits zoomed; the menus' zoom options off the Vita's menu
+
+The user, with a photo of the credits (a small 4:3 box with black all round): "Remember when we
+zoomed in the main menu & save select menu? Gonna need to do that for the credits too", and of F1 >
+Video > Display with "Stretch menus to the screen" and "Zoom menus to fill the screen" circled: "you
+don't need to show the two options I have circled".
+- The credits (`CCredits::Draw`) zoom as the front end's menus do (test 22): their background movie
+  (creditBG.thp) is 4:3 with a 16:9 picture band, and the text and the port's bars are laid out for
+  it (`PortCreditsWidth`, `PortDrawCreditsBars`), so GX's viewport scaled about the screen's centre
+  (about 1.32 on the Vita) fills the screen with the band and cuts only the black above and below
+  it. `PortMenuZoom` and `PortMenuZoomFactor` moved from CFrontEndUI.cpp to
+  include/MetroidPrime/PortMenuZoom.hpp, shared by both.
+- F1 > Video > Display leaves out the two checkboxes on the Vita (and the settings search its
+  "Stretch menus" entry): `stretch_menus` and `zoom_menus` keep their saved values (by default off and
+  on there), as test 43 left the resolution scale's.
+
+Test 53's log, the ending (MLVL 13D79165, the user: "FPS drops in at the ending cutscene ... It's
+either the fire effects ... or something else"): about 17 s at 13-15 FPS. Every core full at once:
+- The game thread 85% busy, about 70 ms a frame: 4.2 ticks a frame (the simulation keeps its 60 Hz)
+  of 8 ms, 35 ms, with 11 ms of them waiting for the side worker's particle steps; the draw 27 ms, 18
+  of them `CElementGen::Render`. Some 5,600 particles updated a frame in 300 systems, 211 made.
+- About 650 of the frame's 1,218 draws are particle models (`CElementGen::RenderModels`, a display
+  list a particle): each one a whole draw on the game thread, the FIFO processor and the GPU.
+- `CEnvFxManager` (the falling ash) draws 64 immediate batches of some 21,000 vertices a frame,
+  decoded by the core 0 helper; the FIFO processor (78% busy) ran 30% of its time in the helper's jobs
+  itself, waiting for it.
+- Core 3: the side worker's particle jobs 31% and the MusyX mixer some 55% (13 voices a frame: 386 ms
+  a second rendered, 167 under its lock).
+- The GPU 51 ms a frame. The render worker waits on it (39% busy).
+None of this is changed in test 54: a round of its own (see the reply).
+
+What to look for in test 54: the credits fill the screen (only the black above and below their band
+cut); the title and file select menus as before; F1 > Video > Display without the two checkboxes.

@@ -153,7 +153,9 @@
 #endif
 {"Video", "Display", "Display", "Vsync", "vertical sync tearing refresh"},
 {"Video", "Display", "Display", "Aspect ratio", "widescreen 4:3 16:9 stretch shape"},
+#if !defined(__vita__)
 {"Video", "Display", "Display", "Stretch menus to the screen", "title file select widescreen 4:3 stretch black bars"},
+#endif
 {"Video", "Display", "Display", "Cutscene black bars", "letterbox cinematic bars"},
 {"Video", "Display", "Display", "Morph ball black bars", "letterbox morph ball camera bars"},
 {"Video", "Display", "Display", "Sharp scan window", "scan visor window sharp pixel"},

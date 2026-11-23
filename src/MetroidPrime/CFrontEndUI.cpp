@@ -68,6 +68,8 @@
 #include "rstl/StringExtras.hpp"
 #include "rstl/math.hpp"
 
+#include "MetroidPrime/PortMenuZoom.hpp"
+
 namespace {
 // Port unlocks (F1 > Game > Unlocks) stand in for the save's flags here without
 // touching them, so switching an unlock off locks the extra again. The Fusion
@@ -91,51 +93,8 @@ bool FusionLinked() {
 }
 
 #ifdef TARGET_PC
-// Port (0.46.0 test 22): the menus zoomed to fill a wide screen (PortDebug::ZoomMenus) for one
-// CFrontEndUI::Draw: GX's viewport scaled about the screen's centre until the 4:3 frame's 640
-// units span the viewport's width (the user: "zoom it in to make it fit the Vita's screen (not by
-// stretching)"). The menus' picture is a band letterboxed inside that frame, the title and file
-// select movies' and the frames over them, so the zoom cuts only black above and below it. It stops
-// at 4/3, where a 16:9 band (three quarters of the frame's height) meets the screen's top and
-// bottom, for screens wider still. The layout, and GXGetViewport, stay as they were. The frame is
-// 640x480 units (the GameCube's 480 lines), so on the Vita (846x480) the zoom is about 1.32, and the
-// screen shows the frame's lines 58 to 422: the title movie's 16:9 band (0.46.0 test 23, its frames
-// from the user's disc).
-float PortMenuZoomFactor() {
-  if (!PortDebug::ZoomMenus() || PortDebug::AspectMode() == PortDebug::kAspect_4_3) {
-    return 1.f;
-  }
-  const auto& vp = CGraphics::GetViewport();
-  if (vp.mWidth <= 0 || vp.mHeight <= 0) {
-    return 1.f;
-  }
-  const float zoom = rstl::min_val(static_cast< float >(vp.mWidth) / 640.f, 4.f / 3.f);
-  return zoom > 1.01f ? zoom : 1.f;
-}
-
-class PortMenuZoom {
-public:
-  PortMenuZoom() {
-    const float zoom = PortMenuZoomFactor();
-    if (zoom <= 1.f) {
-      return;
-    }
-    const auto& vp = CGraphics::GetViewport();
-    GXPortSetViewportZoom(zoom, static_cast< float >(vp.mLeft) + 0.5f * static_cast< float >(vp.mWidth),
-                          static_cast< float >(vp.mTop) + 0.5f * static_cast< float >(vp.mHeight));
-    mOn = true;
-  }
-  ~PortMenuZoom() {
-    if (mOn) {
-      GXPortSetViewportZoom(1.f, 0.f, 0.f);
-    }
-  }
-  PortMenuZoom(const PortMenuZoom&) = delete;
-  PortMenuZoom& operator=(const PortMenuZoom&) = delete;
-
-private:
-  bool mOn = false;
-};
+// The menus' zoom (PortMenuZoom, PortMenuZoomFactor): MetroidPrime/PortMenuZoom.hpp, shared with
+// the credits since 0.46.0 test 54.
 
 // Port: "Exit Game" on the main menu (PortDebug::MenuExit; Prime 2's issue #80). The Select
 // legend draws it as its companion (CGuiTextPane::PortSetCompanion) a line below it, under

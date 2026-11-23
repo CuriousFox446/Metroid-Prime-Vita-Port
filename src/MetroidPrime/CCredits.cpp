@@ -31,6 +31,7 @@
 
 #ifdef TARGET_PC
 #include "port_debug.h"
+#include "MetroidPrime/PortMenuZoom.hpp"
 
 // The credits background is a 4:3 movie with a 16:9 picture band, and the text and cinema bars
 // are laid out for it. A wider viewport draws the movie pillarboxed at its 4:3 width, so lay
@@ -690,6 +691,11 @@ void CCredits::Draw() const {
   if (x14_state != 3) {
     return;
   }
+#ifdef TARGET_PC
+  // Port (0.46.0 test 54): zoomed as the front end's menus are (PortMenuZoom): the movie's 16:9
+  // band, the text and the bars fill the screen; only the black above and below the band is cut.
+  const PortMenuZoom portZoom;
+#endif
   DrawVideo();
   DrawText();
 }
