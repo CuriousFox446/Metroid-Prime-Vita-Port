@@ -105,9 +105,11 @@ struct Worker {
   // parks every atomic's waiters on one of 16 condition variables picked by address. In 0.46.0
   // test 1 the worker woke 17 to 40 times a job there, against 1.5 in 0.42.0's tests, and slept
   // through jobs the game thread waited for (205 past 500 ms in three minutes, none before).
+  // `sleeping` counts the threads asleep on it: the core 0 helper's jobs have two since 0.46.0 test
+  // 57 (the core 3 helper), and a submitter wakes one of them for each job it queues.
   std::mutex sleepMutex;
   std::condition_variable sleepCv;
-  std::atomic<bool> sleeping{false};
+  std::atomic<uint32_t> sleeping{0};
   // Those waiting on `cv` (for a job, or a submitter for a free slot). The worker takes the mutex to
   // wake them only when there are some.
   std::atomic<uint32_t> waiters{0};
@@ -122,6 +124,15 @@ struct Worker {
   std::atomic<uint32_t> otherWaits{0};
   std::atomic<uint64_t> otherWaitUs{0};
   std::atomic<uint32_t> hangs{0};
+  // A second thread for a claiming worker's jobs (0.46.0 test 57: the core 3 helper, the core 0
+  // helper's): it takes one only while kExtraBacklog or more wait unclaimed, and sleeps on these, so
+  // a wake-up for the first thread never goes to it. Of `jobs` and `busyUs`, its own.
+  bool extraThread = false;
+  std::mutex extraMutex;
+  std::condition_variable extraCv;
+  std::atomic<uint32_t> extraSleeping{0};
+  std::atomic<uint32_t> extraJobs{0};
+  std::atomic<uint64_t> extraBusyUs{0};
   uint64_t lastLog = 0; // the render worker's (log_stats)
 };
 
@@ -196,17 +207,40 @@ void run_claimed(Worker& w, uint32_t job) noexcept {
   }
 }
 
-// The helper's loop: as run's, each job claimed first.
-void run_claiming(Worker& w) {
+// The jobs waiting unclaimed past which a worker's second thread takes them (Worker::extraThread):
+// below it they are left to the first thread, which is never preempted by the second's core's own
+// (the FIFO processor waits at its frame's end for a job a preempted thread holds).
+constexpr uint32_t kExtraBacklog = 2;
+
+uint32_t unclaimed(const Worker& w) noexcept {
+  const uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+  return w.submitted.load(std::memory_order_seq_cst) - c;
+}
+
+// The helper's loop: as run's, each job claimed first. `extra`: the core 3 helper, the core 0
+// helper's second thread (0.46.0 test 57): it sleeps till kExtraBacklog jobs wait unclaimed, on its
+// own condition, and its jobs are counted apart too.
+void run_claiming(Worker& w, bool extra = false) {
   for (;;) {
     uint32_t c = w.claimed.load(std::memory_order_seq_cst);
+    if (extra && w.submitted.load(std::memory_order_seq_cst) - c < kExtraBacklog) {
+      // seq_cst as below: it counts itself asleep and then reads the queue; a submitter writes the
+      // queue and then reads the count (submit_to).
+      std::unique_lock lock{w.extraMutex};
+      w.extraSleeping.fetch_add(1, std::memory_order_seq_cst);
+      while (unclaimed(w) < kExtraBacklog) {
+        w.extraCv.wait_for(lock, kSleepSlice);
+      }
+      w.extraSleeping.fetch_sub(1, std::memory_order_relaxed);
+      continue;
+    }
     if (c == w.submitted.load(std::memory_order_seq_cst)) {
       std::unique_lock lock{w.sleepMutex};
-      w.sleeping.store(true, std::memory_order_seq_cst);
+      w.sleeping.fetch_add(1, std::memory_order_seq_cst);
       while (w.claimed.load(std::memory_order_seq_cst) == w.submitted.load(std::memory_order_seq_cst)) {
         w.sleepCv.wait_for(lock, kSleepSlice);
       }
-      w.sleeping.store(false, std::memory_order_relaxed);
+      w.sleeping.fetch_sub(1, std::memory_order_relaxed);
       continue;
     }
     if (!w.claimed.compare_exchange_weak(c, c + 1, std::memory_order_seq_cst)) {
@@ -214,8 +248,13 @@ void run_claiming(Worker& w) {
     }
     const uint64_t start = now_us();
     run_claimed(w, c + 1);
-    w.busyUs.fetch_add(now_us() - start, std::memory_order_relaxed);
+    const uint64_t took = now_us() - start;
+    w.busyUs.fetch_add(took, std::memory_order_relaxed);
     w.jobs.fetch_add(1, std::memory_order_relaxed);
+    if (extra) {
+      w.extraBusyUs.fetch_add(took, std::memory_order_relaxed);
+      w.extraJobs.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -244,11 +283,11 @@ void* run(void* arg) {
       // then reads `sleeping`. So one of them sees the other: either the worker finds the job, or the
       // submitter wakes it, through the mutex (it cannot slip in between the check and the wait).
       std::unique_lock lock{w.sleepMutex};
-      w.sleeping.store(true, std::memory_order_seq_cst);
+      w.sleeping.fetch_add(1, std::memory_order_seq_cst);
       while (w.submitted.load(std::memory_order_seq_cst) == next - 1) {
         w.sleepCv.wait_for(lock, kSleepSlice);
       }
-      w.sleeping.store(false, std::memory_order_relaxed);
+      w.sleeping.fetch_sub(1, std::memory_order_relaxed);
     }
     const Job job = w.ring[next % kSlots];
     const uint64_t start = now_us();
@@ -319,12 +358,68 @@ Worker* background_worker() noexcept {
   return started;
 }
 
+// 0.46.0 test 57. The core 0 helper's jobs taken by a second thread too, on the fourth core below
+// everything else there but the compiler and the texture workers (191). In test 56's ending (MLVL
+// 13D79165) the helper's jobs were some 35 ms a frame (the falling ash's 21,700 vertices, Samus's
+// skinned model's 14,000) and the core 0 helper, below side worker 2 there, ran 20 of them: the FIFO
+// processor ran the rest at each frame's end (4.5 s in 15.9), the frame's end waited for them, and
+// the game thread's next frame began after it (begin-wait 5-7 ms a frame), while the fourth core
+// was 42% idle. Its jobs are the same ones (claimed one by one, as the FIFO processor claims them),
+// and none touches what the game's per-thread slots keep.
+constexpr int kHelper2Priority = 135;
+
+struct SecondThread {
+  Worker* worker;
+  const char* name;
+  int core;
+  int priority;
+};
+
+void* run_second(void* arg) {
+  const SecondThread params = *static_cast<SecondThread*>(arg);
+  delete static_cast<SecondThread*>(arg);
+  thread::set_current({.name = params.name,
+                       .priority = thread::Priority::High,
+                       .vitaCore = params.core,
+                       .vitaPriority = params.priority});
+  run_claiming(*params.worker, true);
+  return nullptr;
+}
+
+// A second thread for a claiming worker's jobs (none on the fourth core without it open).
+void start_second_thread(Worker* w, const char* name, int core, int priority, const char* what) noexcept {
+  if (w == nullptr || !w->claiming || (core == thread::kVitaSystemCore && !thread::vita_core3_available())) {
+    return;
+  }
+  w->extraThread = true; // before the thread runs, and before any submit sees it (the first is this one's caller's)
+  auto* params = new SecondThread{w, name, core, priority};
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, kStack);
+  pthread_t handle;
+  const int result = pthread_create(&handle, &attr, &run_second, params);
+  pthread_attr_destroy(&attr);
+  if (result != 0) {
+    delete params;
+    w->extraThread = false;
+    Log.warn("{}: not started ({})", name, result);
+    return;
+  }
+  pthread_detach(handle);
+  Log.info("{}: started on core {} at priority {} ({})", name, core, priority, what);
+}
+
 Worker* helper_worker() noexcept {
-  static Worker* const started =
-      start_worker("core 0 helper", kHelperPriority, kHelperCore, false, sHelper,
-                   "the FIFO processor's skinned calls' vertices and long immediate draws, which its frame's end "
-                   "waits for, running those still unclaimed itself then",
-                   true);
+  static Worker* const started = [] {
+    Worker* const w =
+        start_worker("core 0 helper", kHelperPriority, kHelperCore, false, sHelper,
+                     "the FIFO processor's skinned calls' vertices and long immediate draws, which its frame's end "
+                     "waits for, running those still unclaimed itself then",
+                     true);
+    start_second_thread(w, "core 3 helper", thread::kVitaSystemCore, kHelper2Priority,
+                        "the core 0 helper's jobs too, below the side worker, the mixer and the background lane");
+    return w;
+  }();
   return started;
 }
 
@@ -345,11 +440,16 @@ uint32_t submit_to(Worker* w, Fn fn, void* data, bool ordered = false, bool stea
   }
   w->ring[job % kSlots] = {fn, data, ordered, stealable};
   w->submitted.store(job, std::memory_order_seq_cst);
-  if (w->sleeping.load(std::memory_order_seq_cst)) {
+  if (w->sleeping.load(std::memory_order_seq_cst) != 0) {
     // Through the mutex: a worker between its check and its wait holds it, so this waits for the
     // wait to begin, and the notify reaches it.
     { std::lock_guard sleep{w->sleepMutex}; }
     w->sleepCv.notify_one();
+  }
+  // A second thread asleep, and enough waiting unclaimed for it (run_claiming's `extra`).
+  if (w->extraThread && w->extraSleeping.load(std::memory_order_seq_cst) != 0 && unclaimed(*w) >= kExtraBacklog) {
+    { std::lock_guard sleep{w->extraMutex}; }
+    w->extraCv.notify_one();
   }
   return job;
 }
@@ -541,6 +641,8 @@ void log_worker(Worker* w, const char* lane) noexcept {
   const uint32_t hangs = w->hangs.exchange(0, std::memory_order_relaxed);
   const uint32_t stolen = w->stolen.exchange(0, std::memory_order_relaxed);
   const uint64_t stolenUs = w->stolenUs.exchange(0, std::memory_order_relaxed);
+  const uint32_t extraJobs = w->extraJobs.exchange(0, std::memory_order_relaxed);
+  const uint64_t extraBusyUs = w->extraBusyUs.exchange(0, std::memory_order_relaxed);
   if (span == 0) {
     return;
   }
@@ -556,10 +658,15 @@ void log_worker(Worker* w, const char* lane) noexcept {
       gameRuns ? fmt::format(", and the game thread ran {} of them itself while it waited ({:.1f} ms in all)", stolen,
                              static_cast<double>(stolenUs) / 1000.0)
                : std::string{};
-  Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core {}, busy {:.1f} ms a second ({:.0f}%); "
-           "the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms){}, the other threads for {} "
-           "({:.1f} ms){}; {} hung",
-           lane, seconds, jobs, jobs / seconds, w->core, static_cast<double>(busyUs) / 1000.0 / seconds,
+  // The core 3 helper's part of the core 0 helper's (0.46.0 test 57), counted in the totals before it.
+  const std::string extraRan =
+      extraJobs != 0 ? fmt::format(" ({} of them on the core 3 helper, {:.1f} ms a second)", extraJobs,
+                                   static_cast<double>(extraBusyUs) / 1000.0 / seconds)
+                     : std::string{};
+  Log.info("[side jobs]{} over {:.1f} s: {} jobs ({:.0f} a second) ran on core {}{}, busy {:.1f} ms a second "
+           "({:.0f}%); the FIFO processor waited for {} of them ({:.1f} ms in all, at most {:.2f} ms){}, the other "
+           "threads for {} ({:.1f} ms){}; {} hung",
+           lane, seconds, jobs, jobs / seconds, w->core, extraRan, static_cast<double>(busyUs) / 1000.0 / seconds,
            100.0 * static_cast<double>(busyUs) / static_cast<double>(span), fifoWaits,
            static_cast<double>(fifoWaitUs) / 1000.0, fifoWaitMaxUs / 1000.0, fifoRan, otherWaits,
            static_cast<double>(otherWaitUs) / 1000.0, gameRan, hangs);

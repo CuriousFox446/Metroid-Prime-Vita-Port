@@ -5400,3 +5400,36 @@ helper's work and the FIFO processor's runs of its jobs (now writing to uncached
 the snow, Samus's model, particles, the masked clears (the Phazon Suit's) and GX's lines (the map's
 outlines, the rain) look as before: a flicker, a stray triangle or a spike from one of them would be
 a chunk taken again too soon.
+
+## 0.46.0 test 57: the ending, round 3 (the core 0 helper's jobs on the fourth core too)
+
+Test 56's log (the user: "I guess we start round 3, right?"): the arena held, every frame's own mesh
+drawn in place ("0 copied", "0 times none free" in every report), no error. The ending at 16-17 FPS
+(log lines 7355-8990; 14-15 in test 55), the scenes after it 37-38 FPS (28-31) and 26-27 (21-23).
+- The render worker's program draws in the ending 11-15 ms a present (57-61), 27% busy.
+- The game thread 85% busy: ticks 26 ms a frame (3.6), 6 of them particle steps it ran itself while
+  it waited; the draw 26 ms (`CElementGen::Render` 16.6). It waited 5-7 ms a frame at `begin_frame`
+  (`fifo::finish_frame_end`) for the FIFO processor to end the frame before.
+- The FIFO processor 85% busy: some 37 ms a frame for 1,400 draws, and 15-20 ms at each frame's end
+  (its `[fifo path]` "vita" share) for the core 0 helper's jobs: it ran 15,287 of them itself (4.5 s
+  in 15.9). The helper's jobs were some 35 ms a frame (the ash's 21,700 vertices, the skinned model's
+  14,000); the core 0 helper, below side worker 2 there, ran 20.
+- The GPU 45.8 ms a frame (87%). The fourth core 42% idle (side worker 24%, mixer 32%).
+- The ending's particle models (Metroid8.pak, 51 PARTs, 10 with models) are small: 21 to 133
+  positions, 1 to 3 surfaces (scratchpad partmodels.py). 672 of the frame's 1,280 list draws are theirs.
+
+Change: the core 0 helper's jobs are taken by a second thread too, the core 3 helper (priority 135,
+below the side worker, the mixer, the background lane and the program cache; above the compiler and
+the texture workers). It takes a job only while two or more wait unclaimed, and sleeps on a condition
+of its own (`Worker::extraThread`), so a wake-up for the core 0 helper never goes to it; below that
+the jobs are left to the core 0 helper, which nothing on its core's own preempts the way the fourth
+core's side worker and mixer preempt this one (the FIFO processor would wait at its frame's end for a
+job a preempted thread holds). The skinned fills' posed pairs, two before (the helper's and the FIFO
+processor's), are four, each fill taking a free one. The `[side jobs] core 0 helper` line gives the
+core 3 helper's part.
+
+What to look for in test 57: the ending's frame rate (16-17 FPS in test 56); in the log, the core 0
+helper's line, the core 3 helper's jobs and the FIFO processor's runs of them (15,287 in 15.9 s
+before), the `[split]` lines' begin-wait (5-7 ms) and the `[fifo path]` "vita" share (15-20 ms). The
+game thread's own work (some 51 ms a frame) and the GPU's 46 then hold it: about 19 FPS at most.
+Sound and the particle steps as before (the core 3 helper is below both).
