@@ -211,6 +211,11 @@ struct SkinnedTemplate {
   std::vector<vita_gl::Vertex> unique;
   std::vector<u32> uniqueSlots;
   std::shared_ptr<const std::vector<u16>> order;
+  // 0.46.0 test 58: the unique vertices on the GPU (a Mesh made from them once, uploaded at its first
+  // draw), whose attributes but the position and the normal a program's draw reads there; each call
+  // writes only its posed part (vita_gl::PosedPart) into the frame. Let go of with the template (the
+  // frames that drew it hold it till they go).
+  std::shared_ptr<vita_gl::Mesh> unpaired;
   // The core 0 helper's last job reading it (0.46.0 test 4): waited for before it changes or goes.
   u32 helperJob = 0;
 };
@@ -293,6 +298,11 @@ struct Stats {
   u32 skinnedIndexed = 0;
   u64 skinnedCorners = 0;
   u64 skinnedVertices = 0;
+  // 0.46.0 test 58: those drawn by index with their posed parts alone in the frame (VertexLayout::
+  // Posed), and the immediate draws in compact vertices (VertexLayout::Compact) and their vertices.
+  u32 skinnedPosed = 0;
+  u32 immediateCompact = 0;
+  u64 immediateCompactVertices = 0;
   // Materials worked out whose stages read an indirect stage (water, heat haze, distortion), and
   // of those the ones left without a program: a layout a program cannot draw, or a texture
   // without a Vita copy.
@@ -822,6 +832,168 @@ void decode_direct(const u8* vtx, const DirectStep* steps, u32 nsteps, u32 strid
         put_sets(v, d.sets, st[0], st[1]);
         break;
       }
+      }
+      p += d.advance;
+    }
+    out[i] = v;
+  }
+}
+
+// 0.46.0 test 58. An immediate draw's vertices as compact ones (vita_gl::CompactVertex: the
+// position, the raw colour and one coordinate pair, 24 bytes where a whole vertex is 56) where they
+// all sit in the list (decode_direct's), a position, at most a colour and one pair, no normal; and
+// where its program and its alpha pass's read nothing else (no normal, their coordinates' inputs that
+// pair's sets alone). The snow's and the ash's, the particles' quads: in test 56's ending some
+// 27,000 vertices a frame, the core 0 helper's (and the FIFO processor's) writes. The values are
+// decode_direct's: the colour as raw (255s without one), the pair the coordinates' input.
+struct CompactPlan {
+  DirectStep steps[GX_VA_TEX7 + 1];
+  u32 nsteps = 0;
+  u32 stride = 0;
+  u8 uvSets = 0;
+};
+
+bool compact_plan(GXVtxFmt fmt, const TexAttrs& texAttrs, const TevProgram* program, const TevProgram* alphaProgram,
+                  u32 count, const u8* vtx, const u8* end, CompactPlan& cp) noexcept {
+  DecodePlan plan;
+  u32 steps = 0;
+  if (!plan_vertices(g_gxState.vtxFmts[fmt], texAttrs, plan, steps) || steps == 0 ||
+      !plan_direct(plan.data(), steps, cp.steps, cp.stride)) {
+    return false;
+  }
+  if (vtx > end || static_cast<u64>(count) * cp.stride > static_cast<u64>(end - vtx)) {
+    return false;
+  }
+  cp.nsteps = steps;
+  cp.uvSets = 0;
+  int positions = 0;
+  int colors = 0;
+  int pairs = 0;
+  for (u32 s = 0; s < steps; ++s) {
+    const DirectStep& d = cp.steps[s];
+    switch (d.op) {
+    case DirectOp::Skip:
+      break;
+    case DirectOp::PosF32x3:
+    case DirectOp::PosS16x3:
+    case DirectOp::PosAny:
+      positions += d.count <= 3 ? 1 : 2;
+      break;
+    case DirectOp::ClrRgba8:
+    case DirectOp::ClrAny:
+      ++colors;
+      break;
+    case DirectOp::TexF32x2:
+    case DirectOp::TexS16x2:
+    case DirectOp::TexU8x2:
+    case DirectOp::TexS8x2:
+    case DirectOp::TexAny:
+      pairs += d.count <= 2 ? 1 : 2;
+      cp.uvSets = d.sets;
+      break;
+    case DirectOp::Normal:
+      return false;
+    }
+  }
+  if (positions != 1 || colors > 1 || pairs > 1) {
+    return false;
+  }
+  for (const TevProgram* p : {program, alphaProgram}) {
+    if (p != nullptr && (p->normalInput || (p->uvInputs & ~cp.uvSets) != 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// `count` compact vertices of `stride` bytes each from `vtx` (room for them checked by the caller),
+// each made whole and stored once (the comment at kReadAhead).
+void decode_compact(const u8* vtx, const CompactPlan& cp, u32 count, vita_gl::CompactVertex* out) noexcept {
+  const DirectStep* const steps = cp.steps;
+  const u32 nsteps = cp.nsteps;
+  const u32 stride = cp.stride;
+  vita_gl::CompactVertex base{};
+  base.raw[0] = base.raw[1] = base.raw[2] = base.raw[3] = 255;
+  // The snow's and the ash's (CEnvFxManager) and the particles' layouts in loops of their own, as
+  // decode_direct_known has them.
+  if (nsteps == 2 && steps[0].op == DirectOp::PosS16x3 && steps[1].op == DirectOp::TexS8x2) {
+    const float ps = steps[0].scale;
+    const float ts = steps[1].scale;
+    const u32 texAt = steps[0].advance;
+    for (u32 i = 0; i < count; ++i, vtx += stride) {
+      vita_gl::CompactVertex v = base;
+      v.pos[0] = static_cast<s16>(read16(vtx, false)) * ps;
+      v.pos[1] = static_cast<s16>(read16(vtx + 2, false)) * ps;
+      v.pos[2] = static_cast<s16>(read16(vtx + 4, false)) * ps;
+      v.uv[0] = static_cast<s8>(vtx[texAt]) * ts;
+      v.uv[1] = static_cast<s8>(vtx[texAt + 1]) * ts;
+      out[i] = v;
+    }
+    return;
+  }
+  if (nsteps == 3 && steps[0].op == DirectOp::PosF32x3 && steps[1].op == DirectOp::ClrRgba8 &&
+      steps[2].op == DirectOp::TexF32x2) {
+    const u32 clrAt = steps[0].advance;
+    const u32 texAt = clrAt + steps[1].advance;
+    for (u32 i = 0; i < count; ++i, vtx += stride) {
+      vita_gl::CompactVertex v;
+      v.pos[0] = std::bit_cast<float>(read32(vtx, false));
+      v.pos[1] = std::bit_cast<float>(read32(vtx + 4, false));
+      v.pos[2] = std::bit_cast<float>(read32(vtx + 8, false));
+      std::memcpy(v.raw, vtx + clrAt, 4);
+      v.uv[0] = std::bit_cast<float>(read32(vtx + texAt, false));
+      v.uv[1] = std::bit_cast<float>(read32(vtx + texAt + 4, false));
+      out[i] = v;
+    }
+    return;
+  }
+  for (u32 i = 0; i < count; ++i, vtx += stride) {
+    vita_gl::CompactVertex v = base;
+    const u8* p = vtx;
+    for (u32 s = 0; s < nsteps; ++s) {
+      const DirectStep& d = steps[s];
+      switch (d.op) {
+      case DirectOp::Skip:
+      case DirectOp::Normal:
+        break;
+      case DirectOp::PosF32x3:
+        v.pos[0] = std::bit_cast<float>(read32(p, false));
+        v.pos[1] = std::bit_cast<float>(read32(p + 4, false));
+        v.pos[2] = std::bit_cast<float>(read32(p + 8, false));
+        break;
+      case DirectOp::PosS16x3:
+        v.pos[0] = static_cast<s16>(read16(p, false)) * d.scale;
+        v.pos[1] = static_cast<s16>(read16(p + 2, false)) * d.scale;
+        v.pos[2] = static_cast<s16>(read16(p + 4, false)) * d.scale;
+        break;
+      case DirectOp::PosAny:
+        read_components(p, d.type, d.scale, false, d.count, v.pos);
+        break;
+      case DirectOp::ClrRgba8:
+        std::memcpy(v.raw, p, 4);
+        break;
+      case DirectOp::ClrAny:
+        read_color(p, d.type, v.raw);
+        break;
+      case DirectOp::TexF32x2:
+        v.uv[0] = std::bit_cast<float>(read32(p, false));
+        v.uv[1] = std::bit_cast<float>(read32(p + 4, false));
+        break;
+      case DirectOp::TexS16x2:
+        v.uv[0] = static_cast<s16>(read16(p, false)) * d.scale;
+        v.uv[1] = static_cast<s16>(read16(p + 2, false)) * d.scale;
+        break;
+      case DirectOp::TexU8x2:
+        v.uv[0] = p[0] * d.scale;
+        v.uv[1] = p[1] * d.scale;
+        break;
+      case DirectOp::TexS8x2:
+        v.uv[0] = static_cast<s8>(p[0]) * d.scale;
+        v.uv[1] = static_cast<s8>(p[1]) * d.scale;
+        break;
+      case DirectOp::TexAny:
+        read_components(p, d.type, d.scale, false, d.count, v.uv);
+        break;
       }
       p += d.advance;
     }
@@ -2378,6 +2550,7 @@ struct SkinnedFill {
   const SkinnedTemplate* t = nullptr;
   bool byIndex = false; // the template's unique vertices (a program's draw), else every corner
   vita_gl::Vertex* out = nullptr;
+  vita_gl::PosedPart* posedOut = nullptr; // instead of `out`: the posed parts alone (test 58)
   bool copySource = false; // the template's vertices copied to `out` first (the frame's own)
   u32 count = 0;
   const u8* base = nullptr;
@@ -2450,6 +2623,29 @@ void write_skinned(const SkinnedFill& f, const std::vector<PosedVertex>& posed) 
       std::memcpy(v.normal, p.normal, sizeof(p.normal));
     }
   };
+  if (f.posedOut != nullptr) {
+    // 0.46.0 test 58: the posed parts alone, the rest the template's on the GPU. A part the arrays do
+    // not give (a two-component position's z, a normal outside its array or not indexed) keeps the
+    // template's, as the whole vertex's copy kept it.
+    for (u32 i = 0; i < f.count; ++i) {
+      const PosedVertex& p = posed[slots[i]];
+      vita_gl::PosedPart part;
+      if (f.cnt != 3 || !p.hasNormal) {
+        const vita_gl::Vertex& from = source[i];
+        std::memcpy(part.pos, from.pos, sizeof(part.pos));
+        std::memcpy(part.normal, from.normal, sizeof(part.normal));
+      }
+      for (u32 c = 0; c < f.cnt; ++c) {
+        part.pos[c] = p.pos[c];
+      }
+      if (p.hasNormal) {
+        std::memcpy(part.normal, p.normal, sizeof(part.normal));
+      }
+      part.pad = 0;
+      f.posedOut[i] = part;
+    }
+    return;
+  }
   if (!f.copySource) {
     for (u32 i = 0; i < f.count; ++i) {
       pose(f.out[i], posed[slots[i]]);
@@ -2548,11 +2744,13 @@ constexpr u32 kHelperImmediateMin = 32;
 struct ImmediateFill {
   const u8* src = nullptr;
   vita_gl::Vertex* out = nullptr;
+  vita_gl::CompactVertex* compactOut = nullptr; // instead of `out`: compact vertices (test 58)
   u32 count = 0;
   u32 stride = 0;
   u32 nsteps = 0;
   u8 grey = 255;
   DirectStep steps[GX_VA_TEX7 + 1];
+  CompactPlan compact; // compactOut's plan
 };
 constexpr size_t kImmediateFills = 256;
 std::array<ImmediateFill, kImmediateFills> sImmediateFills;
@@ -2565,7 +2763,11 @@ size_t sStageUsed = 0;
 
 void run_immediate_fill(void* data) {
   const ImmediateFill& f = *static_cast<const ImmediateFill*>(data);
-  decode_direct(f.src, f.steps, f.nsteps, f.stride, f.count, f.grey, f.out);
+  if (f.compactOut != nullptr) {
+    decode_compact(f.src, f.compact, f.count, f.compactOut);
+  } else {
+    decode_direct(f.src, f.steps, f.nsteps, f.stride, f.count, f.grey, f.out);
+  }
   vita_gl::finish_vertex_writes();
 }
 
@@ -2614,11 +2816,44 @@ bool decode_on_helper(const u8* vtx, const u8* end, GXVtxFmt fmt, u32 count, con
   ImmediateFill& f = sImmediateFills[slot];
   f.src = staged;
   f.out = out;
+  f.compactOut = nullptr;
   f.count = count;
   f.stride = stride;
   f.nsteps = steps;
   f.grey = grey_for(texAttrs);
   std::copy(direct, direct + steps, f.steps);
+  const u32 job = side_jobs::submit_helper(&run_immediate_fill, &f);
+  if (job == 0) {
+    sNoHelper = true;
+    return false;
+  }
+  sImmediateFillJobs[slot] = job;
+  sNextImmediateFill = (slot + 1) % kImmediateFills;
+  sLastHelperJob = job;
+  ++sStats.immediateOnHelper;
+  sStats.immediateVerticesOnHelper += count;
+  return true;
+}
+
+// The same for compact vertices (test 58), their plan made (compact_plan: the bytes are in the list).
+bool compact_on_helper(const u8* vtx, const CompactPlan& cp, u32 count, vita_gl::CompactVertex* out) noexcept {
+  if (sNoHelper || count < kHelperImmediateMin) {
+    return false;
+  }
+  const size_t bytes = static_cast<size_t>(count) * cp.stride;
+  const size_t slot = sNextImmediateFill;
+  if (sImmediateFillJobs[slot] != 0) {
+    side_jobs::wait_helper(sImmediateFillJobs[slot]);
+    sImmediateFillJobs[slot] = 0;
+  }
+  u8* staged = stage_bytes(bytes);
+  std::memcpy(staged, vtx, bytes);
+  ImmediateFill& f = sImmediateFills[slot];
+  f.src = staged;
+  f.out = nullptr;
+  f.compactOut = out;
+  f.count = count;
+  f.compact = cp;
   const u32 job = side_jobs::submit_helper(&run_immediate_fill, &f);
   if (job == 0) {
     sNoHelper = true;
@@ -2683,10 +2918,13 @@ void make_unique_vertices(SkinnedTemplate& t) {
 // under this state: for a program's draw (`program`) posed into the frame's own vertices
 // (`frameMesh`), the template's unique vertices with its order into them as the indices (every
 // corner, in order, when there are more than 16-bit indices take); else every corner, into `out`.
+// Since 0.46.0 test 58 a program's draw by index takes only the posed parts into the frame, the
+// rest from the template's unique vertices on the GPU: `unpaired`, the draw's Mesh.
 // False when the list cannot have one (positions not indexed, or more than one vertex format) or a
 // position index falls outside the array as it is now: it is then decoded whole.
 bool skinned_from_template(const void* key, const resident::Entry& entry, u32 size, const TexAttrs& texAttrs,
-                           bool program, vita_gl::FrameMesh& frameMesh, std::vector<vita_gl::Vertex>& out) noexcept {
+                           bool program, vita_gl::FrameMesh& frameMesh, std::vector<vita_gl::Vertex>& out,
+                           std::shared_ptr<vita_gl::Mesh>& unpaired) noexcept {
   const GXAttrType posType = g_gxState.vtxDesc[GX_VA_POS];
   if (posType != GX_INDEX8 && posType != GX_INDEX16) {
     return false;
@@ -2716,6 +2954,7 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
       t.unique.clear();
       t.uniqueSlots.clear();
       t.order.reset();
+      t.unpaired.reset();
       return false;
     }
     t.fmt = static_cast<GXVtxFmt>(std::countr_zero(state.fmtMask));
@@ -2743,6 +2982,11 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     t.indices.clear();
     t.indices.shrink_to_fit();
     make_unique_vertices(t);
+    // The unique vertices on the GPU, for a program's draws (test 58): none without them (more than
+    // 16-bit indices take: every corner then, as before).
+    t.unpaired = t.order != nullptr && !t.unique.empty()
+                     ? vita_gl::make_mesh(std::vector<vita_gl::Vertex>(t.unique), vita_gl::MeshKind::Skinned)
+                     : nullptr;
   }
   if (t.vertices.empty()) {
     return false;
@@ -2801,8 +3045,17 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   sStats.skinnedCorners += t.vertices.size();
   sStats.skinnedVertices += count;
   if (program) {
-    fill.out = frame_vertices_safe(count, frameMesh.vertexAt);
-    fill.copySource = true;
+    if (byIndex && t.unpaired != nullptr) {
+      // 0.46.0 test 58: the posed part alone into the frame (16 bytes a vertex where the whole one was
+      // 56, the template's copy read for each), the rest the template's on the GPU (`unpaired`).
+      fill.posedOut = reinterpret_cast<vita_gl::PosedPart*>(
+          frame_vertices_safe(vita_gl::frame_slots(count, sizeof(vita_gl::PosedPart)), frameMesh.vertexAt));
+      frameMesh.layout = vita_gl::VertexLayout::Posed;
+      unpaired = t.unpaired;
+    } else {
+      fill.out = frame_vertices_safe(count, frameMesh.vertexAt);
+      fill.copySource = true;
+    }
     frameMesh.vertexCount = count;
     if (byIndex) {
       frameMesh.indexCount = static_cast<u32>(t.order->size());
@@ -2846,7 +3099,8 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     const bool program = material.program != nullptr;
     vita_gl::FrameMesh frameMesh{.kind = vita_gl::MeshKind::Skinned};
     std::vector<vita_gl::Vertex> triangles;
-    if (skinned_from_template(key, entry, size, texAttrs, program, frameMesh, triangles)) {
+    std::shared_ptr<vita_gl::Mesh> unpaired;
+    if (skinned_from_template(key, entry, size, texAttrs, program, frameMesh, triangles, unpaired)) {
       ++sStats.skinnedFromTemplate;
     } else {
       u8 fmtMask = 0;
@@ -2856,7 +3110,9 @@ bool draw_resident(const void* key, const resident::Entry& entry, u32 size) noex
     }
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kSkinned);
     if (frameMesh.vertexCount != 0) {
-      record_draw(nullptr, material, frameMesh);
+      // A posed draw (VertexLayout::Posed) carries its template's unique vertices as its Mesh.
+      record_draw(unpaired, material, frameMesh);
+      sStats.skinnedPosed += frameMesh.layout == vita_gl::VertexLayout::Posed ? 1 : 0;
       return true;
     }
     if (triangles.empty()) {
@@ -2898,18 +3154,33 @@ bool draw_immediate(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, std::span<cons
     vita_gl::FrameMesh mesh{.kind = vita_gl::MeshKind::Immediate,
                             .primitive = lines ? vita_gl::MeshPrimitive::Lines : vita_gl::MeshPrimitive::Triangles};
     if (count != 0) {
-      vita_gl::Vertex* out = frame_vertices_safe(count, mesh.vertexAt);
       const u8* vtx = vertices.data();
+      const u8* const end = vertices.data() + vertices.size();
       sLastFail = Fail::None;
-      if (decode_on_helper(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out) ||
-          decode_vertices(vtx, vertices.data() + vertices.size(), fmt, count, texAttrs, out)) {
-        mesh.vertexCount = count;
-        if (indices != nullptr) {
-          mesh.indexCount = static_cast<u32>(indices->size());
-          mesh.indexAt = vita_gl::frame_indices(indices->data(), mesh.indexCount);
+      CompactPlan cp;
+      if (compact_plan(fmt, texAttrs, material.program, material.alphaProgram, count, vtx, end, cp)) {
+        // 0.46.0 test 58: compact vertices (vita_gl::CompactVertex), 24 bytes where a whole one is 56.
+        auto* out = reinterpret_cast<vita_gl::CompactVertex*>(
+            frame_vertices_safe(vita_gl::frame_slots(count, sizeof(vita_gl::CompactVertex)), mesh.vertexAt));
+        if (!compact_on_helper(vtx, cp, count, out)) {
+          decode_compact(vtx, cp, count, out);
         }
+        mesh.layout = vita_gl::VertexLayout::Compact;
+        mesh.uvSets = cp.uvSets;
+        mesh.vertexCount = count;
+        ++sStats.immediateCompact;
+        sStats.immediateCompactVertices += count;
       } else {
-        vita_gl::trim_frame_vertices(mesh.vertexAt);
+        vita_gl::Vertex* out = frame_vertices_safe(count, mesh.vertexAt);
+        if (decode_on_helper(vtx, end, fmt, count, texAttrs, out) || decode_vertices(vtx, end, fmt, count, texAttrs, out)) {
+          mesh.vertexCount = count;
+        } else {
+          vita_gl::trim_frame_vertices(mesh.vertexAt);
+        }
+      }
+      if (mesh.vertexCount != 0 && indices != nullptr) {
+        mesh.indexCount = static_cast<u32>(indices->size());
+        mesh.indexAt = vita_gl::frame_indices(indices->data(), mesh.indexCount);
       }
     }
     vita_gl::fifo_clock::mark(vita_gl::fifo_clock::kImmediate);
@@ -3382,16 +3653,18 @@ void log_stats() noexcept {
            "copy, {} replacing another, {} freed holding a texture nothing else held); key parts worked out: "
            "pipeline {}, textures {}; {} cached of {} ({} KiB), holding {} textures ({:.1f} MiB; held by "
            "materials alone {}, {:.1f} MiB); "
-           "skinned calls: {} from their template ({} drawn by index; {} corners as {} vertices), {} decoded whole, "
-           "{} templates made; {} draws with a generated "
+           "skinned calls: {} from their template ({} drawn by index, {} of them posed in parts; {} corners as {} "
+           "vertices), {} decoded whole, {} templates made; immediate draws in compact vertices: {} ({} vertices); "
+           "{} draws with a generated "
            "program ({} generated; {} of the draws with another light count's while theirs was on its way), their "
            "constant arrays {} recorded, {} repeating the last; {} draws with a fixed-function part; {} materials "
            "worked out with their alpha test left out, {} alpha passes drawn for GXSetDstAlpha's constant",
            s.materialReused, s.materialHits, s.materialMisses, s.materialMissesCopy, s.materialEvictions, s.loneTextures,
            s.keyPipelines, s.keyTextures, materials,
            sMaterials.size(), sizeof(sMaterials) / 1024, heldTextures.size(), heldBytes / 1048576.0, onlyHeld,
-           onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedCorners, s.skinnedVertices,
-           s.perCall, s.skinnedTemplates, s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
+           onlyHeldBytes / 1048576.0, s.skinnedFromTemplate, s.skinnedIndexed, s.skinnedPosed, s.skinnedCorners,
+           s.skinnedVertices, s.perCall, s.skinnedTemplates, s.immediateCompact, s.immediateCompactVertices,
+           s.withProgram, tev_program_count(), s.standIns, s.constantsRecorded,
            s.constantsShared, s.fixedParts, s.alphaTestsLeftOut, s.alphaPasses);
   // 0.46.0 test 4: the skinned calls posed on the core 0 helper, and the FIFO processor's waits for it.
   Log.info("core 0 helper: {} skinned calls posed there, {} immediate draws decoded there ({} vertices); waited "

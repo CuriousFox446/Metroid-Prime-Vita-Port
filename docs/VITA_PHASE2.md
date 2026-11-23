@@ -5442,3 +5442,32 @@ FIFO processor waited for 238 of the helper's jobs, 1,023 ms in all and up to 20
 2.6 ms in test 56), and its frame's end for the helper 22.7 ms a frame (15.1). Taken out again: the
 helper's two files are test 56's (vita_side_jobs.cpp, gx/vita_draw.cpp), and the lesson kept: a thread
 the FIFO processor may wait on at a frame's end must not run below busy work on its core.
+
+## 0.46.0 test 58: the ending, round 4 (smaller vertices for the skinned calls and the immediate draws)
+
+The user: "Yes, start round 4". The core 0 helper's jobs, which the FIFO processor ran at its frame's
+end for 15-20 ms a frame in test 56's ending, are the frame's own vertices: a skinned call's posing at
+1.31 us a vertex (the template's 56-byte vertex read, posed, written whole), an immediate draw's decode
+at 0.74 (56 bytes written). A vertex is now written smaller (vita_gl.hpp `VertexLayout`):
+- A skinned call drawn by a program (by index, from its template's unique vertices) writes only its
+  posed part into the frame (`PosedPart`: position and normal, 16 bytes), no template vertex read. Its
+  template keeps its unique vertices on the GPU (`SkinnedTemplate::unpaired`, a Mesh made once at the
+  template's making, uploaded at its first draw), and the draw has it as its Mesh: the render worker
+  points the raw colour and the sets there and the position and the normal at the posed parts
+  (vitaGL then reads each attribute as a stream of its own, none copied). A part the arrays do not
+  give (a two-component position's z, a normal outside its array) keeps the template's, as before.
+- An immediate draw whose vertices all sit in the list with a position, at most a colour and one
+  coordinate pair, no normal, and whose program and alpha pass read nothing else (`TevProgram`'s
+  `normalInput`, `uvInputs`, from its generation: no source or key changed) writes compact vertices
+  (`CompactVertex`: position, raw colour, the pair; 24 bytes), on the core 0 helper as before
+  (`compact_on_helper`) or the FIFO processor (`decode_compact`). The snow's and the ash's, the
+  particles' quads.
+- Both are drawn fixed-function too while their program is on its way (a compact one's raw colour as
+  its colour). Neither joins the draw before it (`merge_into_last`: whole vertices alone).
+- The log: the materials line's "posed in parts" and "immediate draws in compact vertices".
+
+What to look for in test 58: the ending's frame rate (16-17 FPS in test 56); in the log, the core 0
+helper's line and the FIFO processor's runs of its jobs (15,287 in 15.9 s in test 56), its frame's end
+waits, the `[split]` lines' begin-wait. Samus's model and the other skinned models (lighting, textures,
+the Phazon Suit's aura), the ash, Phendrana's snow, the particles and the rain look as before; a wrong
+one would be a stretched, black or speckled skinned model or particle.

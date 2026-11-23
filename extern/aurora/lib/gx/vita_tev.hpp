@@ -59,6 +59,12 @@ struct TevProgram {
   // Its fog's depth fraction's numerator and denominator from two rows after the rest
   // (tev_vertex_rows; 0.46.0 test 46).
   bool fogRows = false;
+  // The vertex attributes its vertex program reads besides the position (0.46.0 test 58, for the
+  // frame's compact vertices): the raw colour, the normal, and the coordinates (bit c: aUv{c}) whose
+  // input is a vertex's texture coordinates.
+  bool rawInput = false;
+  bool normalInput = false;
+  u8 uvInputs = 0;
   // FIFO thread (record_draw): where its last draw's constants went among the rows of the frame
   // being recorded (`recordedIn`, that frame's serial; another: none yet), for a draw repeating them.
   mutable u32 recordedIn = 0;

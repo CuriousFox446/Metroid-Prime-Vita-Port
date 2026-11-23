@@ -123,6 +123,31 @@ void pad_triangle_indices(std::vector<uint16_t>& indices) noexcept;
 // (vita_gl.cpp's VertexArena), uncached, and drawn where they are: write each one whole, once, and
 // read none back. In heap memory (none of the GPU's free), vitaGL copies a draw's into its per-frame
 // pool, as before.
+// 0.46.0 test 58. How a FrameMesh's vertices lie among the frame's (the frame's vertices are counted
+// in Vertex slots; a run of smaller parts takes frame_slots of them): every attribute (Vertex); a
+// skinned call's posed part (PosedPart: its position and normal) beside its template's other
+// attributes in the draw's Mesh (made once, on the GPU), the same vertices in the same order; or an
+// immediate draw's position, raw colour and one coordinate pair (CompactVertex) for a program that
+// reads nothing else, the pair its `uvSets` coordinates' input. The writes per vertex were the
+// core 0 helper's cost in test 56's ending (some 35 ms a frame, 56 bytes each).
+enum class VertexLayout : uint8_t { Full, Posed, Compact };
+struct PosedPart {
+  float pos[3];
+  int8_t normal[3];
+  uint8_t pad;
+};
+static_assert(sizeof(PosedPart) == 16);
+struct CompactVertex {
+  float pos[3];
+  uint8_t raw[4];
+  float uv[2];
+};
+static_assert(sizeof(CompactVertex) == 24);
+// The Vertex slots `count` parts of `size` bytes take.
+constexpr uint32_t frame_slots(uint32_t count, uint32_t size) noexcept {
+  return static_cast<uint32_t>((uint64_t{count} * size + sizeof(Vertex) - 1) / sizeof(Vertex));
+}
+
 struct FrameMesh {
   uint32_t vertexAt = 0;
   uint32_t vertexCount = 0; // 0: none, the draw's mesh is its Mesh
@@ -130,6 +155,8 @@ struct FrameMesh {
   uint32_t indexCount = 0; // 0: its vertices drawn in order
   MeshKind kind = MeshKind::Other;
   MeshPrimitive primitive = MeshPrimitive::Triangles;
+  VertexLayout layout = VertexLayout::Full;
+  uint8_t uvSets = 0; // Compact: the coordinates whose input is its pair
 };
 
 // A GX texture's copy for the Vita's GPU, made beside the WebGPU one (gfx/texture.cpp): as RGBA8

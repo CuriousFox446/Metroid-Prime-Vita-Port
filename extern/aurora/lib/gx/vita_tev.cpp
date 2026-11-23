@@ -1231,6 +1231,8 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
   if (normals) {
     add(vertexParams, "float3 aNrm");
   }
+  info.rawInput = raw;
+  info.normalInput = normals;
   int lightRows[kProgramCoords] = {};
   for (int c = 0; c < layout.coordCount; ++c) {
     // As GX generates a coordinate: the source times the matrix (z 1 after a 2x4 one), normalised
@@ -1247,6 +1249,7 @@ void generate(const TevLayout& layout, TevProgram& info, std::string& vertexSour
     }
     if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
       add(vertexParams, fmt::format("float2 aUv{}", c));
+      info.uvInputs = static_cast<u8>(info.uvInputs | (1u << c));
     }
     add(vertexOuts, fmt::format("{} out vUv{} : TEXCOORD{}", type, c, c));
     vertexBody += fmt::format("  float4 t{} = {};\n", c, texgen_input(tcg, c));

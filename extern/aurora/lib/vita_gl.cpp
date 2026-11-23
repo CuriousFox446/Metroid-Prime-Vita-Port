@@ -2472,14 +2472,17 @@ bool same_rows(uint32_t a, uint32_t b, uint8_t count) noexcept {
 // draws is all in its program's inputs.
 bool merge_into_last(const Draw& draw) noexcept {
   const FrameMesh& b = draw.frameMesh;
-  if (draw.mesh != nullptr || b.vertexCount == 0 || b.primitive == MeshPrimitive::Points || draw.clear ||
-      draw.copyTo != nullptr || draw.fixed != kNoFixed || draw.program.program == nullptr ||
-      g_recording.draws.empty()) {
+  // Whole vertices alone (0.46.0 test 58): a compact mesh's place counts Vertex slots, not its own
+  // vertices, so two side by side are not one run of them; a posed one has its Mesh.
+  if (draw.mesh != nullptr || b.vertexCount == 0 || b.layout != VertexLayout::Full ||
+      b.primitive == MeshPrimitive::Points || draw.clear || draw.copyTo != nullptr || draw.fixed != kNoFixed ||
+      draw.program.program == nullptr || g_recording.draws.empty()) {
     return false;
   }
   Draw& last = g_recording.draws.back();
   FrameMesh& a = last.frameMesh;
-  if (last.mesh != nullptr || a.vertexCount == 0 || last.clear || last.copyTo != nullptr || last.fixed != kNoFixed ||
+  if (last.mesh != nullptr || a.vertexCount == 0 || a.layout != VertexLayout::Full || last.clear ||
+      last.copyTo != nullptr || last.fixed != kNoFixed ||
       a.kind != b.kind || a.primitive != b.primitive || a.vertexAt + a.vertexCount != b.vertexAt ||
       (a.indexCount != 0) != (b.indexCount != 0) || last.width != draw.width) {
     return false;
@@ -2810,17 +2813,14 @@ void bind_mesh(Mesh& mesh, DrawPath path, Section section) noexcept {
   }
 }
 
-// Binds a draw's mesh (render worker) and gives what its arrays' offsets are from: its Mesh's
-// (bind_mesh); for a mesh of the frame's own in the GPU's arena (VertexArena, 0.46.0 test 56) the
-// arena's buffer object pointed at its first vertex, the offsets the vertex's own; else no buffer,
-// its vertices in the frame, counted for the log as a Mesh in client memory is (vitaGL copies them
-// at each draw). The program path and the fixed-function one both read a bound buffer's address
-// at the draw.
-const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath path, Section section) noexcept {
-  if (draw.mesh != nullptr) {
-    bind_mesh(*draw.mesh, path, section);
-    return draw.mesh->base();
-  }
+// Binds a mesh of the frame's own (render worker) and gives what its arrays' offsets are from: in the
+// GPU's arena (VertexArena, 0.46.0 test 56) the arena's buffer object pointed at its first vertex,
+// the offsets the vertex's own; else no buffer, its vertices in the frame, counted for the log as a
+// Mesh in client memory is (vitaGL copies them at each draw). `size`: a vertex's bytes in its layout
+// (test 58). The program path and the fixed-function one both read a bound buffer's address at the
+// draw.
+const uint8_t* bind_frame_vertices(const Draw& draw, const Frame& frame, DrawPath path, Section section,
+                                   uint32_t size) noexcept {
   const FrameMesh& mesh = draw.frameMesh;
   const Vertex* const first = frame.vertices.at(mesh.vertexAt);
   const bool inPlace = frame.vertices.in_arena(mesh.vertexAt);
@@ -2840,7 +2840,7 @@ const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath pat
     uploads.us += us;
     if (!inPlace) {
       ++uploads.made;
-      uploads.bytes += static_cast<uint64_t>(mesh.vertexCount) * sizeof(Vertex);
+      uploads.bytes += static_cast<uint64_t>(mesh.vertexCount) * size;
     }
   }
   if (path == kPathFixed && mesh.vertexCount > g_clock.largestFixedVertices) {
@@ -2850,10 +2850,30 @@ const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath pat
   return inPlace ? nullptr : reinterpret_cast<const uint8_t*>(first);
 }
 
-// Draws a draw's mesh, its arrays set (render worker): a mesh of the frame's own by its indices
-// among the frame's, or its vertices in order.
-void draw_mesh(const Draw& draw, const Frame& frame) noexcept {
+// Binds a draw's mesh (render worker) and gives what its arrays' offsets are from: its Mesh's
+// (bind_mesh), or the frame's own whole vertices' (bind_frame_vertices).
+const uint8_t* bind_draw_mesh(const Draw& draw, const Frame& frame, DrawPath path, Section section) noexcept {
   if (draw.mesh != nullptr) {
+    bind_mesh(*draw.mesh, path, section);
+    return draw.mesh->base();
+  }
+  return bind_frame_vertices(draw, frame, path, section, sizeof(Vertex));
+}
+
+// 0.46.0 test 58: a draw whose vertices are a posed skinned call's (its template's unique vertices
+// as its Mesh, its posed parts among the frame's) or compact ones.
+bool posed_draw(const Draw& draw) noexcept {
+  return draw.mesh != nullptr && draw.frameMesh.vertexCount != 0 && draw.frameMesh.layout == VertexLayout::Posed;
+}
+bool compact_draw(const Draw& draw) noexcept {
+  return draw.mesh == nullptr && draw.frameMesh.vertexCount != 0 && draw.frameMesh.layout == VertexLayout::Compact;
+}
+
+// Draws a draw's mesh, its arrays set (render worker): a mesh of the frame's own by its indices
+// among the frame's (a posed draw's too: its Mesh's vertices and its parts are the same ones), or its
+// vertices in order.
+void draw_mesh(const Draw& draw, const Frame& frame) noexcept {
+  if (draw.mesh != nullptr && !posed_draw(draw)) {
     draw.mesh->draw(draw.mesh->count());
     return;
   }
@@ -3679,33 +3699,62 @@ bool palette_on_gpu(const Draw& draw, Program& program, GLuint& usedProgram, uin
   return true;
 }
 
+// A program's arrays for a draw (render worker), each pointed while the buffer it reads is bound:
+// whole vertices (a Mesh's or the frame's); a posed draw's two (0.46.0 test 58): its template's
+// unique vertices on the GPU (its Mesh) for all but the position and the normal, its posed parts
+// among the frame's for those; or compact vertices, whose program reads no normal (compact_plan,
+// gx/vita_draw.cpp; a normal or a shade read anyway is pointed at the raw colour, a shade being no
+// generated program's). Two buffers make vitaGL a stream of each attribute, none copied.
+void set_program_arrays(const Draw& draw, const Frame& frame, Program& program) noexcept {
+  const auto attrib = [&program](int which, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
+                                 uintptr_t at) {
+    if (program.attr(which) >= 0) {
+      glVertexAttribPointer(program.attr(which), size, type, normalized, stride, reinterpret_cast<const void*>(at));
+    }
+  };
+  if (posed_draw(draw)) {
+    bind_mesh(*draw.mesh, kPathProgram, kProgramUpload);
+    const auto unpaired = reinterpret_cast<uintptr_t>(draw.mesh->base());
+    attrib(kAttrRaw, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), unpaired + offsetof(Vertex, raw));
+    attrib(kAttrShade, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), unpaired + offsetof(Vertex, shade));
+    for (int coord = 0; coord < kTexCoords; ++coord) {
+      attrib(kAttrUv0 + coord, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+             unpaired + offsetof(Vertex, uv) + coord * sizeof(float[2]));
+    }
+    const auto posed = reinterpret_cast<uintptr_t>(
+        bind_frame_vertices(draw, frame, kPathProgram, kProgramUpload, sizeof(PosedPart)));
+    attrib(kAttrPos, 3, GL_FLOAT, GL_FALSE, sizeof(PosedPart), posed + offsetof(PosedPart, pos));
+    attrib(kAttrNrm, 3, GL_BYTE, GL_TRUE, sizeof(PosedPart), posed + offsetof(PosedPart, normal));
+    return;
+  }
+  if (compact_draw(draw)) {
+    const auto base = reinterpret_cast<uintptr_t>(
+        bind_frame_vertices(draw, frame, kPathProgram, kProgramUpload, sizeof(CompactVertex)));
+    attrib(kAttrPos, 3, GL_FLOAT, GL_FALSE, sizeof(CompactVertex), base + offsetof(CompactVertex, pos));
+    attrib(kAttrRaw, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(CompactVertex), base + offsetof(CompactVertex, raw));
+    attrib(kAttrShade, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(CompactVertex), base + offsetof(CompactVertex, raw));
+    attrib(kAttrNrm, 3, GL_BYTE, GL_TRUE, sizeof(CompactVertex), base + offsetof(CompactVertex, raw));
+    for (int coord = 0; coord < kTexCoords; ++coord) {
+      attrib(kAttrUv0 + coord, 2, GL_FLOAT, GL_FALSE, sizeof(CompactVertex), base + offsetof(CompactVertex, uv));
+    }
+    return;
+  }
+  const auto base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathProgram, kProgramUpload));
+  attrib(kAttrPos, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, pos));
+  attrib(kAttrRaw, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), base + offsetof(Vertex, raw));
+  attrib(kAttrShade, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), base + offsetof(Vertex, shade));
+  attrib(kAttrNrm, 3, GL_BYTE, GL_TRUE, sizeof(Vertex), base + offsetof(Vertex, normal));
+  for (int coord = 0; coord < kTexCoords; ++coord) {
+    attrib(kAttrUv0 + coord, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, uv) + coord * sizeof(float[2]));
+  }
+}
+
 // A draw with its generated program (render worker).
 void draw_with_program(const Draw& draw, const Frame& frame, Program& program, GLuint& usedProgram,
                        uint32_t& attribsOn, RenderState& current, BoundTextures& bound) {
   use_program(program, usedProgram, attribsOn);
   g_clock.mark(kProgramSwitch);
-  const auto base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathProgram, kProgramUpload));
-  const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
-  if (program.attr(kAttrPos) >= 0) {
-    glVertexAttribPointer(program.attr(kAttrPos), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
-  }
-  if (program.attr(kAttrRaw) >= 0) {
-    glVertexAttribPointer(program.attr(kAttrRaw), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex),
-                          pointer(offsetof(Vertex, raw)));
-  }
-  if (program.attr(kAttrShade) >= 0) {
-    glVertexAttribPointer(program.attr(kAttrShade), 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex),
-                          pointer(offsetof(Vertex, shade)));
-  }
-  if (program.attr(kAttrNrm) >= 0) {
-    glVertexAttribPointer(program.attr(kAttrNrm), 3, GL_BYTE, GL_TRUE, sizeof(Vertex), pointer(offsetof(Vertex, normal)));
-  }
-  for (int coord = 0; coord < kTexCoords; ++coord) {
-    if (program.attr(kAttrUv0 + coord) >= 0) {
-      glVertexAttribPointer(program.attr(kAttrUv0 + coord), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                            pointer(offsetof(Vertex, uv) + coord * sizeof(float[2])));
-    }
-  }
+  set_program_arrays(draw, frame, program);
   g_clock.mark(kProgramPointers);
   const ProgramInputs& inputs = draw.program;
   program.set_constants(inputs, frame);
@@ -3976,14 +4025,43 @@ void draw_world(const Frame& frame) {
     }
     enter_fixed_function();
     g_clock.mark(kFixedSwitch);
-    const auto base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathFixed, kFixedUpload));
-    const auto pointer = [base](size_t offset) { return reinterpret_cast<const void*>(base + offset); };
-    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, pos)));
-    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), pointer(offsetof(Vertex, color)));
-    // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
-    for (int unit = 0; unit < kTexUnits; ++unit) {
-      glClientActiveTexture(GL_TEXTURE0 + unit);
-      glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), pointer(offsetof(Vertex, uv) + fixed->units[unit].coord * sizeof(float[2])));
+    const auto at = [](uintptr_t base, size_t offset) { return reinterpret_cast<const void*>(base + offset); };
+    if (compact_draw(draw)) {
+      // 0.46.0 test 58, while its program is on its way: the raw colour as the colour (the same but
+      // for an untextured draw without one, 255 for the shaded 200), its one pair for every unit.
+      const auto base = reinterpret_cast<uintptr_t>(
+          bind_frame_vertices(draw, frame, kPathFixed, kFixedUpload, sizeof(CompactVertex)));
+      glVertexPointer(3, GL_FLOAT, sizeof(CompactVertex), at(base, offsetof(CompactVertex, pos)));
+      glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(CompactVertex), at(base, offsetof(CompactVertex, raw)));
+      for (int unit = 0; unit < kTexUnits; ++unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        glTexCoordPointer(2, GL_FLOAT, sizeof(CompactVertex), at(base, offsetof(CompactVertex, uv)));
+      }
+    } else {
+      // A posed draw's (test 58): the colour and the sets from its template's unique vertices on the
+      // GPU, the position from its posed parts, each pointed while its buffer is bound.
+      const bool posed = posed_draw(draw);
+      uintptr_t base = 0;
+      if (posed) {
+        bind_mesh(*draw.mesh, kPathFixed, kFixedUpload);
+        base = reinterpret_cast<uintptr_t>(draw.mesh->base());
+      } else {
+        base = reinterpret_cast<uintptr_t>(bind_draw_mesh(draw, frame, kPathFixed, kFixedUpload));
+      }
+      glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), at(base, offsetof(Vertex, color)));
+      // Both sets point into this mesh, a unit that is off too: no pointer is left into another buffer.
+      for (int unit = 0; unit < kTexUnits; ++unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex),
+                          at(base, offsetof(Vertex, uv) + fixed->units[unit].coord * sizeof(float[2])));
+      }
+      if (posed) {
+        const auto parts = reinterpret_cast<uintptr_t>(
+            bind_frame_vertices(draw, frame, kPathFixed, kFixedUpload, sizeof(PosedPart)));
+        glVertexPointer(3, GL_FLOAT, sizeof(PosedPart), at(parts, offsetof(PosedPart, pos)));
+      } else {
+        glVertexPointer(3, GL_FLOAT, sizeof(Vertex), at(base, offsetof(Vertex, pos)));
+      }
     }
     g_clock.mark(kFixedPointers);
     for (int unit = 0; unit < kTexUnits; ++unit) {
