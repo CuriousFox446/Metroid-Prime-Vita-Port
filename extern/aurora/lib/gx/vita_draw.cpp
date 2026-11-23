@@ -2955,9 +2955,17 @@ void warm_up_step() noexcept { tev_warm_up_step(); }
 // (dst_alpha_mode). Not made, their materials keeping the black stand-in: depth copies. A copy
 // repeating the last one into its destination this frame (the same rectangle and format) with
 // nothing drawn since is left to it: it would copy the same. (Once any repeat was: the thermal
-// visor's hot pass copies what its cold pass copied, with the hot objects drawn between.) A frame
-// makes seven at most: each ends vitaGL's scene, with the depth stored and loaded around it.
-constexpr size_t kCopiesPerFrame = 7;
+// visor's hot pass copies what its cold pass copied, with the hot objects drawn between.) Each
+// copy after a draw ends the display's scene, with the depth stored and loaded around it (copies
+// in a row share one end), and the display's render target keeps 8 scenes a frame (GXM's most:
+// vitaGL's MAX_SCENES_PER_FRAME), past which a scene waits for the GPU to finish one before it.
+// A frame made seven at most till 0.46.0 test 52, and dropped the rest: in third person the Phazon
+// Suit's aura takes six (the scene, and five of the alpha's blur into its mask) and the sun's
+// shadows two or three more, so its last two, the mask's own among them, were dropped (test 52's
+// log: 600 a window of 300 frames), and the aura was drawn with an earlier frame's mask, where
+// Samus had been. Since test 53 a frame makes twelve: one waiting at the GPU beats a wrong picture,
+// and a frame wanting more (indirect particles copy each one) still has a bound.
+constexpr size_t kCopiesPerFrame = 12;
 
 // This frame's copies (record_copy), to tell a repeat (`draws`: the frame's draws recorded once it
 // was); the frame by its serial.

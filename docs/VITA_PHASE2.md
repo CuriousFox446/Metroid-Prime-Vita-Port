@@ -5244,3 +5244,33 @@ What to look for in test 52:
 - Stand still for a second (the hand on the cannon when still): the rifle settles, and no left hand
   comes over it. The same in free look and while firing combos.
 - The grapple beam still shows the marine's left arm.
+
+## 0.46.0 test 53: the Phazon Suit's aura in third person, every copy made
+
+The user, with two photos (the Phazon Suit and the Dark Trooper in third person, the aura's outline
+off to one side of the body) and test 52's log: "we still need to fix the phazon suit aura.
+Sometimes it has problems following you in third-person".
+
+The aura is drawn from a mask: the body drawn with GXSetDstAlpha's 255, the EFB's alpha blurred by
+`CCubeRenderer::DoPhazonSuitIndirectAlphaBlur` and copied into the mask texture
+(`DrawPhazonSuitIndirectEffect`). The chain takes six EFB copies a frame: the scene (RGB565, for the
+warp), then five alpha copies (the halved alpha, the quarter, the PC's HDR round trip, the halo, the
+mask). The Vita path made seven copies a frame at most and dropped the rest (`record_copy`,
+`kCopiesPerFrame`). In third person with the sun's shadows on, a frame wanted nine: test 52's log has
+windows of 2,700 copies in 300 frames, 1,500 of them alpha (five a frame: the chain ran every frame),
+600 "past a frame's 7" (two a frame). The two dropped were the chain's last, the halo's and the
+mask's: the aura was drawn with the mask an earlier frame had left, where Samus had been. Windows of
+seven a frame (2,100) dropped none, so it came and went.
+- `kCopiesPerFrame` 12. Each copy after a draw ends the display's scene (copies in a row share one
+  end), and the display's render target keeps 8 scenes a frame (GXM's most, vitaGL's
+  `MAX_SCENES_PER_FRAME`): a frame past that waits at its next scene for the GPU to finish one,
+  rather than drawing a wrong picture. The bound stays for frames that would make many more
+  (indirect particles copy each one).
+- The PC's HDR round trip in the blur (an A8 copy of the quarter drawn back over the alpha, which
+  clamps a float EFB's sum) is left out on the Vita (`!defined(__vita__)`): its 8-bit EFB saturates
+  each blend already, as the GC's does, so the copy and its draw changed nothing. The chain is five
+  copies there, four scene ends.
+
+What to look for in test 53: third person in the Phazon Suit, moving and turning where the sun's
+shadows fall: the aura round the body every frame. The presents report's copies line: "past a
+frame's 12" at 0; the frame rate there against test 52's (about 33-38 FPS in those windows).

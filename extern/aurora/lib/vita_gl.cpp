@@ -2844,7 +2844,8 @@ uint32_t g_lastVcount = 0;
 std::array<uint32_t, 5> g_pacing{};
 
 // The scenes vitaGL sizes a render target for (vglSetupRenderTargetScenesNum): the display's, which
-// takes a frame's copies (record_copy makes 7 a frame at most) and one, and a copy's framebuffer's.
+// takes a frame's copies and one, 8 (GXM's most; record_copy makes up to 12 since 0.46.0 test 53,
+// a scene past the 8th waiting for the GPU to finish one before it), and a copy's framebuffer's.
 // A frame drawn at another scale takes the display's for its framebuffer, made with it.
 constexpr uint8_t kDisplayScenes = 8;
 constexpr uint8_t kCopyScenes = 4;
@@ -4044,8 +4045,9 @@ bool initialize() noexcept {
   // The scenes a frame draws to each render target: each EFB copy ends the display's scene and
   // draws one into its texture's framebuffer (copy_on_gpu), and GXM sizes a target's own memory
   // by the scenes it expects a frame (one by default, past which a scene waits for the GPU to be
-  // done with one before it). The display takes the copies' (record_copy makes 7 a frame at most)
-  // and one; a copy's framebuffer, a destination copied a few times a frame (the particles').
+  // done with one before it). The display takes the copies' and one, 8 (GXM's most; record_copy
+  // makes up to 12 a frame since 0.46.0 test 53); a copy's framebuffer, a destination copied a few
+  // times a frame (the particles').
   vglSetupRenderTargetScenesNum(8, 4);
   // The shader patcher's heaps, larger (kPatcherFragmentUsse's comment).
   vglSetupShaderPatcher(kPatcherBuffer, kPatcherVertexUsse, kPatcherFragmentUsse);

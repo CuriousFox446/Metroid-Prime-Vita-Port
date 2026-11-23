@@ -2774,12 +2774,13 @@ void CCubeRenderer::DoPhazonSuitIndirectAlphaBlur(float blurRadius, float blurRa
     CGX::End();
   }
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && !defined(__vita__)
   // Port: the GC EFB saturates each ONE/ONE blend at 1, so the eight 0.3 taps leave the body's
   // inside at 1 and the subtract below clears it to the halo. The HDR scene's float target keeps
   // the sum (up to 2.4), and the whole body stays in the mask. All the taps add, so one clamp of
   // the sum equals the per-blend saturation: an A8 copy (unorm) drawn back over the alpha. In the
-  // 8-bit display EFB the round trip changes nothing.
+  // 8-bit display EFB the round trip changes nothing, so the Vita (an 8-bit EFB only) leaves it out:
+  // each EFB copy there ends the display's scene, of which GXM keeps 8 a frame (0.46.0 test 53).
   CopyTex(4, false, GetRenderToTexBuffer(12), GX_TF_A8, false);
   GXSetColorUpdate(GX_FALSE);
   CGraphics::LoadDolphinSpareTexture(width >> 2, height >> 2, GX_TF_I8, GetRenderToTexBuffer(12),
