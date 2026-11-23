@@ -5466,8 +5466,32 @@ at 0.74 (56 bytes written). A vertex is now written smaller (vita_gl.hpp `Vertex
   its colour). Neither joins the draw before it (`merge_into_last`: whole vertices alone).
 - The log: the materials line's "posed in parts" and "immediate draws in compact vertices".
 
-What to look for in test 58: the ending's frame rate (16-17 FPS in test 56); in the log, the core 0
+What to look for in test 58 (superseded by test 59, below): the ending's frame rate (16-17 FPS in test 56); in the log, the core 0
 helper's line and the FIFO processor's runs of its jobs (15,287 in 15.9 s in test 56), its frame's end
 waits, the `[split]` lines' begin-wait. Samus's model and the other skinned models (lighting, textures,
 the Phazon Suit's aura), the ash, Phendrana's snow, the particles and the rain look as before; a wrong
 one would be a stretched, black or speckled skinned model or particle.
+
+## 0.46.0 test 59: the Metroid Prime fight's 4 FPS (a skinned list's templates, one for each state)
+
+The user, with test 58's log: "The performance is so bad fighting Metroid Prime (the ending boss
+fight)". The log (83,805 lines, the build 4573fd6, no error) has the fight at 18-40 FPS, and then some
+90 s at 4.0-4.2 FPS (lines 73584-83801). There the FIFO processor spent 240 ms a frame in 63 skinned
+list calls (`vita: skinned list call` 285 ms a frame, 4.5 ms a call), the game thread waited 152 ms a
+frame for it (`begin_frame`), and the simulation fell to 40 ticks a second. Their reports: 3,036,
+4,416 and 1,357 templates made for 7,726, 6,048 and 5,082 calls (0 to 109 in every other report): the
+boss's lists were called in two states in turn (its body drawn twice a frame), and a list kept one
+template (`sSkinned`, a template a list), so each call in the other state made it again (the list
+decoded whole, its distinct pairs and unique vertices worked out, and since test 58 their copy for the
+GPU made and uploaded).
+- A skinned list keeps a template for each state it is called in, up to four (`SkinnedList`, as
+  `CachedList` keeps a resident list's triangles), the one made again past four in turn; each stays
+  where it was made (the core 0 helper's jobs read it there), and a list let go of waits for every one.
+- A template's unique vertices go to the GPU at its second call (`SkinnedTemplate::calls`), not at its
+  making: one made for a single call is drawn whole, as before test 58, with no copy and no upload.
+
+The rest of the fight (18-30 FPS in most of it): the game thread's own work, some 48 ms a frame in the
+log's steady 20 FPS stretch (3 ticks of 8.6 ms, the draw 16.5); not changed here.
+
+What to look for in test 59: the fight's frame rate where test 58 had 4 FPS (the same as the fight's
+other parts, 18-30), and the materials line's "templates made" in its reports (a few, not thousands).

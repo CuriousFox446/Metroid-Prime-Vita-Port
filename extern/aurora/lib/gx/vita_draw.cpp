@@ -214,12 +214,23 @@ struct SkinnedTemplate {
   // 0.46.0 test 58: the unique vertices on the GPU (a Mesh made from them once, uploaded at its first
   // draw), whose attributes but the position and the normal a program's draw reads there; each call
   // writes only its posed part (vita_gl::PosedPart) into the frame. Let go of with the template (the
-  // frames that drew it hold it till they go).
+  // frames that drew it hold it till they go). Since test 59 made at its second call, not its
+  // first: a template made for one call alone costs no copy and no upload.
   std::shared_ptr<vita_gl::Mesh> unpaired;
+  u32 calls = 0;
   // The core 0 helper's last job reading it (0.46.0 test 4): waited for before it changes or goes.
   u32 helperJob = 0;
 };
-std::unordered_map<const void*, SkinnedTemplate> sSkinned;
+// A skinned list's templates, one for each state it is called in, a few kept (as CachedList keeps a
+// list's triangles), each where it was made (the core 0 helper's jobs read it there). 0.46.0 test 59:
+// in test 58's Metroid Prime fight the boss's lists were called in two states in turn (its body drawn
+// twice a frame), and the one template each kept was made again at nearly every call (4,416 of 6,048
+// in one report): 4.5 ms a call on the FIFO processor, 63 calls a frame, 4 FPS.
+struct SkinnedList {
+  std::array<std::unique_ptr<SkinnedTemplate>, kVariantsPerList> variants;
+  size_t next = 0; // the one made again when none matches and all are in use (in turn)
+};
+std::unordered_map<const void*, SkinnedList> sSkinned;
 
 // A skinned call's distinct vertices as posed (skinned_from_template), and the immediate draws'
 // vertices before they are made triangles (draw_immediate): the FIFO thread's, kept for their
@@ -2929,9 +2940,37 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
   if (posType != GX_INDEX8 && posType != GX_INDEX16) {
     return false;
   }
-  SkinnedTemplate& t = sSkinned[key];
-  const bool built = !t.vertices.empty() || t.state.fmtMask != 0;
-  if (!built || !t.state.matches_current(texAttrs, true)) {
+  // The list's template for the state it is called in now (one made or not usable alike: fmtMask
+  // set), else a new one: in a slot never used, else in the next in turn (test 59).
+  SkinnedList& list = sSkinned[key];
+  SkinnedTemplate* found = nullptr;
+  for (const std::unique_ptr<SkinnedTemplate>& variant : list.variants) {
+    if (variant != nullptr && (!variant->vertices.empty() || variant->state.fmtMask != 0) &&
+        variant->state.matches_current(texAttrs, true)) {
+      found = variant.get();
+      break;
+    }
+  }
+  const bool made = found == nullptr;
+  if (made) {
+    std::unique_ptr<SkinnedTemplate>* slot = nullptr;
+    for (std::unique_ptr<SkinnedTemplate>& variant : list.variants) {
+      if (variant == nullptr) {
+        slot = &variant;
+        break;
+      }
+    }
+    if (slot == nullptr) {
+      slot = &list.variants[list.next];
+      list.next = (list.next + 1) % kVariantsPerList;
+    }
+    if (*slot == nullptr) {
+      *slot = std::make_unique<SkinnedTemplate>();
+    }
+    found = slot->get();
+  }
+  SkinnedTemplate& t = *found;
+  if (made) {
     wait_for_template(t); // the core 0 helper may still read it
     ++sStats.skinnedTemplates;
     DecodeState& state = t.state;
@@ -2982,14 +3021,16 @@ bool skinned_from_template(const void* key, const resident::Entry& entry, u32 si
     t.indices.clear();
     t.indices.shrink_to_fit();
     make_unique_vertices(t);
-    // The unique vertices on the GPU, for a program's draws (test 58): none without them (more than
-    // 16-bit indices take: every corner then, as before).
-    t.unpaired = t.order != nullptr && !t.unique.empty()
-                     ? vita_gl::make_mesh(std::vector<vita_gl::Vertex>(t.unique), vita_gl::MeshKind::Skinned)
-                     : nullptr;
+    t.unpaired.reset();
+    t.calls = 0;
   }
   if (t.vertices.empty()) {
     return false;
+  }
+  // The unique vertices on the GPU, for a program's draws (test 58), at the template's second call
+  // (test 59): none without them (more than 16-bit indices take: every corner then, as before).
+  if (++t.calls == 2 && t.unpaired == nullptr && t.order != nullptr && !t.unique.empty()) {
+    t.unpaired = vita_gl::make_mesh(std::vector<vita_gl::Vertex>(t.unique), vita_gl::MeshKind::Skinned);
   }
   const VtxAttrFmt& posFmt = g_gxState.vtxFmts[t.fmt].attrs[GX_VA_POS];
   const AttrArray& array = g_gxState.arrays[GX_VA_POS];
@@ -3496,7 +3537,11 @@ void release(const void* key) noexcept {
   sPosAnswerKnown = false;
   sCache.erase(key);
   if (const auto it = sSkinned.find(key); it != sSkinned.end()) {
-    wait_for_template(it->second); // the core 0 helper may still read it
+    for (const std::unique_ptr<SkinnedTemplate>& variant : it->second.variants) {
+      if (variant != nullptr) {
+        wait_for_template(*variant); // the core 0 helper may still read it
+      }
+    }
     sSkinned.erase(it);
   }
 }
