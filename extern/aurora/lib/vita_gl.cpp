@@ -1760,8 +1760,43 @@ std::vector<uint8_t> g_savedMaterials;
 std::mutex g_materialsMutex;
 std::vector<uint8_t> g_materialsPending;
 bool g_materialsQueued = false;
+// 0.46.0 test 61: the records go to the card in batches, every three minutes at most or once
+// 64 KiB wait, not one append for each new material: in test 60, its card's shader folder emptied,
+// 226 records were saved in one session, and the music's refill reads from the disc image on the
+// same card came 4 to 8.5 s late (the music repeating and overlapping) in every stretch where
+// records were saved, and in none where they were not (the DVD worker's reads behind the card
+// thread's writes). The first batch waits too, from the start (read_materials). Records not
+// written yet when the game is closed are saved again the next time their material is drawn.
+constexpr auto kMaterialsInterval = std::chrono::minutes(3);
+constexpr size_t kMaterialsBatch = 64 * 1024;
+std::chrono::steady_clock::time_point g_materialsWritten{}; // the last batch queued (g_materialsMutex)
+
+void write_materials() noexcept;
+
+// g_materialsMutex held: the records waiting queued for the card thread, when they are due.
+void queue_materials_locked() noexcept {
+  if (g_materialsQueued || g_materialsPending.empty()) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (g_materialsPending.size() < kMaterialsBatch && now - g_materialsWritten < kMaterialsInterval) {
+    return;
+  }
+  g_materialsWritten = now;
+  g_materialsQueued = card_thread().submit(write_materials);
+}
+
+// The presents report's look (render worker): records waiting since the last batch, queued once due.
+void queue_due_materials() noexcept {
+  std::lock_guard lock{g_materialsMutex};
+  queue_materials_locked();
+}
 
 void read_materials() noexcept {
+  {
+    std::lock_guard lock{g_materialsMutex};
+    g_materialsWritten = std::chrono::steady_clock::now();
+  }
   std::FILE* file = std::fopen(g_materialsPath.c_str(), "rb");
   if (file == nullptr) {
     return;
@@ -2250,7 +2285,11 @@ private:
         m_id = program;
         GLenum format = 0;
         std::vector<uint8_t> binary;
-        if (program_binary(m_id, format, binary)) {
+        // Not one linked from the precompiled pack (0.46.0 test 61): the pack gives it back the next
+        // session as quickly, and each binary written held the card the music's refills read the
+        // disc image from (test 60, its card's shader folder emptied: a binary for every program
+        // drawn).
+        if (!job.packed && program_binary(m_id, format, binary)) {
           {
             std::lock_guard lock{g_keysMutex};
             g_cardKeys.insert(m_key);
@@ -2351,9 +2390,7 @@ void save_material(const void* record, size_t size) noexcept {
   std::lock_guard lock{g_materialsMutex};
   g_materialsPending.insert(g_materialsPending.end(), lengthBytes, lengthBytes + sizeof(length));
   g_materialsPending.insert(g_materialsPending.end(), bytes, bytes + size);
-  if (!g_materialsQueued) {
-    g_materialsQueued = card_thread().submit(write_materials);
-  }
+  queue_materials_locked();
 }
 
 namespace {
@@ -4685,6 +4722,7 @@ void present(ImDrawData* overlay) noexcept {
   g_reaper.reap(std::move(frame));
   g_clock.mark(kFinish);
   if (++g_presentStats.presents == 300) {
+    queue_due_materials();
     Log.info("presents: {}, {} with game draws, {:.1f} draws a frame ({:.1f} more joined to the draw before them), {} "
              "destroyed here with the reaper two behind; "
              "generated programs: {} draws with theirs, {} with a stand-in while theirs was on its way (another "

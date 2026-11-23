@@ -5539,3 +5539,29 @@ What to look for in test 60:
 - At the start "precompiled: 2960"; in play few or no programs sent to the compiler thread.
 - The ending's dips (12-14 FPS for some 4 s in its heavy part, the GPU 72-80 ms a frame), its last shot
   (22-28 FPS), and the GPU busy time in heavy scenes elsewhere against test 59's.
+
+## 0.46.0 test 61: the music's refills before the shader cache's writes
+
+The user, with test 60's log: "mr music repeating and overlap has returned". The log (59,519 lines,
+e3654cf, Tallon Overworld) began with the card's shader folder empty but for the new pack ("programs
+on the card: 0; precompiled: 2960; material records: 0 KiB"); no program failed.
+- The music's refills (CDSPStream, read by Aurora's DVD worker from the disc image) came 4 to 8.5 s
+  late ("refill late ... asked for 3996 ms ago", "late refill read done ... after 5708 ms") in every
+  stretch where material records were saved (226 over the session), and in none where none were
+  (log lines 6192-9481 and 17159-17955).
+- Each new material's record was appended to materials.bin on the card thread at once (a batch of a
+  record or a few), and every program linked, from the pack too, had its binary written to the card:
+  writes on the card the DVD worker's reads of the disc image waited behind.
+
+So:
+- A program linked from the precompiled pack is not written to the card (`link_compiled`): the pack
+  gives it back the next session as quickly. One compiled on the Vita is, as before.
+- The material records go to the card in batches, every three minutes at most or once 64 KiB wait
+  (`queue_materials_locked`, looked at in `save_material` and at each presents report), the first
+  three minutes from the start. Records not written yet when the game is closed are saved again the
+  next time their material is drawn.
+- Nothing needs deleting from the shader folder for a new build: binaries of other sources are left
+  unread, and the pack holds tests 47-61's programs.
+
+What to look for in test 61: no "refill late" lines in the log (or a few, in a batch's minute) and
+the music whole; "material records: ... N saved since" growing as before.
