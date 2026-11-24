@@ -401,7 +401,8 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   have no ball; import again.
 - "Play as a Federation Marine" (`echoes_federation_marine`, off by default; console `marine 0|1`),
   under it, puts Echoes' Federation Marine (its `Galactic_Trooper`, the white GF trooper) in place of
-  Samus, from the next mod reload; the Echoes import brings it (mod version 19; import again). It and
+  Samus, from the next mod reload; the Echoes import brings it (mod version 19, the left hand on the
+  rifle from 20; import again). It and
   "Play as Dark Samus" exclude each other. Below.
 
 #### Play as a Federation Marine
@@ -435,8 +436,14 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
 - The first-person left arm is the trooper's own left forearm and hand, turned into the grapple arm's
   frame and skinned on its joints: the fingers follow the grapple animations. It shows only for the
   grapple beam: Samus's poses that put her left hand on the cannon (the hand on the cannon when still,
-  free look, the fidgets, combo fire, a strike's flinch) went through the rifle, which has a grip of
-  its own for that hand, so with the rifle they are not drawn (0.46.0 test 52).
+  free look, the fidgets, combo fire, a strike's flinch) went through the rifle, so with the rifle they
+  are not drawn (0.46.0 test 52).
+- In those poses the marine's left hand holds the rifle's front grip instead (the barred guard under
+  its muzzle; mod version 20): a model of the trooper's own left forearm and hand made by the import,
+  the fingers closed on the guard and the forearm running back 14° below level, drawn with the rifle
+  and slid up from below over 0.2 s (and down after). From the first-person camera, above and behind,
+  the guard is under the rifle, so mostly the hand's top and the forearm show at the bottom of the
+  screen. The pose is the user's pick of three previews.
 - The Morph Ball is Prime's own, its shell in the look's armour colour (the marine's white, the Gravity
   purple, the Dark Trooper's dark grey) and its lights in the look's light colour (teal, aqua; the Dark
   Trooper keeps the red). So is the Spider Ball (Prime's, from its Varia Suit set), with Prime's glass

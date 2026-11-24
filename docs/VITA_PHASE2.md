@@ -5565,3 +5565,45 @@ So:
 
 What to look for in test 61: no "refill late" lines in the log (or a few, in a batch's minute) and
 the music whole; "material records: ... N saved since" growing as before.
+
+## 0.46.0 test 62: the Federation Marine's left hand on its rifle's grip (echoes-suits 20)
+
+Since test 52 the marine's first-person left arm was left out of Samus's poses on the cannon (it went
+through the rifle). The user: "Was thinking of bringing back the left hand and make it hold the arm
+cannon grip instead of on top the arm cannon, show me a preview first". They circled the barred guard
+under the rifle's muzzle.
+- Three previews (`~/marine/leftgrip.py`, rendered on the PC, nothing built):
+  - the hand closed on the guard, the forearm along the rifle: "kinda looks like a floating hand";
+  - the forearm pointing down: "too low, and now the hand is not holding the grip properly";
+  - the first grip, the wrist bent so the forearm runs back 14° (A) or 28° (B) below level. They
+    picked A.
+- The import (`BuildLeftGrip`, port_federation_marine.cpp) writes the trooper's left forearm and hand
+  as a static model in the rifle's space, Wear(look, `kLeftGripBase`) per look (the Gravity marine's
+  purple, the Dark Trooper's own).
+  - Posed by linear blend skinning on the Echoes skin: the fingers closed 55° and 60° at their two
+    joints about the knuckle line, the thumb swung under, the forearm turned 34° about the wrist.
+  - Placed with the knuckle line along the guard (index finger at its top) and the gripped point on
+    its middle. 146 vertices.
+  - echoes-suits `kVersion` 20, so the user imports again. The harness's output is test 61's plus the
+    three grip models.
+- The loader records the looks that have one (`sMarineGrips`, `PortFederationMarine::ServesLeftGrip`).
+  CGunWeapon loads it with the rifle (`mPortGripModelData`, LoadSuitArm; a mods reload that brings or
+  removes it loads the arm again).
+- CPlayerGun::Update raises `mPortGripBlend` over 0.2 s while the grapple arm plays the gun
+  controller's animations (`kAS_GunControllerAnimation`: free look, the hand on the cannon when still,
+  fidgets, combo fire, a strike's flinch), and lowers it after. DrawArm still leaves the animated arm
+  out with the rifle.
+- CGunWeapon draws the grip on the rifle's transform, slid down and back by what the blend lacks
+  (`PortLeftGripXf`): in the normal visors (outside the beam's tint), thermal, X-ray and beam changes
+  (the hologram path), and the depth pass.
+
+What to look for in test 62:
+- Import the Echoes suits again (version 20). The log's "serves the Federation Marine" line ends
+  "3 with the left hand on them".
+- Stand still for a second, or free-look: the marine's left hand and cuff rise under the rifle's
+  lower left and stay while you turn and fire; walking drops them.
+- The grapple beam still shows the whole left arm.
+
+(Not in the build: since test 52 the user also has `echoes-suits-hd`, an add-on mod of higher-resolution
+textures for the marine and the Dark Trooper made from their own pictures. It works with test 62 as it
+is.)

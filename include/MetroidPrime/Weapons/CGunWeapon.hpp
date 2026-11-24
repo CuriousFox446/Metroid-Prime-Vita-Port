@@ -182,6 +182,8 @@ public:
   // The Federation Marine's rifle stands in for the cannon now: the left hand's poses on the cannon
   // would go through it, so CPlayerGun::DrawArm leaves them out.
   bool PortDrawsMarineRifle() const { return mPortDreadCannon && mPortMarineRifle; }
+  // How far the marine's left hand is on the rifle's grip (0 away, 1 on it; CPlayerGun, every tick).
+  void PortSetLeftGrip(float blend) { mPortGripBlend = blend; }
 #endif
   void ReturnToDefault(CStateManager& mgr);
   bool ComboFireOver() const;
@@ -289,6 +291,12 @@ protected:
   // LoadSuitArm.
   float mPortCannonRoll = 30.f;
   bool mPortMarineRifle = false;
+  // The marine's left hand on that rifle's grip (PortFederationMarine::LeftGripModel, imports from
+  // echoes-suits 20), in the rifle's space; drawn with it while mPortGripBlend > 0, slid up from below
+  // (PortLeftGripXf).
+  rstl::optional_object< CModelData > mPortGripModelData;
+  float mPortGripBlend = 0.f;
+  bool PortLeftGripXf(const CTransform4f& cannonXf, CTransform4f& out) const;
 
   // Echoes' arm cannon (echoes-suits, PortEchoesSuits::GunAncs) is skinned to Prime's gun skeleton,
   // whose missile anims open the barrel; Echoes' cannon never opens. For it PlayAnim plays Echoes'

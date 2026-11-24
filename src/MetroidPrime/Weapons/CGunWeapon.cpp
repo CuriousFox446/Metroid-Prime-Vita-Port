@@ -400,10 +400,14 @@ void CGunWeapon::Update(float dt, CStateManager& mgr) {
       LoadSuitArm(mgr);
     }
 #ifdef TARGET_PC
-    // The Dread cannon switched on or off (setting, mods reload): load the arm again.
+    // The Dread cannon switched on or off (setting, mods reload), or the marine's left hand on its
+    // rifle came or went (a mods reload after an import): load the arm again.
     else if (xb0_suitArmModelData &&
-             mPortDreadCannon !=
-                 PortDreadSamus::ReplacesFirstPersonCannon(NWeaponTypes::get_current_suit(mgr))) {
+             (mPortDreadCannon !=
+                  PortDreadSamus::ReplacesFirstPersonCannon(NWeaponTypes::get_current_suit(mgr)) ||
+              bool(mPortGripModelData) !=
+                  (mPortDreadCannon && mPortMarineRifle &&
+                   PortFederationMarine::ServesLeftGrip(NWeaponTypes::get_current_suit(mgr))))) {
       AsyncLoadSuitArm(mgr);
     }
 #endif
@@ -598,6 +602,10 @@ void CGunWeapon::Draw(const bool drawSuitArm, const CStateManager& mgr, const CT
     else if (mPortDreadCannon) {
       CModelFlags useFlags(CModelFlags::kT_Opaque, 1.0f);
       xb0_suitArmModelData->RenderThermal(cannonXf, mulColor, addColor, useFlags);
+      CTransform4f gripXf = CTransform4f::Identity();
+      if (PortLeftGripXf(cannonXf, gripXf)) {
+        mPortGripModelData->RenderThermal(gripXf, mulColor, addColor, useFlags);
+      }
     }
 #endif
     else {
@@ -662,6 +670,11 @@ void CGunWeapon::Draw(const bool drawSuitArm, const CStateManager& mgr, const CT
         CCubeModel::PortSetBeamGlow(nullptr, -1, 0);
         PortBeamColours::Reapply();
       }
+      // The marine's left hand on the rifle, out of the beam's tint.
+      CTransform4f gripXf = CTransform4f::Identity();
+      if (PortLeftGripXf(cannonXf, gripXf)) {
+        mPortGripModelData->Render(mgr, gripXf, lights, flags);
+      }
 #else
       x10_solidModelData->Render(mgr, xf, lights, flags.UseShaderSet(x20c_shaderIdx));
 #endif
@@ -692,7 +705,12 @@ void CGunWeapon::PortDrawDepth(const bool drawSuitArm, const CStateManager& mgr,
     return;
   const CModelFlags flags = CModelFlags::Normal().UseShaderSet(x20c_shaderIdx);
   if (mPortDreadCannon) {
-    xb0_suitArmModelData->Render(mgr, PortDreadCannonXf(xf), nullptr, flags);
+    const CTransform4f cannonXf = PortDreadCannonXf(xf);
+    xb0_suitArmModelData->Render(mgr, cannonXf, nullptr, flags);
+    CTransform4f gripXf = CTransform4f::Identity();
+    if (PortLeftGripXf(cannonXf, gripXf)) {
+      mPortGripModelData->Render(mgr, gripXf, nullptr, CModelFlags::Normal());
+    }
     return;
   }
   x10_solidModelData->Render(mgr, xf, nullptr, flags);
@@ -713,8 +731,12 @@ void CGunWeapon::DrawHologram(const CStateManager& mgr, const CTransform4f& xf,
   // The hologram (a beam change, the X-ray visor) is the retail gun's own model: the Dread cannon
   // stands in for it, unlit like the hologram.
   if (mPortDreadCannon) {
-    xb0_suitArmModelData->Render(mgr, PortDreadCannonXf(xf), nullptr,
-                                 flags.UseShaderSet(x20c_shaderIdx));
+    const CTransform4f cannonXf = PortDreadCannonXf(xf);
+    xb0_suitArmModelData->Render(mgr, cannonXf, nullptr, flags.UseShaderSet(x20c_shaderIdx));
+    CTransform4f gripXf = CTransform4f::Identity();
+    if (PortLeftGripXf(cannonXf, gripXf)) {
+      mPortGripModelData->Render(mgr, gripXf, nullptr, flags);
+    }
     return;
   }
 #endif
@@ -748,6 +770,18 @@ CTransform4f CGunWeapon::PortDreadCannonXf(const CTransform4f& xf) const {
           .GetTranslation();
   return xf * CTransform4f::Translate(muzzle + PortDreadMuzzleShift()) *
          CTransform4f::RotateY(CRelAngle::FromDegrees(mPortCannonRoll));
+}
+
+// The Federation Marine's left hand on its rifle's front grip (mPortGripModelData, in the rifle's
+// space): on the rifle's transform, slid down, back and left by what mPortGripBlend lacks of 1, so it
+// rises into place as Samus's hand would onto her cannon. False when it is not drawn.
+bool CGunWeapon::PortLeftGripXf(const CTransform4f& cannonXf, CTransform4f& out) const {
+  if (!mPortDreadCannon || !mPortGripModelData || mPortGripBlend <= 0.f || !mPortGripModelData->IsLoaded(0)) {
+    return false;
+  }
+  const float away = 1.f - mPortGripBlend;
+  out = cannonXf * CTransform4f::Translate(CVector3f(-0.06f * away, -0.10f * away, -0.22f * away));
+  return true;
 }
 
 // The Plasma Beam's animations push LBEAM out along the barrel (+Y) past its bind pose, 0.204
@@ -995,6 +1029,8 @@ void CGunWeapon::Touch(const CStateManager& mgr) {
     if (xb0_suitArmModelData)
 #ifdef TARGET_PC
       xb0_suitArmModelData->Touch(mgr, mPortDreadCannon ? x20c_shaderIdx : 0);
+    if (mPortGripModelData)
+      mPortGripModelData->Touch(mgr, 0);
 #else
       xb0_suitArmModelData->Touch(mgr, 0);
 #endif
@@ -1033,6 +1069,7 @@ void CGunWeapon::Unload(CStateManager& mgr) {
   xb0_suitArmModelData = rstl::optional_object_null();
 #ifdef TARGET_PC
   mPortDreadCannon = false;
+  mPortGripModelData = rstl::optional_object_null();
 #endif
   x100_gunController = nullptr;
   x1bc_rainSplashGenerator = nullptr;
@@ -1186,6 +1223,7 @@ void CGunWeapon::AsyncLoadSuitArm(CStateManager& mgr) {
   xb0_suitArmModelData = rstl::optional_object_null();
 #ifdef TARGET_PC
   mPortDreadCannon = false;  // the retail gun until LoadSuitArm has the new arm
+  mPortGripModelData = rstl::optional_object_null();
 #endif
   x13c_armCharacter = gpSimplePool->GetObj(skSuitArmNames[suit]);
   x13c_armCharacter.Lock();
@@ -1205,6 +1243,11 @@ void CGunWeapon::LoadSuitArm(CStateManager& mgr) {
   xb0_suitArmModelData =
       CStaticRes(mPortDreadCannon ? CAssetId(PortDreadSamus::FirstPersonCannon(suit)) : armId,
                  x4_scale);
+  mPortGripModelData = rstl::optional_object_null();
+  if (mPortDreadCannon && mPortMarineRifle && PortFederationMarine::ServesLeftGrip(suit)) {
+    mPortGripModelData = CStaticRes(CAssetId(PortFederationMarine::LeftGripModel(suit)), x4_scale);
+    mPortGripModelData->SetSortThermal(true);
+  }
 #else
   xb0_suitArmModelData = CStaticRes(armId, x4_scale);
 #endif

@@ -600,7 +600,7 @@ inline void CPlayerGun::DrawArm(const CStateManager& mgr, const CVector3f& pos,
   // fire, a strike's flinch: the gun controller's animations) went through it. The rifle has a grip
   // of its own for that hand, so with it the arm shows only for the grapple beam (the user, 0.46.0
   // test 51: "make sure the hand doesn't appear because it clips through the arm cannon and it
-  // already has a grip").
+  // already has a grip"); the gun draws the marine's left hand on that grip instead (mPortGripBlend).
   if (x740_grappleArm->GetAnimState() == CGrappleArm::kAS_GunControllerAnimation &&
       x72c_currentBeam->PortDrawsMarineRifle()) {
     return;
@@ -1249,6 +1249,15 @@ void CPlayerGun::Update(float grappleSwingT, float cameraBobT, float dt, CStateM
 
 #ifdef TARGET_PC
   sPortRemasteredGun = x774_holoTransitionGen->PortIsRemastered();
+  // The Federation Marine's left hand on its rifle's grip: shown while the arm would rest on the
+  // cannon (the gun controller's animations: free look, the hand on the cannon when still, fidgets,
+  // combo fire, a strike's), which DrawArm leaves out with the rifle; slid in and out over 0.2 s.
+  {
+    const bool onCannon = x740_grappleArm->GetActive() &&
+                          x740_grappleArm->GetAnimState() == CGrappleArm::kAS_GunControllerAnimation;
+    mPortGripBlend = CMath::Clamp(0.f, mPortGripBlend + (onCannon ? dt : -dt) * 5.f, 1.f);
+    x72c_currentBeam->PortSetLeftGrip(mPortGripBlend);
+  }
 #endif
   x6a0_motionState.Update((x2f0_pressedFireButtonStates & 1) != 0 && x832_28_readyForShot &&
                               x32c_chargePhase < kCP_AnimAndSfx && !player.IsInFreeLook()

@@ -112,12 +112,14 @@ int sEchoesImportVersion = 0;
 // "Play as a Federation Marine" (PortFederationMarine::SetPlayAsMarine; the setting
 // echoes_federation_marine) and what the last load served of it: the body CMDLs (PortDreadSamus::
 // Replaces and HasOwnCannon: its bodies carry their boots, visor and rifle), the first-person cannon
-// ids its rifle is under (PortDreadSamus::FirstPersonCannon), and the suits whose Spider Ball is its
-// (Prime's own recoloured: its glass shell stays).
+// ids its rifle is under (PortDreadSamus::FirstPersonCannon), the suits whose look has the left hand
+// on that rifle (PortFederationMarine::LeftGripModel), and the suits whose Spider Ball is its (Prime's
+// own recoloured: its glass shell stays).
 bool sPlayAsMarine = false;
 bool sMarineServed = false;
 std::set<uint32_t> sMarineBodies;
 std::set<uint32_t> sMarineRifles;
+std::set<int> sMarineGrips;
 std::set<int> sMarineSpiderSuits;
 // thermal.lut: the thermal visor's heat gradient (port_thermal.h).
 std::string sThermalLut;
@@ -520,6 +522,9 @@ bool PortFederationMarine::ServesFirstPersonRifle(int suit) {
   const uint32_t id = PortDreadSamus::FirstPersonCannon(suit);
   return sMarineRifleShown && id != 0 && PortMods::sMarineRifles.count(id) != 0;
 }
+bool PortFederationMarine::ServesLeftGrip(int suit) {
+  return ServesFirstPersonRifle(suit) && PortMods::sMarineGrips.count(suit) != 0;
+}
 void PortFederationMarine::SetPlayAsMarine(bool on) {
   PortMods::sPlayAsMarine = on;
   if (on) PortMods::sPlayAsDarkSamus = false;
@@ -763,6 +768,7 @@ void Initialize() {
   sMarineServed = false;
   sMarineBodies.clear();
   sMarineRifles.clear();
+  sMarineGrips.clear();
   sMarineSpiderSuits.clear();
   {
     std::lock_guard<std::mutex> lock(sEffectIdsMutex);
@@ -1206,6 +1212,8 @@ void Initialize() {
       if (const LooseResource* rifle = marine(0x434D444Cu, PortFederationMarine::Wear(look, PortFederationMarine::kRifleBase))) {
         serve(rifle, PortDreadSamus::FirstPersonCannon(suit));
         sMarineRifles.insert(PortDreadSamus::FirstPersonCannon(suit));
+        // The left hand on it, under its own id (PortFederationMarine::LeftGripModel).
+        if (marine(0x434D444Cu, PortFederationMarine::LeftGripModel(suit)) != nullptr) sMarineGrips.insert(suit);
       }
       for (const auto& t : PortDreadSamus::kBallTargets) {
         if (t.suit != suit) continue;
@@ -1239,8 +1247,9 @@ void Initialize() {
       }
     }
     if (sMarineServed) {
-      PortLog::Write("mods: %s serves the Federation Marine: %zu Samus body model(s), %zu first-person rifle(s)\n",
-                     PortEchoesSuits::kModName, sMarineBodies.size(), sMarineRifles.size());
+      PortLog::Write("mods: %s serves the Federation Marine: %zu Samus body model(s), %zu first-person rifle(s), "
+                     "%zu with the left hand on them\n",
+                     PortEchoesSuits::kModName, sMarineBodies.size(), sMarineRifles.size(), sMarineGrips.size());
     }
   }
 

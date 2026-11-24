@@ -521,6 +521,9 @@ private:
   // aim, and whether that holds R's free-look pose (left hand on the cannon).
   float mPortStillTime = 0.f;
   bool mPortHandOnCannon = false;
+  // The Federation Marine's left hand on its rifle (CGunWeapon::PortSetLeftGrip): 0 away, 1 on the
+  // grip; it rises while the arm would rest on the cannon and falls after, 0.2 s either way.
+  float mPortGripBlend = 0.f;
   int mPortRapidShots;
   float mPortRapidTimer;
   bool mPortPointerAimValid;

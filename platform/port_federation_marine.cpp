@@ -136,6 +136,23 @@ constexpr double kGripRollDegrees = -50.0;
 // Prime's spider ball glass (SamusSpiderBallGlassCMDL): its set 0 teal (Power and Gravity), set 1
 // green (Varia), set 2 aqua.
 constexpr uint32_t kSpiderGlass = kSpiderBallGlass;
+// The first-person left hand on the rifle's front grip (BuildLeftGrip), the user's pick of three
+// previews (~/marine/leftgrip.py, after 0.46.0 test 52; "A"): the fingers closed 55 and 60 degrees at
+// their two joints, the thumb swung 55 under the palm and its tip 35; the gripped point 6 mm from the
+// knuckles toward the wrist and 42 mm under the palm. In the rifle's space: the guard's middle, its
+// axis (down the guard, the index finger at its top), the way the hand's forearm would run unbent
+// (toward the left shoulder) and the way it runs after the wrist's bend (back, 14 degrees below level:
+// along the rifle it "kinda looks like a floating hand", 48 degrees down was "too low").
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kGripCurl1 = 55.0, kGripCurl2 = 60.0, kGripThumb = 55.0, kGripThumbTip = 35.0;
+constexpr double kGripReach = 0.006, kGripDepth = 0.042;
+constexpr V3 kGripCentre{0.0, -0.075, -0.066};
+constexpr V3 kGripAxis{0.0, -0.04, -0.07};
+constexpr V3 kGripForearm{-0.78, -0.48, 0.37};
+constexpr V3 kGripBend{-0.60, -0.78, -0.18};
+// Its triangles: those past the upper arm (x < -0.40 in the T-pose) weighing most on the elbow, the
+// wrist or a finger.
+constexpr double kGripCut = -0.40;
 
 // Prime's Gravity Suit, measured: its limbs' purple (the median of the purple texels: hue, saturation,
 // value; RecolourVaria's), and its visor's glass texel (FE5F7B41 over the face, 38,227,194).
@@ -471,6 +488,150 @@ bool BuildGrappleArm(const Body& body, const std::vector<EchoesJoint>& joints, c
   }
   if (out.surfaces.empty()) return Fail(error, "no left arm triangles");
   if (!PortEchoesSuits::CompactSkinned(out, skin, error)) return false;
+  SetBounds(out);
+  return PruneMaterials(out, error);
+}
+
+// A rigid motion p -> r p + t, for posing joints.
+struct Rigid {
+  double r[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  V3 t;
+  V3 Turn(V3 v) const {
+    return {r[0][0] * v.x + r[0][1] * v.y + r[0][2] * v.z, r[1][0] * v.x + r[1][1] * v.y + r[1][2] * v.z,
+            r[2][0] * v.x + r[2][1] * v.y + r[2][2] * v.z};
+  }
+  V3 Apply(V3 p) const { return Turn(p) + t; }
+};
+
+// The turn by `angle` (radians) about the unit `axis` through `head`.
+Rigid About(V3 head, V3 axis, double angle) {
+  Rigid m;
+  const V3 cols[3] = {Rotate({1, 0, 0}, axis, angle), Rotate({0, 1, 0}, axis, angle), Rotate({0, 0, 1}, axis, angle)};
+  for (int c = 0; c < 3; ++c) {
+    m.r[0][c] = cols[c].x;
+    m.r[1][c] = cols[c].y;
+    m.r[2][c] = cols[c].z;
+  }
+  m.t = head - m.Turn(head);
+  return m;
+}
+
+// `a` after `b`: p -> a(b(p)).
+Rigid Then(const Rigid& a, const Rigid& b) {
+  Rigid m;
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) m.r[i][j] = a.r[i][0] * b.r[0][j] + a.r[i][1] * b.r[1][j] + a.r[i][2] * b.r[2][j];
+  }
+  m.t = a.Turn(b.t) + a.t;
+  return m;
+}
+
+// The first-person left hand on the rifle's front grip (the barred guard under its muzzle), a static
+// model in the rifle's space (BuildRifle's: muzzle at the origin, barrel +y). The trooper's left forearm
+// and hand, posed by linear blend skinning on its Echoes skin: the fingers closed toward the palm about
+// the knuckle line, the thumb swung under, the wrist bent so the forearm runs back toward the left
+// shoulder (kGripBend). Then placed with the gripped point on the guard's middle, the knuckle line along
+// the guard (index finger at its top) and the palm on its left. Unskinned; the gun draws it with the
+// rifle while Samus's left hand would rest on her cannon (CGunWeapon::PortSetLeftGrip).
+bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, PrimeCmdl& out, std::string* error) {
+  const EchoesJoint* elbow = FindJoint(joints, "L_elbow");
+  const EchoesJoint* wrist = FindJoint(joints, "L_wrist");
+  if (elbow == nullptr || wrist == nullptr) return Fail(error, "the left elbow or wrist is missing");
+  // The T-posed hand lies flat, its fingers out along -x, its thumb forward (+y), its palm down (-z).
+  // Each finger's joints close about the knuckle line (-y), the second on the first.
+  const V3 knuckleLine{0, -1, 0};
+  std::map<uint32_t, Rigid> pose;
+  V3 knuckles;
+  for (const char* finger : {"Index", "middle", "Ring", "Pinky"}) {
+    const EchoesJoint* j1 = FindJoint(joints, std::string("L_") + finger + "_1");
+    const EchoesJoint* j2 = FindJoint(joints, std::string("L_") + finger + "_2");
+    if (j1 == nullptr || j2 == nullptr) return Fail(error, std::string("the left hand's ") + finger + " finger is missing");
+    const Rigid first = About(FromArray(j1->position), knuckleLine, kGripCurl1 * kPi / 180.0);
+    pose[j1->id] = first;
+    pose[j2->id] = Then(first, About(FromArray(j2->position), knuckleLine, kGripCurl2 * kPi / 180.0));
+    knuckles = knuckles + FromArray(j1->position) * 0.25;
+  }
+  const EchoesJoint* thumb1 = FindJoint(joints, "L_thumb_1");
+  const EchoesJoint* thumb2 = FindJoint(joints, "L_thumb_2");
+  if (thumb1 == nullptr || thumb2 == nullptr) return Fail(error, "the left thumb is missing");
+  const Rigid thumb = About(FromArray(thumb1->position), {1, 0, 0}, kGripThumb * kPi / 180.0);
+  pose[thumb1->id] = thumb;
+  pose[thumb2->id] = Then(thumb, About(FromArray(thumb2->position), {0, 0, 1}, kGripThumbTip * kPi / 180.0));
+  std::set<uint32_t> kept = {elbow->id, wrist->id};
+  for (const auto& entry : pose) kept.insert(entry.first);
+  // The hand's frame (knuckle line u1 index to pinky, palm normal u2, toward the wrist u3) onto the
+  // guard's (its axis a, the palm's side n, the unbent forearm f), the gripped point onto its middle.
+  const V3 u1{0, -1, 0}, u2{0, 0, -1}, u3{1, 0, 0};
+  const V3 gripPoint = knuckles + V3{kGripReach, 0, -kGripDepth};
+  const V3 a = Normalized(kGripAxis);
+  const V3 f = Normalized(kGripForearm - a * Dot(kGripForearm, a));
+  const V3 n = Cross(f, a);
+  const auto place = [&](V3 p) {
+    const V3 d = p - gripPoint;
+    return kGripCentre + a * Dot(d, u1) + n * Dot(d, u2) + f * Dot(d, u3);
+  };
+  const auto placeDirection = [&](V3 v) { return a * Dot(v, u1) + n * Dot(v, u2) + f * Dot(v, u3); };
+  // The wrist's bend: the forearm (the elbow's weights, and the upper arm's at its end) turned about the
+  // wrist from its own way (u3) to kGripBend's, the hand staying on the guard.
+  const V3 want = Normalized(kGripBend);
+  const V3 wantHere = u1 * Dot(want, a) + u2 * Dot(want, n) + u3 * Dot(want, f);
+  const V3 bendAxis = Cross(u3, wantHere);
+  const double bend = std::atan2(Length(bendAxis), Dot(u3, wantHere));
+  if (bend > 1e-6) {
+    const Rigid forearm = About(FromArray(wrist->position), Normalized(bendAxis), bend);
+    for (const char* name : {"L_elbow", "L_shoulder", "L_varia_SDK"}) {
+      if (const EchoesJoint* j = FindJoint(joints, name)) pose[j->id] = forearm;
+    }
+  }
+  const size_t count = body.model.arrays[0].size() / 12;
+  std::vector<uint8_t> keep(count, 0);
+  for (size_t v = 0; v < count && v < body.echoesWeights.size(); ++v) {
+    const Weights& w = body.echoesWeights[v];
+    if (w.empty()) continue;
+    const auto main = std::max_element(w.begin(), w.end(), [](const auto& x, const auto& y) { return x.second < y.second; });
+    keep[v] = kept.count(main->first) != 0 && Position(body.model, uint32_t(v)).x < kGripCut ? 1 : 0;
+  }
+  out = body.model;
+  if (!PortEchoesSuits::FloatNormals(out, error) ||
+      !PortEchoesSuits::KeepTriangles(
+          out, [&keep](uint32_t x, uint32_t y, uint32_t z) {
+            return x < keep.size() && y < keep.size() && z < keep.size() && keep[x] && keep[y] && keep[z];
+          },
+          error)) {
+    return false;
+  }
+  if (out.surfaces.empty()) return Fail(error, "no left hand triangles");
+  const size_t posed = std::min(out.arrays[0].size() / 12, out.arrays[1].size() / 12);
+  for (size_t v = 0; v < posed; ++v) {
+    const V3 p0 = Position(out, uint32_t(v));
+    const V3 n0{GetF(out.arrays[1], v * 12), GetF(out.arrays[1], v * 12 + 4), GetF(out.arrays[1], v * 12 + 8)};
+    V3 p, nv;
+    double total = 0;
+    if (v < body.echoesWeights.size()) {
+      for (const auto& [joint, weight] : body.echoesWeights[v]) {
+        const auto it = pose.find(joint);
+        p = p + (it != pose.end() ? it->second.Apply(p0) : p0) * weight;
+        nv = nv + (it != pose.end() ? it->second.Turn(n0) : n0) * weight;
+        total += weight;
+      }
+    }
+    if (total <= 0) {
+      p = p0;
+      nv = n0;
+    }
+    p = place(p);
+    nv = Normalized(placeDirection(nv));
+    SetF(out.arrays[0], v * 12, float(p.x));
+    SetF(out.arrays[0], v * 12 + 4, float(p.y));
+    SetF(out.arrays[0], v * 12 + 8, float(p.z));
+    SetF(out.arrays[1], v * 12, float(nv.x));
+    SetF(out.arrays[1], v * 12 + 4, float(nv.y));
+    SetF(out.arrays[1], v * 12 + 8, float(nv.z));
+  }
+  // Unskinned: the vertices the lists draw, kept with a skin of one group over them all.
+  std::vector<uint8_t> skin = WriteSkin(std::vector<Weights>(posed, Weights{{0u, 1.f}}));
+  if (!PortEchoesSuits::CompactSkinned(out, skin, error)) return false;
+  Set32(out.header, 8, Get32(out.header, 8) & ~0x1u);
   SetBounds(out);
   return PruneMaterials(out, error);
 }
@@ -859,7 +1020,7 @@ bool Import(const Io& io, Result& result, std::string& error) {
   // nowhere near the arms).
   progress();
   struct FirstPerson {
-    PrimeCmdl rifle, arm;
+    PrimeCmdl rifle, arm, grip;
     std::vector<uint8_t> armSkin;
   };
   std::map<const Trooper*, FirstPerson> firstPerson;
@@ -875,8 +1036,13 @@ bool Import(const Io& io, Result& result, std::string& error) {
       error = std::string(t->name) + " first-person left arm: " + why;
       return false;
     }
+    if (!BuildLeftGrip(bodies[t][0], echoesCinfs[t->cinf], fp.grip, &why)) {
+      error = std::string(t->name) + " first-person left hand on the rifle: " + why;
+      return false;
+    }
     log(std::string("marine: ") + t->name + " first person: rifle " + std::to_string(fp.rifle.arrays[0].size() / 12) +
-        " vertices, left arm " + std::to_string(fp.arm.arrays[0].size() / 12));
+        " vertices, left arm " + std::to_string(fp.arm.arrays[0].size() / 12) + ", left hand on the rifle " +
+        std::to_string(fp.grip.arrays[0].size() / 12));
   }
 
   // The Gravity marine's textures: the marine's, its texels voted limb or not by the body's triangles
@@ -1093,9 +1259,21 @@ bool Import(const Io& io, Result& result, std::string& error) {
     }
     collect(rifle);
     ++result.rifles;
+    PrimeCmdl grip = firstPerson[source].grip;
+    if (look == kGravityMarine && !remap(grip, gravityTextures, &why)) {
+      error = std::string(kLookNames[look]) + " left hand on the rifle: " + why;
+      return false;
+    }
+    const uint32_t gripId = Wear(look, kLeftGripBase);
+    if (!fresh(gripId, std::string(kLookNames[look]) + " left hand on the rifle") ||
+        !write(Hex8(gripId) + ".CMDL", PortEchoesSuits::WriteCmdl(grip))) {
+      return false;
+    }
+    collect(grip);
+    ++result.grips;
     log(std::string("marine: ") + kLookNames[look] + ": bodies " + Hex8(Wear(look, varia.cmdl[0])) + " " +
         Hex8(Wear(look, varia.cmdl[1])) + " " + Hex8(Wear(look, varia.cmdl[2])) + ", left arm " +
-        Hex8(Wear(look, varia.cmdl[3])) + ", rifle " + Hex8(rifleId));
+        Hex8(Wear(look, varia.cmdl[3])) + ", rifle " + Hex8(rifleId) + ", left hand on it " + Hex8(gripId));
   }
 
   // The balls: Prime's own Morph Ball (from its Power Suit set) and Spider Ball (from its Varia Suit
@@ -1272,7 +1450,8 @@ bool Import(const Io& io, Result& result, std::string& error) {
   }
   if (io.progress) io.progress(kSteps, kSteps);
   log("marine: " + std::to_string(result.bodies) + " bodies, " + std::to_string(result.arms) + " left arms, " +
-      std::to_string(result.rifles) + " rifles, " + std::to_string(result.balls) + " balls and glass, " +
+      std::to_string(result.rifles) + " rifles, " + std::to_string(result.grips) + " left hands on them, " +
+      std::to_string(result.balls) + " balls and glass, " +
       std::to_string(echoesTextures.size()) + " Echoes textures, " + std::to_string(result.files.size()) + " files");
   return true;
 }

@@ -32,8 +32,14 @@ inline constexpr int kSuitLooks[PortEchoesSuits::kSuitLookSuits] = {kMarine, kGr
 // PortDreadSamus::FirstPersonCannon(suit): the gun draws it the Dread cannon's way, on its live
 // muzzle locator in place of both Prime's cannon and the suit arm. Its muzzle sits on Prime's
 // (0.46.0 test 51 drew it 7.5 cm lower, its shots with it; test 52 put it back up, the user's call).
-// The left hand's poses on the cannon are not drawn with it (CGunWeapon::PortDrawsMarineRifle).
+// The left arm's poses on the cannon are not drawn with it (CGunWeapon::PortDrawsMarineRifle).
 inline constexpr uint32_t kRifleBase = 0x4AD9BBAC;  // Prime's VariaArm, the id the variants derive from
+// The first-person left hand on the rifle (echoes-suits 20): a static model in the rifle's space, the
+// marine's left forearm and hand closed on the rifle's front grip, written as Wear(look, kLeftGripBase).
+// The gun draws it with the rifle in place of those poses, slid in from below (CGunWeapon,
+// CPlayerGun::mPortGripBlend).
+inline constexpr uint32_t kLeftGripBase = 0x07111AA7;  // Prime's PowerArm, the id the variants derive from
+constexpr uint32_t LeftGripModel(int suit) { return Wear(kSuitLooks[suit], kLeftGripBase); }
 // Prime's Spider Ball glass (SamusSpiderBallGlassCMDL; its sets teal, green, aqua): a look's glass is
 // written as Wear(look, kSpiderBallGlass) and served under its suit variant. The Phazon Suit's own
 // Spider Ball (SamusPhazonBallANCS) and glass stay Prime's: the Dark Trooper wears them.
@@ -52,5 +58,7 @@ void SetFirstPersonRifleShown(bool shown);
 bool FirstPersonRifleShown();
 // Whether the loaded mods serve the marine's rifle as the suit's first-person cannon (and it is shown).
 bool ServesFirstPersonRifle(int suit);
+// Whether they also have the left hand on that rifle (LeftGripModel(suit)): imports from version 20.
+bool ServesLeftGrip(int suit);
 
 }  // namespace PortFederationMarine

@@ -27,6 +27,8 @@
 //   (CINF 516F4445) and skinned on its joints by name;
 // - the first-person rifle: the body's right forearm, hand and rifle, turned down the gun's barrel
 //   axis with the muzzle at the origin, unskinned;
+// - the first-person left hand on the rifle: the body's left forearm and hand closed on the rifle's
+//   front grip, in the rifle's space, unskinned (shown while Samus's hand would rest on her cannon);
 // - the Morph and Spider Balls: Prime's own, their shells in the look's armour colour and their lights
 //   in its light colour (the Dark Trooper keeps Prime's Phazon Spider Ball, already dark).
 //
@@ -38,6 +40,7 @@ struct Result {
   size_t bodies = 0;   // cutscene, in-game and doll bodies written
   size_t arms = 0;     // first-person left arms
   size_t rifles = 0;   // first-person rifles
+  size_t grips = 0;    // first-person left hands on the rifles
   size_t balls = 0;    // Morph and Spider Balls (and their glass)
   std::vector<std::string> files;  // every file written, in order
 };
