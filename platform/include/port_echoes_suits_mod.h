@@ -42,7 +42,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     kLeftGripBase).
 // 21: the troopers' bodies' rifle flat, its top facing forward in the T-pose (turned 90 degrees about
 //     the forearm, not 50); the first-person arms straight back to the shoulder joints.
-inline constexpr int kVersion = 21;
+// 22: the first-person left hand's arm straight on from its forearm, unbent at the elbow.
+inline constexpr int kVersion = 22;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's

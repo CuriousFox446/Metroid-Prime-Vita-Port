@@ -5635,3 +5635,15 @@ What to look for in test 63:
 - Third person, cutscenes and the pause screen: the rifle about 40° off grip-down standing and
   walking, as the preview showed.
 - First person: as test 62.
+
+## 0.46.0 test 64: the marine's first-person left arm straight (echoes-suits 22)
+
+After test 63 (not yet played), with a render of its first-person arms: "Let's see what it looks with
+the left arm straightened", an arrow drawn straight back along the left upper arm. A preview left
+BuildLeftGrip's elbow bend out, so the upper arm runs on along the forearm's line, back 14° below level.
+The user: "Build it straight".
+- `kGripShoulder` and the elbow's turn are gone; the upper arm takes the forearm's pose.
+- Only the three left-hand models change (`~/marine/out16`, byte for byte the preview's `out15`).
+- From the first-person camera nothing changes.
+
+What to look for in test 64: import the Echoes suits again (version 22); otherwise as test 63.

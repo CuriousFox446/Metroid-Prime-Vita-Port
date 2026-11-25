@@ -154,9 +154,9 @@ constexpr V3 kGripAxis{0.0, -0.04, -0.07};
 constexpr V3 kGripForearm{-0.78, -0.48, 0.37};
 constexpr V3 kGripBend{-0.60, -0.78, -0.18};
 // Its triangles: those weighing most on the upper arm, the elbow, the wrist or a finger, out to the
-// shoulder joint (kRifleArmCut's). The upper arm bends at the elbow toward Samus's left shoulder (about
-// here in the rifle's space); it cannot reach it, the grip being held as far out as Samus's cannon.
-constexpr V3 kGripShoulder{-0.45, -0.883, 0.10};
+// shoulder joint (kRifleArmCut's). The upper arm runs straight on from the forearm, as the rifle's arm
+// does (test 63 bent it at the elbow toward Samus's left shoulder; the user: "Let's see what it looks
+// with the left arm straightened", then "Build it straight").
 
 // Prime's Gravity Suit, measured: its limbs' purple (the median of the purple texels: hue, saturation,
 // value; RecolourVaria's), and its visor's glass texel (FE5F7B41 over the face, 38,227,194).
@@ -509,11 +509,10 @@ Rigid Then(const Rigid& a, const Rigid& b) {
 // The first-person left hand on the rifle's front grip (the barred guard under its muzzle), a static
 // model in the rifle's space (BuildRifle's: muzzle at the origin, barrel +y). The trooper's left arm out
 // to the shoulder joint, posed by linear blend skinning on its Echoes skin: the fingers closed toward the
-// palm about the knuckle line, the thumb swung under, the wrist bent so the forearm runs back toward the
-// left shoulder (kGripBend), the upper arm bent at the elbow toward it (kGripShoulder). Then placed with
-// the gripped point on the guard's middle, the knuckle line along the guard (index finger at its top) and
-// the palm on its left. Unskinned; the gun draws it with the rifle while Samus's left hand would rest on
-// her cannon (CGunWeapon::PortSetLeftGrip).
+// palm about the knuckle line, the thumb swung under, the wrist bent so the arm runs straight back
+// toward the left shoulder (kGripBend). Then placed with the gripped point on the guard's middle, the
+// knuckle line along the guard (index finger at its top) and the palm on its left. Unskinned; the gun
+// draws it with the rifle while Samus's left hand would rest on her cannon (CGunWeapon::PortSetLeftGrip).
 bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, PrimeCmdl& out, std::string* error) {
   const EchoesJoint* elbow = FindJoint(joints, "L_elbow");
   const EchoesJoint* wrist = FindJoint(joints, "L_wrist");
@@ -564,22 +563,6 @@ bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, Pri
     const Rigid forearm = About(FromArray(wrist->position), Normalized(bendAxis), bend);
     for (const char* name : {"L_elbow", "L_shoulder", "L_varia_SDK"}) {
       if (const EchoesJoint* j = FindJoint(joints, name)) pose[j->id] = forearm;
-    }
-  }
-  // The elbow's bend: the upper arm (on the forearm's line so far) turned about the elbow toward the
-  // left shoulder, kGripShoulder.
-  if (shoulder != nullptr) {
-    const Rigid forearm = pose.count(elbow->id) != 0 ? pose[elbow->id] : Rigid{};
-    const V3 elbowHere = forearm.Apply(FromArray(elbow->position));
-    const V3 upperNow = Normalized(forearm.Turn(FromArray(shoulder->position) - FromArray(elbow->position)));
-    const V3 upperWant = Normalized(kGripShoulder - place(elbowHere));
-    const V3 upperWantHere = u1 * Dot(upperWant, a) + u2 * Dot(upperWant, n) + u3 * Dot(upperWant, f);
-    const V3 elbowAxis = Cross(upperNow, upperWantHere);
-    const double elbowBend = std::atan2(Length(elbowAxis), Dot(upperNow, upperWantHere));
-    if (elbowBend > 1e-6) {
-      const Rigid upper = Then(About(elbowHere, Normalized(elbowAxis), elbowBend), forearm);
-      pose[shoulder->id] = upper;
-      if (const EchoesJoint* pad = FindJoint(joints, "L_varia_SDK")) pose[pad->id] = upper;
     }
   }
   const size_t count = body.model.arrays[0].size() / 12;
