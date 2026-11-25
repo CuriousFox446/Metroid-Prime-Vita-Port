@@ -273,6 +273,9 @@ struct State {
   CSegId gunSeg = CSegId::Invalid();
   CSegId muzzleSeg = CSegId::Invalid();
   CSegId forearm = CSegId::Invalid(); // the cannon arm's elbow, which the cannon rides (LevelRifle)
+  // Samus's: the clips' forearm rotation, before LevelCannon turns it (kept as shoulderPose is).
+  CQuaternion forearmPose = CQuaternion::NoRotation();
+  bool haveForearmPose = false;
   CQuaternion shoulderPose = CQuaternion::NoRotation(); // the clips', before the aim
   bool advanced = false; // the pose was rebuilt since the last AimArm (shoulderPose is stale)
   bool haveAim = false;
@@ -408,6 +411,7 @@ void FindAimBones(const CAnimData& data) {
   const CCharLayoutInfo& layout = *data.GetCharLayoutInfo();
   s.shoulder = CSegId::Invalid();
   s.forearm = CSegId::Invalid();
+  s.haveForearmPose = false;
   s.gunSeg = layout.GetSegIdFromString(rstl::string_l("GUN_LCTR"));
   s.muzzleSeg = layout.GetSegIdFromString(rstl::string_l("Charge_LCTR"));
   if (s.gunSeg == CSegId::Invalid() || s.muzzleSeg == CSegId::Invalid()) {
@@ -586,6 +590,81 @@ void LevelRifle(CAnimData& data) {
   const CQuaternion turn = CQuaternion::AxisAngle(CUnitVector3f(b), CRelAngle::FromRadians(angle));
   TurnSeg(pb, *data.GetCharLayoutInfo(), s.forearm, pb.GetSegRotation(s.forearm), turn);
   data.SetPoseBuilderValid(false);
+}
+
+// 0.46.0 test 66, Samus's own bodies: the roll about her forearm's line that the aim grid's level
+// row gives at the aim's yaw (the bind's -z from straight down, as LevelRifle measures it: -67
+// degrees aiming ahead or left, the ready clip; +23 aiming right, B_aimrright_samus), kept at every
+// pitch while she aims. The other rows' clips roll it far from that (+40 up ahead, -56 up left, -62
+// up right, +37 down left, +55 down right; ~/marine/aimroll.py), so blended by the aim her cannon
+// turned about its line as she looked up and down, and back as the aim crossed the up row (the user,
+// after test 64: "They seem to love rotating when looking up and down", then of test 65's
+// marine-only fix "Yes, Samus too").
+float LevelRollRadians(float u) {
+  const float degrees = u <= 0.f ? -67.f : -67.f + 90.f * std::min(u, 1.f);
+  return degrees * float(3.14159265358979323846 / 180.0);
+}
+
+// Before AimArm, over the clips' shoulder as AimArm starts from it, so AimArm then puts the bore on
+// the aim as before (the roll turns the cannon about the forearm, not quite about its bore) and the
+// roll is worked out from the same pose every frame. By the aim's weight: with the cannon lowered,
+// the clips' own roll. The marine's bodies keep LevelRifle's grip-down roll; the dread body (another
+// skeleton) its clips'.
+void LevelCannon(CAnimData& data) {
+  if (s.forearm == CSegId::Invalid()) {
+    return;
+  }
+  const auto body = PortDreadSamus::CutsceneBody(s.loadedChar);
+  if (PortFederationMarine::ServesBody(body) || PortDreadSamus::ReplacesWithDread(body)) {
+    return;
+  }
+  CHierarchyPoseBuilder& pb = data.PoseBuilder();
+  if (s.advanced || !s.haveForearmPose) {
+    s.forearmPose = pb.GetSegRotation(s.forearm);
+    s.haveForearmPose = true;
+  }
+  pb.Insert(s.forearm, s.forearmPose);
+  if (s.shoulder != CSegId::Invalid()) {
+    if (s.advanced) {
+      s.shoulderPose = pb.GetSegRotation(s.shoulder); // as AimArm saves it, before it turns it
+    }
+    pb.Insert(s.shoulder, s.shoulderPose);
+  }
+  data.SetPoseBuilderValid(false);
+  if (s.aimWeight <= 0.f) {
+    return;
+  }
+  CTransform4f xf = CTransform4f::Identity();
+  pb.BuildTransform(s.forearm, xf);
+  const CVector3f barrel = xf.Rotate(CVector3f(1.f, 0.f, 0.f));
+  if (!barrel.CanBeNormalized()) {
+    return;
+  }
+  const CVector3f b = barrel.AsNormalized();
+  const CVector3f minusZ = xf.Rotate(CVector3f(0.f, 0.f, -1.f));
+  const CVector3f zOff = minusZ - b * CVector3f::Dot(minusZ, b);
+  // The ground's way across the barrel, near straight up or down toward ahead, as LevelRifle has it.
+  const CVector3f down(0.f, 0.f, -1.f);
+  const CVector3f toGround = down - b * CVector3f::Dot(down, b);
+  const float level = toGround.Magnitude();
+  CVector3f want = level > 1e-4f ? toGround * (1.f / level) : CVector3f::Zero();
+  const float steep = 1.f - CMath::Clamp(0.f, (level - 0.05f) / 0.25f, 1.f);
+  const CVector3f ahead(0.f, b.GetZ() > 0.f ? 1.f : -1.f, 0.f);
+  const CVector3f aheadOff = ahead - b * CVector3f::Dot(ahead, b);
+  if (steep > 0.f && aheadOff.CanBeNormalized()) {
+    want = want * (1.f - steep) + aheadOff.AsNormalized() * steep;
+  }
+  if (!zOff.CanBeNormalized() || !want.CanBeNormalized()) {
+    return;
+  }
+  const CVector3f g = zOff.AsNormalized();
+  const CVector3f w = want.AsNormalized();
+  // The roll from the bind's -z to the ground's way now, less the level row's: the turn to keep it.
+  const float now = std::atan2(CVector3f::Dot(CVector3f::Cross(g, w), b), CVector3f::Dot(g, w));
+  const float angle = std::remainder(now - LevelRollRadians(s.gridU), float(2.0 * 3.14159265358979323846));
+  const CQuaternion turn =
+      CQuaternion::AxisAngle(CUnitVector3f(b), CRelAngle::FromRadians(angle * std::min(s.aimWeight, 1.f)));
+  TurnSeg(pb, *data.GetCharLayoutInfo(), s.forearm, s.forearmPose, turn);
 }
 
 // Points the grapple arm at the grapple point by s.reachWeight: the shoulder puts the hand on the
@@ -1870,6 +1949,7 @@ void NoteShot(const CStateManager& mgr) {
   s.aimWeight = 1.f;
   CAnimData& data = *s.body->AnimationData();
   PoseBody(data);
+  LevelCannon(data);
   AimArm(mgr, data);
   LevelRifle(data);
 }
@@ -1887,6 +1967,7 @@ void PreRender(const CStateManager& mgr) {
       PoseBody(data);
     }
     const bool fresh = s.advanced;
+    LevelCannon(data);
     AimArm(mgr, data);
     LevelRifle(data);
     ReachArm(mgr, data, fresh);

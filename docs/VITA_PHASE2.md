@@ -5673,3 +5673,27 @@ rotating when looking up and down".
 
 What to look for in test 65: in third person as the marine, aim up and down, standing and walking.
 The rifle should stay upright, its grip toward the ground. Echoes-suits stays version 22.
+
+## 0.46.0 test 66: Samus's cannon upright in third person
+
+Test 65 levelled the marine's rifle only. The user, of Samus's own arm: "Yes, Samus too".
+- The aim clips leave her right forearm at these rolls about its line (the bind's -z from straight
+  down, as test 65's `LevelRifle` measures; `~/marine/aimroll.py`): -67° at the level aim ahead or
+  left (the ready clip), +23° aiming right (B_aimrright_samus), +40° up ahead, -56° up left, -62° up
+  right, +37° down left, +55° down right. Blended by the aim's pitch and yaw, the cannon turned up to
+  107° about its line looking up or down, and back again as the aim crossed the up row.
+- `LevelCannon` (port_third_person_body.cpp) turns her forearm about its line to the level row's roll
+  at the aim's yaw (`LevelRollRadians`: -67° ahead and left, toward +23° at the right), at every
+  pitch, by the aim's weight (with the cannon lowered, the clips' own roll).
+  - It runs before `AimArm`, over the clips' shoulder as AimArm starts from it, so the bore still goes
+    onto the aim, and the roll is worked out from the same pose every frame (the clips' forearm
+    rotation kept as the shoulder's is).
+  - Samus's bodies and the Echoes suits' (Prime's skeleton, the same clips); not the marine's (test
+    65's grip-down roll) or the dread body.
+- Offline, on aimtwist.py's harness with Samus's Power Suit body (CMDL F39476F2): the turns are +107°
+  up ahead, +104° down left, -85° up right, +32° down right, +11° up left, 0 level; the elbow's
+  close-ups show no pinch (her cannon is a model of its own, not drawn there).
+
+What to look for in test 66: in third person as Samus, aim up and down, ahead and to the sides. The
+cannon should keep the roll it has aiming level; with the cannon lowered, as before. The marine as in
+test 65.
