@@ -425,7 +425,9 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   drawn over it. The hand and rifle are turned 90° about the forearm (mod version 21): flat, the
   rifle's top facing forward in the T-pose, the user's choice. Samus's animations roll her forearm for
   her cannon, so in her poses the grip sits about 40° off straight down (versions 19-20 turned it 50°,
-  which hangs it straight down in most of them; running rolls the forearm about 82°).
+  which hangs it straight down in most of them; running rolls the forearm about 82°). In third person
+  the game turns the forearm back about its line (from 0.46.0 test 65), so the grip hangs down at every
+  aim, aiming up and down included; cutscenes and the pause screen keep her poses' roll.
 - In first person the marine's right arm, hand and rifle stand in for the arm cannon and the suit arm
   (the arm straight back to the shoulder joint, as Samus's suit arm runs, from mod version 21):
   one model per suit, drawn with its muzzle on the cannon's so it follows the recoil (the same way as

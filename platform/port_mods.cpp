@@ -531,6 +531,7 @@ void PortFederationMarine::SetPlayAsMarine(bool on) {
 }
 bool PortFederationMarine::PlayAsMarine() { return PortMods::sPlayAsMarine; }
 bool PortFederationMarine::MarineServed() { return PortMods::sMarineServed; }
+bool PortFederationMarine::ServesBody(uint32_t bodyCmdl) { return PortMods::sMarineBodies.count(bodyCmdl) != 0; }
 namespace {
 bool sEchoesCannonShown = true;
 // Ice, Wave and Plasma wear Prime's original look (echoes_cannon_looks); Power has no choice.

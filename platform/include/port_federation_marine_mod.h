@@ -34,6 +34,11 @@ inline constexpr int kSuitLooks[PortEchoesSuits::kSuitLookSuits] = {kMarine, kGr
 // (0.46.0 test 51 drew it 7.5 cm lower, its shots with it; test 52 put it back up, the user's call).
 // The left arm's poses on the cannon are not drawn with it (CGunWeapon::PortDrawsMarineRifle).
 inline constexpr uint32_t kRifleBase = 0x4AD9BBAC;  // Prime's VariaArm, the id the variants derive from
+// How far the import turns the bodies' hand and rifle about the forearm (degrees, about the bind's +x,
+// the T-posed right arm): their grip, -z in Echoes' bind, then points (0, sin, -cos) of it. The
+// third-person body turns the forearm back about its line so that grip hangs down whatever Samus's aim
+// clips do to it (PortThirdPersonBody's LevelRifle).
+inline constexpr double kBodyGripRollDegrees = -90.0;
 // The first-person left hand on the rifle (echoes-suits 20): a static model in the rifle's space, the
 // marine's left forearm and hand closed on the rifle's front grip, written as Wear(look, kLeftGripBase).
 // The gun draws it with the rifle in place of those poses, slid in from below (CGunWeapon,
@@ -52,6 +57,8 @@ bool PlayAsMarine();
 // Whether the loaded mods serve the marine: the setting was on when they last loaded, and the
 // echoes-suits import has it.
 bool MarineServed();
+// Whether a Samus body CMDL id is served as the marine's (or the Dark Trooper's) body now.
+bool ServesBody(uint32_t bodyCmdl);
 // The first-person rifle's switch (the setting marine_first_person_rifle, on by default): off, the
 // gun is Prime's own (or the Echoes cannon) with the suit arm. Applies at once.
 void SetFirstPersonRifleShown(bool shown);

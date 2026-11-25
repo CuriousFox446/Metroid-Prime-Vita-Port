@@ -5647,3 +5647,29 @@ The user: "Build it straight".
 - From the first-person camera nothing changes.
 
 What to look for in test 64: import the Echoes suits again (version 22); otherwise as test 63.
+
+## 0.46.0 test 65: the marine's rifle upright in third person
+
+After test 64, the user: "Don't know what's wrong with the right arm in third person. They seem to love
+rotating when looking up and down".
+- The cause: Samus's aim clips (ANCS C2E1F513), which the third-person body blends by the aim's pitch
+  and yaw, turn her forearm about its own line as they point the cannon. The rifle rides the forearm, so
+  it rolled with them. To hang its grip straight down the forearm needs +23° at the level aim, +130°
+  aiming up, and +145° and +127° aiming down right and left (`~/marine/aimroll.py`, `aimtwist.py`). So
+  looking up or down, the rifle turned nearly upside down.
+- The fix: `LevelRifle` (port_third_person_body.cpp) runs after `AimArm`. It turns the marine's forearm
+  (R_elbow) about its line until the grip points as near the ground as it can.
+  - With the barrel steeper than 73°, the ground's way across it swings fast. There the grip goes the
+    way a rifle pitched that far from level holds it: ahead of the body aiming up, behind it aiming down
+    (wholly past 87°). The two agree for an aim straight ahead.
+  - It applies aiming or not, so standing and walking hold the rifle grip-down too (test 63: about 40°
+    off down).
+  - The arm has no wrist joint, so the turn is at the elbow. Six of the body's vertices share the elbow
+    50/50; at the largest turn (145°) renders show no visible pinch.
+- Only the marine's bodies (`PortFederationMarine::ServesBody`). Samus's bodies, cutscenes and the
+  pause screen are as before.
+- The import is unchanged (`~/marine/out17` matches `out16` byte for byte), so there is nothing to
+  import again.
+
+What to look for in test 65: in third person as the marine, aim up and down, standing and walking.
+The rifle should stay upright, its grip toward the ground. Echoes-suits stays version 22.

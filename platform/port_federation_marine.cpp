@@ -134,8 +134,9 @@ constexpr const char* kMuzzleJoint = "GUN_Particle_LCTR";
 // forearm for her cannon: posed with them the grip hangs straight down after -51 degrees in the pause
 // screen's idle, -45 standing ready, -50 walking, -49 landing, -82 running (~/marine/roll.py; tests 51
 // to 62 had -50, after the user's "held sideways" at 0 in test 50), so at -90 it sits about 40 degrees
-// off down in most poses. The user saw both and chose this.
-constexpr double kGripRollDegrees = -90.0;
+// off down in most poses. The user saw both and chose this. In third person the game turns the forearm
+// back so the grip hangs down (kBodyGripRollDegrees, port_federation_marine_mod.h, is this angle).
+constexpr double kGripRollDegrees = kBodyGripRollDegrees;
 // Prime's spider ball glass (SamusSpiderBallGlassCMDL): its set 0 teal (Power and Gravity), set 1
 // green (Varia), set 2 aqua.
 constexpr uint32_t kSpiderGlass = kSpiderBallGlass;
