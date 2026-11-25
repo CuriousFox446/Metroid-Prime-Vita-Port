@@ -402,7 +402,7 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
 - "Play as a Federation Marine" (`echoes_federation_marine`, off by default; console `marine 0|1`),
   under it, puts Echoes' Federation Marine (its `Galactic_Trooper`, the white GF trooper) in place of
   Samus, from the next mod reload; the Echoes import brings it (mod version 19, the left hand on the
-  rifle from 20; import again). It and
+  rifle from 20, the flat rifle and longer first-person arms from 21; import again). It and
   "Play as Dark Samus" exclude each other. Below.
 
 #### Play as a Federation Marine
@@ -421,9 +421,12 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   rifle and the Morph and Spider Balls.
 - The rifle is part of the troopers' meshes. In cutscenes and third person the marine holds it where
   Samus's cannon sits (the right wrist rides the forearm, as the cannon does), so Prime's cannon is not
-  drawn over it. Samus's animations roll her forearm for her cannon, so the hand and rifle are turned
-  50° about the forearm (mod version 19): the grip hangs down in her poses.
-- In first person the marine's forearm, hand and rifle stand in for the arm cannon and the suit arm:
+  drawn over it. The hand and rifle are turned 90° about the forearm (mod version 21): flat, the
+  rifle's top facing forward in the T-pose, the user's choice. Samus's animations roll her forearm for
+  her cannon, so in her poses the grip sits about 40° off straight down (versions 19-20 turned it 50°,
+  which hangs it straight down in most of them; running rolls the forearm about 82°).
+- In first person the marine's right arm, hand and rifle stand in for the arm cannon and the suit arm
+  (the arm straight back to the shoulder joint, as Samus's suit arm runs, from mod version 21):
   one model per suit, drawn with its muzzle on the cannon's so it follows the recoil (the same way as
   the Dread cannon). The shots leave that muzzle, the hexagonal mouth of the barrel under the rifle's top
   housing; seen from behind and above, the housing hides it, so they show from just under the
@@ -439,8 +442,9 @@ ids, and the loader serves it over the suits that wear it; the helmet bodies fro
   free look, the fidgets, combo fire, a strike's flinch) went through the rifle, so with the rifle they
   are not drawn (0.46.0 test 52).
 - In those poses the marine's left hand holds the rifle's front grip instead (the barred guard under
-  its muzzle; mod version 20): a model of the trooper's own left forearm and hand made by the import,
-  the fingers closed on the guard and the forearm running back 14° below level, drawn with the rifle
+  its muzzle; mod version 20): a model of the trooper's own left arm and hand made by the import, the
+  fingers closed on the guard, the forearm running back 14° below level and (from version 21) the
+  upper arm on to the shoulder joint, bent at the elbow toward the shoulder, drawn with the rifle
   and slid up from below over 0.2 s (and down after). From the first-person camera, above and behind,
   the guard is under the rifle, so mostly the hand's top and the forearm show at the bottom of the
   screen. The pose is the user's pick of three previews.

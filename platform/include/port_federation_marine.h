@@ -19,16 +19,18 @@
 // echoes-suits bodies do (PortEchoesSuits::ConvertCskr): the right wrist, holding the rifle, folds onto
 // the elbow, where Samus's cannon rides. Built from them:
 // - the bodies (cutscene, in-game, the pause screen's doll), the marine's visor glass made opaque,
-//   the hand and rifle turned about the forearm so they stand upright in Samus's poses;
+//   the hand and rifle turned 90 degrees about the forearm: flat, the rifle's top facing forward in the
+//   T-pose (the user's call; Samus's poses hold it about 40 degrees off grip-down);
 // - the Dark Trooper with its broken visor taken out and the marine's whole visor merged in;
 // - the Gravity marine: the limbs' plates (shoulder pads, arms, hands, thighs, knees, shins, boots:
 //   the parts Prime's Gravity Suit paints purple) in its purple, the visor and lights in its aqua;
 // - the first-person left arm: the body's left forearm and hand, turned into the grapple arm's frame
 //   (CINF 516F4445) and skinned on its joints by name;
-// - the first-person rifle: the body's right forearm, hand and rifle, turned down the gun's barrel
-//   axis with the muzzle at the origin, unskinned;
-// - the first-person left hand on the rifle: the body's left forearm and hand closed on the rifle's
-//   front grip, in the rifle's space, unskinned (shown while Samus's hand would rest on her cannon);
+// - the first-person rifle: the body's right arm out to the shoulder joint, straight, with its hand and
+//   rifle, turned down the gun's barrel axis with the muzzle at the origin, unskinned;
+// - the first-person left hand on the rifle: the body's left arm out to the shoulder joint, its hand
+//   closed on the rifle's front grip, in the rifle's space, unskinned (shown while Samus's hand would
+//   rest on her cannon);
 // - the Morph and Spider Balls: Prime's own, their shells in the look's armour colour and their lights
 //   in its light colour (the Dark Trooper keeps Prime's Phazon Spider Ball, already dark).
 //

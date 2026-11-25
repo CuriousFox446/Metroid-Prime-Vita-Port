@@ -118,21 +118,24 @@ constexpr uint32_t kBodyMaterial = 0, kRifleMaterial = 1, kGlassMaterial = 2, kG
 // screen's doll, the first-person left arm).
 constexpr uint32_t kKindCinf[PortEchoesSuits::kBodyKinds] = {0x19C53902, 0xA496DA02, 0xF76E70A6, 0x516F4445};
 constexpr const char* kKindNames[PortEchoesSuits::kBodyKinds] = {"cutscene", "in-game", "pause screen", "left arm"};
-// Prime's first-person gun skeleton (its elbow at the origin, the shoulder behind and above it).
-constexpr uint32_t kGunCinf = 0x46ED31E0;
-// The arms' triangles the first-person models keep: those whose vertices all lie this far out from
-// the body's middle (|x|, the T-pose's arms along x), the upper arm's last 20 cm and on (the elbows
-// are at 0.53; Prime's suit arm reaches 0.195 behind the gun's elbow, its grapple arm 0.188).
+// The arms' triangles the first-person left (grapple) arm keeps: those whose vertices all lie this far
+// out from the body's middle (|x|, the T-pose's arms along x), the upper arm's last 20 cm and on (the
+// elbows are at 0.53; Prime's grapple arm reaches 0.188 behind its elbow).
 constexpr double kArmCut = 0.33;
+// The first-person rifle's and left hand's arms go on to the shoulder joints (0.295 out; the shoulder
+// pads, on joints of their own, stay out): Samus's suit arm reaches 0.231 behind the gun's elbow, and
+// the user, comparing the two: "extend both of the left and right arm".
+constexpr double kRifleArmCut = 0.27;
 // The skeleton's locator at the rifle's muzzle (where Echoes' trooper fires from).
 constexpr const char* kMuzzleJoint = "GUN_Particle_LCTR";
 // The bodies' hand and rifle turned this far about the forearm (degrees, about the bind pose's
-// elbow-to-wrist axis, by each vertex's weight on the right wrist). Samus's animations roll her
-// forearm for her cannon: on the T-posed trooper's rifle (top up) the grip then points in, not down
-// (the user's pause screen photo, 0.46.0 test 50: "held sideways"). Posed with her own animations,
-// the grip hangs straight down after -51 degrees in the pause screen's idle, -45 standing ready, -50
-// walking, -49 landing (-82 running): ~/marine/roll.py.
-constexpr double kGripRollDegrees = -50.0;
+// elbow-to-wrist axis, by each vertex's weight on the right wrist): flat, the rifle's top facing
+// forward in the T-pose (the user's call, 2026-11-25, echoes-suits 21). Samus's animations roll her
+// forearm for her cannon: posed with them the grip hangs straight down after -51 degrees in the pause
+// screen's idle, -45 standing ready, -50 walking, -49 landing, -82 running (~/marine/roll.py; tests 51
+// to 62 had -50, after the user's "held sideways" at 0 in test 50), so at -90 it sits about 40 degrees
+// off down in most poses. The user saw both and chose this.
+constexpr double kGripRollDegrees = -90.0;
 // Prime's spider ball glass (SamusSpiderBallGlassCMDL): its set 0 teal (Power and Gravity), set 1
 // green (Varia), set 2 aqua.
 constexpr uint32_t kSpiderGlass = kSpiderBallGlass;
@@ -150,9 +153,10 @@ constexpr V3 kGripCentre{0.0, -0.075, -0.066};
 constexpr V3 kGripAxis{0.0, -0.04, -0.07};
 constexpr V3 kGripForearm{-0.78, -0.48, 0.37};
 constexpr V3 kGripBend{-0.60, -0.78, -0.18};
-// Its triangles: those past the upper arm (x < -0.40 in the T-pose) weighing most on the elbow, the
-// wrist or a finger.
-constexpr double kGripCut = -0.40;
+// Its triangles: those weighing most on the upper arm, the elbow, the wrist or a finger, out to the
+// shoulder joint (kRifleArmCut's). The upper arm bends at the elbow toward Samus's left shoulder (about
+// here in the rifle's space); it cannot reach it, the grip being held as far out as Samus's cannon.
+constexpr V3 kGripShoulder{-0.45, -0.883, 0.10};
 
 // Prime's Gravity Suit, measured: its limbs' purple (the median of the purple texels: hue, saturation,
 // value; RecolourVaria's), and its visor's glass texel (FE5F7B41 over the face, 38,227,194).
@@ -306,33 +310,29 @@ const EchoesJoint* FindJoint(const std::vector<EchoesJoint>& joints, const std::
 }
 
 // The vertices the arm's first-person model keeps: weighing most on one of `arm`'s joints and at
-// least kArmCut out from the middle on its side (`side` +1 right, -1 left).
-std::vector<uint8_t> ArmVertices(const Body& body, const std::set<uint32_t>& arm, int side) {
+// least `cut` out from the middle on its side (`side` +1 right, -1 left).
+std::vector<uint8_t> ArmVertices(const Body& body, const std::set<uint32_t>& arm, int side, double cut) {
   const size_t count = body.model.arrays[0].size() / 12;
   std::vector<uint8_t> keep(count, 0);
   for (size_t v = 0; v < count && v < body.echoesWeights.size(); ++v) {
     const Weights& w = body.echoesWeights[v];
     if (w.empty()) continue;
     const auto main = std::max_element(w.begin(), w.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
-    keep[v] = arm.count(main->first) != 0 && Position(body.model, uint32_t(v)).x * side >= kArmCut ? 1 : 0;
+    keep[v] = arm.count(main->first) != 0 && Position(body.model, uint32_t(v)).x * side >= cut ? 1 : 0;
   }
   return keep;
 }
 
-// The first-person rifle of a trooper body: its right arm's triangles past kArmCut (the upper arm's
-// end, the forearm, the hand, the rifle), turned down the gun's barrel (RifleFrame) with the muzzle
-// at the origin, the upper arm bent up toward the gun skeleton's shoulder as Prime's arm is; unskinned.
-bool BuildRifle(const Body& body, const std::vector<EchoesJoint>& joints, const PortDread::PrimeSkeleton& gun,
-                PrimeCmdl& out, std::string* error) {
+// The first-person rifle of a trooper body: its right arm's triangles out to the shoulder joint
+// (kRifleArmCut: the upper arm, the forearm, the hand, the rifle), turned down the gun's barrel
+// (RifleFrame) with the muzzle at the origin, the upper arm straight back from the elbow as Samus's
+// suit arm runs (0.46.0 tests 50-62 bent it 30 degrees up, toward the gun skeleton's shoulder joint;
+// the user, comparing the two: "Samus' arm is not bent... but ours"); unskinned.
+bool BuildRifle(const Body& body, const std::vector<EchoesJoint>& joints, PrimeCmdl& out, std::string* error) {
   const EchoesJoint* muzzle = FindJoint(joints, kMuzzleJoint);
-  const EchoesJoint* elbow = FindJoint(joints, "R_elbow");
-  const EchoesJoint* shoulder = FindJoint(joints, "R_shoulder");
-  const int gunElbow = gun.Find("elbow"), gunShoulder = gun.Find("shoulder");
-  if (muzzle == nullptr || elbow == nullptr || shoulder == nullptr || gunElbow < 0 || gunShoulder < 0) {
-    return Fail(error, "the rifle's muzzle, the right elbow or shoulder, or the gun's elbow or shoulder is missing");
-  }
+  if (muzzle == nullptr) return Fail(error, "the rifle's muzzle is missing");
   std::set<uint32_t> arm = Subtree(joints, "R_shoulder");
-  const std::vector<uint8_t> keep = ArmVertices(body, arm, +1);
+  const std::vector<uint8_t> keep = ArmVertices(body, arm, +1, kRifleArmCut);
   out = body.model;
   if (!PortEchoesSuits::FloatNormals(out, error) ||
       !PortEchoesSuits::KeepTriangles(
@@ -343,31 +343,11 @@ bool BuildRifle(const Body& body, const std::vector<EchoesJoint>& joints, const 
     return false;
   }
   if (out.surfaces.empty()) return Fail(error, "no right arm triangles");
-  // The upper arm: from the elbow straight back in the T-pose, bent toward the gun skeleton's
-  // shoulder (about 30 degrees up) by its weight on the shoulder.
   const V3 origin = FromArray(muzzle->position);
-  const V3 elbowAt = Rifle(FromArray(elbow->position) - origin);
-  const V3 upperNow = Normalized(Rifle(FromArray(shoulder->position) - FromArray(elbow->position)));
-  const V3 upperWant =
-      Normalized(FromArray(gun.joints[size_t(gunShoulder)].head) - FromArray(gun.joints[size_t(gunElbow)].head));
-  V3 axis = Cross(upperNow, upperWant);
-  const double angle = std::atan2(Length(axis), Dot(upperNow, upperWant));
-  axis = Normalized(axis);
-  const std::set<uint32_t> upper = {shoulder->id};
   const size_t count = out.arrays[0].size() / 12;
   for (size_t v = 0; v < count; ++v) {
-    double bend = 0;
-    if (v < body.echoesWeights.size()) {
-      for (const auto& [joint, weight] : body.echoesWeights[v]) {
-        if (upper.count(joint)) bend += weight;
-      }
-    }
-    V3 p = Rifle(Position(out, uint32_t(v)) - origin);
-    V3 n = Rifle({GetF(out.arrays[1], v * 12), GetF(out.arrays[1], v * 12 + 4), GetF(out.arrays[1], v * 12 + 8)});
-    if (bend > 0) {
-      p = elbowAt + Rotate(p - elbowAt, axis, angle * bend);
-      n = Rotate(n, axis, angle * bend);
-    }
+    const V3 p = Rifle(Position(out, uint32_t(v)) - origin);
+    const V3 n = Rifle({GetF(out.arrays[1], v * 12), GetF(out.arrays[1], v * 12 + 4), GetF(out.arrays[1], v * 12 + 8)});
     SetF(out.arrays[0], v * 12, float(p.x));
     SetF(out.arrays[0], v * 12 + 4, float(p.y));
     SetF(out.arrays[0], v * 12 + 8, float(p.z));
@@ -432,7 +412,7 @@ bool BuildGrappleArm(const Body& body, const std::vector<EchoesJoint>& joints, c
     match[j.id] = inChain ? Match{found, walk} : Match{armShoulder, shoulder};
   }
   const std::set<uint32_t> left = Subtree(joints, "L_shoulder");
-  const std::vector<uint8_t> keep = ArmVertices(body, left, -1);
+  const std::vector<uint8_t> keep = ArmVertices(body, left, -1, kArmCut);
   out = body.model;
   if (!PortEchoesSuits::FloatNormals(out, error)) return false;
   const V3 from = FromArray(elbow->position);
@@ -527,12 +507,13 @@ Rigid Then(const Rigid& a, const Rigid& b) {
 }
 
 // The first-person left hand on the rifle's front grip (the barred guard under its muzzle), a static
-// model in the rifle's space (BuildRifle's: muzzle at the origin, barrel +y). The trooper's left forearm
-// and hand, posed by linear blend skinning on its Echoes skin: the fingers closed toward the palm about
-// the knuckle line, the thumb swung under, the wrist bent so the forearm runs back toward the left
-// shoulder (kGripBend). Then placed with the gripped point on the guard's middle, the knuckle line along
-// the guard (index finger at its top) and the palm on its left. Unskinned; the gun draws it with the
-// rifle while Samus's left hand would rest on her cannon (CGunWeapon::PortSetLeftGrip).
+// model in the rifle's space (BuildRifle's: muzzle at the origin, barrel +y). The trooper's left arm out
+// to the shoulder joint, posed by linear blend skinning on its Echoes skin: the fingers closed toward the
+// palm about the knuckle line, the thumb swung under, the wrist bent so the forearm runs back toward the
+// left shoulder (kGripBend), the upper arm bent at the elbow toward it (kGripShoulder). Then placed with
+// the gripped point on the guard's middle, the knuckle line along the guard (index finger at its top) and
+// the palm on its left. Unskinned; the gun draws it with the rifle while Samus's left hand would rest on
+// her cannon (CGunWeapon::PortSetLeftGrip).
 bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, PrimeCmdl& out, std::string* error) {
   const EchoesJoint* elbow = FindJoint(joints, "L_elbow");
   const EchoesJoint* wrist = FindJoint(joints, "L_wrist");
@@ -559,6 +540,8 @@ bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, Pri
   pose[thumb2->id] = Then(thumb, About(FromArray(thumb2->position), {0, 0, 1}, kGripThumbTip * kPi / 180.0));
   std::set<uint32_t> kept = {elbow->id, wrist->id};
   for (const auto& entry : pose) kept.insert(entry.first);
+  const EchoesJoint* shoulder = FindJoint(joints, "L_shoulder");
+  if (shoulder != nullptr) kept.insert(shoulder->id);
   // The hand's frame (knuckle line u1 index to pinky, palm normal u2, toward the wrist u3) onto the
   // guard's (its axis a, the palm's side n, the unbent forearm f), the gripped point onto its middle.
   const V3 u1{0, -1, 0}, u2{0, 0, -1}, u3{1, 0, 0};
@@ -583,13 +566,29 @@ bool BuildLeftGrip(const Body& body, const std::vector<EchoesJoint>& joints, Pri
       if (const EchoesJoint* j = FindJoint(joints, name)) pose[j->id] = forearm;
     }
   }
+  // The elbow's bend: the upper arm (on the forearm's line so far) turned about the elbow toward the
+  // left shoulder, kGripShoulder.
+  if (shoulder != nullptr) {
+    const Rigid forearm = pose.count(elbow->id) != 0 ? pose[elbow->id] : Rigid{};
+    const V3 elbowHere = forearm.Apply(FromArray(elbow->position));
+    const V3 upperNow = Normalized(forearm.Turn(FromArray(shoulder->position) - FromArray(elbow->position)));
+    const V3 upperWant = Normalized(kGripShoulder - place(elbowHere));
+    const V3 upperWantHere = u1 * Dot(upperWant, a) + u2 * Dot(upperWant, n) + u3 * Dot(upperWant, f);
+    const V3 elbowAxis = Cross(upperNow, upperWantHere);
+    const double elbowBend = std::atan2(Length(elbowAxis), Dot(upperNow, upperWantHere));
+    if (elbowBend > 1e-6) {
+      const Rigid upper = Then(About(elbowHere, Normalized(elbowAxis), elbowBend), forearm);
+      pose[shoulder->id] = upper;
+      if (const EchoesJoint* pad = FindJoint(joints, "L_varia_SDK")) pose[pad->id] = upper;
+    }
+  }
   const size_t count = body.model.arrays[0].size() / 12;
   std::vector<uint8_t> keep(count, 0);
   for (size_t v = 0; v < count && v < body.echoesWeights.size(); ++v) {
     const Weights& w = body.echoesWeights[v];
     if (w.empty()) continue;
     const auto main = std::max_element(w.begin(), w.end(), [](const auto& x, const auto& y) { return x.second < y.second; });
-    keep[v] = kept.count(main->first) != 0 && Position(body.model, uint32_t(v)).x < kGripCut ? 1 : 0;
+    keep[v] = kept.count(main->first) != 0 && Position(body.model, uint32_t(v)).x < -kRifleArmCut ? 1 : 0;
   }
   out = body.model;
   if (!PortEchoesSuits::FloatNormals(out, error) ||
@@ -935,7 +934,7 @@ bool Import(const Io& io, Result& result, std::string& error) {
     }
   }
   std::map<uint32_t, PortDread::PrimeSkeleton> primeCinfs;
-  for (const uint32_t id : {kKindCinf[0], kKindCinf[1], kKindCinf[2], kKindCinf[3], kGunCinf}) {
+  for (const uint32_t id : {kKindCinf[0], kKindCinf[1], kKindCinf[2], kKindCinf[3]}) {
     std::vector<uint8_t> data;
     std::string why;
     if (!io.retail(kCINF, id, data) || !PortDread::ParseCinf(data.data(), data.size(), primeCinfs[id], &why)) {
@@ -1028,7 +1027,7 @@ bool Import(const Io& io, Result& result, std::string& error) {
     if (cancelled()) return false;
     std::string why;
     FirstPerson& fp = firstPerson[t];
-    if (!BuildRifle(bodies[t][0], echoesCinfs[t->cinf], primeCinfs[kGunCinf], fp.rifle, &why)) {
+    if (!BuildRifle(bodies[t][0], echoesCinfs[t->cinf], fp.rifle, &why)) {
       error = std::string(t->name) + " first-person rifle: " + why;
       return false;
     }

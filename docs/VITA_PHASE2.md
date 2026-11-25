@@ -5607,3 +5607,31 @@ What to look for in test 62:
 (Not in the build: since test 52 the user also has `echoes-suits-hd`, an add-on mod of higher-resolution
 textures for the marine and the Dark Trooper made from their own pictures. It works with test 62 as it
 is.)
+
+## 0.46.0 test 63: the marine's rifle flat, its first-person arms straight and to the shoulder (echoes-suits 21)
+
+From renders on the PC (nothing on the Vita between the two builds), the user asked for three changes,
+each previewed before they said "Build them".
+- "rotate the arm cannon completely flat with the top facing forward" (a T-pose render). The bodies'
+  hand and rifle are now turned 90° about the forearm (`kGripRollDegrees`), not 50°.
+  - The preview showed what that does in Samus's own poses: test 51's 50° hung the grip straight
+    down (her animations roll the forearm about 51° standing, 50° walking, 82° running), while 90°
+    leaves it about 40° off down in most of them. The user: "looks good".
+- "Samus' arm is not bent... but ours" (the two first-person arms side by side). BuildRifle no longer
+  bends the upper arm's end 30° up toward the gun skeleton's shoulder joint, which Samus's suit arm
+  (PowerArm 07111AA7) doesn't follow. The arm runs straight back; BuildRifle needs no gun skeleton now.
+- "extend both of the left and right arm".
+  - The first-person rifle's arm goes on to the shoulder joint (`kRifleArmCut` 0.27, was `kArmCut`
+    0.33). It now ends 20 cm behind the gun's elbow; Samus's suit arm ends 23 cm behind it.
+  - The left hand on the grip gets its upper arm, bent at the elbow toward Samus's left shoulder
+    (`kGripShoulder`). It ends about 40 cm short of it: the grip is held as far out as her cannon.
+  - The shoulder pads stay out. The grapple arm is as before.
+- From the first-person camera nothing changes: the new parts sit behind and below the frame.
+- The harness's output is byte for byte the preview's (`~/marine/out13`). Against test 62's, only the
+  nine bodies, three rifles and three left hands differ.
+
+What to look for in test 63:
+- Import the Echoes suits again (version 21).
+- Third person, cutscenes and the pause screen: the rifle about 40° off grip-down standing and
+  walking, as the preview showed.
+- First person: as test 62.
