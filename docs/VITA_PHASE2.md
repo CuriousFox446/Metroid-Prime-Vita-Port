@@ -5697,3 +5697,37 @@ Test 65 levelled the marine's rifle only. The user, of Samus's own arm: "Yes, Sa
 What to look for in test 66: in third person as Samus, aim up and down, ahead and to the sides. The
 cannon should keep the roll it has aiming level; with the cannon lowered, as before. The marine as in
 test 65.
+
+## 0.46.0 test 67: the third-person arms bent one way; the free arm off the chest's turn
+
+The user, before trying test 66: "The upper arm also twists when looking up and down and the left
+arm does this weird motion when turning left and right". Measured on the ANCS on the PC (the
+scratchpad's hinge.py, hinge2.py, twistrange.py, leftarm.py on `~/marine`'s harness):
+- The body's clips come in two kinds. The ready, idle, stop, walk and run clips and the aim clips up
+  left and up right bend the right elbow about its upper arm's local +z and the left about -z, each
+  forearm turned +1 to +4° about its line under the upper arm. The slow walk, the turn on the spot and
+  the other aim clips (up ahead, right, down left, down right) have the right upper arm rolled half
+  round and the left a quarter, each forearm turned +88 to +90°: the same arms, the bones rolled
+  otherwise. Each clip's turn is constant through it.
+- Blended across the two kinds, the upper arm spun about its line: the right one 164 to 220° from the
+  level aim to up ahead, down or right. The left rolled a quarter turn as the turn on the spot (or the
+  slow walk) blended in.
+- The left arm, free while aiming (the legs' pose), hangs from the chest, and the aim clips turn the
+  chest some 110° from aiming left to right: the left hand swung 1.2 m, from behind her to in front.
+
+So:
+- `CanonicalArms` (in `Sample`, so every clip the body plays) puts each sampled pose's arms the ready
+  clip's way (`MeasureArms`): the upper arm turned about its line until the elbow bends about the ready
+  clip's axis, the forearm kept where it was in the model; then the forearm turned about its line to
+  the ready clip's turn under the upper arm. Offline, the right upper arm's spin over those blends is
+  3 to 37°, and every clip's elbow is the ready clip's.
+- The cannon's roll then follows the arm: the bind's -z from straight down -41 to -78° over the aim
+  clips (they had -67 to +55). Test 66's `LevelCannon`, which held it to the level row's roll at the
+  aim's yaw, is gone: aiming right its table wrung the elbow up to 98°.
+- While aiming, the free arm's upper arm (`freeShoulder`) is held as the legs' pose holds it in the
+  model, by the aim's weight; only its shoulder moves with the chest (the hand some 0.5 m).
+- The marine's `LevelRifle` (test 65) is unchanged, after the aim as before.
+
+What to look for in test 67: in third person, look up and down and turn left and right, standing and
+walking (slowly too), as Samus and as the marine. The upper arms should keep their facing, the
+cannon its roll, the left arm hanging as it does when walking, and the elbows no wrung look.

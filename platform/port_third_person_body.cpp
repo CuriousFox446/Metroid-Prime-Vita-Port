@@ -273,9 +273,17 @@ struct State {
   CSegId gunSeg = CSegId::Invalid();
   CSegId muzzleSeg = CSegId::Invalid();
   CSegId forearm = CSegId::Invalid(); // the cannon arm's elbow, which the cannon rides (LevelRifle)
-  // Samus's: the clips' forearm rotation, before LevelCannon turns it (kept as shoulderPose is).
-  CQuaternion forearmPose = CQuaternion::NoRotation();
-  bool haveForearmPose = false;
+  // 0.46.0 test 67: each arm's elbow as the ready clip bends it (CanonicalArms): the bend's axis in
+  // the upper arm's frame, and the forearm's turn about its own line under the upper arm.
+  struct ArmRef {
+    CSegId upper = CSegId::Invalid();
+    CSegId fore = CSegId::Invalid();
+    CVector3f hinge = CVector3f::Zero();
+    float twist = 0.f;
+    bool valid = false;
+  };
+  ArmRef arms[2];
+  CSegId freeShoulder = CSegId::Invalid(); // the free arm's upper arm (L_shoulder, the cannon on the right)
   CQuaternion shoulderPose = CQuaternion::NoRotation(); // the clips', before the aim
   bool advanced = false; // the pose was rebuilt since the last AimArm (shoulderPose is stale)
   bool haveAim = false;
@@ -411,7 +419,6 @@ void FindAimBones(const CAnimData& data) {
   const CCharLayoutInfo& layout = *data.GetCharLayoutInfo();
   s.shoulder = CSegId::Invalid();
   s.forearm = CSegId::Invalid();
-  s.haveForearmPose = false;
   s.gunSeg = layout.GetSegIdFromString(rstl::string_l("GUN_LCTR"));
   s.muzzleSeg = layout.GetSegIdFromString(rstl::string_l("Charge_LCTR"));
   if (s.gunSeg == CSegId::Invalid() || s.muzzleSeg == CSegId::Invalid()) {
@@ -592,79 +599,52 @@ void LevelRifle(CAnimData& data) {
   data.SetPoseBuilderValid(false);
 }
 
-// 0.46.0 test 66, Samus's own bodies: the roll about her forearm's line that the aim grid's level
-// row gives at the aim's yaw (the bind's -z from straight down, as LevelRifle measures it: -67
-// degrees aiming ahead or left, the ready clip; +23 aiming right, B_aimrright_samus), kept at every
-// pitch while she aims. The other rows' clips roll it far from that (+40 up ahead, -56 up left, -62
-// up right, +37 down left, +55 down right; ~/marine/aimroll.py), so blended by the aim her cannon
-// turned about its line as she looked up and down, and back as the aim crossed the up row (the user,
-// after test 64: "They seem to love rotating when looking up and down", then of test 65's
-// marine-only fix "Yes, Samus too").
-float LevelRollRadians(float u) {
-  const float degrees = u <= 0.f ? -67.f : -67.f + 90.f * std::min(u, 1.f);
-  return degrees * float(3.14159265358979323846 / 180.0);
+// 0.46.0 test 67: the arms bent one way in every clip. The body's clips come in two kinds (measured on
+// the ANCS on the PC): the ready, idle, stop, walk and run clips and the aim clips up left and up right
+// bend the right elbow about its upper arm's local +z and the left about -z, each forearm turned +1 to
+// +4 degrees about its line under the upper arm; the slow walk, the turn on the spot and the other aim
+// clips (up ahead, right, down left and right) have the right upper arm rolled half round and the left
+// a quarter, each forearm turned +88 to +90, the same arms otherwise (each clip's turn is constant).
+// Blended across the two (looking up from the level aim, turning on the spot, walking slower), the
+// upper arm spun about its line (170 to 220 degrees for the right one, looking up or down) and the left
+// rolled a quarter turn (the user, after test 66: "The upper arm also twists when looking up and down
+// and the left arm does this weird motion when turning left and right"). So each sampled pose's arms
+// are put the ready clip's way (CanonicalArms, in Sample): the upper arm turned about its line until
+// the elbow bends about the ready clip's axis, the forearm kept where it was in the model; then the
+// forearm turned about its line to the ready clip's turn under the upper arm. No clip's own motion is
+// lost (the clips' turns are constant), and the elbow is the ready clip's in every clip. The cannon's
+// roll then follows the arm (the bind's -z from straight down: -41 to -78 degrees over the aim clips,
+// where they had -67 to +55), so test 66's LevelCannon, which held it to the level row's at the aim's
+// yaw and so wrung the elbow up to 98 degrees aiming right, is gone.
+float ElbowTwist(const CQuaternion& fore) {
+  const CVector3f x(1.f, 0.f, 0.f);
+  const CQuaternion swing = CQuaternion::ShortestRotationArc(x, fore.Transform(x));
+  const CQuaternion twist = swing.BuildInverted() * fore;
+  return 2.f * std::atan2(twist.GetVector().GetX(), twist.GetScalar());
 }
 
-// Before AimArm, over the clips' shoulder as AimArm starts from it, so AimArm then puts the bore on
-// the aim as before (the roll turns the cannon about the forearm, not quite about its bore) and the
-// roll is worked out from the same pose every frame. By the aim's weight: with the cannon lowered,
-// the clips' own roll. The marine's bodies keep LevelRifle's grip-down roll; the dread body (another
-// skeleton) its clips'.
-void LevelCannon(CAnimData& data) {
-  if (s.forearm == CSegId::Invalid()) {
-    return;
-  }
-  const auto body = PortDreadSamus::CutsceneBody(s.loadedChar);
-  if (PortFederationMarine::ServesBody(body) || PortDreadSamus::ReplacesWithDread(body)) {
-    return;
-  }
-  CHierarchyPoseBuilder& pb = data.PoseBuilder();
-  if (s.advanced || !s.haveForearmPose) {
-    s.forearmPose = pb.GetSegRotation(s.forearm);
-    s.haveForearmPose = true;
-  }
-  pb.Insert(s.forearm, s.forearmPose);
-  if (s.shoulder != CSegId::Invalid()) {
-    if (s.advanced) {
-      s.shoulderPose = pb.GetSegRotation(s.shoulder); // as AimArm saves it, before it turns it
+void CanonicalArms(Pose& p) {
+  const CVector3f x(1.f, 0.f, 0.f);
+  const CUnitVector3f xAxis(x);
+  for (const State::ArmRef& arm : s.arms) {
+    if (!arm.valid) {
+      continue;
     }
-    pb.Insert(s.shoulder, s.shoulderPose);
+    CQuaternion& upper = p.rot[arm.upper.val()];
+    CQuaternion& fore = p.rot[arm.fore.val()];
+    // Nearly straight (under 3 degrees), the bend has no axis to match: the upper arm as it is.
+    const CVector3f bend = CVector3f::Cross(x, fore.Transform(x));
+    if (bend.Magnitude() >= 0.05f) {
+      const CVector3f h = bend.AsNormalized();
+      const float roll =
+          std::atan2(CVector3f::Dot(CVector3f::Cross(arm.hinge, h), x), CVector3f::Dot(arm.hinge, h));
+      const CQuaternion turn = CQuaternion::AxisAngle(xAxis, CRelAngle::FromRadians(roll));
+      upper = upper * turn;
+      fore = turn.BuildInverted() * fore;
+    }
+    fore = CQuaternion::ShortestRotationArc(x, fore.Transform(x)) *
+           CQuaternion::AxisAngle(xAxis, CRelAngle::FromRadians(arm.twist));
   }
-  data.SetPoseBuilderValid(false);
-  if (s.aimWeight <= 0.f) {
-    return;
-  }
-  CTransform4f xf = CTransform4f::Identity();
-  pb.BuildTransform(s.forearm, xf);
-  const CVector3f barrel = xf.Rotate(CVector3f(1.f, 0.f, 0.f));
-  if (!barrel.CanBeNormalized()) {
-    return;
-  }
-  const CVector3f b = barrel.AsNormalized();
-  const CVector3f minusZ = xf.Rotate(CVector3f(0.f, 0.f, -1.f));
-  const CVector3f zOff = minusZ - b * CVector3f::Dot(minusZ, b);
-  // The ground's way across the barrel, near straight up or down toward ahead, as LevelRifle has it.
-  const CVector3f down(0.f, 0.f, -1.f);
-  const CVector3f toGround = down - b * CVector3f::Dot(down, b);
-  const float level = toGround.Magnitude();
-  CVector3f want = level > 1e-4f ? toGround * (1.f / level) : CVector3f::Zero();
-  const float steep = 1.f - CMath::Clamp(0.f, (level - 0.05f) / 0.25f, 1.f);
-  const CVector3f ahead(0.f, b.GetZ() > 0.f ? 1.f : -1.f, 0.f);
-  const CVector3f aheadOff = ahead - b * CVector3f::Dot(ahead, b);
-  if (steep > 0.f && aheadOff.CanBeNormalized()) {
-    want = want * (1.f - steep) + aheadOff.AsNormalized() * steep;
-  }
-  if (!zOff.CanBeNormalized() || !want.CanBeNormalized()) {
-    return;
-  }
-  const CVector3f g = zOff.AsNormalized();
-  const CVector3f w = want.AsNormalized();
-  // The roll from the bind's -z to the ground's way now, less the level row's: the turn to keep it.
-  const float now = std::atan2(CVector3f::Dot(CVector3f::Cross(g, w), b), CVector3f::Dot(g, w));
-  const float angle = std::remainder(now - LevelRollRadians(s.gridU), float(2.0 * 3.14159265358979323846));
-  const CQuaternion turn =
-      CQuaternion::AxisAngle(CUnitVector3f(b), CRelAngle::FromRadians(angle * std::min(s.aimWeight, 1.f)));
-  TurnSeg(pb, *data.GetCharLayoutInfo(), s.forearm, s.forearmPose, turn);
 }
 
 // Points the grapple arm at the grapple point by s.reachWeight: the shoulder puts the hand on the
@@ -804,9 +784,45 @@ void Sample(const Clip& clip, float phase, Pose& out) {
                                      (pb.GetSegOffset(seg) - poseLayout.GetFromParentUnrotated(seg))
                                : pb.GetSegOffset(seg);
   }
+  CanonicalArms(out);
 }
 
 void Sample(CAnimData& data, int clip, float phase, Pose& out) { Sample(Clip{&data, clip}, phase, out); }
+
+// The arms' reference for CanonicalArms: the ready clip's elbows (sampled before any arm is valid,
+// so as the clip has them). An arm whose forearm hangs from something other than its upper arm, or
+// whose ready elbow is straight, is left as the clips pose it.
+void MeasureArms(CAnimData& data) {
+  static Pose ready;
+  const CCharLayoutInfo& layout = *data.GetCharLayoutInfo();
+  for (State::ArmRef& arm : s.arms) {
+    arm.valid = false;
+  }
+  if (s.ready < 0) {
+    return;
+  }
+  Sample(data, s.ready, 0.f, ready);
+  const CVector3f x(1.f, 0.f, 0.f);
+  constexpr const char* kArms[2][2] = {{"R_shoulder", "R_elbow"}, {"L_shoulder", "L_elbow"}};
+  for (int a = 0; a < 2; ++a) {
+    State::ArmRef& arm = s.arms[a];
+    arm.upper = layout.GetSegIdFromString(rstl::string_l(kArms[a][0]));
+    arm.fore = layout.GetSegIdFromString(rstl::string_l(kArms[a][1]));
+    if (arm.upper == CSegId::Invalid() || arm.fore == CSegId::Invalid() || arm.upper.val() >= kSegs ||
+        arm.fore.val() >= kSegs || !s.posed[arm.upper.val()] || !s.posed[arm.fore.val()] ||
+        layout.GetOriginalParent(arm.fore) != arm.upper) {
+      continue;
+    }
+    const CQuaternion& fore = ready.rot[arm.fore.val()];
+    const CVector3f bend = CVector3f::Cross(x, fore.Transform(x));
+    if (bend.Magnitude() < 0.05f) {
+      continue;
+    }
+    arm.hinge = bend.AsNormalized();
+    arm.twist = ElbowTwist(fore);
+    arm.valid = true;
+  }
+}
 
 // Whether the body plays a clip of set id (the rest are built only to list and pin): the walk
 // back, the sprint, the jump and landing, the fall, the flinch.
@@ -1495,6 +1511,27 @@ void PoseBody(CAnimData& data) {
         sAcc.rot[i] = parentModel.BuildInverted() * sBlended.rot[i];
         sAcc.off[i] = sAcc.off[i] * (1.f - s.aimWeight) + sArms.off[i] * s.aimWeight;
       }
+      // 0.46.0 test 67: the free arm's upper arm held as the legs' pose holds it in the model, by the
+      // aim's weight. Hanging from the aimed chest it went round with it: the aim clips turn the chest
+      // some 110 degrees from aiming left to right, and the left hand swung 1.2 m from behind her to in
+      // front as the aim crossed (the user: "the left arm does this weird motion when turning left
+      // and right"). Now only its shoulder moves with the chest (the hand some 0.5 m).
+      if (s.freeShoulder != CSegId::Invalid()) {
+        const auto aimedModel = [&](auto& self, CSegId seg) -> CQuaternion {
+          const int i = seg.val();
+          if (seg == CSegId::Character() || i >= kSegs || !s.upper[i]) {
+            return seg == CSegId::Character() || i >= kSegs ? CQuaternion::NoRotation() : sModel.rot[i];
+          }
+          if (!s.freeArm[i]) {
+            return sBlended.rot[i];
+          }
+          return self(self, layout.GetOriginalParent(seg)) * sAcc.rot[i];
+        };
+        const int f = s.freeShoulder.val();
+        const CQuaternion parentModel = aimedModel(aimedModel, layout.GetOriginalParent(s.freeShoulder));
+        const CQuaternion held = Blend(parentModel * sAcc.rot[f], sModel.rot[f], s.aimWeight);
+        sAcc.rot[f] = parentModel.BuildInverted() * held;
+      }
     }
   }
   // Backpedalling, the torso leans forward over the feet (over the aim, which AimArm corrects).
@@ -1600,9 +1637,11 @@ void Build(CStateManager& mgr) {
   FindAimBones(*data);
   FindReachBones(*data);
   std::fill(std::begin(s.freeArm), std::end(s.freeArm), false);
+  s.freeShoulder = CSegId::Invalid();
   for (const char* name : {"L_shoulder", "R_shoulder"}) {
     CSegId arm = layout.GetSegIdFromString(rstl::string_l(name));
     if (arm != CSegId::Invalid() && s.shoulder != CSegId::Invalid() && arm != s.shoulder) {
+      s.freeShoulder = arm.val() < kSegs && s.posed[arm.val()] ? arm : CSegId::Invalid();
       // From where the arm leaves the spine: the aim clips raise the collarbone too.
       for (int depth = 0; depth < 64; ++depth) {
         const CSegId parent = layout.GetOriginalParent(arm);
@@ -1617,6 +1656,8 @@ void Build(CStateManager& mgr) {
       break;
     }
   }
+  // Before any clip is measured (Measure: the aim grid's directions), so they are measured as drawn.
+  MeasureArms(*data);
   BuildSets(false);
   // A missing walk clip stands in by its fallback, else the walk (the ready pose without one);
   // a missing walk back or sprint drops out of its tiers (Update).
@@ -1949,7 +1990,6 @@ void NoteShot(const CStateManager& mgr) {
   s.aimWeight = 1.f;
   CAnimData& data = *s.body->AnimationData();
   PoseBody(data);
-  LevelCannon(data);
   AimArm(mgr, data);
   LevelRifle(data);
 }
@@ -1967,7 +2007,6 @@ void PreRender(const CStateManager& mgr) {
       PoseBody(data);
     }
     const bool fresh = s.advanced;
-    LevelCannon(data);
     AimArm(mgr, data);
     LevelRifle(data);
     ReachArm(mgr, data, fresh);
