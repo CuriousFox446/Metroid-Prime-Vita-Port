@@ -1,13 +1,13 @@
-# Metroid Prime Unbound for PS Vita
+# Metroid Prime for PS Vita
 
 > **Disclaimer:** this is an unofficial fan project. It is not affiliated with or endorsed by
 > Nintendo or Retro Studios. It builds on the [PrimeDecomp](https://github.com/PrimeDecomp/prime)
-> decompilation and on the Metroid Prime Unbound native port, but neither project maintains or
+> decompilation and on the Metroid Prime native port, but neither project maintains or
 > supports this Vita build. Please report problems with it [here](../../issues), not to them.
 
 **Metroid Prime, running natively on the PlayStation Vita.** No emulator is involved:
 - The game code is the [PrimeDecomp](https://github.com/PrimeDecomp/prime) decompilation, compiled
-  for the Vita by way of the Metroid Prime Unbound native port (version 0.46.0).
+  for the Vita by way of the Metroid Prime native port (version 0.46.0).
 - A renderer written for the Vita's GPU draws it.
 
 **No game content is included.** You need your own copy of the game as a disc image, and the port
@@ -78,7 +78,7 @@ The game renders at the Vita's native 960×544, in 4:3 (pillarboxed) or 16:9.
 
 ## Installing
 
-1. Install `metroid_prime_port.vpk` with VitaShell. Builds are on the [Releases](../../releases)
+1. Install the `.vpk` with VitaShell. Builds are on the [Releases](../../releases)
    page, or see [Building](#building).
 2. Make the folder `ux0:data/MetroidPrime/` and copy your disc image into it. If there are
    several, the first `.iso` or `.gcm` by name is used.
