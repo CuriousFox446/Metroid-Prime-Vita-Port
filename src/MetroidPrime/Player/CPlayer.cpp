@@ -2953,6 +2953,13 @@ void CPlayer::Render(const CStateManager& mgr) const {
         CVector3f origin = bodyXf.GetTranslation();
         origin.SetZ(GetBoundingBox().GetMinPoint().GetZ());
         bodyXf.SetTranslation(origin);
+        // 0.46.0 test 70: where frames are blended between ticks (an FPS cap that is not a whole
+        // number of ticks a frame, or none), drawn where the blended camera expects her, as her other
+        // models are (PortPresentedView); at the tick's own place she slid back and forth against it.
+        CTransform4f toCur = CTransform4f::Identity();
+        if (PortPresentedView(CTransform4f::Identity(), toCur)) {
+          bodyXf = toCur.GetQuickInverse() * bodyXf;
+        }
         if (PortThirdPersonBody::Render(mgr, bodyXf, GetActorLights())) {
           break;
         }

@@ -467,8 +467,22 @@ void DrawBuiltinMods() {
       PortEchoesSuits::SetPlayAsDarkSamus(dark);
       MarkDirty();
     }
-    ItemHelp("Dark Samus's body in place of every suit's, in third person, cutscenes and the pause screen. "
-             "The first-person arm and the Morph Ball stay the suit's.");
+    ItemHelp("Dark Samus's body in place of every suit's, in third person, cutscenes and the pause screen, "
+             "with her Morph Ball, and her arm cannon in first person. The first-person left arm stays the "
+             "suit's.");
+    // 0.46.0 test 70, the user: "I want the dark samus mod to have her arm cannon in first person too".
+    ImGui::Indent();
+    ImGui::BeginDisabled(!dark);
+    bool darkCannon = PortEchoesSuits::DarkSamusCannonShown();
+    if (ImGui::Checkbox("Dark Samus's arm cannon in first person", &darkCannon)) {
+      PortEchoesSuits::SetDarkSamusCannonShown(darkCannon);
+      MarkDirty();
+    }
+    ImGui::EndDisabled();
+    ItemHelp("Her right arm and its cannon in place of the arm cannon and the suit arm (the shots and beams "
+             "stay the beam's own). Off keeps the arm cannon (Prime's, or the Echoes one when that is on). "
+             "Needs the Echoes suits imported again (version 23). Applies at once.");
+    ImGui::Unindent();
     // 0.46.0 test 51: the Federation Marine, the user's call: "a toggle under 'Play as Dark Samus' as
     // 'Play as a Federation Marine', not a separate category". The two exclude each other.
     bool marine = PortFederationMarine::PlayAsMarine();

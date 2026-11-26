@@ -163,6 +163,10 @@ bool FrameLimitEnabled();
 // 30 FPS cap (frame_limit_30=), else the FPS cap setting (fps_cap=, MP_FPS_CAP);
 // 0 = unlimited.
 int FrameRateCap();
+// The simulation ticks each frame runs when FrameRateCap is below the simulation rate and divides
+// it (2 under the 30 FPS cap at 60 Hz), else 0: the frames then step in that even cadence and show
+// each tick's own state, unblended, as under the 60 FPS cap (0.46.0 test 70).
+unsigned FrameCadenceTicks();
 void SetFrameLimitEnabled(bool enabled);
 void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented);
 // The last full second of main-loop work (RecordFrame's durations, pacing left out):

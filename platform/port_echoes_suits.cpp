@@ -3,6 +3,7 @@
 #include "port_echoes_suits.h"
 
 #include "port_dread_samus_mod.h"
+#include "port_federation_marine.h"
 #include "port_strings.h"
 
 #include <algorithm>
@@ -2725,6 +2726,111 @@ bool SwapHead(PrimeCmdl& body, std::vector<uint8_t>& skin, const PrimeCmdl& dono
   return CompactSkinned(body, skin, error);
 }
 
+namespace {
+
+// Dark Samus's first-person arm cannon (kDarkCannon; 0.46.0 test 70, the user: "I want the dark
+// samus mod to have her arm cannon in first person too"): her right arm's triangles from the shoulder
+// joint out (the upper arm, the forearm and the cannon it ends in; her shoulder pad is on a joint of
+// its own and stays out), her muzzle locator at the origin and the T-posed arm turned down the gun's
+// barrel (its +x to +y, PortFederationMarine::RifleFrame), unskinned. The Federation Marine's
+// first-person rifle is made so (port_federation_marine.cpp, BuildRifle), and the gun draws both the
+// same way: on its muzzle, in place of the arm cannon and the suit arm.
+constexpr double kDarkCannonArmCut = 0.27;  // out from the middle: the shoulder joints sit at 0.295
+constexpr const char* kDarkCannonMuzzle = "GUN_Particle_LCTR";
+
+bool BuildDarkCannon(const PrimeCmdl& body, const std::vector<uint8_t>& echoesCskr,
+                     const std::vector<EchoesJoint>& joints, PrimeCmdl& out, std::string* error) {
+  const EchoesJoint* muzzle = nullptr;
+  std::set<uint32_t> arm;
+  for (const EchoesJoint& j : joints) {
+    if (j.name == kDarkCannonMuzzle) muzzle = &j;
+    if (j.name == "R_shoulder") arm.insert(j.id);
+  }
+  if (muzzle == nullptr || arm.empty()) return Fail(error, "her right shoulder or muzzle locator is missing");
+  for (bool grew = true; grew;) {
+    grew = false;
+    for (const EchoesJoint& j : joints) {
+      if (!arm.count(j.id) && arm.count(j.parent)) {
+        arm.insert(j.id);
+        grew = true;
+      }
+    }
+  }
+  std::vector<uint32_t> mains;  // each vertex's heaviest Echoes joint
+  if (!MainJoints(echoesCskr, mains, error)) return false;
+  out = body;
+  if (!FloatNormals(out, error) || out.arrays.size() < 2) return Fail(error, "no positions and normals");
+  const size_t count = out.arrays[0].size() / 12;
+  std::vector<uint8_t> keep(count, 0);
+  {
+    Reader p{out.arrays[0].data(), out.arrays[0].size()};
+    for (size_t v = 0; v < count && v < mains.size(); ++v) {
+      keep[v] = arm.count(mains[v]) != 0 && p.F32(v * 12) >= kDarkCannonArmCut ? 1 : 0;
+    }
+  }
+  if (!KeepTriangles(
+          out,
+          [&keep](uint32_t a, uint32_t b, uint32_t c) {
+            return a < keep.size() && b < keep.size() && c < keep.size() && keep[a] && keep[b] && keep[c];
+          },
+          error)) {
+    return false;
+  }
+  if (out.surfaces.empty()) return Fail(error, "no right arm triangles");
+  const auto setF = [](std::vector<uint8_t>& d, size_t at, double value) {
+    const float f = float(value);
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    Set32(d, at, bits);
+  };
+  for (size_t v = 0; v < count; ++v) {
+    Reader p{out.arrays[0].data(), out.arrays[0].size()};
+    Reader n{out.arrays[1].data(), out.arrays[1].size()};
+    const double x = double(p.F32(v * 12)) - muzzle->position[0], y = double(p.F32(v * 12 + 4)) - muzzle->position[1],
+                 z = double(p.F32(v * 12 + 8)) - muzzle->position[2];
+    const double nx = n.F32(v * 12), ny = n.F32(v * 12 + 4), nz = n.F32(v * 12 + 8);
+    setF(out.arrays[0], v * 12, -y);
+    setF(out.arrays[0], v * 12 + 4, x);
+    setF(out.arrays[0], v * 12 + 8, z);
+    setF(out.arrays[1], v * 12, -ny);
+    setF(out.arrays[1], v * 12 + 4, nx);
+    setF(out.arrays[1], v * 12 + 8, nz);
+  }
+  // Unskinned: one group over every vertex, which CompactSkinned cuts to the drawn ones.
+  std::vector<uint8_t> skin;
+  Put32(skin, 1);
+  Put32(skin, 1);
+  Put32(skin, 0);
+  PutF32(skin, 1.f);
+  Put32(skin, uint32_t(count));
+  Put32(skin, 0xFFFFFFFF);
+  Put32(skin, uint32_t(count));
+  Put32(skin, 0xFFFFFFFF);
+  Put32(skin, uint32_t(count));
+  if (!CompactSkinned(out, skin, error)) return false;
+  Reader h{out.header.data(), out.header.size()};
+  Set32(out.header, 8, h.U32(8) & ~0x1u);
+  // Its bounds.
+  float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+  Reader p{out.arrays[0].data(), out.arrays[0].size()};
+  for (size_t at = 0; at + 12 <= out.arrays[0].size(); at += 12) {
+    for (int c = 0; c < 3; ++c) {
+      const float value = p.F32(at + size_t(c) * 4);
+      lo[c] = std::min(lo[c], value);
+      hi[c] = std::max(hi[c], value);
+    }
+  }
+  if (lo[0] <= hi[0]) {
+    for (int c = 0; c < 3; ++c) {
+      setF(out.header, 0x0C + size_t(c) * 4, lo[c]);
+      setF(out.header, 0x18 + size_t(c) * 4, hi[c]);
+    }
+  }
+  return PortFederationMarine::PruneMaterials(out, error);
+}
+
+}  // namespace
+
 bool Import(const Io& io, Result& result, std::string& error) {
   const auto log = [&io](const std::string& line) {
     if (io.log) io.log(line);
@@ -2854,6 +2960,25 @@ bool Import(const Io& io, Result& result, std::string& error) {
     log(line);
     if (!write(Hex8(t.cmdl) + ".CMDL", WriteCmdl(model)) || !write(Hex8(t.cskr) + ".CSKR", outCskr)) {
       return false;
+    }
+    // Dark Samus's first-person arm cannon (version 23), from her cutscene body: her bodies are one
+    // mesh. Without it (a skeleton this does not know) she keeps the suit's arm and cannon.
+    if (t.worn < 0 && t.cinf == 0x19C53902) {
+      PrimeCmdl cannon;
+      std::string cannonWhy;
+      if (!BuildDarkCannon(model, cskr, echoesCinfs[t.echoesCinf], cannon, &cannonWhy)) {
+        log("echoes: Dark Samus first-person arm cannon not made: " + cannonWhy);
+      } else if (io.retailId(kDarkCannon)) {
+        error = "Dark Samus first-person arm cannon: output id " + Hex8(kDarkCannon) + " is a Prime resource.";
+        return false;
+      } else {
+        if (!write(Hex8(kDarkCannon) + ".CMDL", WriteCmdl(cannon))) {
+          return false;
+        }
+        log("echoes: Dark Samus first-person arm cannon -> " + Hex8(kDarkCannon) + ", " +
+            std::to_string(cannon.arrays[0].size() / 12) + " vertices, " + std::to_string(cannon.surfaces.size()) +
+            " surfaces");
+      }
     }
     if (t.worn == kWornVaria) {
       variaBodies[t.kind] = VariaBody{std::move(model), std::move(outCskr), t.cinf};

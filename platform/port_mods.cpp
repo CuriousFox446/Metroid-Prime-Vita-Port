@@ -91,6 +91,9 @@ std::set<uint32_t> sDreadSkeletons;
 std::set<uint32_t> sEchoesBodies;
 // Of those, the ones Dark Samus stands in for: her body carries her cannon (PortDreadSamus::HasOwnCannon).
 std::set<uint32_t> sDarkSamusBodies;
+// The first-person cannon ids her arm cannon is served under (PortDreadSamus::FirstPersonCannon;
+// PortEchoesSuits::kDarkCannon, 0.46.0 test 70).
+std::set<uint32_t> sDarkSamusCannons;
 // The beam ANCS whose Echoes cannon variant it serves (PortEchoesSuits::GunAncs).
 std::set<uint32_t> sEchoesGuns;
 // Whether it serves Dark Samus in place of the suit bodies (PortEchoesSuits::DarkSamusServed).
@@ -507,14 +510,25 @@ void PortDreadSamus::SetFirstPersonCannonShown(bool shown) { sDreadCannonShown =
 bool PortDreadSamus::FirstPersonCannonShown() { return sDreadCannonShown; }
 namespace {
 bool sMarineRifleShown = true;
+// Dark Samus's arm cannon in first person (dark_samus_first_person_cannon; 0.46.0 test 70).
+bool sDarkSamusCannonShown = true;
 }
 bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
   const uint32_t id = FirstPersonCannon(suit);
   return id != 0 && ((sDreadCannonShown && PortMods::sDreadCannons.count(id) != 0) ||
-                     (sMarineRifleShown && PortMods::sMarineRifles.count(id) != 0));
+                     (sMarineRifleShown && PortMods::sMarineRifles.count(id) != 0) ||
+                     (sDarkSamusCannonShown && PortMods::sDarkSamusCannons.count(id) != 0));
 }
 float PortDreadSamus::FirstPersonCannonRoll(int suit) {
-  return PortFederationMarine::ServesFirstPersonRifle(suit) ? 0.f : 30.f;
+  // The marine's rifle and Dark Samus's cannon are modelled upright; Dread's is turned 30 degrees.
+  return PortFederationMarine::ServesFirstPersonRifle(suit) || PortEchoesSuits::ServesDarkSamusCannon(suit) ? 0.f
+                                                                                                           : 30.f;
+}
+void PortEchoesSuits::SetDarkSamusCannonShown(bool shown) { sDarkSamusCannonShown = shown; }
+bool PortEchoesSuits::DarkSamusCannonShown() { return sDarkSamusCannonShown; }
+bool PortEchoesSuits::ServesDarkSamusCannon(int suit) {
+  const uint32_t id = PortDreadSamus::FirstPersonCannon(suit);
+  return sDarkSamusCannonShown && id != 0 && PortMods::sDarkSamusCannons.count(id) != 0;
 }
 void PortFederationMarine::SetFirstPersonRifleShown(bool shown) { sMarineRifleShown = shown; }
 bool PortFederationMarine::FirstPersonRifleShown() { return sMarineRifleShown; }
@@ -761,6 +775,7 @@ void Initialize() {
   sDreadSkeletons.clear();
   sEchoesBodies.clear();
   sDarkSamusBodies.clear();
+  sDarkSamusCannons.clear();
   sEchoesGuns.clear();
   sDarkSamusServed = false;
   for (int& served : sServedSuitLooks) served = PortEchoesSuits::kLookPrime;
@@ -1299,10 +1314,27 @@ void Initialize() {
       }
       ++balls;
     }
+    // Her arm cannon in first person (echoes-suits 23), as every suit's first-person cannon: the gun
+    // draws it on its muzzle in place of the arm cannon and the suit arm (PortDreadSamus::
+    // ReplacesFirstPersonCannon), while dark_samus_first_person_cannon is on.
+    if (const LooseResource* cannon = echoes(0x434D444Cu, PortEchoesSuits::kDarkCannon)) {  // 'CMDL'
+      for (int suit = 0; suit < PortEchoesSuits::kSuitLookSuits; ++suit) {
+        const uint32_t to = PortDreadSamus::FirstPersonCannon(suit);
+        if (to == 0) continue;
+        LooseResource resource = *cannon;
+        resource.id = to;
+        loose[{resource.type, to}] = std::move(resource);
+        if (const auto provider = sResourceProviders.find({cannon->type, cannon->id}); provider != sResourceProviders.end()) {
+          sResourceProviders[{cannon->type, to}] = provider->second;
+        }
+        sDarkSamusCannons.insert(to);
+      }
+    }
     sDarkSamusServed = served != 0 || balls != 0;
     if (sDarkSamusServed) {
-      PortLog::Write("mods: %s serves Dark Samus as %zu Samus body model(s) and %zu Morph Ball(s)\n",
-                     PortEchoesSuits::kModName, served, balls);
+      PortLog::Write("mods: %s serves Dark Samus as %zu Samus body model(s), %zu Morph Ball(s) and %zu first-person "
+                     "arm cannon(s)\n",
+                     PortEchoesSuits::kModName, served, balls, sDarkSamusCannons.size());
     }
   }
 

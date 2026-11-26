@@ -224,6 +224,19 @@ int FrameRateCap() {
   return EffectiveFrameRateCap();
 }
 
+unsigned FrameCadenceTicks() {
+  EnsureInitialized();
+  if (Turbo() || SimAdaptive()) {
+    return 0;
+  }
+  const int cap = EffectiveFrameRateCap();
+  const unsigned sim = SimRate();
+  if (cap <= 0 || static_cast< unsigned >(cap) >= sim || sim % static_cast< unsigned >(cap) != 0) {
+    return 0;
+  }
+  return sim / static_cast< unsigned >(cap);
+}
+
 
 double DynamicResTargetFps() {
   double target = sDynamicResTarget;

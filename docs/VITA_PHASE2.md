@@ -5783,3 +5783,31 @@ it possible to unzoom and put the attract videos back to 4:3?"
 What to look for in test 69: Press Start pulsing on the title from first boot (and the Dolby logo
 among the splash screens); the attract movies as a 4:3 picture with bars at the sides, their lines a
 pixel apart; the title zoomed again after them.
+
+## 0.46.0 test 70: the 30 FPS cap's frames two ticks each, unblended; Dark Samus's arm cannon in first person
+
+The user, with test 69: "third person movement looks jittery when moving with the 30 FPS Cap", and "I
+want the dark samus mod to have her arm cannon in first person too".
+- **The 30 FPS cap's cadence** (`PortDebug::FrameCadenceTicks`, `FixedStepClock::Advance`): test 69's log
+  held 30 frames a second with stretches of one and three ticks a frame in turn (1 13, 2 4, 3 13)
+  rather than two: the clock rounded at a tick's edge, and only the 60 FPS cap had leeway there. A cap
+  below the simulation rate that divides it (the 30 FPS cap: 2 ticks) now runs that many ticks a frame
+  while the clock is within a whole tick of them either way; only a whole tick of drift adds or holds
+  back one, after which the remainder is near nothing again.
+- **Unblended at 30**: frames were blended between ticks under the 30 FPS cap (only the 60 FPS cap
+  turned it off). The camera was drawn a varying fraction of a tick behind, and the third-person body
+  was not, so she slid back and forth against the camera as she moved. Under the 30 FPS cap each frame
+  now shows its tick's own state, as under the 60. Where frames are still blended (an FPS cap that is
+  not a whole number of ticks a frame, or none), the third-person body is drawn at the blended place,
+  as her other models are (`PortPresentedView`).
+- **Dark Samus's arm cannon in first person** (echoes-suits 23, `PortEchoesSuits::kDarkCannon`
+  F60324CB): the import makes it from her cutscene body as the Federation Marine's first-person rifle
+  is made: her right arm's triangles from the shoulder joint out (upper arm, forearm, cannon), her
+  `GUN_Particle_LCTR` at the origin, the T-posed arm turned down the gun's barrel, unskinned (400
+  vertices). While she is played the loader serves it as every suit's first-person cannon, and the gun
+  draws it on its muzzle in place of the arm cannon and the suit arm, upright. Mods > Echoes: "Dark
+  Samus's arm cannon in first person" (`dark_samus_first_person_cannon`, on). The first-person left arm
+  stays the suit's. Needs the Echoes suits imported again.
+
+What to look for in test 70: third person at the 30 FPS cap moving smoothly with the body steady in
+the view; after re-importing the Echoes suits, Dark Samus's cannon in first person with every beam.

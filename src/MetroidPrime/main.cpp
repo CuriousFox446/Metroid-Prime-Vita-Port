@@ -546,9 +546,11 @@ bool CGameArchitectureSupport::UpdateTicks() {
     period = 1.0 / static_cast< double >(PortDebug::SimRate());
   }
   x7c_tickClock.SetPeriod(period);
+  // 0.46.0 test 70: under the 30 FPS cap each frame runs two ticks, a whole tick of slack either way
+  // (FixedStepClock's cadence); at the edge of a tick it had alternated one and three.
   unsigned ticks =
       x7c_tickClock.Advance(elapsed, gpMain->GetScreenFading() || PortDebug::Turbo(),
-                            PortDebug::FrameLimitEnabled());
+                            PortDebug::FrameLimitEnabled(), adaptive ? 0u : PortDebug::FrameCadenceTicks());
   // A frame within the clamp is covered by its one step; past it (a hitch)
   // the remainder is kept so the following frames catch up.
   if (adaptive && ticks > 0 && elapsed <= 1.f / 30.f) {
@@ -1246,7 +1248,12 @@ int CMain::RsMain(int argc, const char* const* argv) {
           interpolation = 1.f;
         // Adaptive steps end on the present time: show the current state, as
         // the leftover the clock keeps is not a fraction between two ticks.
-        if (PortDebug::FrameLimitEnabled() || (PortDebug::SimAdaptive() && !PortDebug::Turbo()))
+        // 0.46.0 test 70: so do the 30 FPS cap's frames (FrameCadenceTicks), whole ticks apart as the
+        // 60 FPS cap's are. Blended, the camera came a varying fraction of a tick behind while the
+        // third-person body did not: "third person movement looks jittery when moving with the 30
+        // FPS Cap".
+        if (PortDebug::FrameLimitEnabled() || PortDebug::FrameCadenceTicks() > 0 ||
+            (PortDebug::SimAdaptive() && !PortDebug::Turbo()))
           interpolation = -1.f;
         PortDebug::PresentOverride(interpolation);
         CCameraManager::SetPresentationInterpolation(interpolation);

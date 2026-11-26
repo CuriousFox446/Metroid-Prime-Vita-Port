@@ -43,7 +43,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 // 21: the troopers' bodies' rifle flat, its top facing forward in the T-pose (turned 90 degrees about
 //     the forearm, not 50); the first-person arms straight back to the shoulder joints.
 // 22: the first-person left hand's arm straight on from its forearm, unbent at the elbow.
-inline constexpr int kVersion = 22;
+// 23: Dark Samus's first-person arm cannon (kDarkCannon).
+inline constexpr int kVersion = 23;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
@@ -247,5 +248,17 @@ bool PlayAsDarkSamus();
 // Whether the loaded mods serve Dark Samus: the setting was on when they last loaded, and the
 // import has her.
 bool DarkSamusServed();
+// Her first-person arm cannon (version 23; 0.46.0 test 70, the user: "I want the dark samus mod to have
+// her arm cannon in first person too"): a static model of her right arm from the shoulder joint out, its
+// muzzle at the origin and its barrel up +Y, made as the Federation Marine's first-person rifle is. While
+// she is played the loader serves it under every suit's PortDreadSamus::FirstPersonCannon, and the gun
+// draws it on its muzzle in place of the arm cannon and the suit arm. Its switch is the setting
+// dark_samus_first_person_cannon (on by default; applies at once).
+inline constexpr int kDarkCannonKey = 0x445341;  // "DSA"
+inline constexpr uint32_t kDarkCannon = PortModelVariant::Id(0x4AD9BBAC, kDarkCannonKey);  // of Prime's VariaArm
+void SetDarkSamusCannonShown(bool shown);
+bool DarkSamusCannonShown();
+// Whether the loaded mods serve her cannon as the suit's first-person cannon now (and it is shown).
+bool ServesDarkSamusCannon(int suit);
 
 }  // namespace PortEchoesSuits
