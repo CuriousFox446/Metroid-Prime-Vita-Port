@@ -167,13 +167,15 @@ re-import." Press **Import** again.
   open to the game ("core 3 ... is open").
 - **Settings in a bad state.** Port menu > System > Settings > **Reset configuration...** backs up
   and resets every setting and mapping. Saves are not touched.
-- **Reporting a bug.** Attach `ux0:data/MetroidPrime/metroid_prime_port.log`, and after a crash the
-  newest `psp2core-*.psp2dmp` from `ux0:data/`. Say which build you ran and what you were doing.
+- **Reporting a bug.** Open an issue with the **Bug report** form. Attach
+  `ux0:data/MetroidPrime/metroid_prime_port.log`, and after a crash the newest `psp2core-*.psp2dmp`
+  from `ux0:data/`, zipped.
 
 ## Building
 
 You need Linux or WSL with [VitaSDK](https://vitasdk.org) (`$VITASDK`, default `~/vitasdk`),
-CMake 3.25 or later, Ninja and Python 3.
+CMake 3.25 or later, Ninja and Python 3. The port is built and tested with VitaSDK's 2026.08
+release and CMake 4.2.3.
 
 1. Install the Vita libraries:
 
@@ -181,21 +183,41 @@ CMake 3.25 or later, Ninja and Python 3.
    vdpm install sdl3 vitaGL vitaShaRK libmathneon fmt zstd zlib libpng freetype
    ```
 
-2. Build both packages:
+2. Swap in the vitaGL the port is tested with, r1488 (commit `2bdbe89`). vdpm now installs a newer
+   one, which can behave differently. This builds it the way vdpm's own package was built:
+
+   ```sh
+   git clone https://github.com/Rinnegatamante/vitaGL.git
+   git -C vitaGL checkout 2bdbe89
+   make -C vitaGL NO_DEBUG=1 -j"$(nproc)"
+   cp vitaGL/libvitaGL.a "$VITASDK/arm-vita-eabi/lib/"
+   cp vitaGL/source/vitaGL.h "$VITASDK/arm-vita-eabi/include/"
+   ```
+
+   A later `vdpm upgrade` puts the newer vitaGL back.
+
+3. Build both packages:
 
    ```sh
    tools/vita_build.sh
    ```
 
-The script configures `build/vita` and writes `build/vita/metroid_prime_port.vpk`.
-- The first configure also downloads and builds a few libraries from source (SDL3, Dear ImGui, fmt,
-  FreeType, libpng and others), with the 32-bit enums the game needs.
-- The builds are made and tested with vdpm's vitaGL r1488 (commit `2bdbe89`). Other vitaGL versions
-  may behave differently.
+The script configures `build/vita` and writes `build/vita/metroid_prime_port.vpk`. The first
+configure also downloads and builds a few libraries from source (SDL3, Dear ImGui, fmt, FreeType,
+libpng and others), with the 32-bit enums the game needs.
 
 The build also makes `metroid_prime_port_demo.vpk`, **Metroid Prime Demo**. It is the same game,
 frigate only, as a separate app that installs beside the full game and keeps its own data folder
 (`ux0:data/MetroidPrimeDemo/`).
+
+### On GitHub
+
+Every push and pull request builds the VPK on GitHub as well, with
+[`.github/workflows/vita.yml`](.github/workflows/vita.yml).
+- It runs in VitaSDK's Docker image `vitasdk/vitasdk:2026.08-20261027`. That image's toolchain and
+  libraries, vitaGL r1488 included, are the ones above.
+- The VPK is kept under the run's **Artifacts**.
+- Nothing is released from there: releases are made by hand.
 
 ### Shader pack
 

@@ -1,0 +1,56 @@
+# Builds the PS Vita VPK on every push and pull request, and keeps it as the run's artifact.
+# Nothing is released from here: releases are made by hand.
+#
+# The image is a frozen tag of VitaSDK's 2026.08 series. Its toolchain (core
+# sdk-snapshot-20260825.611.1) and the libraries the port links (packages snapshot 20261024.61.1:
+# vitaGL r1488 = 2bdbe89, vitaShaRK 1.7, libmathneon, zlib, zstd...) are the versions the port is
+# built and tested with. CMake is the 4.2.3 it is built with too, in place of the image's own.
+name: PS Vita
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vita-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpk:
+    name: VPK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container: vitasdk/vitasdk:2026.08-20261027
+    steps:
+      - uses: actions/checkout@v4
+
+      # The container runs as root over a checkout the runner's user owns; without this, git
+      # refuses the repository and the build loses its revision.
+      - name: Let git read the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: CMake 4.2.3
+        run: |
+          cd /tmp
+          curl -fsSLO https://github.com/Kitware/CMake/releases/download/v4.2.3/cmake-4.2.3-linux-x86_64.tar.gz
+          echo "5bb505d5e0cca0480a330f7f27ccf52c2b8b5214c5bba97df08899f5ef650c23  cmake-4.2.3-linux-x86_64.tar.gz" | sha256sum -c -
+          tar -xzf cmake-4.2.3-linux-x86_64.tar.gz -C /opt
+          echo "/opt/cmake-4.2.3-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: tools/vita_build.sh
+
+      - name: Name the artifact after the commit
+        id: name
+        run: echo "revision=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The Demo's VPK is built too, but only the game's is kept.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metroid_prime_port-${{ steps.name.outputs.revision }}
+          path: build/vita/metroid_prime_port.vpk
+          if-no-files-found: error

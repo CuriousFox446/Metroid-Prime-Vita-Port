@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest something new or a change to how the port works.
+description: Suggest something new for the Vita port, or a change to how it works.
 labels: ["enhancement"]
 body:
   - type: textarea
@@ -10,13 +10,10 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: platform
+  - type: textarea
+    id: extra
     attributes:
-      label: Platform it's for
-      multiple: true
-      options:
-        - All
-        - Android
-        - Windows
-        - Linux
+      label: Anything else
+      description: How it could work, where in the game it matters, or another game or port that does it well.
+    validations:
+      required: false

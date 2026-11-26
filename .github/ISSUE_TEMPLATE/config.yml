@@ -1,5 +1,2 @@
+# Issues start from one of the two forms, so a bug report always asks for the build and the log.
 blank_issues_enabled: false
-contact_links:
-  - name: Building or packaging the port
-    url: https://github.com/Odrannnn/MetroidPrimePort/blob/port/docs/NATIVE_PORT.md
-    about: Build steps, settings, environment variables and testing notes.
