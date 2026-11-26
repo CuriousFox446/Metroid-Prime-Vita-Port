@@ -59,4 +59,12 @@ void GrappleFrame(const float (&in)[3], float (&out)[3]);
 // A model's material set 0 without the materials no surface draws and the textures no material uses.
 bool PruneMaterials(PortEchoesSuits::PrimeCmdl& model, std::string* error);
 
+// The first-person left (grapple) arm of a body on Echoes Samus's skeleton (`joints`, its Echoes skin
+// `echoesCskr`; `body` as PortEchoesSuits::ConvertCmdl gives it, in Echoes' bind pose) on Prime's grapple
+// arm skeleton `arm` (CINF 516F4445), made as the troopers' arms are; `skin` gets its CSKR on `arm`.
+// Dark Samus's is made so (echoes-suits 24).
+bool BuildLeftArm(const PortEchoesSuits::PrimeCmdl& body, const std::vector<uint8_t>& echoesCskr,
+                  const std::vector<PortEchoesSuits::EchoesJoint>& joints, const PortDread::PrimeSkeleton& arm,
+                  PortEchoesSuits::PrimeCmdl& out, std::vector<uint8_t>& skin, std::string* error);
+
 }  // namespace PortFederationMarine

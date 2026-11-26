@@ -5828,3 +5828,23 @@ Ball (`PortDreadSamus::ModServesSpiderBall`, since test 22). That check asks for
 Prime's ball ANCS and of its model; Dark Samus's ball is served as the ANCS alone (it names her own
 model), so it never counted, and the glass drew round her ball. The loader now counts her ball as the
 suit's own Spider Ball wherever it serves it.
+
+## 0.46.0 test 73: Dark Samus's own left hand in first person
+
+The user: "Dark Samus has Samus' left hand instead of her own". The first-person left arm (the grapple
+arm: the hand on the cannon in free look, combo fire, the fidgets, a strike's flinch, and the grapple
+beam) stayed the suit's while she was played.
+- **Her left arm** (echoes-suits 24, CMDL `DarkSamusId(kDarkArmCinf)` A06D7F48, CSKR 6F0973D2): the
+  import makes it from her cutscene body as the Federation Marine's first-person left arm is made
+  (`PortFederationMarine::BuildLeftArm`, now shared): her left arm's triangles from the last 20 cm of
+  the upper arm out, turned into the grapple arm's frame with the elbows on each other, and skinned on
+  Prime's grapple arm skeleton (CINF 516F4445) by joint name, so her clawed fingers bend on Prime's
+  finger joints (504 vertices, 4 surfaces). While she is played the loader serves it as every suit's
+  first-person left arm. Posed offline with the grapple arm's own animations (free look, combo fire,
+  the grapple) beside the Varia's arm, it follows the same poses.
+- Mods > Echoes, Play as Dark Samus's help says so. Needs the Echoes suits imported again (version 24);
+  until then the suit's arm stays.
+
+What to look for in test 73: after re-importing the Echoes suits, Dark Samus's own clawed left hand in
+first person in free look, on the cannon when standing still, in combo fire and when grappling, with
+no Samus hand left over; whether it clips through her cannon where it rests on it.

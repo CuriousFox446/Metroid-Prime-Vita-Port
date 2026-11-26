@@ -44,7 +44,8 @@ inline constexpr const char* kStampName = ".echoes-suits-version";
 //     the forearm, not 50); the first-person arms straight back to the shoulder joints.
 // 22: the first-person left hand's arm straight on from its forearm, unbent at the elbow.
 // 23: Dark Samus's first-person arm cannon (kDarkCannon).
-inline constexpr int kVersion = 23;
+// 24: Dark Samus's first-person left arm (DarkSamusId(kDarkArmCinf)).
+inline constexpr int kVersion = 24;
 
 // What each of Prime's suits wears (the setting echoes_suit_looks; the next mod reload applies a
 // change), by CPlayerState::EPlayerSuit: Power, Gravity, Varia, Phazon. A look covers the suit's
@@ -233,6 +234,12 @@ inline constexpr DarkBody kDarkBodies[] = {
     {0xA496DA02, 0x891E00FD, 0xE231AF2B}, {0xF76E70A6, 0xCC25E002, 0xA70A4FD4}, {0xF76E70A6, 0xA602C954, 0xCD2D6682},
     {0xF76E70A6, 0x11A5BC8A, 0x7A8A135C}, {0xF76E70A6, 0x5644E7A1, 0x3D6B4877},
 };
+// Her first-person left arm (version 24; 0.46.0 test 73, the user: "Dark Samus has Samus' left hand
+// instead of her own"): her left arm from the upper arm out, on Prime's grapple arm skeleton, made as the
+// Federation Marine's is (PortFederationMarine::BuildLeftArm), as CMDL DarkSamusId(kDarkArmCinf) and CSKR
+// DarkSamusSkinId(kDarkArmCinf). While she is played the loader serves it as every suit's first-person
+// left arm (kind 3 of SuitResources): the hand on the cannon, the grapple beam's arm.
+inline constexpr uint32_t kDarkArmCinf = 0x516F4445;
 // Her Morph Ball (Echoes' ANCS 654A3F97, character Dark_Samus_MorphBall: one joint, so rigid), fit
 // once to each Prime ball of PortDreadSamus::kBallTargets as kBalls' are: ANCS DarkBallId(ancs)
 // (character 0 on CMDL DarkBallId(cmdl), CSKR DarkBallSkinId(cmdl)) and low-poly CMDL

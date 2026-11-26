@@ -865,6 +865,14 @@ bool PruneMaterials(PrimeCmdl& model, std::string* error) {
   return true;
 }
 
+bool BuildLeftArm(const PrimeCmdl& body, const std::vector<uint8_t>& echoesCskr, const std::vector<EchoesJoint>& joints,
+                  const PortDread::PrimeSkeleton& arm, PrimeCmdl& out, std::vector<uint8_t>& skin, std::string* error) {
+  Body from;
+  from.model = body;
+  if (!VertexWeights(echoesCskr, from.echoesWeights, error)) return false;
+  return BuildGrappleArm(from, joints, arm, out, skin, error);
+}
+
 bool Import(const Io& io, Result& result, std::string& error) {
   const auto log = [&io](const std::string& line) {
     if (io.log) io.log(line);

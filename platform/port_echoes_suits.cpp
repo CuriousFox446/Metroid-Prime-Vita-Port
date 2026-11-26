@@ -2961,8 +2961,8 @@ bool Import(const Io& io, Result& result, std::string& error) {
     if (!write(Hex8(t.cmdl) + ".CMDL", WriteCmdl(model)) || !write(Hex8(t.cskr) + ".CSKR", outCskr)) {
       return false;
     }
-    // Dark Samus's first-person arm cannon (version 23), from her cutscene body: her bodies are one
-    // mesh. Without it (a skeleton this does not know) she keeps the suit's arm and cannon.
+    // Dark Samus's first-person arm cannon (version 23) and left arm (24), from her cutscene body: her
+    // bodies are one mesh. Without them (a skeleton this does not know) she keeps the suit's.
     if (t.worn < 0 && t.cinf == 0x19C53902) {
       PrimeCmdl cannon;
       std::string cannonWhy;
@@ -2977,6 +2977,39 @@ bool Import(const Io& io, Result& result, std::string& error) {
         }
         log("echoes: Dark Samus first-person arm cannon -> " + Hex8(kDarkCannon) + ", " +
             std::to_string(cannon.arrays[0].size() / 12) + " vertices, " + std::to_string(cannon.surfaces.size()) +
+            " surfaces");
+      }
+      // Her first-person left arm (version 24), on Prime's grapple arm skeleton, made as the Federation
+      // Marine's is. Without it she keeps the suit's.
+      if (!primeCinfs.count(kDarkArmCinf)) {
+        std::vector<uint8_t> data;
+        std::string skeletonWhy;
+        if (!io.retail(kCINF, kDarkArmCinf, data) ||
+            !PortDread::ParseCinf(data.data(), data.size(), primeCinfs[kDarkArmCinf], &skeletonWhy)) {
+          primeCinfs.erase(kDarkArmCinf);
+        }
+      }
+      const uint32_t armCmdl = DarkSamusId(kDarkArmCinf), armCskr = DarkSamusSkinId(kDarkArmCinf);
+      PrimeCmdl arm;
+      std::vector<uint8_t> armSkin;
+      std::string armWhy;
+      const auto armSkeleton = primeCinfs.find(kDarkArmCinf);
+      if (armSkeleton == primeCinfs.end()) {
+        log("echoes: Dark Samus first-person left arm not made: Prime's grapple arm skeleton " + Hex8(kDarkArmCinf) +
+            " is missing or unreadable");
+      } else if (!PortFederationMarine::BuildLeftArm(model, cskr, echoesCinfs[t.echoesCinf], armSkeleton->second, arm,
+                                                     armSkin, &armWhy)) {
+        log("echoes: Dark Samus first-person left arm not made: " + armWhy);
+      } else if (io.retailId(armCmdl) || io.retailId(armCskr)) {
+        error = "Dark Samus first-person left arm: output id " + Hex8(io.retailId(armCmdl) ? armCmdl : armCskr) +
+                " is a Prime resource.";
+        return false;
+      } else {
+        if (!write(Hex8(armCmdl) + ".CMDL", WriteCmdl(arm)) || !write(Hex8(armCskr) + ".CSKR", armSkin)) {
+          return false;
+        }
+        log("echoes: Dark Samus first-person left arm -> " + Hex8(armCmdl) + ", " +
+            std::to_string(arm.arrays[0].size() / 12) + " vertices, " + std::to_string(arm.surfaces.size()) +
             " surfaces");
       }
     }
