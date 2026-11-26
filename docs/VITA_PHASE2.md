@@ -5819,3 +5819,12 @@ her T-pose with its top (the side split in a V at its back, where the forearm go
 `PortDreadSamus::FirstPersonCannonRoll` turns it 90 degrees about the barrel (the gun's RotateY, as the
 Dread cannon's 30), which puts that side on top; the previews before and after were checked from the
 first-person eye and from above. The import is unchanged (echoes-suits stays 23).
+
+## 0.46.0 test 72: no Spider Ball glass round Dark Samus's ball
+
+The user: "the spiderball is blending with Dark Samus' morphball". With the Spider Ball the game draws
+Prime's spider ball glass, a shell round Prime's own Spider Ball, unless a mod serves the suit's Spider
+Ball (`PortDreadSamus::ModServesSpiderBall`, since test 22). That check asks for the suit's variant of
+Prime's ball ANCS and of its model; Dark Samus's ball is served as the ANCS alone (it names her own
+model), so it never counted, and the glass drew round her ball. The loader now counts her ball as the
+suit's own Spider Ball wherever it serves it.

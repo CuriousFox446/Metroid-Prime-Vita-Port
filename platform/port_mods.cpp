@@ -1316,6 +1316,11 @@ void Initialize() {
           sResourceProviders[{from->type, to}] = provider->second;
         }
       }
+      // 0.46.0 test 72: as the Spider Ball too she is her own ball, never Prime's glass shell around it
+      // (PortDreadSamus::ModServesSpiderBall). Her ANCS names her own model, so the check below, which
+      // asks for the suit's variant of Prime's ball model as well, did not count her: the glass drew
+      // round her ball (the user: "the spiderball is blending with Dark Samus' morphball").
+      if (t.spider) sModSpiderBalls.insert(t.suit);
       ++balls;
     }
     // Her arm cannon in first person (echoes-suits 23), as every suit's first-person cannon: the gun
