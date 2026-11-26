@@ -5811,3 +5811,11 @@ want the dark samus mod to have her arm cannon in first person too".
 
 What to look for in test 70: third person at the 30 FPS cap moving smoothly with the body steady in
 the view; after re-importing the Echoes suits, Dark Samus's cannon in first person with every beam.
+
+## 0.46.0 test 71: Dark Samus's first-person cannon upright
+
+The user, marking a side of test 70's preview "TOP": "arm cannon is sideways". Her cannon comes out of
+her T-pose with its top (the side split in a V at its back, where the forearm goes in) to the left.
+`PortDreadSamus::FirstPersonCannonRoll` turns it 90 degrees about the barrel (the gun's RotateY, as the
+Dread cannon's 30), which puts that side on top; the previews before and after were checked from the
+first-person eye and from above. The import is unchanged (echoes-suits stays 23).

@@ -520,9 +520,13 @@ bool PortDreadSamus::ReplacesFirstPersonCannon(int suit) {
                      (sDarkSamusCannonShown && PortMods::sDarkSamusCannons.count(id) != 0));
 }
 float PortDreadSamus::FirstPersonCannonRoll(int suit) {
-  // The marine's rifle and Dark Samus's cannon are modelled upright; Dread's is turned 30 degrees.
-  return PortFederationMarine::ServesFirstPersonRifle(suit) || PortEchoesSuits::ServesDarkSamusCannon(suit) ? 0.f
-                                                                                                           : 30.f;
+  // The marine's rifle is modelled upright. Dark Samus's cannon comes out of her T-pose with its top
+  // (the side split in a V at its back) to the left: turned 90 degrees, it is on top (0.46.0 test 71,
+  // the user, marking that side on test 70's preview: "arm cannon is sideways"). Dread's is turned 30.
+  if (PortFederationMarine::ServesFirstPersonRifle(suit)) {
+    return 0.f;
+  }
+  return PortEchoesSuits::ServesDarkSamusCannon(suit) ? 90.f : 30.f;
 }
 void PortEchoesSuits::SetDarkSamusCannonShown(bool shown) { sDarkSamusCannonShown = shown; }
 bool PortEchoesSuits::DarkSamusCannonShown() { return sDarkSamusCannonShown; }
