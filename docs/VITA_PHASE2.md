@@ -5759,3 +5759,27 @@ into the main menu", and then "reimplement the interlace effect when the main me
 What to look for in test 68: the new checkbox (30 FPS when on, the slider greyed); the attract movies
 (leave the title alone for 30 s) with even lines a pixel apart; Press Start bright as soon as the
 title takes Start.
+
+## 0.46.0 test 69: Press Start shown (Render2D off the near plane), the attract movies at 4:3
+
+The user, with test 68: "4 attract videos later, the press start prompt still didn't appear, also, is
+it possible to unzoom and put the attract videos back to 4:3?"
+- **Press Start**: test 68's log drew it on every title frame (the reports' one single-texture draw a
+  frame, blended, with its own program), so it was drawn and not seen. `CGraphics::Render2D` lays its
+  quad at depth 1 in an ortho whose near plane is 1 (`MTXOrtho(..., -1, -10)`): on the near plane
+  itself. GX's clip depth there comes out -1.0 in float, kept on the GameCube and the PC. The PS Vita
+  takes GX's clip depth to GL's (2 z + w) in the projection's rows, and in float that lands one step
+  past the near plane (-1.00000012, worked through with the game's own `MTXOrtho`): the GPU clipped
+  the whole quad. With a depth range set (a game's, left on the front end after quitting) it lands
+  inside (-0.9375), which is why it once showed only after a save was loaded and quit. On the Vita
+  the quad now sits a hair inside (depth 1.0001: 2.2e-5 of the clip depth, the depth 1.1e-5, still
+  in front of everything). The other Render2D draws (the Dolby splash screen, the in-game on-screen
+  textures) get the same depth.
+- **The attract movies at 4:3**: `CFrontEndUI::Draw` leaves the menus' zoom off while the attract
+  movie is the one shown (`PortMenuZoom(false)`), so they play as the 4:3 picture they are, in the
+  middle of the screen. The title, file select and their movies stay zoomed. The field lines follow
+  (their rows read the zoom).
+
+What to look for in test 69: Press Start pulsing on the title from first boot (and the Dolby logo
+among the splash screens); the attract movies as a 4:3 picture with bars at the sides, their lines a
+pixel apart; the title zoomed again after them.

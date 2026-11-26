@@ -32,11 +32,13 @@ inline float PortMenuZoomFactor() {
   return zoom > 1.01f ? zoom : 1.f;
 }
 
-// The zoom for one scope (a Draw), about the viewport's centre; off again at its end.
+// The zoom for one scope (a Draw), about the viewport's centre; off again at its end. `on` false
+// leaves that Draw unzoomed (0.46.0 test 69: the attract movies, at their 4:3).
 class PortMenuZoom {
 public:
-  PortMenuZoom() {
-    const float zoom = PortMenuZoomFactor();
+  PortMenuZoom() : PortMenuZoom(true) {}
+  explicit PortMenuZoom(bool on) {
+    const float zoom = on ? PortMenuZoomFactor() : 1.f;
     if (zoom <= 1.f) {
       return;
     }

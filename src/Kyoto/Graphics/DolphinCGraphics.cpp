@@ -965,6 +965,20 @@ void CGraphics::Render2D(const CTexture& tex, int x, int y, int w, int h, const 
   x2 = x1 + w;
   y2 = y1 + h;
 
+  // The quad's depth: 1 is the ortho's near plane itself (its near -1). GX's clip depth there is
+  // -1.0 in float, kept (the GameCube's, the PC's). The PS Vita takes GX's clip depth to GL's
+  // (2 z + w) in the projection's rows, and in float that lands 1.2e-7 past the near plane
+  // (-1.00000012): the whole quad was clipped. Press Start never showed on the title (0.46.0 test
+  // 68's log drew it every frame), nor the Dolby splash screen. A game's depth range left set (the
+  // HUD's) moved it inside, so it once showed only after a save was loaded and quit ("it appears
+  // only after you loaded a save and then restart back to the main menu"). 0.46.0 test 69: a hair
+  // inside, 2.2e-5 of the clip depth (the depth 1.1e-5, still in front of everything).
+#if defined(__vita__)
+  const float z = 1.0001f;
+#else
+  const float z = 1.f;
+#endif
+
   // Save state + setup
   CGX::SetVtxDescv(skPosColorTexDirect);
   SetTevStates(6);
@@ -978,16 +992,16 @@ void CGraphics::Render2D(const CTexture& tex, int x, int y, int w, int h, const 
 
   // Draw
   CGX::Begin(GX_TRIANGLESTRIP, GX_VTXFMT0, 4);
-  GXPosition3f32(x1, y1, 1.f);
+  GXPosition3f32(x1, y1, z);
   GXColor1u32(c);
   GXTexCoord2f32(0.f, 0.f);
-  GXPosition3f32(x2, y1, 1.f);
+  GXPosition3f32(x2, y1, z);
   GXColor1u32(c);
   GXTexCoord2f32(1.f, 0.f);
-  GXPosition3f32(x1, y2, 1.f);
+  GXPosition3f32(x1, y2, z);
   GXColor1u32(c);
   GXTexCoord2f32(0.f, 1.f);
-  GXPosition3f32(x2, y2, 1.f);
+  GXPosition3f32(x2, y2, z);
   GXColor1u32(c);
   GXTexCoord2f32(1.f, 1.f);
   CGX::End();

@@ -2846,7 +2846,11 @@ void CFrontEndUI::Draw() const {
 #ifdef TARGET_PC
   if (sResumeStage == kRS_Accepting || sResumeStage == kRS_Starting)
     return; // black until the game starts
-  const PortMenuZoom portZoom;
+  // 0.46.0 test 69: the attract movies unzoomed, at their 4:3 in the frame (the user: "is it
+  // possible to unzoom and put the attract videos back to 4:3?"); the menus zoomed as before. Their
+  // field lines follow (PortFieldLineRow reads the zoom).
+  const bool attractShown = xcc_curMoviePtr != nullptr && xcc_curMoviePtr == xc4_attractMovie.get();
+  const PortMenuZoom portZoom(!attractShown);
 #endif
 
   if (xec_emuFrme.get() != nullptr) {
