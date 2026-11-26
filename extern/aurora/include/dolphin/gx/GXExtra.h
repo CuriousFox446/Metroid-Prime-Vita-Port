@@ -215,6 +215,9 @@ void GXPortRunGpuCostTest(void);
 // fractions of the screen (origin top left): the whole screen, or for one of another shape (4:3) its
 // own shape, centred, black beside it. False elsewhere, where Aurora's present fits it to the window.
 GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, float* width, float* height);
+// PS Vita (0.46.0 test 68): the screen's height in pixel rows (544); 0 elsewhere, where it is the
+// window's and Aurora's present may scale the frame.
+u32 GXPortGetScreenRows(void);
 // Port (0.46.0 test 22): every viewport GX is given from now on, and the one in force, scaled by
 // `zoom` about (centerX, centerY), in the viewport's units: what is drawn grows about that point,
 // the outside cut off by the scissor. 1 turns it off. GXGetViewport still gives the viewport as set.

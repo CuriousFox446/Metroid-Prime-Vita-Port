@@ -2599,7 +2599,15 @@ CIOWin::EMessageReturn CFrontEndUI::Update(float dt, CArchitectureQueue& queue) 
         }
         x64_pressStartAlpha = alpha;
       } else {
+#ifdef TARGET_PC
+        // 0.46.0 test 68: the pulse begins at its brightest, not from nothing. The title takes Start
+        // from the moment the prompt begins (the tweak's 1 s), and from nothing the prompt took half
+        // a second to show: pressed straight away, it was gone before it could be seen ("the
+        // 'Press Start' doesn't appear when you start the game"; test 67's log drew it 11 frames).
+        x60_pressStartTime = 0.5f;
+#else
         x60_pressStartTime = 0.f;
+#endif
         x64_pressStartAlpha = 0.f;
       }
     }
@@ -3078,6 +3086,10 @@ void CFrontEndUI::StartAttractMovie() {
   SetCurrentMovie(kMM_Stopped);
   const char* name = GetNextAttractMovieFileName();
   xc4_attractMovie = rstl::auto_ptr< CMoviePlayer >(rs_new CMoviePlayer(name, 0.f, false, false));
+#ifdef TARGET_PC
+  // Their field lines, one to a row of the screen (0.46.0 test 68).
+  xc4_attractMovie->PortSetFieldLines(true);
+#endif
   xcc_curMoviePtr = xc4_attractMovie.get();
 }
 
@@ -3146,6 +3158,7 @@ void CFrontEndUI::PortReloadMods() {
     const int idx = (xbc_nextAttract + xc0_attractCount - 1) % xc0_attractCount;
     xc4_attractMovie = rstl::auto_ptr< CMoviePlayer >(
         rs_new CMoviePlayer(GetAttractMovieFileName(idx), 0.f, false, false));
+    xc4_attractMovie->PortSetFieldLines(true); // 0.46.0 test 68, as StartAttractMovie
     xcc_curMoviePtr = xc4_attractMovie.get();
   } else {
     SetCurrentMovie(curMovie);

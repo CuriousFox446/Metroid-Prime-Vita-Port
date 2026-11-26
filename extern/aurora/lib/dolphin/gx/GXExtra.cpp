@@ -1211,7 +1211,11 @@ GXBool GXPortGetScreenFit(u32 fbWidth, u32 fbHeight, float* left, float* top, fl
   *height = fit.height / kH;
   return GX_TRUE;
 }
+
+u32 GXPortGetScreenRows(void) { return static_cast<u32>(aurora::vita_gl::kScreenHeight); }
 #else
+u32 GXPortGetScreenRows(void) { return 0; }
+
 void GXPortSetSwapInterval(u32) {}
 
 void GXPortRunGpuCostTest(void) {}

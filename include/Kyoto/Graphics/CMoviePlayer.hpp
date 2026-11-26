@@ -83,6 +83,11 @@ public:
   // as on the console; a mod's movie in another size fills the view instead,
   // keeping its shape.
   void PortGetMargins(int vpWidth, int vpHeight, int& xMargin, int& yMargin) const;
+  // 0.46.0 test 68: a movie made without `deinterlace` drawn with the GameCube's field lines (every
+  // other line, the two fields in turn), one line a row of the screen's pixels where the screen's
+  // rows are known (the PS Vita); else whole, as since test 23. The front end's attract movies (the
+  // user: "reimplement the interlace effect when the main menu shows videos").
+  void PortSetFieldLines(bool on) { xPortFieldLines = on; }
 #endif
   bool CanDrawVideo() const { return xac_indexLoad.null(); }
   bool PumpIndexLoad();
@@ -114,6 +119,7 @@ private:
     uint job = 0;
   };
   SPortDecode xPortDecodes[3];
+  bool xPortFieldLines = false; // PortSetFieldLines
   bool PortSlotDecoded(int slot);
   void PortWaitDecodes();
   static void PortDecodeJob(void* decode);

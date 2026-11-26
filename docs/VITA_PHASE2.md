@@ -5731,3 +5731,31 @@ So:
 What to look for in test 67: in third person, look up and down and turn left and right, standing and
 walking (slowly too), as Samus and as the marine. The upper arms should keep their facing, the
 cannon its roll, the left arm hanging as it does when walking, and the elbows no wrung look.
+
+## 0.46.0 test 68: a 30 FPS cap, the attract movies' field lines, Press Start at once
+
+The user, with test 67: "I'd like to have a '30 FPS Cap (Target)' option between the '60 FPS Cap
+(Target)' and the cap scaler also the 'Press Start' doesn't appear when you start the game and boot
+into the main menu", and then "reimplement the interlace effect when the main menu shows videos".
+- **30 FPS cap (target)** (Video > Frame rate, saved `frame_limit_30`): a checkbox between the 60 FPS
+  cap and the FPS cap slider. On, the frames are paced to 30 a second (`FrameRateCap`, the dynamic
+  resolution's target and the timing line too), each up two of the screen's refreshes; the game still
+  steps at 60 Hz. One cap or the other: checking either clears the other, and the slider is off
+  under both. Original experience still holds 60.
+- **The attract movies' field lines** (`CMoviePlayer::PortSetFieldLines`, `PortFieldLineRow`). Test 23
+  drew every movie whole. The front end's attract movies (made without `deinterlace`) draw the
+  GameCube's field lines again: every other line, by the 8x4 pattern's alpha test as before, but one
+  line to a row of the screen's pixels rather than to a line of the 480-line frame (uneven at 544 rows
+  and more so zoomed: why test 23 took them out). The pattern's texgen row maps the quad (the ortho's z,
+  which runs up) through the menus' zoom (`GXPortGetViewportZoom`) and the frame's place on the screen
+  (`GXPortGetScreenFit`, `GXPortGetScreenRows`: 544) to the screen's rows, each row's centre on a
+  texel's centre. The title, file select and ending movies stay whole.
+- **Press Start**: test 67's log drew it in 11 frames, and then the title went on to file select. The
+  disc's `PressStartDelay` (1 s on the user's disc) starts the prompt and the title's taking Start
+  together, and the prompt's pulse began from nothing (half a second to full): pressed at once, it
+  was gone before it showed. Its pulse begins at its brightest now. Its texture loaded as it should
+  (no read failed, and the loader was idle on the title).
+
+What to look for in test 68: the new checkbox (30 FPS when on, the slider greyed); the attract movies
+(leave the title alone for 30 s) with even lines a pixel apart; Press Start bright as soon as the
+title takes Start.

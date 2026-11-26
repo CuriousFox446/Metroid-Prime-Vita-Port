@@ -173,6 +173,9 @@ float TickFrames() { return sTickPeriod * 60.f; }
 
 // What the frame code uses: the settings, or retail's under Original experience.
 static bool EffectiveFrameLimit() { return sFrameLimitEnabled || sOriginalExperience; }
+// The frames a second the main loop is paced to: 60 under the 60 FPS cap, 30 under the 30 FPS cap,
+// else the FPS cap setting (0: none).
+static int EffectiveFrameRateCap() { return EffectiveFrameLimit() ? 60 : sFrameLimit30 ? 30 : sFpsCap; }
 // Photo mode's supersampled capture holds the EFB at this scale for a few frames; never saved.
 static float sCaptureScale = 0.f;
 float EffectiveRenderScale() {
@@ -218,7 +221,7 @@ bool FrameLimitEnabled() {
 
 int FrameRateCap() {
   EnsureInitialized();
-  return EffectiveFrameLimit() ? 60 : sFpsCap;
+  return EffectiveFrameRateCap();
 }
 
 
@@ -228,7 +231,7 @@ double DynamicResTargetFps() {
     const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
     target = mode != nullptr && mode->refresh_rate > 0.f ? mode->refresh_rate : 60.0;
   }
-  const int cap = EffectiveFrameLimit() ? 60 : sFpsCap;
+  const int cap = EffectiveFrameRateCap();
   return cap > 0 ? std::min(target, static_cast< double >(cap)) : target;
 }
 
@@ -362,7 +365,7 @@ void RecordFrame(uint64_t durationNs, unsigned ticks, bool presented) {
     if (sTraceTiming) {
       PortLog::Write("[timing] presented=%.1f FPS throughput=%.1f FPS simulation=%.1f ticks/s cap=%d; frames by "
                      "ticks: 0 %u, 1 %u, 2 %u, 3 %u, 4+ %u\n",
-                     sActualFps, sThroughputFps, sActualTps, EffectiveFrameLimit() ? 60 : sFpsCap, sTicksPerFrame[0],
+                     sActualFps, sThroughputFps, sActualTps, EffectiveFrameRateCap(), sTicksPerFrame[0],
                      sTicksPerFrame[1], sTicksPerFrame[2], sTicksPerFrame[3], sTicksPerFrame[4]);
     }
     std::fill(std::begin(sTicksPerFrame), std::end(sTicksPerFrame), 0u);

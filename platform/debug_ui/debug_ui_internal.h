@@ -45,7 +45,10 @@ extern float sCutsceneSpeed;
 extern unsigned sSimRate;
 extern bool sSimAdaptive;
 extern bool sFrameLimitEnabled;
-extern int sFpsCap; // with the 60 FPS cap off; 0 = unlimited
+// The 30 FPS cap (0.46.0 test 68, saved frame_limit_30): the frames paced to 30 a second, each up
+// two of the screen's refreshes; the 60 FPS cap, when on too, comes first.
+extern bool sFrameLimit30;
+extern int sFpsCap; // with the 60 and 30 FPS caps off; 0 = unlimited
 inline constexpr int kFpsCapMin = 30;
 #ifdef __vita__
 // The Vita's screen shows 60 frames a second at most (the user, 0.46.0 test 32): caps run 30 to 60,

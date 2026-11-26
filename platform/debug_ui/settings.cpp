@@ -646,6 +646,7 @@ const SettingKey kSettingKeys[] = {
      [](const std::string& value) { sSharpenAmount = std::clamp(std::atoi(value.c_str()), 0, 100); },
      [](std::ostream& out) { out << sSharpenAmount; }, false, "0", "80"},
     BoolKey< &sFrameLimitEnabled >("frame_limit"),
+    BoolKey< &sFrameLimit30 >("frame_limit_30"),
     {"fps_cap", [](const std::string& value) { sFpsCap = ClampFpsCap(std::atoi(value.c_str())); },
      [](std::ostream& out) { out << sFpsCap; }, false, "0", "144"},
     {"sim_rate",

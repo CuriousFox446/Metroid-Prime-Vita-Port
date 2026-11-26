@@ -64,7 +64,39 @@ static void MyTHPGXRestore() {
   CGX::SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 }
 
-static void MyTHPGXYuv2RgbSetup(bool field, bool deinterlace) {
+#ifdef TARGET_PC
+// 0.46.0 test 68: the field lines' texgen row (t from the quad's position) mapped to the screen's pixel
+// rows: t = (row + field) / 4, so the pattern's lines (4 a texture's height, every other one kept)
+// fall one to a row of pixels, each row's centre on a texel's centre. The quad is laid out in the
+// ortho SetViewportOrtho makes (its z up: the viewport's row 2 * top + height - z), GX's viewport is
+// zoomed about its centre for the menus (PortMenuZoom), and the frame is fitted to the screen
+// (GXPortGetScreenFit). False where the screen's rows are not known (only the PS Vita's are).
+static bool PortFieldLineRow(bool field, float out[4]) {
+  const u32 rows = GXPortGetScreenRows();
+  const GXRenderModeObj& mode = CGraphics::GetRenderMode();
+  float fitLeft = 0.f, fitTop = 0.f, fitWidth = 0.f, fitHeight = 0.f;
+  if (rows == 0 || mode.efbHeight == 0 ||
+      !GXPortGetScreenFit(mode.fbWidth, mode.efbHeight, &fitLeft, &fitTop, &fitWidth, &fitHeight)) {
+    return false;
+  }
+  const CViewport& vp = CGraphics::GetViewport();
+  float centerX = 0.f, centerY = 0.f;
+  const float zoom = GXPortGetViewportZoom(&centerX, &centerY);
+  const float screen = static_cast< float >(rows);
+  const float perUnit = fitHeight * screen / static_cast< float >(mode.efbHeight); // rows a frame line
+  // The viewport's row of z: 2 * top + height - z, zoomed about centerY, then on the screen.
+  const float zero = static_cast< float >(2 * vp.mTop + vp.mHeight); // the row of z = 0, unzoomed
+  const float a = -zoom * perUnit;
+  const float b = fitTop * screen + perUnit * (centerY + (zero - centerY) * zoom);
+  out[0] = 0.f;
+  out[1] = 0.f;
+  out[2] = 0.25f * a;
+  out[3] = 0.25f * b + (field ? 0.25f : 0.f);
+  return true;
+}
+#endif
+
+static void MyTHPGXYuv2RgbSetup(bool field, bool deinterlace, bool fieldLines) {
 #ifdef TARGET_PC
   // Port (0.46.0 test 23): every frame whole. Without `deinterlace` (the attract movies, most of the
   // endings) the GameCube draws one field's lines a frame, an 8x4 pattern's alpha by screen position
@@ -72,7 +104,12 @@ static void MyTHPGXYuv2RgbSetup(bool field, bool deinterlace) {
   // progressive screen the other lines stayed black: scanlines, uneven on the Vita's 544 lines and
   // more so zoomed ("the main menu videos are supposed to have this effect ... but it looks kinda
   // off"). The movies' frames are whole pictures (attract0.thp: 640x480, letterboxed like the title).
-  deinterlace = true;
+  // Since test 68 a movie asked for them (PortSetFieldLines: the front end's attract movies) keeps
+  // the lines, one to a row of the screen's pixels (PortFieldLineRow), where those rows are known.
+  float lineRow[4] = {};
+  if (!fieldLines || !PortFieldLineRow(field, lineRow)) {
+    deinterlace = true;
+  }
 #endif
   GXVtxDescList attr[3] = {
       {GX_VA_POS, GX_DIRECT},
@@ -94,6 +131,13 @@ static void MyTHPGXYuv2RgbSetup(bool field, bool deinterlace) {
 
     float n = field ? 0.25f : 0.f;
     float mtx[8] = {0.125f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.25f, n};
+#ifdef TARGET_PC
+    // The second row the screen's rows (PortFieldLineRow), not the frame's lines.
+    mtx[4] = lineRow[0];
+    mtx[5] = lineRow[1];
+    mtx[6] = lineRow[2];
+    mtx[7] = lineRow[3];
+#endif
     GXLoadTexMtxImm(reinterpret_cast< MtxPtr >(mtx), GX_TEXMTX0, GX_MTX2x4);
     GXTexObj obj;
     GXInitTexObj(&obj, skInterlacePattern, 8, 4, GX_TF_I8, GX_REPEAT, GX_REPEAT, FALSE);
@@ -568,7 +612,11 @@ void CMoviePlayer::DrawFrame(const CVector3f& v1, const CVector3f& v2, const CVe
   CTHPTextureSet& texture = x80_textures[xd0_drawTexSlot];
   const bool field = CGraphics::GetDolphinLastFrameAbove();
   const bool deinterlace = xf4_25_deinterlace;
-  MyTHPGXYuv2RgbSetup(field, deinterlace);
+#ifdef TARGET_PC
+  MyTHPGXYuv2RgbSetup(field, deinterlace, xPortFieldLines);
+#else
+  MyTHPGXYuv2RgbSetup(field, deinterlace, false);
+#endif
   MyTHPYuv2RgbTextureSetup(texture.Y(), texture.U(), texture.V(), x6c_videoInfo.mXSize,
                            x6c_videoInfo.mYSize);
   CGX::Begin(GX_TRIANGLEFAN, GX_VTXFMT7, 4);

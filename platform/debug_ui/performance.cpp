@@ -38,10 +38,26 @@ void DrawPerformanceTab() {
   bool frameLimit = sFrameLimitEnabled;
   if (ImGui::Checkbox("60 FPS cap (target)", &frameLimit)) {
     SetFrameLimitEnabled(frameLimit);
+    if (frameLimit) {
+      sFrameLimit30 = false;
+    }
     MarkDirty();
   }
+  // 0.46.0 test 68 (the user: a "30 FPS Cap (Target)" between the 60 FPS cap and the slider): the
+  // other preset, one or the other. The game still steps at 60 Hz, two steps a frame.
+  bool frameLimit30 = sFrameLimit30 && !sFrameLimitEnabled;
+  if (ImGui::Checkbox("30 FPS cap (target)", &frameLimit30)) {
+    sFrameLimit30 = frameLimit30;
+    if (frameLimit30) {
+      SetFrameLimitEnabled(false);
+    }
+    ResetDynamicRes();
+    MarkDirty();
+  }
+  ItemHelp("Paces the game to 30 frames a second, each frame up two of the screen's refreshes, so "
+           "they come evenly where 60 is out of reach. The game itself still runs at 60 Hz.");
   {
-    ImGui::BeginDisabled(sFrameLimitEnabled);
+    ImGui::BeginDisabled(sFrameLimitEnabled || sFrameLimit30);
 #ifdef __vita__
     // 30 to the screen's 60, where the top is no cap (saved as 0): the screen's own pace.
     int cap = sFpsCap > 0 ? sFpsCap : kFpsCapMax;
@@ -51,8 +67,8 @@ void DrawPerformanceTab() {
       MarkDirty();
     }
     ImGui::EndDisabled();
-    ItemHelp("The most frames drawn a second with the 60 FPS cap off, from 30 to the screen's 60. At 30 "
-             "each frame stays up two refreshes, so they come evenly.");
+    ItemHelp("The most frames drawn a second with both caps above off, from 30 to the screen's 60. At "
+             "30 each frame stays up two refreshes, so they come evenly.");
 #else
     // One past the top is "Unlimited" (saved as 0).
     int cap = sFpsCap > 0 ? sFpsCap : kFpsCapMax + 1;
@@ -63,7 +79,7 @@ void DrawPerformanceTab() {
       MarkDirty();
     }
     ImGui::EndDisabled();
-    ItemHelp("The most frames drawn a second with the 60 FPS cap off. Vsync still limits it to the "
+    ItemHelp("The most frames drawn a second with both caps above off. Vsync still limits it to the "
              "display's refresh rate.");
 #endif
   }

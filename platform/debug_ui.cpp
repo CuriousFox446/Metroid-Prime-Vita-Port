@@ -44,7 +44,8 @@ float sCutsceneSpeed = 8.f;
 unsigned sSimRate = 60;
 bool sSimAdaptive = false;
 bool sFrameLimitEnabled = true;
-int sFpsCap = 0; // with the 60 FPS cap off; 0 = unlimited
+bool sFrameLimit30 = false; // the 30 FPS cap (0.46.0 test 68), under the 60 one
+int sFpsCap = 0; // with the 60 and 30 FPS caps off; 0 = unlimited
 bool sTurbo = false;
 unsigned sTurboTicks = 1;
 bool sTraceTiming = false;
