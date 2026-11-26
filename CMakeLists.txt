@@ -592,12 +592,18 @@ endif()
 # clear error. On Android it is built from source (cmake/AndroidOpenSSL.cmake),
 # because the NDK has no TLS library and a find_package that quietly finds
 # nothing is how an APK ends up refusing every wss:// server. Leaving it out
-# there has to be asked for.
+# there has to be asked for. On the PS Vita it is never looked for (see below).
 option(MP_ALLOW_NO_TLS "Android: build without OpenSSL, so wss:// is refused" OFF)
 if(ANDROID)
     if(NOT MP_ALLOW_NO_TLS)
         include(cmake/AndroidOpenSSL.cmake)
     endif()
+elseif(VITA)
+    # The Vita build has no TLS: its overlay has no Archipelago page, and port_ws.cpp's TLS path
+    # needs sigpending and sigtimedwait, which the Vita's newlib lacks. VitaSDK's openssl package,
+    # where it is installed (its full Docker image has every package, the GitHub build among the
+    # users), would switch that path on and break the link. Not looking keeps the build the same
+    # whichever packages the SDK has.
 else()
     find_package(OpenSSL)
 endif()
