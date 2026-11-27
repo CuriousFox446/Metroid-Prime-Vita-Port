@@ -206,10 +206,6 @@ The script configures `build/vita` and writes `build/vita/metroid_prime_port.vpk
 configure also downloads and builds a few libraries from source (SDL3, Dear ImGui, fmt, FreeType,
 libpng and others), with the 32-bit enums the game needs.
 
-The build also makes `metroid_prime_port_demo.vpk`, **Metroid Prime Demo**. It is the same game,
-frigate only, as a separate app that installs beside the full game and keeps its own data folder
-(`ux0:data/MetroidPrimeDemo/`).
-
 ### On GitHub
 
 Every push and pull request builds the VPK on GitHub as well, with
